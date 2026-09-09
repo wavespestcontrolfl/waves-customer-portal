@@ -12,7 +12,7 @@ const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 
 suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
-  let db, server, origin, token, actor, customerA, customerB, nameA;
+  let db, server, origin, token, actor, customerA, customerB, nameA, firstName;
   const sessionId = crypto.randomUUID();
   const originalEnv = { ...process.env };
   const tools = (name, input, id) => ({ content: [{ type: 'tool_use', name, input, id }], usage: {} });
@@ -47,11 +47,14 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     db = require('../models/db');
     if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the IB task migration to the isolated database first');
     actor = crypto.randomUUID(); customerA = crypto.randomUUID(); customerB = crypto.randomUUID();
-    nameA = `Fixture Alder${customerA.slice(0, 8)}`;
+    // A per-run first name: the shared isolated database accumulates fixtures, and a
+    // repeated first name would cap the single-name lookup after ten runs.
+    firstName = `Fixture${customerA.slice(0, 4).replace(/[0-9]/g, digit => 'ghijklmnop'[Number(digit)])}`;
+    nameA = `${firstName} Alder${customerA.slice(0, 8)}`;
     await db('technicians').insert({ id: actor, name: 'Synthetic IB operator', role: 'admin', active: true, auth_token_version: 1 });
     await db('customers').insert([
-      { id: customerA, first_name: 'Fixture', last_name: `Alder${customerA.slice(0, 8)}`, phone: `+155501${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`, address_line1: '100 Example Grove', city: 'Sarasota' },
-      { id: customerB, first_name: 'Fixture', last_name: `Birch${customerB.slice(0, 8)}`, phone: `+155502${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`, address_line1: '200 Example Grove', city: 'Sarasota' },
+      { id: customerA, first_name: firstName, last_name: `Alder${customerA.slice(0, 8)}`, phone: `+155501${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`, address_line1: '100 Example Grove', city: 'Sarasota' },
+      { id: customerB, first_name: firstName, last_name: `Birch${customerB.slice(0, 8)}`, phone: `+155502${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`, address_line1: '200 Example Grove', city: 'Sarasota' },
     ]);
     token = require('jsonwebtoken').sign({ type: 'access', tokenVersion: 1, technicianId: actor }, process.env.JWT_SECRET, { expiresIn: '1h' });
     const express = require('express');
@@ -145,7 +148,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     ], usage: {} }).mockResolvedValueOnce({ content: [
       { type: 'tool_use', name: 'query_leads', input: { search: 'Synthetic' }, id: 'leads' },
       { type: 'tool_use', name: 'get_stale_leads', input: {}, id: 'stale' },
-      { type: 'tool_use', name: 'query_customers', input: { search: 'Fixture' }, id: 'customers' },
+      { type: 'tool_use', name: 'query_customers', input: { search: firstName }, id: 'customers' },
     ], usage: {} }).mockResolvedValueOnce(answer('The customer leads are loaded.'));
     const result = await api('/query', request(`Show ${nameA}'s leads`));
     expect(result.status).toBe(200);
@@ -964,7 +967,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
 
   test('duplicate first names and an unrecognized spoken name require clarification before writing', async () => {
     proposeNote(customerA, 'Needs target choice');
-    const ambiguous = await api('/query', request('Add a note for Fixture'));
+    const ambiguous = await api('/query', request(`Add a note for ${firstName}`));
     expect(ambiguous.body.taskState).toBe('needs_information');
     expect(ambiguous.body.candidates.length).toBeGreaterThanOrEqual(2);
     proposeNote(customerA, 'Needs target choice');
@@ -976,7 +979,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
 
   test('an ambiguous read stops before a model can pick either customer', async () => {
     mockModel.mockResolvedValue(tools('get_customer_detail', { customer_id: customerA }, 'guessed-read'));
-    const result = await api('/query', request("Show me Fixture's details"));
+    const result = await api('/query', request(`Show me ${firstName}'s details`));
     expect(result.body.taskState).toBe('needs_information');
     expect(result.body.candidates.length).toBeGreaterThanOrEqual(2);
     expect(mockModel).not.toHaveBeenCalled();
@@ -1064,7 +1067,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   }, 30000);
 
   test('selecting a saved ambiguity candidate resumes the same task and original request', async () => {
-    const first = await api('/query', request('Add the Selection regression note for Fixture', {
+    const first = await api('/query', request(`Add the Selection regression note for ${firstName}`, {
       conversationHistory: [{ role: 'user', content: 'Use the note draft from this conversation' },
         { role: 'assistant', content: 'Synthetic original note draft: Selection regression' }],
     }));
@@ -1169,7 +1172,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const seeded = await Threads.appendExchange({ actorId: actor, threadId: seed.threadId, expectedSeq: seed.lastSeq,
       context: 'customers', userText: 'Synthetic second turn', assistantText: 'Synthetic second reply' });
     try {
-      const first = await api('/query', request('Add a note for Fixture', { thread_id: seeded.threadId, thread_seq: seeded.lastSeq }));
+      const first = await api('/query', request(`Add a note for ${firstName}`, { thread_id: seeded.threadId, thread_seq: seeded.lastSeq }));
       expect(first.body.taskState).toBe('needs_information');
       expect(mockModel).not.toHaveBeenCalled();
       const selected = first.body.candidates[0].customer_id;
