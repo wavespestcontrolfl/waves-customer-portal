@@ -102,7 +102,26 @@ const TERMITE_INSTALL_BUILDUP = Object.freeze({ laborMaterial: 5.25, misc: 0.75,
 // plausible hardware band (codex #4313 r3 P1). Mapped envelopes carry no
 // materialCost, so they resolve through the two known costs or the default.
 const PLAUSIBLE_STATION_COST = Object.freeze({ min: 5, max: 80 });
-function unstampedTermiteStationCost(system, stations, storedInstall, storedMaterialCost) {
+// Mapped-only envelopes (Admin V2 persists results.tmBait with sta + ti and
+// no materialCost) recover an admin-tuned cost by inverting the install
+// formula — valid ONLY when the stored inputs carry neutral install
+// modifiers (construction multiplier 1, foundation adjustment 0), which the
+// engine's own deriveModifiers decides from the persisted profile (codex
+// #4313 r4 P1). With a modifier in play the inversion would be a fiction
+// that replays wrong, so those rows keep the default.
+function storedTermiteModifiersNeutral(estData = {}) {
+  const { deriveModifiers } = require('./pricing-engine/modifiers');
+  const profiles = [estData?.engineInputs, estData?.inputs, estData?.engineRequest?.profile]
+    .filter((p) => p && typeof p === 'object');
+  // No stored inputs at all = no evidence either way → never invert.
+  if (!profiles.length) return false;
+  return profiles.every((profile) => {
+    const m = deriveModifiers(profile);
+    return Number(m.termiteConstructionMult) === 1 && Number(m.termiteFoundationAdj) === 0;
+  });
+}
+
+function unstampedTermiteStationCost(system, stations, storedInstall, storedMaterialCost, modifiersNeutral) {
   const legacy = PRE_STAMP_TERMITE_STATION_COST[system];
   const current = A1_TERMITE_STATION_COST[system];
   if (!Number.isFinite(legacy)) return null;
@@ -111,12 +130,17 @@ function unstampedTermiteStationCost(system, stations, storedInstall, storedMate
   if (!(n > 0) || !(install > 0) || !Number.isFinite(current) || current === legacy) return legacy;
   const buildup = TERMITE_INSTALL_BUILDUP.laborMaterial + TERMITE_INSTALL_BUILDUP.misc;
   const priced = (cost) => Math.round(n * (cost + buildup) * TERMITE_INSTALL_BUILDUP.multiplier);
+  const plausible = (cost) => cost >= PLAUSIBLE_STATION_COST.min && cost <= PLAUSIBLE_STATION_COST.max && priced(cost) === install;
   if (priced(legacy) === install) return legacy;
   if (priced(current) === install) return current;
   const material = Number(storedMaterialCost);
   if (material > 0) {
     const derived = Math.round((material / n - buildup) * 100) / 100;
-    if (derived >= PLAUSIBLE_STATION_COST.min && derived <= PLAUSIBLE_STATION_COST.max && priced(derived) === install) return derived;
+    if (plausible(derived)) return derived;
+  }
+  if (modifiersNeutral === true) {
+    const inverted = Math.round((install / (n * TERMITE_INSTALL_BUILDUP.multiplier) - buildup) * 10000) / 10000;
+    if (plausible(inverted)) return inverted;
   }
   return legacy;
 }
@@ -157,6 +181,7 @@ function storedTermiteResult(estData = {}) {
     stations: firstDefined(m.sta, r.stations),
     install: firstDefined(m.ti, m.ai, install.retailValue, install.price),
     materialCost: install.materialCost,
+    modifiersNeutral: storedTermiteModifiersNeutral(estData),
   };
 }
 
@@ -169,7 +194,7 @@ function termiteKnobSignalForReplay(estData = {}) {
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
     return { system: String(stored.stamp.system || stored.system).toLowerCase(), stationCost: stampedCost };
   }
-  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install, stored.materialCost);
+  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install, stored.materialCost, stored.modifiersNeutral);
   return Number.isFinite(fallback) ? { system: stored.system, stationCost: fallback } : null;
 }
 

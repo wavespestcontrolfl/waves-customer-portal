@@ -175,6 +175,8 @@ describe('termite_install admin validation', () => {
     [{ trelona_bait: -1 }, 'trelona_bait'],
     [{ multiplier: 0 }, 'multiplier'],
     [{ cartridge_cost: 'free' }, 'cartridge_cost'],
+    [{ cartridge_cost: 0 }, 'cartridge_cost'],
+    [{ follow_up_visit_reserve: 25 }, 'follow_up_visit_reserve'],
     [{ cartridges_per_station: 2.5 }, 'cartridges_per_station'],
     [{ cartridge_replacement_rate: 1.5 }, 'cartridge_replacement_rate'],
     [{ follow_up_visit_reserve: -0.25 }, 'follow_up_visit_reserve'],
@@ -400,8 +402,16 @@ describe('termite catalog link — codex round 1', () => {
     constants.TERMITE.systems.trelona.stationCost = 24;
     const replayed = priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'trelona', knobs: { system: 'trelona', stationCost: 23.53 } });
     expect(replayed.installation.price).toBe(642);
-    // A mapped envelope has no materialCost → the two known costs or the default.
-    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 642 } } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    // A mapped envelope has no materialCost: with NEUTRAL stored modifiers the
+    // install formula inverts exactly and the tuned cost is recovered…
+    const mapped = { engineRequest: { profile: { homeSqFt: 2000 } }, result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 642 } } } };
+    const recovered = replay.termiteKnobSignalForReplay(mapped);
+    expect(recovered.system).toBe('trelona');
+    expect(recovered.stationCost).toBeCloseTo(23.5172, 3);
+    expect(priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'trelona', knobs: recovered }).installation.price).toBe(642);
+    // …but a stored profile with an install modifier in play makes the inversion a fiction → the default.
+    expect(replay.termiteKnobSignalForReplay({ ...mapped, engineRequest: { profile: { homeSqFt: 2000, foundationType: 'CRAWLSPACE' } } })).toEqual({ system: 'trelona', stationCost: 22.05 });
+    expect(replay.termiteKnobSignalForReplay({ ...mapped, inputs: { constructionMaterial: 'WOOD_FRAME' } })).toEqual({ system: 'trelona', stationCost: 22.05 });
     // An implausible derivation (a line whose materialCost is garbage) never wins.
     expect(replay.termiteKnobSignalForReplay({ result: { lineItems: [{ ...line, installation: { ...line.installation, materialCost: 9000 } }] } })).toEqual({ system: 'trelona', stationCost: 22.05 });
   });
