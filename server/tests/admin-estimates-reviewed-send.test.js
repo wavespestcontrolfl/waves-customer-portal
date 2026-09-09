@@ -189,17 +189,20 @@ beforeEach(() => {
 describe('commercial bid authoring', () => {
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
   const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
-  test('PUT stores fractional quote totals and fixed expiry atomically', async () => {
+  const costing = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'PRIVATE CREW COST', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 4 }] };
+  test('PUT stores fractional quote totals, fixed expiry and private costing atomically', async () => {
     row.status = 'draft';
-    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal(), projectCosting: costing });
     expect(res.statusCode).toBe(200);
     expect(row.onetime_total).toBe(2580);
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf().proposalCosting).toEqual(costing);
+    expect(JSON.stringify(dataOf().proposal)).not.toContain('PRIVATE CREW COST');
     expect(dataOf().proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: 25.8, unit: 'acre', amount: 2580 });
   });
   test('PUT rejects stale editing and invalid quantities without replacing saved prices', async () => {
     row.status = 'draft';
-    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal() });
+    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal(), projectCosting: costing });
     expect(stale.statusCode).toBe(409);
     expect(mutations).toHaveLength(0);
     const invalid = proposal(); invalid.buildings[0].lineItems[0].quantity = 0.00001;
@@ -216,17 +219,28 @@ describe('commercial bid authoring', () => {
     expect(dataOf().proposal.validThrough).toBe('2099-12-21');
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
   });
-  test.each(['validity', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
-    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+  test.each(['validity', 'costing', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
+    row.status = 'draft'; row.estimate_data = { proposal: proposal(), proposalCosting: costing };
     const body = { proposal: proposal() };
     if (field === 'validity') body.proposal.validThrough = null;
+    if (field === 'costing') body.projectCosting = { ...costing, rows: [] };
     if (field === 'unit') body.proposal.buildings[0].lineItems[0].unit = 'sqft';
     gateEnvValue.mockReturnValue(false);
     const res = await invoke('/:id/proposal', 'put', body);
     expect(res.statusCode).toBe(409);
     expect(res.body.error).toMatch(/Bid authoring is currently disabled/);
     expect(mutations).toHaveLength(0);
-    expect(dataOf()).toEqual({ proposal: proposal() });
+    expect(dataOf()).toEqual({ proposal: proposal(), proposalCosting: costing });
+  });
+  test('the disabled gate rejects original-form uploads before parsing files or reading estimates', async () => {
+    gateEnvValue.mockReturnValue(false);
+    const layer = router.stack.find((entry) => entry.route?.path === '/:id/proposal/bid-form.pdf');
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    await layer.route.stack[0].handle({}, res, next);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(next).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
   });
   test('an expired fixed bid can be explicitly revised and its expiry disposition is cleared', async () => {
     row.status = 'expired'; row.sent_at = new Date('2026-01-01T12:00:00Z');

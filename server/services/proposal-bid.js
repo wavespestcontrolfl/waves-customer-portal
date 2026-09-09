@@ -1,4 +1,4 @@
-const { PROPOSAL_UNITS } = require('../../shared/proposal-bid.cjs');
+const { PROPOSAL_UNITS, COST_CATEGORIES, roundDecimal } = require('../../shared/proposal-bid.cjs');
 const { validDateOnly } = require('../utils/date-only');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -24,7 +24,7 @@ function decimalValid(value, { min = 0, max = 99999999.99 } = {}) {
   const n = Number(value);
   return Number.isFinite(n) && n >= min && n <= max && Math.abs(n * 10000 - Math.round(n * 10000)) < 0.001;
 }
-function validateBidFields(proposal) {
+function validateBidFields(proposal, costing) {
   if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return 'A proposal must be an object.';
   if (proposal.buildings != null && !Array.isArray(proposal.buildings)) return 'Proposal buildings must be a list.';
   if (proposal.validThrough && !validDateOnly(proposal.validThrough)) return 'Valid through must be a real calendar date (YYYY-MM-DD).';
@@ -44,6 +44,26 @@ function validateBidFields(proposal) {
       }
     }
   }
+  if (costing == null) return null;
+  if (!Array.isArray(costing.rows) || costing.rows.length > 100) return 'Project costing supports up to 100 cost rows.';
+  if (!Number.isInteger(Number(costing.revenueYears)) || Number(costing.revenueYears) < 1 || Number(costing.revenueYears) > 30) return 'Cost comparison needs a revenue period of 1–30 whole years.';
+  for (const row of costing.rows) {
+    if (!row || typeof row.description !== 'string' || !row.description.trim() || row.description.length > 200 || String(row.phase || '').length > 120) return 'Cost rows need a description (up to 200 characters) and a phase of up to 120 characters.';
+    if (!Object.hasOwn(COST_CATEGORIES, row.category) || !Object.hasOwn(PROPOSAL_UNITS, row.unit)) return 'Choose a category and unit for each cost row.';
+    if (!decimalValid(row.quantity, { min: 0.0001, max: 1000000000 }) || !decimalValid(row.unitCost)) return 'Cost quantities must be positive and unit costs nonnegative, with at most four decimal places.';
+    if (!Number.isInteger(Number(row.occurrences)) || row.occurrences < 1 || row.occurrences > 1000) return 'Cost occurrences must be a whole number from 1 to 1,000.';
+    if (Number(row.quantity) * Number(row.unitCost) * Number(row.occurrences) > 99999999.99) return 'Each extended project cost must be at most $99,999,999.99.';
+  }
   return null;
 }
-module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields };
+function normalizeProjectCosting(raw) {
+  if (!raw || !Array.isArray(raw.rows)) return null;
+  return {
+    revenueYears: Number(raw.revenueYears),
+    rows: raw.rows.map((row) => ({
+      category: row.category, phase: String(row.phase || '').trim(), description: row.description.trim(),
+      quantity: roundDecimal(row.quantity), unit: row.unit, unitCost: roundDecimal(row.unitCost), occurrences: Number(row.occurrences),
+    })),
+  };
+}
+module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields, normalizeProjectCosting };

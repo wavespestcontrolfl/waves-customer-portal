@@ -8,6 +8,8 @@ import {
 } from 'lucide-react';
 import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
+import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
+import ProposalBidForm from '../../components/estimates/ProposalBidForm';
 import { PROPOSAL_UNITS, proposalLineAmount } from '@proposal-bid';
 
 // Commercial proposal builder — the full-page surface for authoring the
@@ -206,6 +208,7 @@ function CommercialProposalEditor() {
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
   const [validThrough, setValidThrough] = useState('');
+  const [projectCosting, setProjectCosting] = useState({ revenueYears: 1, rows: [] });
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
@@ -271,6 +274,7 @@ function CommercialProposalEditor() {
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
     setTerms(p.terms || '');
     setValidThrough(p.validThrough || '');
+    setProjectCosting(data.projectCosting || { revenueYears: 1, rows: [] });
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
@@ -643,7 +647,7 @@ function CommercialProposalEditor() {
   // from what is actually on screen.
   const formRef = React.useRef(null);
   formRef.current = {
-    title, preparedFor, propertyAddress, taxRate, terms, validThrough,
+    title, preparedFor, propertyAddress, taxRate, terms, validThrough, projectCosting,
     buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
     loadedAuthored, dirty,
   };
@@ -719,6 +723,7 @@ function CommercialProposalEditor() {
 
   const buildPayload = (f = formRef.current) => ({
     expectedEditVersion: loadedVersionRef.current,
+    ...(bidToolsEnabled ? { projectCosting: f.projectCosting } : {}),
     proposal: {
       title: f.title.trim() || 'Commercial Service Proposal',
       preparedFor: f.preparedFor.trim(),
@@ -747,6 +752,24 @@ function CommercialProposalEditor() {
       })).filter((b) => b.lineItems.length > 0),
     },
   });
+
+  const downloadBidForm = async ({ file, ...options }) => {
+    if (!locked && !(await save())) throw new Error('Save the proposal successfully before exporting the form.');
+    const body = new FormData();
+    body.append('sourcePdf', file);
+    body.append('options', JSON.stringify({ ...options, expectedEditVersion: loadedVersionRef.current }));
+    const response = await fetch(`${API_BASE}/admin/estimates/${estimateId}/proposal/bid-form.pdf`, {
+      method: 'POST', headers: { Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` }, body,
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || 'Could not prepare the bid form.');
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url; link.download = `${options.template}-bid-form.pdf`; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
 
   // Returns true ONLY when the persisted proposal equals the on-screen
   // state — download/send/Mark-won gate on this, and a true returned while
@@ -1391,6 +1414,11 @@ function CommercialProposalEditor() {
               <Plus size={15} /> Add building
             </Button>
           )}
+
+          {(bidToolsEnabled || projectCosting.rows.length > 0) && <ProposalProjectCosting value={projectCosting} totals={totals} disabled={!!locked || !bidToolsEnabled}
+            onChange={(value) => { setProjectCosting(value); markEdit(); }} />}
+
+          {bidToolsEnabled && !programsMode && <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />}
 
           <Card>
             <CardHeader>
