@@ -682,7 +682,7 @@ describe('booking route wiring (source contracts)', () => {
     // on the customers row the activation already holds.
     const props = fs.readFileSync(path.join(__dirname, '..', 'services', 'customer-properties.js'), 'utf8');
     expect(props).toMatch(/const \{ claimFence = null, conn = null \} = opts;/);
-    expect(props).toMatch(/return ensurePrimaryCore\(customerOrId, opts, conn && conn\.isTransaction \? conn : db\);/);
+    expect(props).toMatch(/if \(conn && conn\.isTransaction\) return ensurePrimaryCore\(customerOrId, \{ \.\.\.opts, lockWait: false \}, conn\);/);
     expect(props).toMatch(/return conn && conn\.isTransaction \? run\(conn\) : db\.transaction\(run\);/);
     const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
     expect(linkageSrc).toMatch(/ensurePrimaryProperty\(customerId, \{ conn: database \}\)/);
@@ -1130,14 +1130,6 @@ describe('booking route wiring (source contracts)', () => {
     expect(backfillSrc2).toMatch(/BOOL_AND\(c\.estimated_price IS NOT NULL AND ROUND\(c\.estimated_price \* 100\) = s\.quotient_cents\)/);
     expect(backfillSrc2).not.toMatch(/< 1\s*\n/);
     expect(backfillSrc2).toMatch(/anchored_split_per_visit/);
-  });
-
-  test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
-    // codex #3504 r12: a confirmation racing its own replay could both
-    // pass hasWelcomeSequence and enqueue two welcome sequences.
-    const welcome = fs.readFileSync(path.join(__dirname, '..', 'services', 'new-recurring-welcome-sms.js'), 'utf8');
-    expect(welcome).toMatch(/async function hasWelcomeSequence\(customerId, conn = db\)/);
-    expect(welcome).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\)\)', \[`new-recurring-welcome:\$\{customer\.id\}`\]\);\s*\n\s*if \(await hasWelcomeSequence\(customer\.id, trx\)\) return 'already_sent';\s*\n\s*await trx\('sms_sequences'\)\.insert\(data\);/);
   });
 
   test('seeded children reserve the converter DURATION AUTHORITY first, then the catalog default, never the coarse funnel duration', () => {

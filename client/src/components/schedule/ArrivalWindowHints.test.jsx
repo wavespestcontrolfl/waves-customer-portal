@@ -13,7 +13,7 @@ it('shows the estimated arrival separately from the chosen promise and picking o
   const onPick = vi.fn();
   const slot = { start: '09:00', end: '10:00', estimatedArrival: '09:44', detourMinutes: 9, arrivalWindows: true };
   render(<BestTimeHint bestTimes={[slot]} onPick={onPick} currentStart="12:00" />);
-  fireEvent.click(screen.getByRole('button', { name: '9:00 AM · arrive ~9:44 AM · +9 min drive' }));
+  fireEvent.click(screen.getByRole('button', { name: '9:00 AM · arrive ~9:44 AM · +9 min added to route' }));
   expect(onPick).toHaveBeenCalledWith(slot);
   expect(screen.getByText(/arrivals stay within each customer's 2-hour window/)).toBeTruthy();
 });

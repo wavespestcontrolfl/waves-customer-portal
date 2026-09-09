@@ -168,6 +168,6 @@ test('admin tool call is dispatched with the actor id from the request, not the 
     const [name, input, ctx] = mockExecuteHistoryTool.mock.calls[0];
     expect(name).toBe('search_ib_history');
     expect(input.query).toBe('acct-1042');
-    expect(ctx).toEqual({ actorId: 'admin-1' });
+    expect(ctx).toMatchObject({ actorId: 'admin-1', readCustomerIds: [] });
   });
 });

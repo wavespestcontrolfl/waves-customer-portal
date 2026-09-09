@@ -138,6 +138,8 @@ function ongoingScenario({
   weeklyValue = null, blackoutRows = [],
   latestDate = '2098-07-15', seriesDates = ['2098-01-15', '2098-04-15', '2098-07-15'],
   addonRows = [],
+  failAddonInsert = 0,
+  failAddonRead = false,
   // Dates the global occupancy probe reports as clashing ('*' = every date).
   clashDates = [],
 }) {
@@ -188,7 +190,12 @@ function ongoingScenario({
     }
     if (table === 'scheduled_service_addons') {
       if (op === 'columnInfo') return {};
-      if (op === 'insert' || op === 'insertReturning') { addonInserts.push(data); return [1]; }
+      if (op === 'insert' || op === 'insertReturning') {
+        if (failAddonInsert === addonInserts.length + 1) throw new Error('QA add-on insert failed');
+        addonInserts.push(data);
+        return [1];
+      }
+      if (failAddonRead) throw new Error('QA add-on read failed');
       return addonRows;
     }
     if (table === 'appointment_reminders') {
@@ -215,6 +222,23 @@ function ongoingScenario({
 
 describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  test.each([1, 2, 'read'])('does not register reminders when required add-on operation %s fails', async (failAddonInsert) => {
+    const { conn } = ongoingScenario({
+      upcomingCount: 1,
+      addonRows: [
+        { service_name: 'QA Scope A', estimated_price: 12 },
+        { service_name: 'QA Scope B', estimated_price: 18 },
+      ],
+      failAddonInsert,
+      failAddonRead: failAddonInsert === 'read',
+    });
+    await expect(runRecurringSeriesMaintenance(conn, {
+      id: 22, recurring_parent_id: 10, customer_id: 5, scheduled_date: '2098-07-15',
+    })).rejects.toThrow(/QA add-on (insert|read) failed/);
+    // PostgreSQL rollback itself is checked in the real-database suite.
+    expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  });
 
   test('extends an ongoing series below the 2-ahead window and propagates create_invoice_on_complete from the latest sibling', async () => {
     const { conn, inserted, reminderWrites } = ongoingScenario({

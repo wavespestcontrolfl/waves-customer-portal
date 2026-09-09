@@ -588,12 +588,12 @@ function matchedCallerTier(ctx = {}) {
 // tier — the calling number IS the key, not the account — so for those the
 // spoofable thing is the only thing, and attestation is required of anyone the
 // session recognised at all.
-const ATTESTATION_ONLY_TOOLS = {
+const ATTESTATION_ONLY_TOOLS = Object.freeze({
   get_invoice_history: 'full-tier',
   get_service_report: 'full-tier',
   get_call_history: 'any-tier',
   get_message_history: 'any-tier',
-};
+});
 
 function callerAttested(ctx = {}) {
   return ctx.callerAttested === true;
@@ -1536,4 +1536,4 @@ async function executeTool(name, input = {}, ctx = {}) {
   }
 }
 
-module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier };
+module.exports = { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS, SANDBOX_DRY_RUN_TOOLS, sandboxDryRunText, activeTools, executeTool, speakSlot, formatSlots, resolveAvailability, availabilityResultToText, matchedCallerTier, ATTESTATION_ONLY_TOOLS };

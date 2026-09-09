@@ -14,6 +14,7 @@ jest.mock('../services/internal-test-customers', () => ({
 }));
 jest.mock('../services/push-notifications', () => ({
   sendToCustomer: mockSendToCustomer,
+  resolveNotificationPropertyId: jest.fn(async () => null),
 }));
 
 const NotificationService = require('../services/notification-service');

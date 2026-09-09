@@ -432,6 +432,19 @@ async function inspectionCreditMemoForInvoice(invoice) {
     // left". Lazy require: this module and inspection-credit reference
     // each other (queueCreditReceiptResend → sendReceiptEmail).
     const { inspectionCreditMemoForVisit } = require('./inspection-credit');
+    if (invoice.visit_completion_packet_id) {
+      const members = await db('visit_completion_packet_items as i')
+        .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
+        .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+        .where({ 'i.invoice_id': invoice.id, 'i.packet_id': invoice.visit_completion_packet_id,
+          's.customer_id': invoice.customer_id })
+        .whereRaw('p.visit_id = s.visit_id').orderBy('s.id').select('s.id', 's.service_type');
+      const notes = await Promise.all(members.map(async (member) => {
+        const note = await inspectionCreditMemoForVisit(member.id);
+        return note ? `${member.service_type}: ${note}` : '';
+      }));
+      return notes.filter(Boolean).join('\n');
+    }
     return await inspectionCreditMemoForVisit(visitId);
   } catch (err) {
     logger.warn(`[invoice-email] inspection credit memo lookup failed: ${err.message}`);

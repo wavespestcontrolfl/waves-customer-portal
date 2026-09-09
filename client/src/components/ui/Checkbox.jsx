@@ -1,10 +1,12 @@
 import React, { forwardRef } from 'react';
 import { cn } from './cn';
+import { useUiDensity } from './UiSurface';
 
 export const Checkbox = forwardRef(function Checkbox(
   { className, label, id, ...rest },
   ref
 ) {
+  const density = useUiDensity();
   const input = (
     <input
       ref={ref}
@@ -20,6 +22,8 @@ export const Checkbox = forwardRef(function Checkbox(
         'disabled:opacity-50 disabled:cursor-not-allowed',
         "checked:after:content-[''] checked:after:absolute checked:after:left-[3px] checked:after:top-[0px]",
         'checked:after:w-[6px] checked:after:h-[10px]',
+        // Preflight is disabled in this app; the check needs an explicit stroke.
+        'checked:after:border-solid checked:after:border-0',
         'checked:after:border-r-[1.5px] checked:after:border-b-[1.5px] checked:after:border-white',
         'checked:after:rotate-45',
         className
@@ -29,7 +33,7 @@ export const Checkbox = forwardRef(function Checkbox(
   );
   if (!label) return input;
   return (
-    <label htmlFor={id} className="inline-flex items-center gap-2 cursor-pointer text-13 text-zinc-900">
+    <label htmlFor={id} data-ui-density={density} className="ui-choice-label inline-flex items-center gap-2 cursor-pointer text-ui-body text-zinc-900">
       {input}
       <span>{label}</span>
     </label>

@@ -194,6 +194,10 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   if (!customer?.phone || !customer?.id) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
+  const eventId = metadata.stripe_event_id || metadata.stripe_setup_intent_id
+    || metadata.stripe_payment_intent_id;
+  if (eventId && metadata.original_message_type !== 'ach_payment_processing') metadata = { ...metadata, notificationEventKey:
+    `payment-problem:stripe:${eventId}:${metadata.original_message_type}:${metadata.recent_failures || 0}` };
   const result = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -218,7 +222,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && result.code === 'QUIET_HOURS_HOLD'
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code)
     && result.deferred
     && result.nextAllowedAt) {
     try {
@@ -252,6 +256,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
         message_type: metadata.original_message_type || 'billing_reminder',
         metadata: JSON.stringify({
           ...metadata,
+          customer_initiated: customerInitiated,
           ...(resolvedInvoiceId ? { invoice_id: resolvedInvoiceId } : {}),
           entry_point: 'stripe_webhook_billing_deferred',
           original_block_code: result.code,
@@ -926,7 +931,7 @@ router.post(
           break;
 
         case 'payment_intent.requires_action':
-          await handlePaymentIntentRequiresAction(event.data.object);
+          await handlePaymentIntentRequiresAction(event.data.object, event.id);
           break;
 
         case 'payment_intent.canceled':
@@ -995,7 +1000,7 @@ router.post(
           break;
 
         case 'setup_intent.setup_failed':
-          await handleSetupIntentFailed(event.data.object);
+          await handleSetupIntentFailed(event.data.object, event.id);
           break;
 
         case 'payout.paid':
@@ -4756,6 +4761,37 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     // bank policy here, and a refusal bells the office instead of dropping
     // silently. A lookup failure on a bank-capable intent rethrows (retry).
     const boundToAccept = !!acceptedIntentId && acceptedIntentId === setupIntent.id;
+    // An UNSTAMPED accept (legacy, or RECURRING_CARD_ON_FILE off at accept)
+    // is the one path where the event payload is the only evidence — and
+    // that payload is the intent as it succeeded. A "use a different
+    // payment method" replacement since then lives only in Stripe metadata
+    // (`retired` / `replaced_by`), so re-read the intent live before
+    // enrolling (GitHub Codex #4144 r3 P1). A retired capture is a
+    // permanent skip (ack); an unreadable one rethrows for Stripe's retry.
+    // A stamped accept was judged under the row lock, where a retirement
+    // cannot have landed, and no replacement is minted after acceptance.
+    if (!boundToAccept) {
+      const { retrieveSetupIntent } = require('../services/stripe');
+      let live = null;
+      try {
+        live = await retrieveSetupIntent(setupIntent.id);
+      } catch (err) {
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring card intent ${setupIntent.id} live read failed (${err.message}) — retry`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'setup_intent_lookup_failed' },
+        );
+      }
+      if (!live) {
+        throw annotateSetupIntentWebhookError(
+          new Error(`recurring card intent ${setupIntent.id} could not be re-read — retry`),
+          { handlerBranch: 'estimate_recurring_card', retryClass: 'expected_retry', reasonCode: 'setup_intent_lookup_failed' },
+        );
+      }
+      if (live.metadata?.retired === 'true') {
+        logger.info(`[stripe-webhook] recurring card intent ${setupIntent.id} was retired by the customer (replaced by ${live.metadata.replaced_by || 'n/a'}) — not enrolling (estimate ${estimate.id})`);
+        return;
+      }
+    }
     if (!boundToAccept && Array.isArray(setupIntent.payment_method_types) && setupIntent.payment_method_types.includes('us_bank_account')) {
       const pmRef = setupIntent.payment_method;
       let pmType = typeof pmRef === 'object' && pmRef?.type ? pmRef.type : null;
@@ -6144,7 +6180,7 @@ async function sweepUnacknowledgedAchProcessingAcks({ limit = 25 } = {}) {
  * payment_intent.requires_action — Customer must complete a step (e.g. micro-
  * deposit verification for ACH). Notify customer to finish setup.
  */
-async function handlePaymentIntentRequiresAction(paymentIntent) {
+async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
   const piId = paymentIntent.id;
   const nextAction = paymentIntent.next_action?.type || 'unknown';
   logger.warn(`[stripe-webhook] PaymentIntent requires action: ${piId} (${nextAction})`);
@@ -6165,7 +6201,8 @@ async function handlePaymentIntentRequiresAction(paymentIntent) {
         const smsResult = await sendBillingSms(
           customer,
           body,
-          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId },
+          { original_message_type: 'bank_verification_incomplete', stripe_payment_intent_id: piId,
+            ...(eventId ? { stripe_event_id: eventId } : {}) },
           { customerInitiated: await isCustomerInitiatedPaymentIntent(paymentIntent) }
         );
         if (!smsResult.sent) {
@@ -7949,7 +7986,7 @@ async function handleMandateUpdated(mandate) {
 /**
  * setup_intent.setup_failed — Bank verification failed (wrong micro-deposits, etc.)
  */
-async function handleSetupIntentFailed(setupIntent) {
+async function handleSetupIntentFailed(setupIntent, eventId) {
   const reason = setupIntent.last_setup_error?.message || 'Unknown';
   logger.warn(`[stripe-webhook] SetupIntent failed: ${setupIntent.id} — ${reason}`);
 
@@ -7994,6 +8031,7 @@ async function handleSetupIntentFailed(setupIntent) {
           {
             original_message_type: 'bank_verification_failed',
             stripe_setup_intent_id: setupIntent.id,
+            ...(eventId ? { stripe_event_id: eventId } : {}),
             // Customer linkage for the deferred-replay recheck: a night-
             // held copy of this notice must suppress at 8 AM if the
             // customer added/verified a replacement bank method overnight

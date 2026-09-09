@@ -89,7 +89,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
 jest.mock('../services/sms-auto-send', () => ({
   hasActiveAutoSendClaim: jest.fn(async () => false),
-  isRealProviderSend: jest.fn((r) => !!r?.providerMessageId),
+  isRealProviderSend: jest.fn((r) => r?.sent === true && !!r.providerMessageId && !['gate-blocked', 'template-disabled', 'owner-silence', 'owner-sms-disabled'].includes(r.providerMessageId)),
 }));
 // The inline review claim boundary: the route must verify + claim BEFORE the
 // provider call and abort on any validation miss (fail closed — the tokenized
@@ -1889,6 +1889,23 @@ describe('Communications review ask serialization', () => {
       expect(retry.status).toBe(409);
       expect((await retry.json()).code).toBe('REVIEW_ASK_SPACING');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed staff asks release their reservation: %s', async providerMessageId => {
+    const deleted = jest.fn(async () => 1);
+    const stamped = jest.fn();
+    db.mockImplementation(table => {
+      const b = makeUniversalBuilder();
+      if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'sms_log') { b.del = deleted; b.update = stamped; }
+      return b;
+    });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId });
+    await withServer(async baseUrl => {
+      await send(baseUrl);
+      expect(deleted).toHaveBeenCalledTimes(1);
+      expect(stamped).not.toHaveBeenCalled();
     });
   });
 

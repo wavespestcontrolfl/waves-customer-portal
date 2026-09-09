@@ -9,6 +9,8 @@ const tracker = require('../services/seo/impact-tracker');
 const miner = require('../services/seo/gsc-opportunity-miner');
 const evidenceMigration = require('../models/migrations/20260907000060_aeo_citation_evidence');
 const seedMigration = require('../models/migrations/20260907000061_seed_aeo_benchmark');
+const entityMigration = require('../models/migrations/20260907000110_aeo_entity_cohort');
+const entityCohort = require('../data/aeo-entity-cohort-v1.json');
 const benchmark = require('../data/aeo-benchmark-v1.json');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -60,6 +62,23 @@ run('AEO PostgreSQL evidence, cohort, and feedback', () => {
     expect(await database('seo_llm_mention_queries').where('query', benchmark.questions[0].query).first()).toMatchObject({ city: 'Owner metadata', active: false });
     await seedMigration.down(database);
     expect(Number((await database('seo_llm_mention_queries').count('* as n').first()).n)).toBe(40);
+  });
+
+  test('entity cohort migration adds the score column, seeds 12 questions, and rolls back without touching queries', async () => {
+    await seedMigration.up(database);
+    await database('seo_llm_mention_queries').insert({ query: entityCohort.questions[0].query, city: null, service: 'brand', active: false });
+    await entityMigration.up(database);
+    await entityMigration.up(database);
+    expect(await database.schema.hasColumn('seo_llm_mentions', 'entity_facts')).toBe(true);
+    expect(Number((await database('seo_llm_mention_queries').count('* as n').first()).n)).toBe(52);
+    expect(await database('seo_llm_mention_queries').where('query', entityCohort.questions[0].query).first()).toMatchObject({ active: false });
+    await database('seo_llm_mentions').insert({ query: entityCohort.questions[1].query, check_date: etDateString(), llm_platform: 'chatgpt', model_version: 'test', waves_mentioned: true, entity_facts: JSON.stringify({ right: 1, missing: 0, wrong: 0 }) });
+    await entityMigration.down(database);
+    expect(await database.schema.hasColumn('seo_llm_mentions', 'entity_facts')).toBe(false);
+    expect(Number((await database('seo_llm_mention_queries').count('* as n').first()).n)).toBe(52);
+    expect(Number((await database('seo_llm_mentions').count('* as n').first()).n)).toBe(1);
+    await entityMigration.up(database);
+    expect(await database.schema.hasColumn('seo_llm_mentions', 'entity_facts')).toBe(true);
   });
 
   test('a citation on one engine does not hide another engine gap; disabled and legacy queries cannot create gaps', async () => {
