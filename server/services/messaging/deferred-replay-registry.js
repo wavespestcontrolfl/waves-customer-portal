@@ -78,6 +78,15 @@ const failClosed = (label, id, err) => {
 };
 
 const REGISTRY = {
+  request_app_deferred: {
+    async recheck(meta) {
+      try {
+        const request = await require('../request-app-notifications')
+          .loadEligibleRequest(meta.customer_id, meta.service_request_id, meta.request_status, meta.request_status_version);
+        return request ? { eligible: true } : { eligible: false, reason: 'request-unavailable-or-updated' };
+      } catch (err) { return failClosed('request-app', meta.service_request_id, err); }
+    },
+  },
   estimate_follow_up_deferred: {
     async recheck(meta) {
       if (!meta.estimate_id) return { eligible: true };
