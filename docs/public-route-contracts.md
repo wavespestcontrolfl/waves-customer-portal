@@ -808,6 +808,9 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+Authored commercial proposals expose reviewed four-decimal quantities and unit
+rates, explicit unit labels and cent-rounded line amounts through the existing
+normalized proposal and document output. These additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

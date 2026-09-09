@@ -1,6 +1,7 @@
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
+const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -58,6 +59,7 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
+const { validateBidFields } = require('../services/proposal-bid');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -3672,6 +3674,7 @@ router.get('/:id/proposal', async (req, res, next) => {
     res.json({
       proposal,
       totals: computeProposalTotals(proposal),
+      bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
       // Engine-composed prospect research (commercial proposal lane) — the
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
@@ -3769,9 +3772,21 @@ router.put('/:id/proposal', async (req, res, next) => {
     }
 
     const incoming = req.body?.proposal || req.body || {};
+    const savedProposal = normalizeProposal(estimate);
+    const bidValidation = validateBidFields(incoming);
+    if (bidValidation) return res.status(400).json({ error: bidValidation });
     // Programs-only callers may omit buildings entirely — normalize once
     // and use the array everywhere (pre-push codex P1: undefined.some threw).
     const incomingBuildings = Array.isArray(incoming.buildings) ? incoming.buildings : [];
+    if (!gateEnvValue('GATE_COMMERCIAL_BID_BUILDER')) {
+      const savedUnits = new Map(savedProposal.buildings.flatMap((building) => building.lineItems.map((line) => [line.id, line.unit || null])));
+      const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
+      const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
+      const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
+      if (unitsChanged) {
+        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units remain in place.' });
+      }
+    }
     const hasBuildings = incomingBuildings.length > 0;
     const incomingPrograms = Array.isArray(incoming.programs) ? incoming.programs : null;
     const hasPrograms = Boolean(incomingPrograms && incomingPrograms.length);
@@ -4065,9 +4080,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         ['estimate-group-send', String(groupId)],
       );
     }
-    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'estimate_group_id', 'status', 'estimate_data', 'address');
+    const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
     if (!locked || (locked.estimate_group_id || null) !== groupId) {
       throw retry('This estimate changed groups while you were editing — reload and retry.');
+    }
+    if (estimateEditVersion(locked) !== estimateEditVersion(estimate)
+      || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
+      throw retry('The saved proposal changed while you were editing. Reload and review the current proposal before saving.');
     }
     // The engine block is carried from the LOCKED row, never the pre-read:
     // a clarify re-price guard stamped between the two would otherwise be

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
+import { PROPOSAL_UNITS, proposalLineAmount } from '@proposal-bid';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -57,13 +58,13 @@ const money = (n) =>
   `$${(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const emptyLine = () => ({
-  description: '', quantity: 1, unitPrice: 0, frequency: 'monthly', taxable: false,
+  id: crypto.randomUUID(), description: '', quantity: 1, unit: '', unitPrice: 0, frequency: 'monthly', taxable: false,
 });
 const emptyBuilding = (i) => ({ name: `Building ${i + 1}`, note: '', lineItems: [emptyLine()] });
 
 const roundMoney = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-const lineAmount = (li) => (Number(li.quantity) || 0) * (Number(li.unitPrice) || 0);
+const lineAmount = proposalLineAmount;
 const lineAnnual = (li) =>
   li.frequency === 'one_time' ? 0 : lineAmount(li) * (PER_YEAR[li.frequency] || 0);
 
@@ -204,7 +205,9 @@ function CommercialProposalEditor() {
   const [propertyAddress, setPropertyAddress] = useState('');
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
+  const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
+  const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
   // Structured agreement sections (slice 1A-i) — all optional; leaving a
   // card empty omits its section from the saved proposal, and the customer
   // surfaces render exactly as before.
@@ -266,14 +269,17 @@ function CommercialProposalEditor() {
     setPropertyAddress(p.propertyAddress || est?.address || '');
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
     setTerms(p.terms || '');
+    setBidToolsEnabled(data.bidToolsEnabled === true);
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
         ? p.buildings.map((b) => ({
             name: b.name || '',
             note: b.note || '',
             lineItems: (b.lineItems || []).map((li) => ({
+              id: li.id || crypto.randomUUID(),
               description: li.description || '',
               quantity: li.quantity ?? 1,
+              unit: li.unit || '',
               unitPrice: li.unitPrice ?? 0,
               frequency: li.frequency || 'monthly',
               taxable: li.taxable === true,
@@ -506,7 +512,7 @@ function CommercialProposalEditor() {
       const copy = {
         name: `${src.name || 'Building'} (copy)`,
         note: src.note,
-        lineItems: src.lineItems.map((l) => ({ ...l })),
+        lineItems: src.lineItems.map((l) => ({ ...l, id: crypto.randomUUID() })),
       };
       return [...prev.slice(0, bi + 1), copy, ...prev.slice(bi + 1)];
     });
@@ -710,6 +716,7 @@ function CommercialProposalEditor() {
   };
 
   const buildPayload = (f = formRef.current) => ({
+    expectedEditVersion: loadedVersionRef.current,
     proposal: {
       title: f.title.trim() || 'Commercial Service Proposal',
       preparedFor: f.preparedFor.trim(),
@@ -726,9 +733,11 @@ function CommercialProposalEditor() {
         lineItems: b.lineItems
           .filter((l) => l.description.trim())
           .map((l) => ({
+            id: l.id,
             description: l.description.trim(),
-            quantity: Math.max(1, Math.round(Number(l.quantity) || 1)),
-            unitPrice: Number(l.unitPrice) || 0,
+            quantity: l.quantity,
+            unit: l.unit,
+            unitPrice: l.unitPrice,
             frequency: l.frequency,
             taxable: l.taxable === true,
           })),
@@ -800,6 +809,7 @@ function CommercialProposalEditor() {
         // #3297 r2). Direct fetch, NOT reload(): reload swallows its error
         // into the page-level banner and resolves (codex #3297 r3).
         const fresh = await adminFetch(`/admin/estimates/${estimateId}/proposal`);
+        loadedVersionRef.current = fresh.estimate?.editVersion;
         if (editGenRef.current === genAtSave) {
           applyLoaded(fresh);
           setDirty(false);
@@ -1284,30 +1294,36 @@ function CommercialProposalEditor() {
 
                 <CardBody className="space-y-2">
                   {/* Column headers (desktop) */}
-                  <div className="hidden md:grid grid-cols-12 gap-2 px-0.5">
-                    <span className={`col-span-4 ${LABEL}`}>Service description</span>
-                    <span className={`col-span-1 ${LABEL}`}>Qty</span>
+                  <div className={`hidden md:grid ${showUnitColumn ? 'grid-cols-[repeat(14,minmax(0,1fr))]' : 'grid-cols-12'} gap-2 px-0.5`}>
+                    <span className={`${showUnitColumn ? 'col-span-2' : 'col-span-4'} ${LABEL}`}>Service description</span>
+                    <span className={`${showUnitColumn ? 'col-span-2' : 'col-span-1'} ${LABEL}`}>Qty</span>
+                    {showUnitColumn && <span className={`col-span-2 ${LABEL}`}>Unit</span>}
                     <span className={`col-span-2 ${LABEL}`}>Unit price</span>
                     <span className={`col-span-2 ${LABEL}`}>Frequency</span>
                     <span className={`col-span-1 ${LABEL} text-center`}>Tax</span>
-                    <span className={`col-span-1 ${LABEL} text-right`}>Amount</span>
+                    <span className={`${showUnitColumn ? 'col-span-2' : 'col-span-1'} ${LABEL} text-right`}>Amount</span>
                     <span className="col-span-1" />
                   </div>
 
                   {b.lineItems.map((li, lii) => (
-                    <div key={lii} className="grid grid-cols-2 md:grid-cols-12 gap-2 items-center border-b border-hairline border-zinc-100 md:border-0 pb-2 md:pb-0">
+                    <div key={lii} className={`grid grid-cols-2 ${showUnitColumn ? 'md:grid-cols-[repeat(14,minmax(0,1fr))]' : 'md:grid-cols-12'} gap-2 items-center border-b border-hairline border-zinc-100 md:border-0 pb-2 md:pb-0`}>
                       <Input
-                        className="col-span-2 md:col-span-4" size="sm" placeholder="Service description"
+                        className={`col-span-2 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-4'}`} size="sm" placeholder="Service description"
                         value={li.description} disabled={!!locked}
                         onChange={(e) => updateLine(bi, lii, { description: e.target.value })}
                       />
                       <Input
-                        className="col-span-1 md:col-span-1" size="sm" type="number" min="1" title="Quantity"
+                        className={`col-span-1 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-1'}`} size="sm" type="number" min="0.0001" step="0.0001" title="Quantity" aria-label="Quantity"
                         value={li.quantity} disabled={!!locked}
                         onChange={(e) => updateLine(bi, lii, { quantity: e.target.value })}
                       />
+                      {showUnitColumn && <Select className="col-span-1 md:col-span-2" size="sm" value={li.unit || ''} disabled={!!locked || !bidToolsEnabled} aria-label="Quantity unit"
+                        onChange={(e) => updateLine(bi, lii, { unit: e.target.value })}>
+                        <option value="">No unit</option>
+                        {Object.entries(PROPOSAL_UNITS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                      </Select>}
                       <Input
-                        className="col-span-1 md:col-span-2" size="sm" type="number" min="0" step="0.01" title="Unit price"
+                        className="col-span-1 md:col-span-2" size="sm" type="number" min="0" step="0.0001" title="Unit price" aria-label="Unit price"
                         value={li.unitPrice} disabled={!!locked}
                         onChange={(e) => updateLine(bi, lii, { unitPrice: e.target.value })}
                       />
@@ -1325,7 +1341,7 @@ function CommercialProposalEditor() {
                         <span className="md:hidden text-12 text-zinc-500">Taxable</span>
                       </div>
                       <div
-                        className="col-span-1 md:col-span-1 text-right text-13 tabular-nums text-zinc-700"
+                        className={`col-span-1 ${showUnitColumn ? 'md:col-span-2' : 'md:col-span-1'} text-right text-13 tabular-nums text-zinc-700`}
                         title={li.frequency === 'one_time' ? 'One-time amount' : `${money(lineAnnual(li))} per year`}
                       >
                         {money(lineAmount(li))}

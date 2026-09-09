@@ -3,6 +3,7 @@ import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_
 import { fmtMoney } from '../lib/money';
 import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
+import { formatLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
@@ -272,6 +273,11 @@ export default function EstimateProposalDocument({ data, token }) {
       <style>{`
         .estimate-document-v1 { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         .estimate-document-v1 .doc-page { max-width: 760px; margin: 0 auto; padding: 20px 16px 28px; }
+        @media screen and (max-width: 600px) {
+          .estimate-document-v1 .doc-title-row { flex-direction: column; gap: 4px !important; }
+          .estimate-document-v1 .doc-info-grid { grid-template-columns: 1fr !important; gap: 0 !important; }
+          .estimate-document-v1 .doc-number { white-space: normal !important; }
+        }
         @media print {
           [data-waves-shell-header],
           footer[role="contentinfo"],
@@ -297,18 +303,18 @@ export default function EstimateProposalDocument({ data, token }) {
         </div>
 
         {/* Title row */}
-        <div className="doc-keep" style={{
+        <div className="doc-keep doc-title-row" style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
           borderTop: `2.5px solid ${NAVY}`, marginTop: 12, paddingTop: 8, gap: 12,
         }}>
           <div style={{ color: NAVY, fontSize: 21, fontWeight: 700, letterSpacing: '0.02em', textTransform: 'uppercase' }}>{docTitle}</div>
-          <div style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
+          <div className="doc-number" style={{ fontSize: 11, color: MUTED, whiteSpace: 'nowrap' }}>
             {estimateNumber ? `Estimate ${estimateNumber} · ` : ''}{fmtInstant(estimate.createdAt)}
           </div>
         </div>
 
         {/* Info grid */}
-        <div className="doc-keep" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '4px 22px', marginTop: 10 }}>
+        <div className="doc-keep doc-info-grid" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '4px 22px', marginTop: 10 }}>
           <div style={{ minWidth: 0 }}>
             <SectionHeader>Prepared for</SectionHeader>
             <InfoRow label="Name">{proposal?.preparedFor || estimate.customerName}</InfoRow>
@@ -412,7 +418,7 @@ export default function EstimateProposalDocument({ data, token }) {
                   }}>
                     <span style={{ minWidth: 0, color: INK }}>
                       {item.description || 'Service'}
-                      {Number(item.quantity) > 1 ? ` × ${item.quantity}` : ''}
+                      {(item.unit || Number(item.quantity) !== 1) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
                     </span>
                     <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
                       {fmtMoney(item.amount)}

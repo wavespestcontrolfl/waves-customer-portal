@@ -87,6 +87,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
+const { gateEnvValue } = require('../config/feature-gates');
 
 let row;
 let mutations;
@@ -172,6 +173,7 @@ function scheduledAttempt({ key = 'synthetic-scheduled-attempt', startedAt, resu
 
 beforeEach(() => {
   jest.clearAllMocks();
+  gateEnvValue.mockReturnValue(false);
   row = savedEstimate();
   mutations = [];
   db.mockImplementation(estimateDatabase);
@@ -182,6 +184,50 @@ beforeEach(() => {
     return { sent: true, message: { provider_message_id: 'synthetic-email-accepted' } };
   });
   email.loadTemplateByKey.mockImplementation(async (key) => ({ template: { template_key: key }, activeVersion: { id: 'synthetic-email-version' } }));
+});
+
+describe('commercial bid authoring', () => {
+  beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
+  const proposal = () => ({ enabled: true, buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
+  test('PUT stores fractional quote totals atomically', async () => {
+    row.status = 'draft';
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
+    expect(res.statusCode).toBe(200);
+    expect(row.onetime_total).toBe(2580);
+    expect(dataOf().proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: 25.8, unit: 'acre', amount: 2580 });
+  });
+  test('PUT rejects stale editing and invalid quantities without replacing saved prices', async () => {
+    row.status = 'draft';
+    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal() });
+    expect(stale.statusCode).toBe(409);
+    expect(mutations).toHaveLength(0);
+    const invalid = proposal(); invalid.buildings[0].lineItems[0].quantity = 0.00001;
+    const badQuantity = await invoke('/:id/proposal', 'put', { proposal: invalid });
+    expect(badQuantity.statusCode).toBe(400);
+    expect(mutations).toHaveLength(0);
+  });
+  test('a legacy editor cannot discard saved units by omitting line identifiers while the gate is off', async () => {
+    gateEnvValue.mockReturnValue(false);
+    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+    const incoming = proposal();
+    delete incoming.buildings[0].lineItems[0].id;
+    delete incoming.buildings[0].lineItems[0].unit;
+    const res = await invoke('/:id/proposal', 'put', { proposal: incoming });
+    expect(res.statusCode).toBe(409);
+    expect(mutations).toHaveLength(0);
+    expect(dataOf().proposal.buildings[0].lineItems[0].unit).toBe('acre');
+  });
+  test.each(['unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
+    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+    const body = { proposal: proposal() };
+    if (field === 'unit') body.proposal.buildings[0].lineItems[0].unit = 'sqft';
+    gateEnvValue.mockReturnValue(false);
+    const res = await invoke('/:id/proposal', 'put', body);
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toMatch(/Bid authoring is currently disabled/);
+    expect(mutations).toHaveLength(0);
+    expect(dataOf()).toEqual({ proposal: proposal() });
+  });
 });
 
 describe('reviewed send attempt receipts', () => {
