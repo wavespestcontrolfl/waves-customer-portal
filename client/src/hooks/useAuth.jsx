@@ -221,10 +221,11 @@ export function AuthProvider({ children }) {
         // selection and the error state; this stale failure changes nothing.
         if (propertyReadSeqRef.current === propertyReadSeq) {
         // A saved-property session scopes every read to the selection the
-        // SERVER honored even when the list cannot be read (codex #4207 r1 /
-        // r1e): take it from /auth/me's `propertyScope` — never the raw token
-        // claim, which the server ignores for a retired property or while
-        // the gate is off. The entry details arrive with the next refresh.
+        // SERVER RESOLVED even when the list cannot be read (codex #4207 r1 /
+        // r1e / r1w): take it from /auth/me's `propertyScope` — the honored
+        // claim, else the fallback the server chose (a lone secondary after
+        // the primary was retired), else `closed` — never the raw token
+        // claim. The entry details arrive with the next refresh.
         const claimed = data?.propertyScope?.propertyId ? String(data.propertyScope.propertyId) : null;
         if (data?.propertyScope && data.propertyScope.enabled === false) {
           // The server is NOT scoping this session (gate off, cancelled): the
@@ -234,6 +235,16 @@ export function AuthProvider({ children }) {
           // (profile shape) restores the switcher.
           resetPropertyScope();
           if (propertiesRef.current.some((p) => p.key)) setProperties([]);
+        } else if (data?.propertyScope?.closed === true && data?.id) {
+          // Every saved property of this profile retired — the server resolved
+          // NO house (uncapped codex r1w P1): the session is scoped to nothing
+          // selectable. Saved scope with a null-key selection, which the page
+          // reads as "property unavailable" (no address, the profile-scoped
+          // My Property notice, no ticket) — never the retired primary's
+          // screens. A successful list read lands the same shape.
+          propertyScopeRef.current = 'saved';
+          setPropertyScope('saved');
+          setSelectedProperty({ key: null, customerId: data.id, propertyId: null, closed: true });
         } else if (claimed && data?.id) {
           setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
             ? prev

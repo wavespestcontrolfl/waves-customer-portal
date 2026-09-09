@@ -59,3 +59,18 @@ test('a lookup failure never blocks the push: profile-only link', async () => {
   db.mockImplementation(() => ({ where: () => ({ first: async () => { throw new Error('connection reset'); } }) }));
   await expect(resolve('cust-1', { appointmentId: 'svc-1' })).resolves.toBeNull();
 });
+
+test('the in-app link is qualified under the app-notifications gate OR the property scope; bare under neither (uncapped codex r1w P1)', () => {
+  const originalApp = process.env.GATE_CUSTOMER_APP_NOTIFICATIONS;
+  try {
+    delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; delete process.env.GATE_APP_PROPERTY_SCOPE;
+    expect(pushService.pushLinkQualificationEnabled()).toBe(false);
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    expect(pushService.pushLinkQualificationEnabled()).toBe(true);
+    delete process.env.GATE_APP_PROPERTY_SCOPE; process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
+    expect(pushService.pushLinkQualificationEnabled()).toBe(true);
+  } finally {
+    if (originalApp === undefined) delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; else process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = originalApp;
+  }
+});
+

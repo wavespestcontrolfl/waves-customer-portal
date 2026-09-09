@@ -308,19 +308,10 @@ function isSecondarySelection(scope) {
   return scope.property.is_primary !== true;
 }
 
-// The session's EFFECTIVE property selection — what the middleware actually
-// honored (a retired property, a foreign claim or the gate being off all
-// read as null), for GET /auth/me. The client trusts THIS, never the raw
-// token claim, when it cannot read the list (codex #4207 r1e).
-function sessionPropertyScopePayload(req) {
-  const enabled = appPropertyScopeEnabled() && req.customerInactive !== true;
-  return { enabled, propertyId: enabled && req.propertyId ? String(req.propertyId) : null };
-}
-
 // The selection a scoped READ was actually resolved to (uncapped codex r1m
-// P1) — for the reads that carry a resolved scope (/schedule, /schedule/next,
-// /tracking/*). Unlike the token-claim payload above, this names the fallback
-// the server chose: a claim-less multi-property session → the primary's id, a
+// P1) — for /auth/me and the reads that carry a resolved scope (/schedule,
+// /schedule/next, /tracking/*, /services?propertyScoped=1). Never the raw
+// token claim: this names the fallback the server chose — a claim-less multi-property session → the primary's id, a
 // lone secondary after the primary was retired → that secondary, every row
 // retired → closed. propertyId is null when no property predicate applied
 // (single home, never-had-row profile) or the scope is closed — the client
@@ -338,7 +329,6 @@ module.exports = {
   accountPropertyIds,
   resolvePrimaryProfileId,
   appPropertyScopeEnabled,
-  sessionPropertyScopePayload,
   resolvedScopePayload,
   accountSavedProperties,
   resolveSessionScope,

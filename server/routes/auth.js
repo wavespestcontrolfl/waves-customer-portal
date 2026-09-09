@@ -16,7 +16,7 @@ const {
   revokeRefreshSession,
   rotateRefreshSession,
 } = require('../middleware/auth');
-const { accountSavedProperties, appPropertyScopeEnabled, sessionPropertyScopePayload } = require('../services/account-properties');
+const { accountSavedProperties, appPropertyScopeEnabled, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 
 // =========================================================================
@@ -477,7 +477,13 @@ router.get('/me', authenticate, async (req, res, next) => {
     // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the selection the
     // middleware HONORED for this session — null when the token's claim was
     // ignored (retired / foreign property, gate off, cancelled session).
-    propertyScope: sessionPropertyScopePayload(req),
+    // The selection the server RESOLVED for this session — the claim when
+    // honored, else the fallback it chose (a lone secondary after the primary
+    // was retired), else `closed` (every property retired) — never the raw
+    // claim alone (uncapped codex r1w P1): the client trusts this when the
+    // property list cannot be read, so it must name the same house every
+    // scoped read is about to use.
+    propertyScope: resolvedScopePayload(await resolveSessionScope(req)),
   });
   } catch (err) { next(err); }
 });

@@ -377,4 +377,22 @@ describe('cross-tab saved-property switch', () => {
     expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b'); // state changed → provider re-rendered
     expect(authApi.refreshProperties).toBe(before);
   });
+
+  it('/auth/me reports the profile CLOSED (every saved property retired) and the list read fails: saved scope with a null-key selection — never the retired primary (uncapped codex r1w P1)', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: null, closed: true } });
+    api.getAuthProperties.mockRejectedValue(new Error('connection reset'));
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('scope').textContent).toBe('saved');
+    expect(screen.getByTestId('selected').textContent).toBe('');
+    expect(authApi.selectedProperty).toEqual({ key: null, customerId: 'cust-1', propertyId: null, closed: true });
+  });
+
+  it('/auth/me names the RESOLVED house (a lone secondary after the primary was retired) and the list read fails: that house is selected, not "the primary"', async () => {
+    stubLocalStorage({ waves_token: 'tok-a', waves_refresh_token: 'ref-a' });
+    api.getMe.mockResolvedValue({ id: 'cust-1', propertyScope: { enabled: true, propertyId: 'prop-b', closed: false } });
+    api.getAuthProperties.mockRejectedValue(new Error('connection reset'));
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    expect(screen.getByTestId('selected').textContent).toBe('cust-1:prop-b');
+  });
 });

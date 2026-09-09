@@ -162,7 +162,11 @@ class PushNotificationService {
       return { ...summarize([], 0), reason: 'preferences_unavailable' };
     }
     if (!context?.enabled) return { ...summarize([], 0), reason: 'push_disabled' };
-    if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
+    // Qualify the in-app destination under the app-notifications gate OR the
+    // property scope (uncapped codex r1w P1): with the scope on and only the
+    // legacy push routing delivering, a reminder for house B must still open
+    // house B, not whichever house is selected. Off both: today's bare link.
+    if (pushLinkQualificationEnabled() && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
       // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the app opens
       // the visit's HOUSE, not just the profile — from notification.propertyId
       // (a composer that knows it) or resolved here from the visit id every
@@ -328,7 +332,11 @@ async function resolveNotificationPropertyId(customerId, notification) {
     return null;
   }
 }
+function pushLinkQualificationEnabled() {
+  return gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') || appPropertyScopeEnabled();
+}
 service.resolveNotificationPropertyId = resolveNotificationPropertyId;
+service.pushLinkQualificationEnabled = pushLinkQualificationEnabled;
 service._resolveNotificationPropertyId = resolveNotificationPropertyId;
 
 module.exports = service;
