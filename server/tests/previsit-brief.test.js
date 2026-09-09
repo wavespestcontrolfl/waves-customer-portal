@@ -356,6 +356,8 @@ describe('history outage — generation aborts, cached brief survives', () => {
     // A legacy top-level series row: pattern alone marks recurrence.
     expect((await factsFor({ is_recurring: false, recurring_parent_id: null, recurring_pattern: 'quarterly' })).visit.oneTime).toBeUndefined();
     expect((await factsFor({ is_recurring: true })).visit.oneTime).toBeUndefined();
+    // A free re-service callback: no lineage markers, but a plan visit.
+    expect((await factsFor({ is_recurring: false, recurring_parent_id: null, recurring_pattern: null, is_callback: true })).visit.oneTime).toBeUndefined();
   });
 });
 

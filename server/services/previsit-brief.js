@@ -826,10 +826,13 @@ async function assembleGrounding(svc, dbh = db) {
       isRecurring: !!svc.is_recurring,
       // One-off stop: present ONLY when the canonical recurring-lineage
       // trio is clear (is_recurring / recurring_parent_id / recurring_pattern
-      // — same set as previsit-card-request-sweep and pay-v2). A series
+      // — same set as previsit-card-request-sweep and pay-v2) AND the visit
+      // is not a plan callback. A series
       // booster carries is_recurring=false WITH a parent id and must never
       // ground a "one-time" cadence claim (codex #4198 r1 P1).
-      ...(!svc.is_recurring && !svc.recurring_parent_id && !svc.recurring_pattern ? { oneTime: true } : {}),
+      // Free re-service callbacks carry no lineage markers but exist only
+      // for covered plan customers — never a one-time stop (codex #4198 r2 P1).
+      ...(!svc.is_recurring && !svc.recurring_parent_id && !svc.recurring_pattern && !svc.is_callback ? { oneTime: true } : {}),
       // Omitted entirely when history is unreadable — the model must not
       // see (and the template must not assert) a first-visit claim that an
       // outage manufactured.
