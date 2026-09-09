@@ -46,7 +46,7 @@ describe('PDF documents across the fallback chain', () => {
   });
   test('an unsupported route cannot silently omit the document', async () => {
     expect(await dispatch({ provider: 'gemini', model: GEMINI_VISION_BEST }, { documents: [{ filename: 'label.pdf', data: 'JVBERi0=' }] }))
-      .toEqual({ ok: false, reason: 'unsupported_pdf_provider' });
+      .toMatchObject({ ok: false, reason: 'unsupported_pdf_provider' });
   });
 });
 
@@ -177,7 +177,7 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
   test('callOpenAI → no_key, no fetch', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch');
     try {
-      expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+      expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi' })).toMatchObject({ ok: false, reason: 'no_key' });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally { fetchSpy.mockRestore(); }
   });
@@ -185,27 +185,27 @@ describe('llm/call fails closed with no key and makes NO network call', () => {
   test('callGemini → no_key, no fetch', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch');
     try {
-      expect(await callGemini({ model: GEMINI_VISION_BEST, text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+      expect(await callGemini({ model: GEMINI_VISION_BEST, text: 'hi' })).toMatchObject({ ok: false, reason: 'no_key' });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally { fetchSpy.mockRestore(); }
   });
 
   test('callAnthropic → no_key', async () => {
-    expect(await callAnthropic({ model: FLAGSHIP, text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+    expect(await callAnthropic({ model: FLAGSHIP, text: 'hi' })).toMatchObject({ ok: false, reason: 'no_key' });
   });
 
   test('dispatch routes by provider and fails closed (OpenAI route, no key)', async () => {
     const fetchSpy = jest.spyOn(global, 'fetch');
     try {
       expect(ROUTES.leadClassify.provider).toBe(PROVIDER.OPENAI);
-      expect(await dispatch(ROUTES.leadClassify, { text: 'hi' })).toEqual({ ok: false, reason: 'no_key' });
+      expect(await dispatch(ROUTES.leadClassify, { text: 'hi' })).toMatchObject({ ok: false, reason: 'no_key' });
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally { fetchSpy.mockRestore(); }
   });
 
   test('dispatch rejects a missing/invalid route', async () => {
-    expect(await dispatch(null)).toEqual({ ok: false, reason: 'no_route' });
-    expect(await dispatch({ provider: 'nope', model: 'x' })).toEqual({ ok: false, reason: 'unknown_provider_nope' });
+    expect(await dispatch(null)).toMatchObject({ ok: false, reason: 'no_route' });
+    expect(await dispatch({ provider: 'nope', model: 'x' })).toMatchObject({ ok: false, reason: 'unknown_provider_nope' });
   });
 });
 
@@ -297,7 +297,7 @@ describe('callAnthropic prompt caching', () => {
     mockAnthropicCreate.mockRejectedValue(err);
 
     await expect(callAnthropic({ model: FLAGSHIP, text: 'hi' }))
-      .resolves.toEqual({ ok: false, reason: 'anthropic_529' });
+      .resolves.toMatchObject({ ok: false, reason: 'anthropic_529' });
   });
 });
 
@@ -321,7 +321,7 @@ describe('callOpenAI jsonMode parsing', () => {
 
   test('non-JSON output → empty_json so the caller can fall back', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'no json here' }) });
-    expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: true })).toEqual({ ok: false, reason: 'empty_json' });
+    expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: true })).toMatchObject({ ok: false, reason: 'empty_json' });
   });
 
   test('incomplete response → fallback signal instead of partial output', async () => {
@@ -329,7 +329,7 @@ describe('callOpenAI jsonMode parsing', () => {
       ok: true,
       json: async () => ({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, output_text: 'partial' }),
     });
-    expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: false })).toEqual({ ok: false, reason: 'openai_incomplete' });
+    expect(await callOpenAI({ model: OPENAI_BEST, text: 'hi', jsonMode: false })).toMatchObject({ ok: false, reason: 'openai_incomplete' });
     const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
     expect(body.reasoning).toEqual({ effort: 'low' });
   });
@@ -489,6 +489,42 @@ describe('dispatchWithFallback', () => {
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
   });
 
+  test('a billed leg that failed carries its usage on the failure entry; an unbilled one carries none', async () => {
+    // A complete, parseable-but-empty JSON answer the provider billed.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ output_text: 'not json', usage: { input_tokens: 900, output_tokens: 40, output_tokens_details: { reasoning_tokens: 10 } } }),
+    });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"text":"ok"}' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true });
+    expect(result).toMatchObject({ ok: true, fallbackUsed: true, failures: [{ provider: PROVIDER.OPENAI, reason: 'empty_json', usage: { input_tokens: 900, output_tokens: 40, reasoning_tokens: 10 } }] });
+
+    // A 529 never reached the model: no usage on that failure, and a validator rejection of a billed answer keeps its usage.
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 529 });
+    const down = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true });
+    expect(down.failures[0]).toEqual({ provider: PROVIDER.OPENAI, model: OPENAI_BEST, reason: 'openai_529' });
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ output_text: '{"text":"bad"}', usage: { input_tokens: 5, output_tokens: 2 } }) });
+    const rejected = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true }, { validate: (r) => (r.json.text === 'bad' ? 'too_bad' : null) });
+    expect(rejected.failures[0]).toMatchObject({ reason: 'too_bad', validator: true, usage: { input_tokens: 5, output_tokens: 2 } });
+
+    // An Anthropic-first chain: the adapter's successful result carries usage too, so a validator rejection keeps it.
+    mockAnthropicCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: '{"text":"bad"}' }], usage: { input_tokens: 7, output_tokens: 3 } });
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ output_text: '{"text":"ok"}' }) });
+    const anthropicFirst = await dispatchWithFallback({
+      primary: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+      fallback: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+    }, { text: 'write', jsonMode: true }, { validate: (r) => (r.json.text === 'bad' ? 'too_bad' : null) });
+    expect(anthropicFirst.failures[0]).toMatchObject({ provider: PROVIDER.ANTHROPIC, reason: 'too_bad', validator: true, usage: { input_tokens: 7, output_tokens: 3 } });
+  });
+
   test('uses the other provider when primary is unavailable', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 529 });
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
@@ -592,7 +628,7 @@ describe('dispatchWithFallback', () => {
       primary: { provider: PROVIDER.OPENAI, model: 'a' },
       fallback: { provider: PROVIDER.OPENAI, model: 'b' },
     }, { text: 'write' });
-    expect(result).toEqual({ ok: false, reason: 'same_provider_fallback', failures: [] });
+    expect(result).toMatchObject({ ok: false, reason: 'same_provider_fallback', failures: [] });
   });
 });
 

@@ -5,7 +5,13 @@
 const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
-const migration = require('../models/migrations/20260908000010_lawn_assessment_runs');
+// Every migration the run writers depend on, in order: the table, then the
+// scores_adjusted column recordRun always writes (Codex #4149 r5 — the fixture
+// applied only the first and CI's real-PostgreSQL run failed on the insert).
+const migrations = [
+  require('../models/migrations/20260908000010_lawn_assessment_runs'),
+  require('../models/migrations/20260908000020_lawn_assessment_runs_scores_adjusted'),
+];
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/llm/call'), dispatchWithFallback: jest.fn() }));
@@ -18,7 +24,7 @@ async function createRunsDb() {
   for (const table of ['customers', 'technicians', 'scheduled_services', 'lawn_assessments', 'lawn_assessment_photos']) {
     await knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
   }
-  await migration.up(knex);
+  for (const step of migrations) await step.up(knex);
   return { knex, schema, async dispose() { await knex.raw('DROP SCHEMA ?? CASCADE', [schema]); await knex.destroy(); } };
 }
 
@@ -48,9 +54,9 @@ const analysis = (overrides = {}) => ({
 
   test('the migration is idempotent and reversible; the table carries one run per assessment', async () => {
     expect(await db.knex.schema.hasTable('lawn_assessment_runs')).toBe(true);
-    await expect(migration.up(db.knex)).resolves.toBeUndefined(); // hasTable guard
+    for (const step of migrations) await expect(step.up(db.knex)).resolves.toBeUndefined(); // hasTable / hasColumn guards
     const columns = await db.knex('lawn_assessment_runs').columnInfo();
-    for (const column of ['assessment_id', 'status', 'provider', 'fallback_used', 'failures', 'unavailable_reason', 'prompt_version', 'context_hash', 'photo_ids', 'findings', 'severities', 'scores_raw', 'raw_response', 'tokens_reasoning', 'latency_ms', 'reviewed_findings', 'added_details', 'reconciliation', 'reviewed_at', 'reviewed_by_technician_id']) {
+    for (const column of ['assessment_id', 'status', 'provider', 'fallback_used', 'failures', 'unavailable_reason', 'prompt_version', 'context_hash', 'photo_ids', 'findings', 'severities', 'scores_raw', 'scores_adjusted', 'raw_response', 'tokens_reasoning', 'latency_ms', 'reviewed_findings', 'added_details', 'reconciliation', 'reviewed_at', 'reviewed_by_technician_id']) {
       expect(columns[column]).toBeDefined();
     }
     expect(columns.assessment_id.nullable).toBe(false);
