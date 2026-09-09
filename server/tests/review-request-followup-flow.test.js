@@ -141,7 +141,7 @@ describe('review request follow-up flow', () => {
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     renderSmsTemplate.mockResolvedValue('Please review us');
-    sendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-followup', auditLogId: 'audit-1' });
 
     const result = await ReviewService.processFollowups();
 
@@ -276,7 +276,7 @@ describe('review request follow-up flow', () => {
     const result = await ReviewService.processFollowups();
 
     expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
-    expect(updateQuery.update).toHaveBeenCalledWith({ followup_sent: false, followup_sent_at: null });
+    expect(updateQuery.update).toHaveBeenCalledWith({ followup_sent: false, followup_sent_at: null, followup_reserved_at: null });
   });
 
   test('creates inline review rows as pending until the bundled completion SMS is delivered', async () => {
