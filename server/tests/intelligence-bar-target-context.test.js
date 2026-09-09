@@ -402,8 +402,17 @@ test('route-wide writers are refused inside a customer-scoped task', async () =>
   for (const [toolName, params] of [['optimize_all_routes', { date: '2026-09-09' }], ['optimize_tech_route', { date: '2026-09-09', technician_name: 'Synthetic Tech' }],
     ['swap_tech_assignments', { date: '2026-09-09', tech_a_name: 'A', tech_b_name: 'B' }]]) {
     expect(await Context.validateRecordTarget(params, context(), { toolName })).toMatchObject({ code: 'customer_scope_required' });
+    // An explicitly named customer who did not resolve keeps the request customer-scoped.
+    expect(await Context.validateRecordTarget(params, { targets: [], namesRequested: true }, { toolName })).toMatchObject({ code: 'customer_scope_required' });
     expect(await Context.validateRecordTarget(params, { targets: [] }, { toolName })).toBeNull();
   }
+});
+
+test('payout details list other customers\' transactions and are refused inside a customer-scoped task', async () => {
+  const schema = { properties: { payout_id: { type: 'string' } } };
+  expect(await Context.prepareReadInput({}, context(), { toolName: 'get_payout_details', schema })).toMatchObject({ code: 'customer_scope_required' });
+  expect(await Context.prepareReadInput({}, { targets: [], namesRequested: true, page: { ids: {} } }, { toolName: 'get_payout_details', schema })).toMatchObject({ code: 'customer_scope_required' });
+  expect(await Context.prepareReadInput({}, { targets: [], page: { ids: {} } }, { toolName: 'get_payout_details', schema })).toEqual({ input: {} });
 });
 
 test('scoped customer-row readers fail closed for an explicitly named customer who did not resolve', async () => {

@@ -693,6 +693,16 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(unknown.body).toMatchObject({ taskState: 'needs_information', pendingActions: [] });
   }, 30000);
 
+  test('a reply via SMS proposed with only the canonical customer id pins that recipient', async () => {
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'reply via sms' }, 'discover'))
+      .mockResolvedValueOnce(tools('reply_via_sms', { customer_id: customerA, message: 'Synthetic reply' }, 'sms'))
+      .mockResolvedValueOnce(answer('Reply awaiting confirmation.'));
+    const result = await api('/query', request(`Reply to ${nameA} by text`));
+    expect(result.body.taskTarget.customer_id).toBe(customerA);
+    expect(result.body.pendingActions).toHaveLength(1);
+    expect(result.body.pendingActions[0].tool).toBe('reply_via_sms');
+  }, 30000);
+
   test('dependent writes cannot be proposed together or resumed after a failed prerequisite', async () => {
     const note = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: 'Frontier fixture' } }, id: 'first' };
     const sms = { type: 'tool_use', name: 'send_sms', input: { customer_id: customerA, message: 'Your note was updated.' }, id: 'second' };

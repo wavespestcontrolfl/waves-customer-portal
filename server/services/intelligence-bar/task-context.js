@@ -403,12 +403,15 @@ function bulkLeadSelection(toolName, records, params) {
 
 // Writers that act on every stop for a date or technician and carry no record
 // identifiers. A customer-scoped task cannot mint an approval for them: the
-// stored action would have no references for the confirm-time recheck.
+// stored action would have no references for the confirm-time recheck. An
+// explicitly named customer who did not resolve keeps the task customer-scoped
+// (as for the broad readers), so a misspelling never widens a request to a
+// whole date or technician.
 const ROUTE_WIDE_WRITERS = new Set(['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments']);
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   const policy = require('./action-policy.json')[toolName];
-  if (context.targets?.length && ROUTE_WIDE_WRITERS.has(toolName)) {
+  if ((context.targets?.length || context.namesRequested) && ROUTE_WIDE_WRITERS.has(toolName)) {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
   if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
@@ -481,7 +484,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
   'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
-  'get_my_route',
+  'get_my_route', 'get_payout_details',
 ]);
 
 // Readers that confine themselves to the task's read scope (readCustomerIds).
