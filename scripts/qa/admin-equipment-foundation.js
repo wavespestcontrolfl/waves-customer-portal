@@ -415,17 +415,28 @@ async function install(page, server, state) {
     });
   });
 }
-async function shot(page, report, name) {
-  await page.evaluate(() => {
-    document.scrollingElement.scrollTop = 0;
-    const main = document.querySelector("main");
-    if (main) main.scrollTop = 0;
-  });
+async function shot(page, report, name, target) {
+  if (target) {
+    await target.evaluate((node) => node.scrollIntoView({
+      block: "center", inline: "nearest", behavior: "instant",
+    }));
+  } else {
+    await page.evaluate(() => {
+      document.scrollingElement.scrollTop = 0;
+      const main = document.querySelector("main");
+      if (main) main.scrollTop = 0;
+    });
+  }
   await page.waitForTimeout(400);
+  if (target) {
+    const box = await target.boundingBox();
+    assert.ok(box && box.y >= 0 && box.y + box.height <= page.viewportSize().height,
+      name + ": screenshot target is inside the viewport");
+  }
   const file = path.join(output, `${name}.png`);
   await page.screenshot({
     path: file,
-    fullPage: (await page.getByRole("dialog").count()) === 0,
+    fullPage: !target && (await page.getByRole("dialog").count()) === 0,
   });
   report.screenshots.push(path.relative(root, file));
 }
@@ -622,9 +633,9 @@ async function fleetDetail(page) {
     .getByRole("button", { name: "Record Maintenance", exact: true })
     .waitFor();
 }
-async function capture(page, state, report, device, key) {
+async function capture(page, state, report, device, key, target) {
   await widths(page, state, key);
-  await shot(page, report, device + "-" + key);
+  await shot(page, report, device + "-" + key, target);
 }
 async function mileageHeader(page, server, state, report, device) {
   state.mileageLogs = Array.from({ length: 30 }, (_, index) => ({
@@ -680,6 +691,9 @@ async function views(page, server, state, report, device) {
     await capture(page, state, report, device, key);
     console.log(device + ": " + key);
   }
+  const chart = page.getByRole("region", { name: "Monthly maintenance costs chart", exact: true });
+  await chart.evaluate((node) => { node.scrollLeft = node.scrollWidth - node.clientWidth; });
+  await shot(page, report, device + "-analytics-chart", chart);
   await section(page, "Assets");
   for (const [label, key] of [
     ["Add Equipment", "new-equipment"],
@@ -700,13 +714,17 @@ async function views(page, server, state, report, device) {
   }
   await section(page, "Maintenance");
   await fleetDetail(page);
-  await capture(page, state, report, device, "maintenance-detail");
+  await capture(page, state, report, device, "maintenance-detail",
+    page.getByRole("button", { name: "Record Maintenance", exact: true }));
   for (const [label, key] of [
     ["Record Maintenance", "record-maintenance"],
     ["Log Mileage", "log-mileage"],
   ]) {
     await page.getByRole("button", { name: label, exact: true }).click();
-    await capture(page, state, report, device, key);
+    await capture(page, state, report, device, key,
+      page.getByRole("heading", { name: label, exact: true }));
+    await shot(page, report, device + "-" + key + "-actions",
+      page.getByRole("button", { name: label === "Record Maintenance" ? "Save Record" : "Save Mileage", exact: true }));
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
   }
   await section(page, "Maintenance", "Calibrations");
@@ -714,11 +732,17 @@ async function views(page, server, state, report, device) {
     .getByLabel("Equipment system", { exact: true })
     .selectOption(systemId);
   await page.getByText("Current active calibration", { exact: true }).waitFor();
-  await capture(page, state, report, device, "selected-calibration");
+  await capture(page, state, report, device, "selected-calibration",
+    page.getByLabel("Test area (sqft)", { exact: true }));
+  await shot(page, report, device + "-selected-calibration-actions",
+    page.getByRole("button", { name: "Save Calibration (expires in 30 days)", exact: true }));
   await page
     .getByRole("button", { name: "Verify Calibration", exact: true })
     .click();
-  await capture(page, state, report, device, "verify-calibration");
+  await capture(page, state, report, device, "verify-calibration",
+    page.getByLabel("Measured sqft", { exact: true }));
+  await shot(page, report, device + "-verify-calibration-actions",
+    page.getByRole("button", { name: "Mark Field Verified", exact: true }));
   await mileageHeader(page, server, state, report, device);
 }
 async function main() {
