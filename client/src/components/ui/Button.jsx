@@ -26,7 +26,13 @@ const VARIANTS = {
 // Links with button presentation reuse these exact variants without changing
 // their native navigation or introducing a second action implementation.
 export function buttonStyles({ variant = 'primary', size = 'md', density = 'legacy', className } = {}) {
-  return cn(BASE, density === 'legacy' ? cn('uppercase tracking-label', SIZES[size]) : cn('ui-action', CONTROL_DENSITIES[density]), VARIANTS[variant], className);
+  const hasVariant = Object.prototype.hasOwnProperty.call(VARIANTS, variant);
+  const hasSize = Object.prototype.hasOwnProperty.call(SIZES, size);
+  if (import.meta.env.DEV) {
+    if (!hasVariant) console.warn(`Button: unknown variant "${variant}" — rendering primary`);
+    if (!hasSize) console.warn(`Button: unknown size "${size}" — rendering md`);
+  }
+  return cn(BASE, density === 'legacy' ? cn('uppercase tracking-label', SIZES[hasSize ? size : 'md']) : cn('ui-action', CONTROL_DENSITIES[density]), VARIANTS[hasVariant ? variant : 'primary'], className);
 }
 
 export const Button = forwardRef(function Button(
