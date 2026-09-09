@@ -351,8 +351,16 @@ function reviewTimingHint({ reviewTiming, reviewCustomAt, preview, bundled, awai
     if (preview?.schedulerEnabled === false) return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
     if (preview?.schedulerEnabled !== true) return "Whether automated review texts can send is not known yet (the send-time preview has not loaded). If the scheduler is off nothing sends; the choice is recorded on this visit.";
   }
-  if (awaitsPayment && reviewTiming === "auto") return "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment.";
-  if (awaitsPayment && reviewTiming === "customer_requested") return "Review text waits for the invoice to be paid, then goes out at the next cadence tick the send window allows. The request is recorded.";
+  // Automatic after payment: enrollForPaidInvoice recovers no explicit
+  // delay, so cadence mode computes the smart window from the payment and
+  // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
+  // Customer requested stores a zero delay, so it goes at the next tick.
+  if (awaitsPayment && reviewTiming === "auto") {
+    return preview?.reviewSequencesEnabled
+      ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
+      : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
+  }
+  if (awaitsPayment && reviewTiming === "customer_requested") return `Review text waits for the invoice to be paid, then goes out at the next ${tickNoun(preview)}${preview?.smsSendWindowEnabled ? " the send window allows" : ""}. The request is recorded.`;
   const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
   return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
 }
@@ -368,6 +376,12 @@ function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
     const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
     const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
     if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
+    // The legacy +120 lands wherever the completion did — an evening visit's
+    // 9:15 PM tick is refused by the send window and the row is re-queued for
+    // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
+    // fenced inside the window by the server.
+    const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
+    if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
     return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
   }
   if (reviewTiming === "customer_requested") {
@@ -409,6 +423,14 @@ function workerTickMinutes(preview) {
   return (preview.reviewSequencesEnabled ? preview.cadenceTickMinutesOfHour : preview.legacyTickMinutesOfHour) || null;
 }
 const tickNoun = (preview) => (preview?.reviewSequencesEnabled ? "cadence tick" : "scheduler tick");
+// The worker tick a send at `iso` is held to when it falls outside the
+// 8 AM–8 PM window (8 PM exclusive): the first tick after the window opens
+// that morning, or the next morning after an evening send. Null inside it.
+function heldToWindowOpenISO(iso, preview) {
+  const { hour } = etParts(new Date(iso));
+  if (hour >= 8 && hour < 20) return null;
+  return windowOpenTickISO(addETDays(new Date(iso), hour >= 20 ? 1 : 0), preview);
+}
 // The custom-time mode: the one whose hint parses operator input and has to
 // reconcile it with the send window and the worker's ticks.
 function customReviewTimingHint(reviewCustomAt, preview) {
