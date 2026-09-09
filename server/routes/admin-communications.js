@@ -1253,8 +1253,10 @@ router.post('/call', async (req, res, next) => {
       if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
       const active = await require('../services/call-bridge').activeBridgeCall({ source, fromPhone: from, customerId: customer?.id }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
-      const promise = await trx('call_commitments').where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' }).forUpdate().first();
-      const original = promise?.call_log_id ? await trx('call_log').where({ id: promise.call_log_id }).first() : null;
+      const original = await trx('call_log as cl').join('call_commitments as cc', 'cc.call_log_id', 'cl.id')
+        .where({ 'cc.id': relatedCommitmentId, 'cc.kind': 'callback', 'cc.party': 'waves' }).forUpdate('cl').first('cl.*');
+      const promise = original ? await trx('call_commitments as cc').where({ 'cc.id': relatedCommitmentId })
+        .whereRaw(`NOT ${require('../services/call-commitments').staleAiRowSql('cc')}`).forUpdate('cc').first('cc.*') : null;
       const target = String(original?.direction || '').startsWith('outbound') ? original.to_phone : original?.from_phone;
       if (!promise || promise.status !== 'open' || !original || normalizePhone(target) !== normalizePhone(to)
         || (original.customer_id || null) !== (customer?.id || null)) {

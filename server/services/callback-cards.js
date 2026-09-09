@@ -48,7 +48,7 @@ async function prepareCallbackCards(conn, { callId = null } = {}) {
     .whereNull('cc.callback_due_at').whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((q) => { if (callId) q.where('cc.call_log_id', callId); })
     .orderBy('cc.created_at', 'asc').limit(200)
-    .select('cc.id', 'cc.source', 'cc.created_at', 'cc.due_at', 'cc.assigned_to', 'cl.created_at as call_started_at',
+    .select('cc.id', 'cc.source', 'cc.created_at', 'cc.updated_at', 'cc.due_at', 'cc.assigned_to', 'cl.created_at as call_started_at',
       'cl.bridged_at', 'cl.duration_seconds', 'cl.direction');
   if (!rows.length) return 0;
   const owner = await conn('technicians').where('employment_status', 'active')
@@ -61,8 +61,9 @@ async function prepareCallbackCards(conn, { callId = null } = {}) {
     let due;
     try {
       const day = etDateString(from);
-      if (!row.due_at && !calendars.has(day)) calendars.set(day, await loadCalendar(conn, from));
-      due = row.due_at ? new Date(row.due_at) : staffedDeadline(from, calendars.get(day));
+      if (!calendars.has(day)) calendars.set(day, await loadCalendar(conn, from));
+      // Keep the fallback independent: re-extraction may withdraw a stated date.
+      due = staffedDeadline(from, calendars.get(day));
     } catch (err) {
       logger.warn(`[callback-cards] deadline unavailable for ${row.id}: ${err.code || err.name || 'error'}`);
       continue; // The feed still shows this promise, with an undated warning.
@@ -70,11 +71,13 @@ async function prepareCallbackCards(conn, { callId = null } = {}) {
     prepared += await conn.transaction(async (trx) => {
       if (!enabled()) return 0;
       const changed = await trx('call_commitments').where({ id: row.id, status: 'open' })
-        .whereNull('callback_due_at').update({ callback_due_at: due,
+        .whereNull('callback_due_at')
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [row.updated_at])
+        .update({ callback_due_at: due,
           assigned_to: trx.raw('COALESCE(assigned_to, ?::uuid)', [owner?.id || null]), updated_at: new Date() });
       if (changed) await recordAuditEvent({ actor_type: 'system', action: 'callback_card_created',
         resource_type: 'call_commitment', resource_id: row.id,
-        metadata: { due_at: due.toISOString(), assigned_to: row.assigned_to || owner?.id || null }, critical: true, trx });
+        metadata: { due_at: new Date(row.due_at || due).toISOString(), assigned_to: row.assigned_to || owner?.id || null }, critical: true, trx });
       return changed;
     });
   }
@@ -109,8 +112,14 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
   }
   return conn.transaction(async (trx) => {
     if (!enabled()) throw error('Callback cards are disabled');
-    const row = await trx('call_commitments').where({ id, kind: 'callback', party: 'waves' }).forUpdate().first();
-    if (!row || !row.call_log_id) throw error('Callback not found', 404);
+    // Extraction takes the source-call lock before writing commitments.
+    // Use that order so a newer pass cannot withdraw this promise mid-action.
+    const source = await trx('call_log as cl').join('call_commitments as cc', 'cc.call_log_id', 'cl.id')
+      .where({ 'cc.id': id, 'cc.kind': 'callback', 'cc.party': 'waves' }).forUpdate('cl').first('cl.id');
+    if (!source) throw error('Callback not found', 404);
+    const row = await trx('call_commitments as cc').where({ 'cc.id': id })
+      .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`).forUpdate('cc').first('cc.*');
+    if (!row) throw error('This callback changed. Refresh to see the latest action.');
     if ((row.status !== 'open' && !['reopen', 'edit'].includes(action)) || new Date(row.updated_at).getTime() !== new Date(expectedAt).getTime()) {
       throw error('This callback changed. Refresh to see the latest action.');
     }

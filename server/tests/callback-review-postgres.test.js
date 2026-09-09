@@ -89,6 +89,84 @@ run('callback review regressions on PostgreSQL', () => {
     expect(Number(await count()) - baseline).toBe(2);
   });
 
+  test.each(['confirm', 'edit', 'claim'])('a newer extraction rejects a stale %s action without reviving the callback', async (action) => {
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    await trx('call_commitments').insert({ call_log_id: row.call_log_id, commitment_key: 'waves:send_report',
+      party: 'waves', kind: 'send_report', description: 'Newer extraction', source: 'ai', last_seen_generation: 2 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    expect(staff).toBeTruthy();
+    await expect(cards.actOnCallback(trx, row.id, { action, actorId: staff.id, expectedAt: row.updated_at,
+      description: 'Edited stale callback' })).rejects.toMatchObject({ status: 409 });
+    const unchanged = await trx('call_commitments').where({ id: row.id }).first();
+    expect(unchanged.human_state).toBeNull();
+    expect(unchanged.updated_at).toEqual(row.updated_at);
+  });
+
+  test('the call route rejects a superseded callback even when its row version did not change', async () => {
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    await trx('call_commitments').insert({ call_log_id: row.call_log_id, commitment_key: 'waves:send_report',
+      party: 'waves', kind: 'send_report', description: 'Newer extraction', source: 'ai', last_seen_generation: 2 });
+    const router = require('../routes/admin-communications');
+    const handler = router.stack.find((r) => r.route?.path === '/call').route.stack.at(-1).handle;
+    const bridge = require('../services/call-bridge').placeBridgeCall;
+    bridge.mockClear();
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    await handler({ body: { to: phone, relatedCommitmentId: row.id, expected_at: row.updated_at.toISOString() },
+      technicianId: null, techRole: 'admin' }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(bridge).not.toHaveBeenCalled();
+  });
+
+  test('the fallback is independent of a stated date and refreshes when extraction changes the source timing', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', callback_due_at: null, due_at: future, last_seen_generation: 1 });
+    await cards.prepareCallbackCards(trx, { callId: row.call_log_id });
+    const calendar = await cards.loadCalendar(trx, ago);
+    const first = await trx('call_commitments').where({ id: row.id }).first();
+    expect(first.callback_due_at).toEqual(cards.staffedDeadline(ago, calendar));
+    expect(first.due_at).toEqual(future);
+    await trx('call_commitments').where({ id: row.id }).update({ commitment_key: 'waves:callback' });
+    await trx('call_log').where({ id: row.call_log_id }).update({ processing_generation: 2, duration_seconds: 7200 });
+    await ledger.upsertCommitments(trx, row.call_log_id, [{ party: 'waves', kind: 'callback', description: 'Call back', due_at: null }],
+      { generation: 2, procGeneration: 2 });
+    const changed = await trx('call_commitments').where({ id: row.id }).first();
+    expect(changed.callback_due_at).toBeNull();
+    await cards.prepareCallbackCards(trx, { callId: row.call_log_id });
+    const source = await trx('call_log').where({ id: row.call_log_id }).first();
+    const ended = ledger.callEndedAt(source);
+    const currentCalendar = await cards.loadCalendar(trx, ended);
+    const current = await trx('call_commitments').where({ id: row.id }).first();
+    expect(current.due_at).toBeNull();
+    expect(current.callback_due_at).toEqual(cards.staffedDeadline(ended, currentCalendar));
+  });
+
+  test.each([[true, true], [false, false]])('re-extraction preserves a fallback when reviewed=%s and cards enabled=%s', async (reviewed, enabled) => {
+    const row = await seed({ source: 'ai', human_state: reviewed ? 'confirmed' : null, last_seen_generation: 1 });
+    await trx('call_commitments').where({ id: row.id }).update({ commitment_key: 'waves:callback' });
+    const gate = process.env.GATE_CALLBACK_CARD;
+    process.env.GATE_CALLBACK_CARD = String(enabled);
+    try {
+      await require('../services/call-commitments').upsertCommitments(trx, row.call_log_id,
+        [{ party: 'waves', kind: 'callback', description: 'New extraction', due_at: future }], { generation: 2 });
+      expect((await trx('call_commitments').where({ id: row.id }).first()).callback_due_at).toEqual(row.callback_due_at);
+    } finally { process.env.GATE_CALLBACK_CARD = gate; }
+  });
+
+  test('preparation cannot install a deadline computed before a concurrent row update', async () => {
+    const row = await seed({ callback_due_at: null });
+    const duringPrepare = (...args) => trx(...args);
+    duringPrepare.raw = trx.raw.bind(trx);
+    duringPrepare.transaction = async (fn) => {
+      await trx('call_commitments').where({ id: row.id }).update({ due_at: future, updated_at: future });
+      return trx.transaction(fn);
+    };
+    await cards.prepareCallbackCards(duringPrepare, { callId: row.call_log_id });
+    const current = await trx('call_commitments').where({ id: row.id }).first();
+    expect(current.callback_due_at).toBeNull();
+    expect(current.due_at).toEqual(future);
+    expect(current.updated_at).toEqual(future);
+  });
+
   test('an unlinked source can call a phone that now uniquely belongs to a customer', async () => {
     const row = await seed();
     const customerId = randomUUID();

@@ -596,6 +596,11 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
+    // Recompute unreviewed callback fallbacks after extraction, including
+    // source-call timing corrections. Gate-off never references the new column.
+    const callbackDeadlineUpdate = require('./callback-cards').enabled()
+      ? "callback_due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' AND call_commitments.kind = 'callback' AND call_commitments.party = 'waves' THEN NULL ELSE call_commitments.callback_due_at END,"
+      : '';
     let written = 0;
     for (const row of rows) {
       // ON CONFLICT … DO UPDATE only when the row is still the AI's to
@@ -608,6 +613,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
             evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
+           ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
            due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_at ELSE call_commitments.due_at END,
