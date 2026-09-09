@@ -110,7 +110,7 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     if (!enabled()) throw error('Callback cards are disabled');
     const row = await trx('call_commitments').where({ id, kind: 'callback', party: 'waves' }).forUpdate().first();
     if (!row || !row.call_log_id) throw error('Callback not found', 404);
-    if ((row.status !== 'open' && action !== 'reopen') || new Date(row.updated_at).getTime() !== new Date(expectedAt).getTime()) {
+    if ((row.status !== 'open' && !['reopen', 'edit'].includes(action)) || new Date(row.updated_at).getTime() !== new Date(expectedAt).getTime()) {
       throw error('This callback changed. Refresh to see the latest action.');
     }
     const staff = await trx('technicians').where({ id: actorId, employment_status: 'active' }).first('id');
@@ -122,7 +122,8 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     if (action === 'release') patch.assigned_to = null;
     if (action === 'snooze') patch.snoozed_until = until;
     if (['fulfill', 'dismiss', 'reopen', 'confirm', 'edit'].includes(action)) {
-      await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, description, due_at, note });
+      const changed = await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, description, due_at, note });
+      if (action === 'edit' && due_at !== undefined && changed.due_at == null) patch.callback_due_at = null;
       patch.snoozed_until = null;
     }
     await trx('call_commitments').where({ id }).update(patch);

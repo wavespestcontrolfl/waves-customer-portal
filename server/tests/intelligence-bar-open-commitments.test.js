@@ -22,6 +22,7 @@ const row = (id, extra = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   require('../config/feature-gates').gateEnvValue.mockReturnValue(false);
+  require('../config/feature-gates').isEnabled.mockReturnValue(true);
 });
 
 test('registered as a READ tool (no write gate) with a typed customer_id', () => {
@@ -71,10 +72,13 @@ test('resolves a customer by name; an unknown name answers with a note, never an
   expect(listOpenCommitments).toHaveBeenCalledTimes(1);
 });
 
-test('callback cards report their stored working-hour deadline and matching explanation', async () => {
-  require('../config/feature-gates').gateEnvValue.mockImplementation((key) => key === 'GATE_CALLBACK_CARD');
+test.each([[false, false], [true, false], [false, true], [true, true]])(
+  'callback gates %s/%s report the same deadline policy and explanation', async (cardsEnabled, commitmentsEnabled) => {
+  require('../config/feature-gates').gateEnvValue.mockImplementation((key) => key === 'GATE_CALLBACK_CARD' && cardsEnabled);
+  require('../config/feature-gates').isEnabled.mockImplementation((key) => key !== 'callCommitments' || commitmentsEnabled);
   listOpenCommitments.mockResolvedValue([row('callback', { kind: 'callback', callback_due_at: '2099-09-01T17:00:00Z' })]);
   const out = await executeCommsTool('get_open_commitments', {});
-  expect(out.implicit_due_rules.callback).toBe('four staffed hours after the call, using office hours and blackout dates');
-  expect(out.commitments[0].effective_due_at).toBe('2099-09-01 1:00 PM ET');
+  const enabled = cardsEnabled && commitmentsEnabled;
+  expect(out.implicit_due_rules.callback).toBe(enabled ? 'four staffed hours after the call, using office hours and blackout dates' : "the end of the call's day (Eastern)");
+  expect(out.commitments[0].effective_due_at).toBe(enabled ? '2099-09-01 1:00 PM ET' : '2026-09-02 12:00 AM ET');
 });
