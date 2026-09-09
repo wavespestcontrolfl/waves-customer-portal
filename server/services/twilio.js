@@ -1280,7 +1280,9 @@ const TwilioService = {
     };
     const alertUnreachable = async () => {
       try {
-        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route" });
+        // Visit-aware (app property scope, PR 3): reachability is judged on
+        // the recipients THIS visit's saved property notifies (GitHub codex r5 P1).
+        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route", scheduledServiceId });
       } catch (e) {
         logger.warn(`[twilio] en-route no-channel alert failed for customer ${customerId}: ${e.message}`);
       }

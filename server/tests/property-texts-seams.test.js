@@ -200,3 +200,10 @@ describe('confirmation deliverer on unreadable preferences', () => {
   });
 });
 
+describe('en-route no-channel alert', () => {
+  test('is judged on the visit (scheduledServiceId threaded to alertNoReachableChannel)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/twilio'), 'utf8');
+    expect(src).toMatch(/alertNoReachableChannel\(\{ customerId, kind: "en_route", scheduledServiceId \}\)/);
+  });
+});
+
