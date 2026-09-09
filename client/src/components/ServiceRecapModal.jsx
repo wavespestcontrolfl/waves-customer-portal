@@ -251,11 +251,19 @@ export default function ServiceRecapModal({
 
   const [restoredNames, setRestoredNames] = useState({});
   const missingSelections = [...selected].filter((id) => !productById.has(id));
+  const record = ctx?.existingRecord;
+  const recordIdentity = !ctx || !selectionAuthoritative.current || loadError ? null : JSON.stringify([
+    ctx.service?.status ?? null,
+    record ? [record.id, record.status, record.technician_notes, (record.products || []).map((p) => JSON.stringify([
+      p.product_id, p.product_name, p.product_category, p.active_ingredient, p.moa_group, p.application_rate, p.rate_unit,
+    ])).sort()] : null,
+  ]);
   const draft = useServiceRecapDraft(serviceId, !loading && !loadError, {
     note, message, rates, sendText, includeComms,
     selectedProducts: [...selected].map((id) => ({ id, name: productById.get(id)?.name || restoredNames[id] || String(id) })),
-  });
+  }, recordIdentity);
   const restoreDraft = () => {
+    if (draft.restoreError) return;
     const saved = draft.candidate;
     setNote(saved.note || '');
     setMessage(saved.message || '');
@@ -449,7 +457,8 @@ export default function ServiceRecapModal({
           <div style={{ padding: '14px 18px calc(18px + env(safe-area-inset-bottom, 0px))' }}>
             {draft.candidate && <div role="status" style={{ color: P.text, marginBottom: 16 }}>
               <p>A saved draft is available for this visit.</p>
-              <button type="button" onClick={restoreDraft}>Restore draft</button>{' '}
+              {draft.restoreError && <p role="alert">{draft.restoreError}</p>}
+              <button type="button" disabled={!!draft.restoreError} onClick={restoreDraft}>Restore draft</button>{' '}
               <button type="button" onClick={draft.discard}>Discard draft</button>
             </div>}
             {draft.saved && <p role="status" style={{ color: P.muted }}>Draft saved on this device. Not submitted.</p>}

@@ -2,10 +2,39 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TechServicePhotosModal from './TechServicePhotosModal';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+it.each([false, true])('ignores an older photo refresh after the next upload (old error: %s)', async (oldError) => {
+  let reads = 0, release;
+  const pending = new Promise(resolve => { release = resolve; });
+  const first = { id: 'photo-a', caption: 'First photo', url: 'data:image/png;base64,eA==' };
+  const second = { id: 'photo-b', caption: 'Second photo', url: 'data:image/png;base64,eA==' };
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    if (options?.method === 'POST') return { ok: true, json: async () => ({ photo: first }) };
+    const read = ++reads;
+    if (read === 2) {
+      await pending;
+      return { ok: !oldError, json: async () => oldError ? { error: 'Stale photo error' } : { photos: [first] } };
+    }
+    return { ok: true, json: async () => ({ photos: read === 1 ? [] : [first, second] }) };
+  }));
+  const { container } = render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  await screen.findByText('No photos yet.');
+  const input = container.querySelector('input[type="file"]');
+  const pick = () => fireEvent.change(input, { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  pick();
+  await waitFor(() => expect(reads).toBe(2));
+  await waitFor(() => expect(input).toBeEnabled());
+  pick();
+  await screen.findByText('Attached (2)');
+  await act(async () => { release(); });
+  expect(screen.getByText('Attached (2)')).toBeInTheDocument();
+  expect(screen.queryByText('Stale photo error')).not.toBeInTheDocument();
+});
 
 it('allows closing after upload succeeds while the photo refresh is still pending', async () => {
   const close = vi.fn();

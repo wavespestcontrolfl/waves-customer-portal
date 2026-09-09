@@ -48,6 +48,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [statusMsg, setStatusMsg] = useState('');
   const [pendingPhoto, setPendingPhoto] = useState(null);
   const uploadInFlight = useRef(false);
+  const loadSequence = useRef(0);
   // Treated-point marking (GATE_PHOTO_MARKS, dark). The probe 404s when the
   // gate is off, which leaves marksSupported false and the affordance absent —
   // no separate client-side flag to keep in sync.
@@ -68,6 +69,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   }, [pendingPhoto]);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     setErrorMsg('');
     try {
@@ -80,14 +82,14 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      setPhotos(data.photos || []);
+      if (sequence === loadSequence.current) setPhotos(data.photos || []);
     } catch (err) {
-      setErrorMsg(err.message || 'Failed to load photos');
+      if (sequence === loadSequence.current) setErrorMsg(err.message || 'Failed to load photos');
     }
-    setLoading(false);
+    if (sequence === loadSequence.current) setLoading(false);
   }, [serviceId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); return () => { loadSequence.current += 1; }; }, [load]);
 
   // Probe whether this lane takes treated-point marks. Fail-soft in both
   // directions: gate off returns 404 and any error leaves the affordance
