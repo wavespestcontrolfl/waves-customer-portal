@@ -41,6 +41,17 @@ describe('recurring series coverage measurements', () => {
     expect(measure([root], { ...root, recurring_ongoing: false })).toMatchObject({ ongoing: false, continuationDueDate: null, issues: [] });
   });
 
+  test.each(['2026-09-01', '2026-10-01'])('a finite plan retains parked work with abandoned date %s', date => {
+    const result = measure([root, visit('parked', date, { status: 'rescheduled' })], { ...root, recurring_ongoing: false });
+    expect(result).toMatchObject({ awaitingPlacementVisits: 1, upcomingVisits: 0, overdueVisits: 0,
+      nextRecordedDate: null, nextTimedVisitDate: null, intervals: [], issues: ['rescheduled_visits_awaiting_placement'] });
+  });
+
+  test('letting a plan lapse does not conceal its last parked application', () => {
+    expect(measure([root, visit('parked', '2026-09-01', { status: 'rescheduled' })], root, { decision: 'let_lapse' }))
+      .toMatchObject({ stopped: false, awaitingPlacementVisits: 1, issues: expect.arrayContaining(['rescheduled_visits_awaiting_placement']) });
+  });
+
   test('active pauses suppress alerts while retaining interval evidence; resumed pauses do not', () => {
     const hold = { starts_on: '2026-08-01', resume_on: '2026-10-01', status: 'active' };
     const rows = [root, visit('overdue', '2026-09-07')];
