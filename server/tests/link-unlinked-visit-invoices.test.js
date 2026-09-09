@@ -146,6 +146,17 @@ describe('conservative historical repair evidence', () => {
   ])('refuses %s as application evidence for %s', (description, service_type) => {
     expect(invoiceBillsVisitApplication({ line_items: [{ description, amount: 100 }] }, { service_type })).toBe(false);
   });
+  test.each(['Termite Foam Service', 'Termite Inspection Service', 'Quarterly Pest Control Service'])(
+    'an invoice labeled %s cannot bill a Termite Bait Station Service visit through a matching line', (service_type) => {
+      const line_items = [{ description: 'Termite Bait Station Service', amount: 100 }];
+      expect(invoiceBillsVisitApplication({ service_type, line_items }, { service_type: 'Termite Bait Station Service' })).toBe(false);
+      expect(invoiceBillsVisitApplication({ service_type: 'Termite Bait Station Service', line_items },
+        { service_type: 'Termite Bait Station Service' })).toBe(true);
+    });
+  test('an invoice with no label still needs matching positive lines', () => {
+    expect(invoiceBillsVisitApplication({ service_type: null, line_items: [{ description: 'Pest Control', amount: 100 }] },
+      { service_type: 'Pest Control' })).toBe(true);
+  });
   test.each([false, true])('a matching line cannot hide another same-family application (reverse=%s)', (reverse) => {
     const line_items = ['Termite Bait Station Service', 'Termite Foam Service']
       .map((description) => ({ description, amount: 100 }));
