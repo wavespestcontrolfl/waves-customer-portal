@@ -3155,7 +3155,7 @@ const ReviewService = {
               },
             });
           } catch (err) {
-            if (err?.providerOutcome?.sent !== true) throw err;
+            if (typeof err?.providerOutcome?.sent !== 'boolean') throw err;
             result = err.providerOutcome;
           }
           if (!result.sent) {

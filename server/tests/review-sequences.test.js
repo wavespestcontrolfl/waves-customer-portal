@@ -4707,9 +4707,11 @@ describe('legacy follow-up delivery spacing', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
-  test('a definite retryable refusal reopens the reserved follow-up', async () => {
+  test.each([false, true])('a definite retryable refusal reopens the reserved follow-up, including audit throws (%s)', async auditThrows => {
     const { request } = setup();
-    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_RETRY' });
+    const outcome = { sent: false, retryable: true, code: 'PROVIDER_RETRY' };
+    if (auditThrows) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
+    else mockSendCustomerMessage.mockResolvedValueOnce(outcome);
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
     expect(request.followup_sent).toBe(false);
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
