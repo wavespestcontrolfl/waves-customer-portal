@@ -154,6 +154,22 @@ run('callback ledger on PostgreSQL', () => {
     expect(live.map((r) => r.id)).toContain(row.id);
   });
 
+  test('a claimed callback still closes on its own returned-call evidence', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
+    expect((await trx('call_commitments').where({ id: row.id }).first()).human_state).toBe('confirmed');
+    await trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
+      status: 'completed', duration_seconds: 120, created_at: now, updated_at: now });
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+    // A human verdict on any other promise is still never rewritten.
+    const other = await seed({ source: 'ai', last_seen_generation: 1, kind: 'send_report', commitment_key: `fixture:report:${randomUUID()}` });
+    await ledger.applyHumanUpdate(trx, other.id, { action: 'confirm', reviewedBy: staff.id });
+    expect(await ledger.refreshFulfillment(trx, other.call_log_id)).toMatchObject({ checked: 0 });
+  });
+
   test.each(['confirm', 'edit', 'claim'])('a newer extraction rejects a stale %s action without reviving the callback', async (action) => {
     const row = await seed({ source: 'ai', last_seen_generation: 1 });
     await trx('call_commitments').insert({ call_log_id: row.call_log_id, commitment_key: 'waves:send_report',

@@ -1296,10 +1296,24 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
+// The rows fulfillment refresh may still write: no human verdict, or a
+// callback card's confirm while the card policy is on or the card already
+// placed a call (a persisted attempt keeps its proof path after rollback).
+function refreshableVerdictSql() {
+  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state = 'confirmed' AND (? OR EXISTS ("
+    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text))))",
+  [require('./callback-cards').enabled()]];
+}
+
 async function refreshFulfillment(conn, callLogId, call = null) {
   const row = call || await conn("call_log").where({ id: callLogId }).first("id", "twilio_call_sid", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds", "metadata");
   if (!row) return { checked: 0, fulfilled: 0, hinted: 0 };
-  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereNull("human_state");
+  // A human verdict is the office's call and is never rewritten — except
+  // the review a callback CARD records when staff claim, snooze or start
+  // calling (callback-cards.actOnCallback, the callback bridge): that
+  // confirm protects the promise from a later extraction withdrawing it,
+  // and the card's own conversation evidence must still close it.
+  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereRaw(...refreshableVerdictSql());
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -1322,7 +1336,7 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       // completed lookup clears it; an error above leaves it alone.
       cleared += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
         .whereRaw("fulfillment ->> 'strength' = 'association'")
         .update({ fulfillment: null, updated_at: new Date() });
       continue;
@@ -1330,13 +1344,13 @@ async function refreshFulfillment(conn, callLogId, call = null) {
     if (proof.strength === "direct") {
       fulfilled += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
         .whereRaw("(fulfillment IS NULL OR fulfillment ->> 'strength' = 'association')")
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
