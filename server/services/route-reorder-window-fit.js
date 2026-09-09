@@ -123,11 +123,11 @@ function sequenceCount(total, timed, groupSizes) {
   return count;
 }
 
-function workDuration(stop) {
+function workDuration(stop, fallback = 60) {
   const start = stop.window_start ? hhmmToMin(String(stop.window_start).slice(0, 5)) : null;
   const end = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : null;
   const span = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
-  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || 60;
+  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || fallback;
 }
 
 /**
@@ -163,10 +163,13 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLat
  * must turn an infeasible baseline into a feasible route; no distance saving
  * is needed to correct that defect. The caller owns gates and fenced writes. */
 function computeChronologicalRepair(RouteOptimizer, stops) {
-  if (stops.some(stop => stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
-    || !Number.isFinite(effectiveWindowRange(stop)?.startMin)
-    || !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
-    || !Number(stop.lat) || !Number(stop.lng))) return null;
+  if (stops.some(stop => {
+    const duration = workDuration(stop, 0);
+    return stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
+      || !Number.isFinite(effectiveWindowRange(stop)?.startMin)
+      || !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
+      || !Number(stop.lat) || !Number(stop.lng) || !Number.isFinite(duration) || duration <= 0;
+  })) return null;
   const ordered = currentOrder(stops);
   const backbone = ordered.filter(stop => stop.route_order != null);
   const additions = ordered.filter(stop => stop.route_order == null);

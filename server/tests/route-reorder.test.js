@@ -166,9 +166,9 @@ test('days whose visits start within 72h are skipped whole (clock freeze)', asyn
 
 describe('near-term null-position repair', () => {
   const repairDay = () => [
-    stop('one', { route_order: 1, window_start: '13:00' }),
+    stop('one', { route_order: 1, window_start: '13:00', estimated_duration_minutes: 60 }),
     stop('later', { route_order: 2, window_start: '15:00', window_end: '17:00', estimated_duration_minutes: 60 }),
-    stop('new', { route_order: null, window_start: '14:00' }),
+    stop('new', { route_order: null, window_start: '14:00', estimated_duration_minutes: 60 }),
   ];
   beforeEach(() => {
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
@@ -197,7 +197,9 @@ describe('near-term null-position repair', () => {
     expect(trxUpdates).toEqual([]);
   });
 
-  test.each([{ auto_dispatch_locked: true }, { auto_dispatch_excluded: true }, { lat: null }, { visit_id: 'group' }])('refuses protected or unverifiable work: %j', async change => {
+  test.each([{ auto_dispatch_locked: true }, { auto_dispatch_excluded: true }, { lat: null }, { visit_id: 'group' },
+    { estimated_duration_minutes: null }, { estimated_duration_minutes: -10 },
+    { estimated_duration_minutes: Infinity }])('refuses protected or unverifiable work: %j', async change => {
     Object.assign(stopsByDate[BAND[0]][0], change);
     expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
     expect(trxUpdates).toEqual([]);
@@ -220,6 +222,13 @@ describe('near-term null-position repair', () => {
     expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
     expect(trxUpdates).toEqual([]);
     expect(trxRawCalls[0].beforeMembershipRead).toBe(true);
+  });
+
+  test('a duration cleared during the run cannot regain the legacy fallback at commit', async () => {
+    liveRowsOverride = repairDay();
+    liveRowsOverride[0].estimated_duration_minutes = null;
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
   });
 
   test('an unreadable reminder state still fails closed', async () => {
@@ -287,6 +296,22 @@ test('quality measurements capture frozen routes in the existing ledger without 
     expect(measurement).toMatchObject({ date: BAND[0], technician_id: 't1', serviceMinutes: 120,
       grossGapMinutes: 120, remainingServiceBudgetMinutes: null });
     expect(JSON.stringify(measurement)).not.toMatch(/"lat"|"lng"|customer_name|address/);
+  } finally {
+    delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
+  }
+});
+
+test('revoking measurement collection before the ledger write omits the collected snapshots', async () => {
+  process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+  try {
+    stopsByDate['2026-08-18'] = backtrackDay();
+    routeTiers.loadReminderFreeze.mockImplementation(async () => {
+      delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
+      return { failed: false, frozen: new Set() };
+    });
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(1);
+    expect(JSON.parse(ledgerInserts[0].result)).not.toHaveProperty('route_quality');
+    expect(JSON.parse(ledgerInserts[0].constraints)).not.toHaveProperty('day_quality_version');
   } finally {
     delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
   }

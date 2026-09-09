@@ -579,7 +579,7 @@ async function runRouteReorder(opts = {}, conn = db) {
               // these, so any mid-run change invalidates the order.
               const windowSig = (s) => {
                 const r = effectiveWindowRange(s);
-                const dur = workDuration(s);
+                const dur = workDuration(s, repair ? 0 : 60);
                 const locked = (s.auto_dispatch_locked || s.auto_dispatch_excluded) ? 'L' : '-';
                 return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${locked}|${s.visit_id || ''}`;
               };
@@ -740,6 +740,7 @@ async function loadAutoDispatchSummary(today, conn = db) {
 async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn = db) {
   try {
     const autoDispatch = summary.run_type === 'route_tiers_nightly' ? await loadAutoDispatchSummary(today, conn) : null;
+    const includeMeasurements = summary.measurements && gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS');
     const [row] = await conn('route_optimization_planner_runs')
       .insert({
         run_type: summary.run_type,
@@ -757,14 +758,14 @@ async function writeLedgerRow({ status, today, bandStart, bandEnd, techIds, conf
           waypoint_cap: GOOGLE_WAYPOINT_CAP,
           freeze_hours: FREEZE_HOURS,
           repair_enabled: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
-          ...(summary.measurements ? { day_quality_version: 2, code_revision: process.env.RAILWAY_GIT_COMMIT_SHA || null } : {}),
+          ...(includeMeasurements ? { day_quality_version: 2, code_revision: process.env.RAILWAY_GIT_COMMIT_SHA || null } : {}),
         }),
         result: JSON.stringify({
           reorders: summary.applied,
           skips: summary.skipped,
           failures: summary.failed,
           auto_dispatch: autoDispatch,
-          ...(summary.measurements ? { route_quality: summary.measurements } : {}),
+          ...(includeMeasurements ? { route_quality: summary.measurements } : {}),
           ...(summary.fatal_error ? { fatal_error: summary.fatal_error } : {}),
         }),
         applied_count: summary.applied.length,
