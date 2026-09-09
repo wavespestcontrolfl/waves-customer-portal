@@ -90,9 +90,11 @@ function etTime(value) {
 
 // Lane 1: callback-requested calls from today with nothing behind them.
 async function loadCallbackCalls(cutoff = new Date()) {
-  if (require('./callback-cards').enabled()) {
-    const { staleAiRowSql } = require('./call-commitments');
-    return db('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+  const cardsEnabled = require('./callback-cards').enabled();
+  const { staleAiRowSql } = require('./call-commitments');
+  let cards = [];
+  if (cardsEnabled) {
+    cards = await db('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
       .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
       .whereRaw(`NOT ${staleAiRowSql('cc')}`).select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
   }
@@ -128,12 +130,14 @@ async function loadCallbackCalls(cutoff = new Date()) {
       -- (call-extraction-v1 prompt) and drives visit creation — a booked
       -- call carrying it is scheduled work, not an unworked callback.
       AND c.disposition = 'callback_task_created'
-      -- Callbacks are NOT handed off to the Owed lane (unlike promised
-      -- estimates): this digest pages the SAME evening a callback goes
-      -- unworked, and the commitments watchdog only rings the next morning
-      -- (7:20am ET, after the call day's midnight deadline). Handing them
-      -- over would lose the same-day alert (Codex #3725 r8). The Owed queue
-      -- still tracks the callback row; the morning bell is the escalation.
+      -- While cards are on, retain disposition-only work if recording its
+      -- commitment failed. A represented promise (including staff-closed
+      -- work) must not reappear in the fallback digest.
+      AND (:cards_enabled = FALSE OR NOT EXISTS (
+        SELECT 1 FROM call_commitments cc
+        WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
+          AND NOT ${staleAiRowSql('cc')}
+      ))
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
       -- unworked obligation, until that time arrives.
@@ -225,9 +229,9 @@ async function loadCallbackCalls(cutoff = new Date()) {
     ORDER BY c.created_at DESC
     LIMIT :cap
     `,
-    { cap: MAX_PER_SECTION, cutoff },
+    { cap: MAX_PER_SECTION, cutoff, cards_enabled: cardsEnabled },
   );
-  return rows;
+  return [...rows, ...cards.map((row) => ({ ...row, callback_card_summary: true }))];
 }
 
 // Lane 2: follow-up tasks that are overdue-pending, or were auto-expired
@@ -596,7 +600,8 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
 // are incomplete — a crashed lane must never read as a quiet day.
 function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [], requests = [] } = {}, laneFailures = []) {
   const failures = (laneFailures || []).filter(Boolean);
-  const a = (callbacks || []).filter(Boolean);
+  const a = (callbacks || []).filter((row) => row && !row.callback_card_summary);
+  const callbackCards = (callbacks || []).filter((row) => row?.callback_card_summary);
   const b = (followUps || []).filter(Boolean);
   const c = (unanswered || []).filter(Boolean);
   const d = (requests || []).filter(Boolean);
@@ -606,7 +611,9 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   // forever once the daily send-marker stamps (codex #3232 r1).
   const laneTotal = (rows) => (rows.length && Number(rows[0].total_count) > 0
     ? Number(rows[0].total_count) : rows.length);
-  const aTotal = laneTotal(a);
+  const cardsTotal = laneTotal(callbackCards);
+  const legacyCallbackTotal = laneTotal(a);
+  const aTotal = legacyCallbackTotal + cardsTotal;
   const bTotal = laneTotal(b);
   const cTotal = laneTotal(c);
   const dTotal = laneTotal(d);
@@ -630,15 +637,16 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionHtml.push(`<p style="border:1px solid #b91c1c;padding:8px 10px;"><strong>LANE FAILURE — this digest is INCOMPLETE.</strong> Failed lane${failures.length === 1 ? '' : 's'}:</p><ul style="margin:0 0 12px 18px;padding:0;">${failures.map((f) => `<li style="margin:0 0 6px 0;">${esc(f.lane)}: ${esc(f.message || 'query failed')}</li>`).join('')}</ul><p>That lane's queue is invisible until the query is fixed — do not read the sections below as the whole day.</p>`);
   }
 
-  if (a.length && require('./callback-cards').enabled()) {
-    sectionText.push(`${aTotal} open callback card${aTotal === 1 ? '' : 's'}: ${adminPortalUrl()}/admin/communications#tab=owed`, '');
-    sectionHtml.push(`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=owed">${aTotal} open callback card${aTotal === 1 ? '' : 's'}</a></p>`);
-  } else if (a.length) {
+  if (callbackCards.length) {
+    sectionText.push(`${cardsTotal} open callback card${cardsTotal === 1 ? '' : 's'}: ${adminPortalUrl()}/admin/communications#tab=owed`, '');
+    sectionHtml.push(`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=owed">${cardsTotal} open callback card${cardsTotal === 1 ? '' : 's'}</a></p>`);
+  }
+  if (a.length) {
     sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
     sectionText.push(...a.map((r) => `- ${etDateTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
-    sectionText.push(...moreLine(a.length, aTotal));
+    sectionText.push(...moreLine(a.length, legacyCallbackTotal));
     sectionText.push('');
-    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${aTotal > a.length ? `<p>…and ${aTotal - a.length} more not shown</p>` : ''}`);
+    sectionHtml.push(`<p><strong>Callbacks requested on calls today</strong> (nothing else tracks these):</p><ul style="margin:0 0 12px 18px;padding:0;">${a.map((r) => `<li style="margin:0 0 6px 0;">${esc(etDateTime(r.created_at))} ${esc(r.customer_name || maskPhone(r.from_phone))}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${esc(String(r.summary).replace(/\s+/g, ' ').trim())}` : ''}</li>`).join('')}</ul>${legacyCallbackTotal > a.length ? `<p>…and ${legacyCallbackTotal - a.length} more not shown</p>` : ''}`);
   }
   if (b.length) {
     sectionText.push('Follow-up tasks overdue or silently expired today:');

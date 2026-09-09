@@ -97,7 +97,7 @@ function LeadOwedPromises({ leadId }) {
     if (busyId) return;
     setBusyId(row.id);
     try {
-      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action }) });
+      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await load();
     } catch (err) {
       setError(err.message || "That change did not save.");

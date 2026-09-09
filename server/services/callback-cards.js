@@ -147,10 +147,14 @@ async function notifyDueCallbacks(conn, { now = new Date() } = {}) {
       await conn.transaction(async (trx) => {
         const live = await trx('call_commitments').where({ id: row.id, status: 'open' }).forUpdate().first();
         if (!enabled() || !live || (live.snoozed_until && new Date(live.snoozed_until) > now)) return;
+        const deadline = live.due_at || live.callback_due_at;
+        if (!deadline || new Date(deadline) > now) return;
+        const alertVersion = [deadline, live.snoozed_until, live.reviewed_at]
+          .map((value) => value ? new Date(value).toISOString() : '').join(':');
         const notice = await require('./notification-service').notifyAdmin('alert', 'A promised callback is due',
           'Open the callback card to call, finish, or snooze this promise.', {
-            recipientId: live.assigned_to || undefined, link: `/admin/communications#tab=owed&callback=${row.id}`,
-            dedupeKey: `callback-card:${row.id}:${live.snoozed_until ? new Date(live.snoozed_until).toISOString() : 'due'}`,
+            link: `/admin/communications#tab=owed&callback=${row.id}`,
+            dedupeKey: `callback-card:${row.id}:${alertVersion}:${live.assigned_to || 'unassigned'}`,
             bell: true, trx, metadata: { triggerKey: 'call_commitment_overdue', commitment_id: row.id, customer_id: row.customer_id },
           });
         if (notice?.id && !notice.deduped) alerted += 1;

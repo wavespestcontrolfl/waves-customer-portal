@@ -354,6 +354,7 @@ describe('POST /outbound-dial-complete', () => {
     const body = { CallSid: `CA${'1'.repeat(32)}`, DialCallSid: `CA${'2'.repeat(32)}`, DialCallStatus: 'completed', DialCallDuration: '90' };
     await complete()({ query: { callLogId: CALL_LOG_ID }, body }, res);
     expect(metadataPatches()).toEqual([expect.objectContaining({ status: 'completed', sid: body.DialCallSid, duration_seconds: 90 })]);
+    expect(state.updates.find((u) => u.patch.metadata).patch.twilio_call_sid).toBe(body.CallSid);
     expect(res.body).toContain('Voicemail detected');
     expect(res.body).toContain('<Hangup/>');
   });

@@ -3359,14 +3359,17 @@ router.post('/outbound-dial-complete', async (req, res) => {
   const duration = Number(req.body?.DialCallDuration);
   const status = String(req.body?.DialCallStatus || '');
   const sid = String(req.body?.DialCallSid || '');
+  const parentSid = String(req.body?.CallSid || '');
   if (CALL_LOG_ID_SHAPE.test(id) && ['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(status)
-    && /^CA[a-f0-9]{32}$/i.test(sid) && Number.isFinite(duration) && duration >= 0) {
+    && /^CA[a-f0-9]{32}$/i.test(sid) && /^CA[a-f0-9]{32}$/i.test(parentSid) && Number.isFinite(duration) && duration >= 0) {
     const leg = JSON.stringify({ status, sid, duration_seconds: duration, ended_at: new Date().toISOString() });
     try {
-      await db('call_log').where({ id, direction: 'outbound', twilio_call_sid: req.body.CallSid })
+      await db('call_log').where({ id, direction: 'outbound' })
+        .whereRaw('(twilio_call_sid = ? OR twilio_call_sid IS NULL)', [parentSid])
         .whereRaw("metadata->>'relatedCommitmentId' IS NOT NULL")
         .whereRaw("metadata->'customer_leg' IS NULL")
-        .update({ metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_leg}', ?::jsonb)", [leg]), updated_at: new Date() });
+        .update({ twilio_call_sid: parentSid,
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_leg}', ?::jsonb)", [leg]), updated_at: new Date() });
     } catch {
       return res.status(503).type('text/xml').send('<Response><Hangup/></Response>');
     }
