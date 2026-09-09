@@ -1,10 +1,11 @@
-const { PROGRAM, allocatedCents, splitCents, production, outcomeBonus, commission, assessmentResult, schemas, validate } = require('../services/field-team-rules');
+const { PROGRAM, ruleDefinition, allocatedCents, splitCents, production, outcomeBonus, commission, assessmentResult, schemas, validate } = require('../services/field-team-rules');
 
-const rule = { service_rules: [{ service_key: 'pest_quarterly', credit_type: 'routine', rework_window_days: 30 }], rework_minimum: 10, handoff_minimum: 10, activation_share_bps: null };
+const rule = ruleDefinition({ service_rules: [{ service_key: 'pest_quarterly', credit_type: 'routine', rework_window_days: 30 }], rework_minimum: 10, handoff_minimum: 10, activation_share_bps: null });
 const allocation = { net_value_cents: 60000, planned_visits: 4, credit_type: 'routine' };
 const productionInput = { rule, allocation, roleKey: 'technician_i', serviceKey: 'pest_quarterly', ordinal: 1, participant: { value_cents: 15000, share_bps: 10000 }, exclusion: 'none', provenance: 'verified' };
+const linkedReturn = { return_service_id: 'return-service', same_issue_confirmed: true, return_service_date: '2026-03-10' };
 const evidence = (overrides = {}) => ({ service_key: 'pest_quarterly', service_date: '2026-03-01', created_at: '2026-04-01T16:00:00Z', facts: { provenance: 'verified', exclusion: 'none', complete_at_cutoff: true, cutoff_at: '2026-03-01T23:00:00Z', repair_reason: 'none', rework_outcome: 'no_return', ...overrides } });
-const cohort = (size, failures = 0, kind = 'rework') => Array.from({ length: size }, (_, i) => evidence(i < failures ? kind === 'rework' ? { rework_outcome: 'technician_execution' } : { complete_at_cutoff: false } : {}));
+const cohort = (size, failures = 0, kind = 'rework') => Array.from({ length: size }, (_, i) => evidence(i < failures ? kind === 'rework' ? { ...linkedReturn, rework_outcome: 'technician_execution' } : { complete_at_cutoff: false } : {}));
 
 describe('Field Team Program revision 2b simulation contract', () => {
   test('keeps Technician II as the highest field title and the modeled targets reconcile', () => {
@@ -51,19 +52,39 @@ describe('Field Team Program revision 2b simulation contract', () => {
     expect(outcomeBonus('handoff', [evidence({ complete_at_cutoff: null })], rule, '2026-04-01').amount_cents).toBeNull();
   });
   test('a return outside the observation window does not become technician fault', () => {
-    expect(outcomeBonus('rework', [evidence({ rework_outcome: 'technician_execution', return_service_date: '2026-05-01' })], { ...rule, rework_minimum: 1 }, '2026-05-02')).toMatchObject({ status: 'unresolved', amount_cents: null });
+    expect(outcomeBonus('rework', [evidence({ ...linkedReturn, rework_outcome: 'technician_execution', return_service_date: '2026-05-01' })], { ...rule, rework_minimum: 1 }, '2026-05-02')).toMatchObject({ status: 'unresolved', amount_cents: null });
   });
   test('unverified or unmapped evidence cannot disappear from an otherwise passing cohort', () => {
     for (const kind of ['handoff', 'rework']) {
       expect(outcomeBonus(kind, [...cohort(10), evidence({ provenance: 'backfilled' })], rule, '2026-04-01').status).toBe('unresolved');
       expect(outcomeBonus(kind, [...cohort(10), { ...evidence(), service_key: null }], rule, '2026-04-01').status).toBe('unresolved');
+      expect(outcomeBonus(kind, [...cohort(10), evidence({ exclusion: 'corrective', provenance: 'backfilled' })], rule, '2026-04-01').status).toBe('unresolved');
+      expect(outcomeBonus(kind, [...cohort(10), { ...evidence({ exclusion: 'corrective' }), service_key: null }], rule, '2026-04-01').status).toBe('unresolved');
     }
+  });
+  test.each([{ return_service_id: null }, { same_issue_confirmed: false }, { return_service_date: null }, { return_service_date: '2026-02-01' }])('keeps an unqualified return unresolved: %j', missing => {
+    expect(outcomeBonus('rework', [...cohort(10), evidence({ ...linkedReturn, rework_outcome: 'technician_execution', ...missing })], rule, '2026-04-01')).toMatchObject({ status: 'unresolved', amount_cents: null });
+  });
+  test('dated rules retain all formula inputs independently of the current model', () => {
+    const later = ruleDefinition({ ...rule, activation_share_bps: 4000 });
+    later.formula.production_bps.technician_i = 900;
+    later.formula.commission_bps = 700;
+    later.formula.outcome_curves.rework.maximum = 30000;
+    expect(production({ ...productionInput, rule: later }).amount_cents).toBe(1350);
+    expect(production(productionInput).amount_cents).toBe(900);
+    expect(outcomeBonus('rework', cohort(10), later, '2026-04-01').amount_cents).toBe(30000);
+    expect(outcomeBonus('rework', cohort(10), rule, '2026-04-01').amount_cents).toBe(20000);
+    const facts = { accepted_net_cents: 60000, baseline_cents: 10000, activation_date: null };
+    expect(commission(facts, later, '2026-04-01').potential_cents).toBe(3500);
+    expect(commission(facts, rule, '2026-04-01').potential_cents).toBe(2500);
+    expect(production({ ...productionInput, rule: { ...rule, formula: undefined } }).amount_cents).toBe(900);
+    expect(production({ ...productionInput, rule: { ...rule, formula: undefined, program_version: 'unknown' } }).amount_cents).toBeNull();
   });
   test('a premature no-return review needs a review after the observation window closes', () => {
     expect(outcomeBonus('rework', [...cohort(10), { ...evidence(), created_at: '2026-03-02T16:00:00Z' }], rule, '2026-04-01')).toMatchObject({ status: 'unresolved', amount_cents: null });
   });
   test('non-technician causation does not count as avoidable rework', () => {
-    expect(outcomeBonus('rework', cohort(10).map(row => ({ ...row, facts: { ...row.facts, rework_outcome: 'protocol' } })), rule, '2026-04-01')).toMatchObject({ amount_cents: 20000, failures: 0 });
+    expect(outcomeBonus('rework', cohort(10).map(row => ({ ...row, facts: { ...row.facts, ...linkedReturn, rework_outcome: 'protocol' } })), rule, '2026-04-01')).toMatchObject({ amount_cents: 20000, failures: 0 });
   });
   test('missing rework windows never produce a passing result', () => {
     expect(outcomeBonus('rework', cohort(100), { ...rule, service_rules: [{ ...rule.service_rules[0], rework_window_days: null }] }, '2026-04-01').amount_cents).toBeNull();
