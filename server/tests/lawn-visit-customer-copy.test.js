@@ -111,6 +111,18 @@ describe('customer publication', () => {
     },
   );
 
+  test.each(['have remained active', 'has stayed active', 'had kept active', 'have just remained active', 'had stayed very active'])(
+    'qualifies the aspectual activity claim %s on both customer surfaces', (claim) => {
+      const text = `Chinch bugs ${claim} along the edge.`;
+      const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
+      const expected = 'Chinch bugs may be active along the edge.';
+      expect(copy.customerObservations(text, [evidence])).toBe(expected);
+      expect(copy.safeConfirmationStep(text, evidence)).toBe(expected);
+      expect(copy.customerObservations(text, [{ ...evidence, confidence: 'low' }])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.safeConfirmationStep(text, { ...evidence, confidence: 'low' })).toBe('');
+    },
+  );
+
   test.each([['Molds are spreading in the shade.', 'Mold activity'], ['Mildews are spreading in the shade.', 'Mildew activity'], ['Molds are spreading in the shade.', 'Fungal activity']])(
     'plural %s publishes with matching fungal evidence named %s', (text, name) => {
       const evidence = { name, label: 'fungal activity', confidence: 'moderate' };

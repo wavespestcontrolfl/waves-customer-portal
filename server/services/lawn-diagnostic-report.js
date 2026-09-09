@@ -695,7 +695,7 @@ function stripConfirmedLanguage(text) {
     // Cause-first active predicate ("Chinch bugs are active along the edge"). Both
     // predicate passes accept a short parenthetical after the cause
     // ("Large patch (Rhizoctonia) is confirmed").
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
       '$1 may be active')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
