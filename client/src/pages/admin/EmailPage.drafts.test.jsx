@@ -368,7 +368,7 @@ describe("Email draft and navigation preservation", () => {
     sendResponse = () => response({ error: "Synthetic send failure" }, 503);
     const view = mount(); const dialog = await compose();
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
-    await waitFor(() => expect(window.alert).toHaveBeenCalled());
+    await screen.findByText("Email send was not confirmed. Your draft is still here.");
     view.unmount(); mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
     expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
     sendResponse = null;

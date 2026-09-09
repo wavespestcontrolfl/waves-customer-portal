@@ -8,8 +8,8 @@ import {
 import { adminFetch } from "./emailApi";
 
 const SEND_ERRORS = {
-  reply: "Failed to send reply: ",
-  compose: "Failed to send: ",
+  reply: "Reply send was not confirmed. Your draft is still here.",
+  compose: "Email send was not confirmed. Your draft is still here.",
 };
 
 // The composer and reply boxes are plain textareas, but the server sends the
@@ -42,6 +42,7 @@ export default function useEmailEditor(userId) {
   const [showCompose, setShowCompose] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
+  const [sendFeedback, setSendFeedback] = useState({});
   const clearDraftResult = useCallback(() => setDraftResult(null), []);
   const changeDrafts = (update) => updateEmailDrafts(draftSession, update);
   const setReplyDraft = (id, text) =>
@@ -62,8 +63,9 @@ export default function useEmailEditor(userId) {
     ? "Draft recovery is unavailable. Your text stays while navigating here; copy it before reloading or closing this tab."
     : "Drafts are saved in this browser tab until you send, discard, or sign out.";
 
-  const sendEmail = async (kind, payload, onSuccess) => {
+  const sendEmail = async (kind, payload, onSuccess, messageId) => {
     if (!setEmailSending(draftSession, kind, true)) return;
+    setSendFeedback((current) => ({ ...current, [kind]: null }));
     try {
       const response = await adminFetch("/api/admin/email/send", {
         method: "POST",
@@ -73,9 +75,12 @@ export default function useEmailEditor(userId) {
         }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      if (!result.success) throw new Error("Send not confirmed");
       await onSuccess();
-    } catch (error) {
-      window.alert(SEND_ERRORS[kind] + error.message);
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId, message: kind === "reply" ? "Reply sent." : "Email sent." } }));
+    } catch {
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId, error: true, message: SEND_ERRORS[kind] } }));
     } finally {
       setEmailSending(draftSession, kind, false);
     }
@@ -106,6 +111,7 @@ export default function useEmailEditor(userId) {
         }));
         await onSent(email);
       },
+      email.id,
     );
   };
 
@@ -130,15 +136,17 @@ export default function useEmailEditor(userId) {
   };
 
   const handleAiDraft = async (email, isSelected) => {
-    if (!email) return;
+    if (!email || drafting || draftSession.sending.reply) return;
     const replyRevision = draftSession.replyRevisions[email.id] || 0;
     setDrafting(true);
     setDraftResult(null);
+    setSendFeedback((current) => ({ ...current, reply: null }));
     try {
       const r = await adminFetch(
         `/api/admin/email/message/${email.id}/ai-draft`,
         { method: "POST" },
       );
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       if (
         d.reply_draft &&
@@ -148,13 +156,14 @@ export default function useEmailEditor(userId) {
         if (isSelected(email.id)) setDraftResult(d);
       }
     } catch {
-      /* ignore */
+      setSendFeedback((current) => ({ ...current, reply: { messageId: email.id, error: true, message: "Could not create an AI draft. Your text is still here." } }));
     }
     setDrafting(false);
   };
 
   return {
     drafts,
+    sendFeedback,
     composeForm,
     setComposeForm,
     setReplyDraft,

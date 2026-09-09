@@ -14,12 +14,13 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
     <Field label={`Reply to ${sender}`}>
       <Textarea value={replyText} aria-label="Reply" onChange={(event) => setReplyDraft(selectedEmail.id, event.target.value)} placeholder="Type your reply..." rows={4} />
     </Field>
+    {editor.sendFeedback.reply?.messageId === selectedEmail.id && <ActionFeedback error={editor.sendFeedback.reply.error} className="mt-2">{editor.sendFeedback.reply.message}</ActionFeedback>}
     {draftResult && <ActionFeedback className="mt-2">AI draft loaded — review and edit before sending</ActionFeedback>}
     <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
       {replyText && <Button variant="ghost" onClick={() => setReplyDraft(selectedEmail.id, "")} disabled={sending} className="mr-auto">Discard reply</Button>}
       <EmailQuickLinks key={selectedEmail.id} active={active} recipient={selectedEmail.from_address} disabled={sending}
         onInsert={(link) => setReplyDraft(selectedEmail.id, appendStaticLinkClause(replyText, link))} />
-      <Button variant="secondary" onClick={() => editor.handleAiDraft(selectedEmail, mailbox.isSelected)} loading={drafting} className="gap-2">
+      <Button variant="secondary" onClick={() => editor.handleAiDraft(selectedEmail, mailbox.isSelected)} loading={drafting} disabled={sending} className="gap-2">
         <Sparkles size={16} aria-hidden />AI draft
       </Button>
       <Button onClick={() => editor.handleReply(selectedEmail, mailbox.loadThread)} loading={sending} disabled={!replyText.trim()} className="gap-2">
