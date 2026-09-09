@@ -103,7 +103,7 @@ function skip(reason, extra = {}) {
  * rows (already filtered to LIVE_STATUSES by the loader); `now` is the
  * clock the future-instant check uses.
  */
-function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date(), transcriptLabelsTrusted = false } = {}) {
+function planRescheduleFromCall({ v2, call, customer, properties = [], candidates = [], appointmentCreated = false, now = new Date(), transcriptLabelsTrusted = false, humanOverride = null } = {}) {
   if (!v2 || typeof v2 !== 'object') return skip('no_v2_extraction');
   if (appointmentCreated) return skip('pipeline_created_appointment');
   if (v2.meta?.is_spam === true) return skip('spam');
@@ -112,10 +112,11 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const scheduling = v2.scheduling || {};
   if (scheduling.status === 'canceled') return skip('cancel_not_automated');
   if (scheduling.status !== 'reschedule_requested') return skip('not_a_reschedule');
-  if (scheduling.agent_committed_booking !== true) return skip('agent_did_not_commit');
-  if (!scheduling.confirmed_start_at) return skip('no_confirmed_start');
+  if (!humanOverride && scheduling.agent_committed_booking !== true) return skip('agent_did_not_commit');
+  const targetStart = humanOverride ? scheduling.proposed_start_at : scheduling.confirmed_start_at;
+  if (!targetStart) return skip(humanOverride ? 'no_proposed_start' : 'no_confirmed_start');
   const confidence = v2.confidence?.scheduling_window;
-  if (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE) return skip('low_scheduling_confidence');
+  if (!humanOverride && (typeof confidence !== 'number' || confidence < MIN_SCHEDULING_CONFIDENCE)) return skip('low_scheduling_confidence');
   if (v2.caller?.decision_maker_present === false) return skip('caller_not_decision_maker');
   if (v2.consent?.do_not_contact_request === true) return skip('do_not_contact_requested');
 
@@ -126,52 +127,57 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   const phoneKeys = phoneMatchDigits(counterpartPhone(call));
   if (!phoneKeys.some((key) => phoneMatchDigits(customer.phone).includes(key))) return skip('caller_phone_not_on_file');
 
-  const target = new Date(scheduling.confirmed_start_at);
+  const target = new Date(targetStart);
   if (Number.isNaN(target.getTime())) return skip('unparseable_confirmed_start');
   if (target.getTime() <= now.getTime()) return skip('confirmed_start_in_past');
   const parts = etParts(target);
-  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at) || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
-  if (!transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
-  if (!hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
+  const onHour = humanOverride ? parts.minute === 0 && target.getUTCSeconds() === 0 : confirmedStartOnTheHour(scheduling.confirmed_start_at);
+  if (!onHour || target.getUTCMilliseconds() !== 0) return skip('off_grid_start_time');
+  if (!humanOverride && !transcriptLabelsTrusted) return skip('untrusted_speaker_labels');
+  if (!humanOverride && !hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return skip('ungrounded_agent_commitment');
   const newDate = etDateString(target);
   const newStart = `${pad2(parts.hour)}:${pad2(parts.minute)}`;
-  if (etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
+  if (!humanOverride && etWallClockOfConfirmedStart(scheduling.confirmed_start_at) !== `${newDate}T${newStart}`) return skip('inconsistent_start_offset');
 
-  const saved = properties.filter((p) => p.active !== false);
-  const primaryKey = customer.address_line1 ? addressKey(customer) : null;
-  const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
-  const stated = v2.property?.service_address || {};
-  const targetKey = statesNewAddress(v2)
-    ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
-      city: stated.city, zip: stated.postal_code }) : null)
-    : (knownKeys.size === 1 ? [...knownKeys][0] : null);
-  if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
-  const atProperty = candidates.filter((row) => {
-    if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
-    const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
-      address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
-    return key === targetKey;
-  });
-  if (!atProperty.length) return skip('no_visit_on_books');
-  // Match the named service BEFORE proximity. A different program near the
-  // destination cannot stand in for the requested visit outside the span.
-  // Coarse categories cannot distinguish programs, so absent/ambiguous
-  // catalog identity stays in office review.
-  const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
-    .map((name) => stripServiceSuffixes(name).toLowerCase()));
-  const matchingServices = atProperty.filter((row) => serviceNameCandidates(row.service_type)
-    .some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
-  const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.service_type).toLowerCase()));
-  if (programIds.size !== 1) return skip('service_needs_review');
-  if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
-  const nearby = matchingServices.filter((row) => {
-    const d = dateOnly(row.scheduled_date);
-    return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
-  });
+  let targetKey = null, nearby;
+  if (humanOverride) nearby = candidates.filter((row) => String(row.id) === String(humanOverride.visitId) && String(row.customer_id) === String(customer.id));
+  else {
+    const saved = properties.filter((p) => p.active !== false);
+    const primaryKey = customer.address_line1 ? addressKey(customer) : null;
+    const knownKeys = new Set([primaryKey, ...saved.map((p) => addressKey(p))].filter(Boolean));
+    const stated = v2.property?.service_address || {};
+    targetKey = statesNewAddress(v2)
+      ? (stated.street_line_1 ? addressKey({ address_line1: stated.street_line_1, address_line2: stated.street_line_2,
+        city: stated.city, zip: stated.postal_code }) : null)
+      : (knownKeys.size === 1 ? [...knownKeys][0] : null);
+    if (!targetKey || !knownKeys.has(targetKey)) return skip('property_needs_review');
+    const atProperty = candidates.filter((row) => {
+      if (row.property_id) return saved.some((p) => String(p.id) === String(row.property_id) && addressKey(p) === targetKey);
+      const key = row.service_address_line1 ? addressKey({ address_line1: row.service_address_line1,
+        address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
+      return key === targetKey;
+    });
+    if (!atProperty.length) return skip('no_visit_on_books');
+    // Match the named service BEFORE proximity. A different program near the
+    // destination cannot stand in for the requested visit outside the span.
+    // Coarse categories cannot distinguish programs, so absent/ambiguous
+    // catalog identity stays in office review.
+    const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
+      .map((name) => stripServiceSuffixes(name).toLowerCase()));
+    const matchingServices = atProperty.filter((row) => serviceNameCandidates(row.service_type)
+      .some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
+    const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.service_type).toLowerCase()));
+    if (programIds.size !== 1) return skip('service_needs_review');
+    if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
+    nearby = matchingServices.filter((row) => {
+      const d = dateOnly(row.scheduled_date);
+      return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
+    });
+  }
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];
   if (!LIVE_STATUSES.includes(visit.status)) return skip('visit_not_live', { visitId: visit.id });
-  if (visit.visit_id) return skip('grouped_visit', { visitId: visit.id });
+  if (visit.visit_id && !(humanOverride && visit.follow_through_group_eligible === true)) return skip('grouped_visit', { visitId: visit.id });
   if (visit.source_action && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
     return skip('dispatch_owned_pending', { visitId: visit.id });
   }
@@ -202,14 +208,73 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   };
 }
 
-async function loadCandidates(conn, customerId, now = new Date()) {
+async function loadCandidates(conn, customerId, now = new Date(), { includePast = false } = {}) {
   return conn('scheduled_services')
     .where({ customer_id: customerId })
     .whereIn('status', LIVE_STATUSES)
-    .where('scheduled_date', '>=', etDateString(now))
+    .where('scheduled_date', '>=', includePast ? etDateString(new Date(now.getTime() - 60 * 86400000)) : etDateString(now))
     .orderBy('scheduled_date', 'asc')
     .select('id', 'customer_id', 'property_id', 'service_id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'status', 'source_action', 'visit_id', 'internal_notes', 'is_recurring',
       'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+}
+
+// Human override shares the planner and SmartRebooker with the automatic
+// path. The proposal supplies a version guard; its note, audit and resolve
+// are written on the SAME transaction as the move, including a series move.
+async function applyReviewedCallReschedule({ conn, call, v2, customer, candidates, visitId, actorId,
+  guard, occurrenceIds = [], occurrences, now = new Date(), rebooker = null } = {}) {
+  if (!actorId || typeof guard !== 'function') throw new Error('Reviewed reschedule requires an authenticated proposal guard');
+  const plan = planRescheduleFromCall({ call, v2, customer, candidates, now, humanOverride: { visitId } });
+  if (plan.action === 'skip') return { outcome: 'skipped', reason: plan.reason };
+  const visit = candidates.find((row) => String(row.id) === String(plan.visitId));
+  const beforeMove = async (trx) => {
+    await trx('customers').where({ id: customer.id }).forShare().first('id');
+    await lockTriageCall(trx, call.id);
+    await trx('call_log').where({ id: call.id }).forUpdate().first('id');
+  };
+  const writeReview = async ({ trx, service }) => {
+    if (!service || dateOnly(service.scheduled_date) !== dateOnly(visit.scheduled_date)
+      || ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'visit_id', 'is_recurring', 'source_action',
+        'window_start', 'window_end', 'estimated_duration_minutes', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip']
+        .some((key) => (service[key] ?? null) !== (visit[key] ?? null))) {
+      throw Object.assign(new Error('The visit changed. Refresh the proposal.'), { status: 409 });
+    }
+    await guard(trx);
+    if (plan.interiorNote) {
+      // Append against the current notes, so a simultaneous note edit is preserved.
+      await trx('scheduled_services').where({ id: visit.id }).update({
+        internal_notes: trx.raw("concat_ws(E'\\n', NULLIF(internal_notes, ''), ?)", [`Call ${etCalendarDayOf(call.created_at || now)}: ${plan.interiorNote}`]),
+      });
+    }
+    await trx('activity_log').insert({ customer_id: customer.id, action: ACTIVITY_ACTION,
+      description: 'Requested time applied by staff. No immediate customer message; normal appointment reminders continue.',
+      metadata: { call_log_id: call.id, scheduled_service_id: visit.id, actor_id: actorId,
+        from: plan.from || null, to: { date: plan.newDate, ...plan.newWindow }, human_override: true } });
+  };
+  if (plan.action === 'already_at_requested_time') {
+    await conn.transaction(async (trx) => {
+      await beforeMove(trx);
+      const current = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
+      if (!current || dateOnly(current.scheduled_date) !== plan.newDate || hhmm(current.window_start) !== plan.newWindow.start
+        || !LIVE_STATUSES.includes(current.status)) {
+        throw Object.assign(new Error('The visit changed. Refresh the proposal.'), { status: 409 });
+      }
+      await writeReview({ trx, service: current });
+    });
+    return { outcome: 'noop', visitId: visit.id };
+  }
+  const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, occurrenceIds.length ? { start: plan.newWindow.start } : plan.newWindow,
+    RESCHEDULE_REASON_CODE, 'admin', {
+      actorId, pendingConfirmation: true, notifyRequested: false, skipCallFollowUpShift: true, sourceSurface: 'call_reschedule', beforeMove,
+      ...(plan.dateMove ? { expectOccurrenceIds: occurrenceIds, expectOccurrences: occurrences } : { seriesPolicy: 'single' }),
+      expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start,
+        window_end: visit.window_end, estimated_duration_minutes: visit.estimated_duration_minutes, visit_id: visit.visit_id || null },
+      moveGuard: writeReview,
+    });
+  if (result?.seriesMoveId) await require('../routes/admin-dispatch').applySeriesMoveEffects({
+    result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow, notify: false, actorId, reasonText: null,
+  });
+  return { outcome: 'applied', visitId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow };
 }
 
 // Resolve the call's open reschedule cards and re-sync review_status —
@@ -376,6 +441,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
 }
 
 module.exports = {
+  applyReviewedCallReschedule,
   applyCallReschedule,
   planRescheduleFromCall,
   loadCandidates,

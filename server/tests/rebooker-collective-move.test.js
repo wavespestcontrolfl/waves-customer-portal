@@ -887,7 +887,7 @@ describe('previewSeriesMove', () => {
     });
     findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
     const preview = await SmartRebooker.previewSeriesMove('svc-1', TARGET);
-    expect(preview).toEqual({
+    expect(preview).toMatchObject({
       collective: true,
       deltaDays: 2,
       movableCount: 3,
@@ -898,6 +898,11 @@ describe('previewSeriesMove', () => {
       firstAffectedDate: TARGET,
       lastAffectedDate: dayOffset(33),
     });
+    expect(preview.occurrences).toEqual([
+      expect.objectContaining({ id: 'svc-1', from_date: BASE, to_date: TARGET, from_start: '09:00:00', to_start: '09:00:00' }),
+      expect.objectContaining({ id: 'svc-3', from_date: dayOffset(26), to_date: dayOffset(28) }),
+      expect.objectContaining({ id: 'svc-4', from_date: SIB3, to_date: dayOffset(33), to_start: null, to_end: null }),
+    ]);
     // Only the timed sibling (svc-3) was probed: the anchor's window is the
     // caller's choice and the windowless svc-4 occupies nothing.
     expect(findConflictingVisits).toHaveBeenCalledTimes(1);

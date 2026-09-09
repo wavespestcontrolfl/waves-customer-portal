@@ -16181,6 +16181,13 @@ const CallRecordingProcessor = {
       // agent-committed move of an on-the-books visit lands on the visit.
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
+      if (isEnabled('rescheduleProposalCard')) {
+        try {
+          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration });
+        } catch (err) {
+          logger.warn(`[call-proc] proposal staging failed for ${call.id}: ${err.code || err.name || 'error'}`);
+        }
+      }
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization

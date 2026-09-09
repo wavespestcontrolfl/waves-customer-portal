@@ -271,6 +271,54 @@ router.get('/commitments/sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/proposals', async (req, res, next) => {
+  try {
+    const offset = Number(req.query.offset || 0);
+    if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
+    const proposals = require('../services/call-reschedule-proposals');
+    const rows = await proposals.listProposals(db, { limit: 101, offset });
+    res.json({ proposals_enabled: proposals.enabled(), proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 });
+  } catch (err) { next(err); }
+});
+
+router.post('/proposals/:id/preview', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id) || (req.body?.visit_id && !UUID_RE.test(req.body.visit_id))) return res.status(400).json({ error: 'Invalid proposal or visit id' });
+    const p = await require('../services/call-reschedule-proposals').previewProposal(db, req.params.id, { visitId: req.body?.visit_id });
+    res.json({ preview_hash: p.preview_hash, visit_id: p.selected.id, series: p.series,
+      from: p.plan.from || null, new_date: p.plan.newDate, new_window: p.plan.newWindow });
+  } catch (err) {
+    if (err.status || err.statusCode) return res.status(err.status || err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.post('/proposals/:id/apply', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id) || !UUID_RE.test(String(req.body?.visit_id || ''))
+      || !/^[a-f0-9]{64}$/.test(String(req.body?.preview_hash || ''))) return res.status(400).json({ error: 'Preview the selected visit before applying' });
+    const result = await require('../services/call-reschedule-proposals').applyProposal(db, req.params.id, {
+      actorId: req.technicianId, visitId: req.body.visit_id, previewHash: req.body.preview_hash,
+    });
+    res.json(result);
+  } catch (err) {
+    if (err.status || err.statusCode) return res.status(err.status || err.statusCode).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+router.post('/proposals/:id/dismiss', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid proposal id' });
+    res.json(await require('../services/call-reschedule-proposals').dismissProposal(db, req.params.id, {
+      actorId: req.technicianId, expectedAt: req.body?.expected_at,
+    }));
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 router.get('/commitments/open', async (req, res, next) => {
   try {
     const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;

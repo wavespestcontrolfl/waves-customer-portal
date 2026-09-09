@@ -34,6 +34,14 @@ function smsLineFor(url) {
   return url ? `Reschedule here: ${url}\n\n` : '';
 }
 
+async function hasUnblockedVisitGroup(conn, visitId) {
+  if (!visitId) return true;
+  const vg = require('./visit-groups');
+  const members = await vg.openMembers(conn, visitId);
+  if (members.length >= 2) return false;
+  return !(await vg.frozenVisitVerdict(conn, visitId)).frozen;
+}
+
 async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {}) {
   try {
     if (!scheduledServiceId) return { url: null, line: '' };
@@ -48,11 +56,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {
     // visit, suppresses the link; an unreadable membership fails closed.
     if (svc.visit_id) {
       try {
-        const vg = require('./visit-groups');
-        const members = await vg.openMembers(db, svc.visit_id);
-        if (members.length >= 2) return { url: null, line: '' };
-        const verdict = await vg.frozenVisitVerdict(db, svc.visit_id);
-        if (verdict.frozen) return { url: null, line: '' };
+        if (!(await hasUnblockedVisitGroup(db, svc.visit_id))) return { url: null, line: '' };
       } catch (vgErr) {
         logger.warn(`[reschedule-link] grouped-visit check failed for ${scheduledServiceId} — link suppressed: ${vgErr.message}`);
         return { url: null, line: '' };
@@ -86,4 +90,4 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {
   }
 }
 
-module.exports = { buildRescheduleLink, smsLineFor };
+module.exports = { buildRescheduleLink, smsLineFor, hasUnblockedVisitGroup };
