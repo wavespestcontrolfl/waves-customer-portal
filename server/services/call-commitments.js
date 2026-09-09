@@ -1908,6 +1908,7 @@ module.exports = {
   PROMPT_KINDS,
   RELAY_EXTRACTOR_VERSION,
   isOverdue,
+  overdueAt,
   selectOverdue,
   scopeCommitmentRows,
   listOpenCommitments,
