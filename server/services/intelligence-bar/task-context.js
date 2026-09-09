@@ -513,8 +513,11 @@ const { validScope, UNCLASSIFIED } = require('./scope-policy');
 // reader then receives the saved property's own full address, never the
 // supplied text, so "123 Main St, Tampa" cannot ride a customer saved at
 // "123 Main St, Bradenton" and a bare street line cannot resolve a
-// different parcel on a repeated street name. Returns the saved row's full
-// address and its stored coordinates (null when the row has none).
+// different parcel on a repeated street name. A saved row with neither city
+// nor ZIP cannot verify any locality (the comparer treats a missing side as
+// compatible), so it never binds; rows carrying both are tried first.
+// Returns the saved row's full address and its stored coordinates (null when
+// the row has none).
 async function bindSavedAddress(supplied, targets) {
   const { sameStreetAddress } = require('../estimator-engine/address-compare');
   const { formatAddress } = require('../../utils/address-normalizer');
@@ -527,8 +530,10 @@ async function bindSavedAddress(supplied, targets) {
     db('customer_properties').whereIn('customer_id', ids).where('active', true).select(fields),
   ]);
   const coordinate = value => (value == null || value === '' || Number.isNaN(Number(value)) ? null : Number(value));
+  const present = value => Boolean(String(value || '').trim());
   const saved = [...customers, ...properties]
-    .filter(row => String(row.address_line1 || '').trim())
+    .filter(row => present(row.address_line1) && (present(row.city) || present(row.zip)))
+    .sort((a, b) => Number(present(b.city) && present(b.zip)) - Number(present(a.city) && present(a.zip)))
     .map(row => ({
       address: formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }),
       lat: coordinate(row.latitude), lng: coordinate(row.longitude),
@@ -620,6 +625,11 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // `candidate_service_id` the gap reader's (both mapped in validateRecordTarget).
 const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone || params.service_id || params.candidate_service_id)
   || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
+// Record readers whose selector-free mode reads no customer-identifying rows:
+// the gap reader without a candidate returns per-technician minute budgets
+// only (the executor strips appointment ids). Such a call has nothing to
+// inherit from the task customer, so an unresolved name does not close it.
+const SELECTOR_FREE_READS_NO_CUSTOMER_ROWS = new Set(['find_schedule_gaps']);
 
 async function prepareReadInput(params, context, { toolName, schema }) {
   // A refused cohort never widens into an unscoped read; an unresolved
@@ -644,7 +654,7 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   // phone/email literal that matched nobody) gives the scoped readers an
   // empty read scope and the record readers no customer to inherit, so a
   // selector-free call would read every customer's rows. Both fail closed.
-  if (customerSpecific && !context.targets?.length
+  if (customerSpecific && !context.targets?.length && !SELECTOR_FREE_READS_NO_CUSTOMER_ROWS.has(toolName)
     && (scope === 'scoped' || ((scope === 'record' || schema.properties?.customer_id) && !hasOwnSelector(params)))) {
     return { error: 'The named customer or contact did not match anyone on file, so this lookup has no customer scope. Correct the name or contact before reading that customer\'s records.', code: 'customer_scope_required' };
   }

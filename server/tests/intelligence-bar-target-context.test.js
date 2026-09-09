@@ -868,6 +868,9 @@ test('compute_estimate binds its lead to the task customer', async () => {
 test('address-keyed readers take only a task customer\'s own active saved address and receive the saved full address', async () => {
   Object.assign(rows.customers[0], { address_line1: '1234 Main St.', city: 'Bradenton', state: 'FL', zip: '34203' });
   rows.customers[1] = { id: B, address_line1: '40 Tower Ct', address_line2: 'Apt 12', city: 'Sarasota', state: 'FL', zip: '34236' };
+  const C = '10000000-0000-4000-8000-000000000003';
+  rows.customers.push({ id: C, address_line1: '123 Main St' });
+  rows.customer_properties.push({ id: '30000000-0000-4000-8000-000000000006', customer_id: C, address_line1: '123 Main St', city: 'Bradenton', state: 'FL', zip: '34205', active: true });
   rows.customer_properties.push(
     { id: '30000000-0000-4000-8000-000000000002', customer_id: A, address_line1: '99 Beach Rd', address_line2: 'Apt 4', city: 'Venice', state: 'FL', zip: '34285', active: true },
     { id: '30000000-0000-4000-8000-000000000003', customer_id: A, address_line1: '7 Old Rd', city: 'Venice', state: 'FL', zip: '34285', active: false },
@@ -892,6 +895,13 @@ test('address-keyed readers take only a task customer\'s own active saved addres
   // The unit must match exactly: the building or another unit is not this property.
   expect((await read('99 Beach Rd, Venice FL', context())).code).toBe('target_clarification_required');
   expect((await read('99 Beach Rd Apt 5, Venice FL', context())).code).toBe('target_clarification_required');
+  // A saved row with neither city nor ZIP cannot verify a locality, so it never binds; a complete row for the same
+  // street still does, and only for its own locality.
+  expect(await read('123 Main St, Bradenton FL 34205', context(C))).toEqual({ input: { address: '123 Main St, Bradenton, FL 34205' } });
+  expect((await read('123 Main St, Tampa FL 33601', context(C))).code).toBe('target_clarification_required');
+  rows.customer_properties = rows.customer_properties.filter(row => row.id !== '30000000-0000-4000-8000-000000000006');
+  expect((await read('123 Main St, Tampa FL 33601', context(C))).code).toBe('target_clarification_required');
+  expect((await read('123 Main St', context(C))).code).toBe('target_clarification_required');
   // An inactive property, a different house number, another customer's property and an empty address are refused.
   expect((await read('7 Old Rd, Venice FL', context())).code).toBe('target_clarification_required');
   expect((await read('12345 Main St', context())).code).toBe('target_clarification_required');
@@ -942,8 +952,12 @@ test('the gap reader\'s candidate appointment is an appointment reference bound 
   expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, context(A))).code).toBe('target_clarification_required');
   expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], page: { ids: {} } })).code).toBe('target_clarification_required');
   expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('target_clarification_required');
-  // Without a candidate the reader reads no customer rows: open for a resolved or unnamed task, closed for an unresolved name.
+  // Without a candidate the reader returns minute budgets only (the executor strips stop ids), so a date-only call
+  // stays open for a resolved, unnamed, or unresolved task ("gaps for Labor Day" reads "Labor" as a name).
   expect(await read({ date: '2026-09-09' }, context(A))).toEqual({ input: { date: '2026-09-09' } });
   expect(await read({ date: '2026-09-09' }, { targets: [], page: { ids: {} } })).toEqual({ input: { date: '2026-09-09' } });
-  expect((await read({ date: '2026-09-09' }, { targets: [], namesRequested: true, page: { ids: {} } })).code).toBe('customer_scope_required');
+  expect(await read({ date: '2026-09-09' }, { targets: [], namesRequested: true, page: { ids: {} } })).toEqual({ input: { date: '2026-09-09' } });
+  expect(await read({ date: '2026-09-09' }, { targets: [], contactRequested: true, page: { ids: {} } })).toEqual({ input: { date: '2026-09-09' } });
+  // A candidate with an unresolved name still has nobody to bind to.
+  expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], contactRequested: true, page: { ids: {} } })).code).toBe('target_clarification_required');
 });

@@ -26,7 +26,7 @@ Read tools (`kind: read`):
 | `broad` | lists other customers' identifiable rows and takes no selector, or returns provider/operations text that can echo customer identifiers (alert bodies, error text, log lines, targeting predicates, trip traces, call quotes keyed by call id) | refused whenever the request is customer-specific (resolved target, unresolved name, or a phone/email literal) |
 | `actor_wide` | the operator's own conversation history, quoting any customer | refused whenever the request is customer-specific |
 | `phone_keyed` / `email_keyed` | keyed by a contact | the key must belong to a task customer (`target_clarification_required`); refused when the named customer did not resolve |
-| `address_keyed` | keyed by a street address (`lookup_property`) | the address must be one of the task customers' ACTIVE saved properties (customer address or service property), compared as a full address by the estimator's canonical comparer (same street, exact unit, no conflicting city or ZIP), and the reader receives the saved property's full address rather than the supplied text, so a substituted, partial or same-street-different-city address cannot expose or price another property; refused when the named customer did not resolve; open outside a customer-scoped task, where new leads have no saved address yet |
+| `address_keyed` | keyed by a street address (`lookup_property`) | the address must be one of the task customers' ACTIVE saved properties (customer address or service property), compared as a full address by the estimator's canonical comparer (same street, exact unit, no conflicting city or ZIP), and the reader receives the saved property's full address rather than the supplied text, so a substituted, partial or same-street-different-city address cannot expose or price another property; a saved row with neither city nor ZIP cannot verify a locality and never binds; refused when the named customer did not resolve; open outside a customer-scoped task, where new leads have no saved address yet |
 
 Write tools (`kind: internal_write` or `external_action`):
 
@@ -109,9 +109,13 @@ old list).
 - `find_schedule_gaps` is `record`: with `candidate_service_id` it loads that
   appointment's customer preferences, plan holds and location, so the
   candidate is validated as an appointment reference that must belong to a
-  task customer. Without a candidate it reads no customer rows, so a
-  date-only call stays open for a resolved or unnamed task and, like every
-  record reader, fails closed for an unresolved name.
+  task customer. Without a candidate it returns per-technician minute
+  budgets only: the IB executor strips the measurement's planned-stop ids,
+  visit ids and arrival windows (kept for the route-performance ledger) and
+  the ids on late-visit rows, so a date-only call reads no
+  customer-identifying rows and stays open for a resolved, unnamed or
+  unresolved task ("gaps for Labor Day" reads "Labor" as a name;
+  `SELECTOR_FREE_READS_NO_CUSTOMER_ROWS` in task-context.js).
 - `get_truck_status` is `broad`: the live last position of a truck during
   service hours is a customer's property, so it is refused inside a
   customer-scoped task like `get_truck_trips`.

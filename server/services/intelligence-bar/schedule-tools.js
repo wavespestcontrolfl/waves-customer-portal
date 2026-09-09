@@ -1525,9 +1525,23 @@ async function swapTechAssignments(input, actionContext = {}) {
 }
 
 
+// The measurement result is shared with the route-performance ledger, which
+// needs every planned stop's id. The Intelligence Bar does not: inside a
+// task about one customer the other stops on the route are other customers'
+// appointments, so their ids and arrival windows are reduced to counts and
+// the late-visit rows lose their ids before the model sees them.
+function withoutStopIdentifiers(result) {
+  if (!Array.isArray(result?.days)) return result;
+  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, ...tech }) => ({
+    ...tech,
+    plannedStopCount: Array.isArray(plannedStops) ? plannedStops.length : null,
+    modeledLateVisits: Array.isArray(modeledLateVisits) ? modeledLateVisits.map(({ id, visitId, ...late }) => late) : modeledLateVisits,
+  })) })) };
+}
+
 async function findScheduleGaps(input) {
   if (require('../../config/feature-gates').gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS')) {
-    return require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db);
+    return withoutStopIdentifiers(await require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db));
   }
   const { date, date_from, date_to, service_type } = input;
   const MAX_STOPS_PER_DAY = 10;
