@@ -17,7 +17,7 @@ jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
   resolveCompletionProfileForScheduledService: jest.fn(async () => ({})),
 }));
-jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}) }));
+jest.mock('../services/visit-groups', () => ({ lockStopForRow: jest.fn(async () => {}), stopBaseKey: jest.fn(() => 'fixture-stop') }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: jest.fn(async () => null) }));
 
@@ -43,7 +43,7 @@ beforeEach(() => {
     status: 'on_site',
   };
   builder = {};
-  for (const method of ['where', 'leftJoin', 'select', 'orderBy', 'whereNot', 'whereIn', 'whereRaw']) {
+  for (const method of ['where', 'leftJoin', 'select', 'orderBy', 'whereNot', 'whereIn', 'whereRaw', 'forUpdate', 'whereNotNull', 'whereNull', 'limit']) {
     builder[method] = jest.fn(() => builder);
   }
   builder.first = jest.fn(async () => service);
@@ -67,19 +67,17 @@ test.each([
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
-test.each([false, '', 0, -1, 2500.5, 10000001, {}, []])('invalid lawn visit area %j is rejected before a completion claim or database read', async treatedSqft => {
+const INVALID_AREAS = [false, '', 0, -1, 2500.5, 10000001, {}, []];
+const withLawnGates = async (run) => {
   process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
   process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
   try {
-    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
-    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
-    expect(db).not.toHaveBeenCalled();
-    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+    await run();
   } finally {
     delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
     delete process.env.GATE_LAWN_PROPERTY_HISTORY;
   }
-});
+};
 
 test.each([
   'front', [{ productId: '00000000-0000-4000-8000-000000000201' }], [{ productName: 'Iron' }],
@@ -112,31 +110,55 @@ test('skipped-default names are measured after trimming: padding around 180 char
   }
 });
 
-test.each([-1, 2500.5, 10000001, 'front'])('invalid lawn visit area %j is rejected under the ledger gate alone (defaults gates off)', async treatedSqft => {
+const withLedgerGateAlone = async (run) => {
   delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
   delete process.env.GATE_LAWN_PROPERTY_HISTORY;
   process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
   try {
-    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
-    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
-    expect(db).not.toHaveBeenCalled();
-    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+    await run();
   } finally {
     delete process.env.GATE_LAWN_ACTUALS_LEDGER;
   }
+};
+
+test.each([-1, 2500.5, 10000001, 'front'])('invalid lawn visit area %j fails a fresh completion attempt after the claim under the ledger gate alone (defaults gates off)', async treatedSqft => {
+  const completionAttempt = { id: 'fixture-attempt' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+  await withLedgerGateAlone(async () => {
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
+  });
+  expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ message: 'lawn_completion_area_invalid' }), expect.anything());
 });
 
-test.each([undefined, null, 2500, '2500'])('valid or omitted lawn visit area %j preserves completion replay', async treatedSqft => {
-  process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
-  process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+test.each([2500.5, 'front'])('lawn visit area %j never blocks a committed completion from replaying under the ledger gate alone', async treatedSqft => {
   const payload = { success: true, serviceRecordId: 'fixture-record' };
   attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
-  try {
+  await withLedgerGateAlone(async () => {
     await expect(complete({ lawnProtocolCompletion: { treatedSqft } })).resolves.toEqual({ status: 200, body: payload });
-  } finally {
-    delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
-    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
-  }
+  });
+  expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+});
+
+test.each([undefined, null, 2500, '2500', ...INVALID_AREAS])('lawn visit area %j never blocks a committed completion from replaying', async treatedSqft => {
+  const payload = { success: true, serviceRecordId: 'fixture-record' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+  await withLawnGates(async () => {
+    await expect(complete({ lawnProtocolCompletion: { treatedSqft } })).resolves.toEqual({ status: 200, body: payload });
+  });
+  expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+});
+
+test.each(INVALID_AREAS)('invalid lawn visit area %j fails a fresh completion attempt after the claim', async treatedSqft => {
+  const completionAttempt = { id: 'fixture-attempt' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+  await withLawnGates(async () => {
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
+  });
+  expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ message: 'lawn_completion_area_invalid' }), expect.anything());
 });
 
 test('a missing service returns the existing 404 payload', async () => {

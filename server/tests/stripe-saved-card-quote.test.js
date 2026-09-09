@@ -116,6 +116,87 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test.each(['VISIT_PAYMENT_REVIEW_REQUIRED', 'VISIT_PAYMENT_ZERO_BALANCE'])(
+    'a saved visit %s refusal happens before account credit or the Stripe handoff', async (expectedCode) => {
+    const invoice = {
+      id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+      total: '250.00', credit_applied: '0.00', payer_id: null,
+      stripe_payment_intent_id: 'pi-old',
+    };
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    let chargeAttempt = null;
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'payment_methods') return card;
+        if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') {
+          chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        }
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    const stripeClient = {
+      paymentIntents: {
+        retrieve: jest.fn().mockResolvedValue({ id: 'pi-old', status: 'requires_payment_method' }),
+        cancel: jest.fn().mockResolvedValue({ id: 'pi-old', status: 'canceled' }),
+        create: jest.fn(),
+      },
+    };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: true } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+    const guard = jest.fn(async (_trx, locked) => {
+      if (expectedCode === 'VISIT_PAYMENT_ZERO_BALANCE') {
+        // The unlocked read was positive. A final discount won the lock race.
+        locked.total = '0.00';
+        return;
+      }
+      throw Object.assign(new Error('Visit billing changed'), { code: expectedCode });
+    });
+    jest.doMock('../services/visit-completion-payment', () => ({ assertVisitCompletionCharge: guard }));
+    const StripeService = require('../services/stripe');
+    try {
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireVisitCompletionPacketId: 'packet-1' }))
+        .rejects.toMatchObject({ code: expectedCode });
+      expect(guard).toHaveBeenCalledWith(db, invoice, 'packet-1');
+      expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      expect(db.mock.calls.some(([table]) => table === 'account_credits')).toBe(false);
+    } finally { jest.dontMock('../services/visit-completion-payment'); }
+  });
+
   test('refuses a locked invoice above the frozen consent cap (maxAuthorizedSubtotal — Codex #3153 r7 P0)', async () => {
     // The completion rails validate the cap on an UNLOCKED snapshot; this
     // guard is the atomic re-check against the locked row — a concurrent
@@ -378,7 +459,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
 
     const StripeService = require('../services/stripe');
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
-      .rejects.toThrow('Collection is stopped for this invoice');
+      .rejects.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED', message: expect.stringContaining('Collection is stopped for this invoice') });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 

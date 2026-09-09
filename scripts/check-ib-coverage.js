@@ -83,10 +83,13 @@ function frontendSourceCensus(source, relative) {
   const ast = parser.parse(source, { sourceType: 'unambiguous', plugins: ['jsx', 'typescript'] });
     walk(ast, (node, parents) => {
       if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+      // `import('../pages/admin/X')` loads a module; it is not a request.
+      if (node.callee.type === 'Import') return;
       const callee = named(node.callee);
       const verbRequest = callee.match(/^(?:admin|api)(?:\.|_)?(get|post|put|patch|delete)(?:Strict)?$/i);
       const verbCall = verbRequest || callee.match(/(?:^|\.)(?:admin|api)?(get|post|put|patch|delete)(?:Strict)?$/i);
-      const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee);
+      // React state setters (`setLinkRequest`) share the suffix but perform no request.
+      const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee) && !/(?:^|\.)set[A-Z]\w*$/.test(callee);
       const localExport = callee === 'URL.createObjectURL' && relative.includes('/admin/');
       const endpoint = normalizedEndpoint(expressionText(node.arguments[0]));
       // Literal admin paths stay visible even through an unfamiliar wrapper.

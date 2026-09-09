@@ -59,7 +59,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -624,6 +624,17 @@ export function derivedTotalAmount(rate, areaSqft) {
   const a = Number(areaSqft);
   if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(a) || a <= 0) return "";
   return Math.round(r * (a / 1000) * 100) / 100;
+}
+// The derived total is the rate's quantity in the rate's unit. A per-basis
+// rate never derives one, and under lawn defaults neither does a row whose
+// amount unit the tech chose away from the rate's unit (`lawnPlanManualFields`
+// only exists there): 15 fl oz must never stand as 15 gal — the total waits
+// for the actual (Codex r8 P1 on #4086).
+function lawnDerivedTotal(product, areaSqft) {
+  if (isPerBasisUnit(product.rateUnit)) return "";
+  if ((product.lawnPlanManualFields || []).includes("amountUnit")
+    && baseUnitOf(product.amountUnit) !== baseUnitOf(product.rateUnit)) return "";
+  return derivedTotalAmount(product.rate, areaSqft);
 }
 
 function createCompletionIdempotencyKey(serviceId) {
@@ -4977,6 +4988,9 @@ function JobCardProduct({ p, D }) {
 
 function JobCardTank({ tank, serviceId, D }) {
   const [gallons, setGallons] = useState(110);
+  // A rig row picked in place of the 110 / 1 gal presets: a full tank of
+  // that rig, dosed on its own carrier and volume.
+  const [rigId, setRigId] = useState(null);
   const [q, setQ] = useState("");
   const [results, setResults] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -5004,6 +5018,10 @@ function JobCardTank({ tank, serviceId, D }) {
     };
   }, [q]);
 
+  const rigs = tank?.rigs || [];
+  const rig = rigs.find((r) => r.equipmentSystemId === rigId) || null;
+  const pickedRigId = rig?.equipmentSystemId || null;
+
   useEffect(() => {
     if (!picked) {
       setMix(null);
@@ -5013,25 +5031,39 @@ function JobCardTank({ tank, serviceId, D }) {
     setBusy(true);
     // Never show the previous product's verdict beside the new one.
     setMix(null);
-    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
+    const volume = pickedRigId ? `rig=${encodeURIComponent(pickedRigId)}` : `gallons=${gallons}`;
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&${volume}`)
       .then((data) => { if (!cancelled) setMix(data); })
       .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
       .finally(() => { if (!cancelled) setBusy(false); });
     return () => { cancelled = true; };
-  }, [picked, gallons, serviceId]);
+  }, [picked, gallons, pickedRigId, serviceId]);
 
-  const pill = (g) => ({
+  const pill = (selected) => ({
     flex: 1,
     minHeight: 44,
     borderRadius: 2,
-    border: `1px solid ${gallons === g ? D.heading : D.inputBorder}`,
-    background: gallons === g ? D.heading : D.card,
-    color: gallons === g ? D.white : D.text,
+    border: `1px solid ${selected ? D.heading : D.inputBorder}`,
+    background: selected ? D.heading : D.card,
+    color: selected ? D.white : D.text,
     fontSize: 12,
     fontWeight: 500,
     textTransform: "uppercase",
     letterSpacing: "0.06em",
     cursor: "pointer",
+  });
+  // A rig row carries the rig's full name, so it reads in sentence case.
+  const rigRow = (selected) => ({
+    ...pill(selected),
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    padding: "0 12px",
+    fontSize: 14,
+    textTransform: "none",
+    letterSpacing: 0,
+    textAlign: "left",
   });
 
   return (
@@ -5046,9 +5078,20 @@ function JobCardTank({ tank, serviceId, D }) {
           <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld until a rig calibration or protocol carrier is on file; per-gallon dilutions still mix.</div>
         )}
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>
-          <button type="button" style={pill(1)} onClick={() => setGallons(1)}>1 gal</button>
+          <button type="button" style={pill(!rig && gallons === 110)} onClick={() => { setGallons(110); setRigId(null); }}>110 gal</button>
+          <button type="button" style={pill(!rig && gallons === 1)} onClick={() => { setGallons(1); setRigId(null); }}>1 gal</button>
         </div>
+        {rigs.length > 0 && (
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>Rigs · full tank</div>
+            {rigs.map((r) => (
+              <button key={r.equipmentSystemId} type="button" style={rigRow(r.equipmentSystemId === pickedRigId)} onClick={() => setRigId(r.equipmentSystemId)}>
+                <span>{r.name}</span>
+                <span style={{ fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" }}>{r.tankCapacityGal} gal</span>
+              </button>
+            ))}
+          </div>
+        )}
         <input
           value={q}
           onChange={(e) => { setQ(e.target.value); setPicked(null); }}
@@ -5105,7 +5148,7 @@ function JobCardTank({ tank, serviceId, D }) {
               <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
             ) : mix?.amount != null ? (
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
@@ -11735,11 +11778,26 @@ export function CompletionPanel({
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
-    if (!lawnCompletionDefaults?.enabled || lawnCompletionDefaults.serviceId === service.id) return;
+    // Visit-owned lawn state resets on a visit change whenever the previous
+    // visit carried any: loaded defaults for another visit, or a governed
+    // draft restored while its plan request had failed (no defaults loaded to
+    // compare against) — otherwise the first visit's area and rows drive the
+    // next visit's build request and quantities (pre-push audit P1).
+    // Treated zones are visit-owned too: a zone subset left from the previous
+    // visit would seed the next visit's defaults and clear its saved lawn area
+    // through the partial-zone effect (Codex r10 P1).
+    const zonesChanged = lawnAreasInitializedRef.current
+      && (areasServiced.length !== lawnDefaultAreas.length || lawnDefaultAreas.some((area) => !areasServiced.includes(area)));
+    const previousVisitState = (lawnCompletionDefaults?.enabled && lawnCompletionDefaults.serviceId !== service.id)
+      || lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0
+      || selectedProducts.some((product) => product.lawnPlanDefaults) || zonesChanged;
+    if (!previousVisitState) return;
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
     setLawnRemovedDefaultIds([]);
     setLawnDefaultsSeedSuppressed(false);
+    setAreasServiced([...lawnDefaultAreas]);
+    lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = false;
     lawnDefaultMixSnapshotRef.current = null;
   }, [service.id]);
@@ -11790,8 +11848,7 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts(current => current.map(product => follows(product)
       ? { ...product, areaValue: lawnVisitArea,
-        totalAmount: product.totalAmountManual ? product.totalAmount
-          : isPerBasisUnit(product.rateUnit) ? "" : derivedTotalAmount(product.rate, lawnVisitArea) } : product));
+        totalAmount: product.totalAmountManual ? product.totalAmount : lawnDerivedTotal(product, lawnVisitArea) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -12029,12 +12086,23 @@ export function CompletionPanel({
         (block) => block?.code === "inventory_product_inactive",
       )
     : treatmentPlanInventoryBlocks;
+  // Every applied product needs its actual amount, unit and method on a
+  // WaveGuard closeout AND on any governed-defaults closeout: the server
+  // enables completion defaults for a tierless visit with an explicit
+  // assignment too, and a governed row left without an amount would persist
+  // with no actual and no inventory deduction (Codex r8 P1). A governed row
+  // restored while the initial plan request failed counts as well — the
+  // defaults never loaded, but the row's withdrawn suggestion still needs an
+  // actual (pre-push audit P1). The empty-list and inventory gates stay
+  // tier-scoped.
+  const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
+    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
-    calibrationRequired &&
-    !isIncompleteVisit &&
-    (selectedProducts.length === 0 ||
-      selectedProductsMissingActualAmount.length > 0 ||
-      treatmentPlanGatingInventoryBlocks.length > 0);
+    (calibrationRequired &&
+      !isIncompleteVisit &&
+      (selectedProducts.length === 0 ||
+        treatmentPlanGatingInventoryBlocks.length > 0)) ||
+    (productActualsRequired && selectedProductsMissingActualAmount.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -12494,11 +12562,7 @@ export function CompletionPanel({
       .catch((err) => {
         if (!cancelled) {
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
-          setSelectedProducts(current => current.map(product => product.lawnPlanDefaults
-            ? { ...product, totalAmount: product.totalAmountManual ? product.totalAmount : "",
-              rate: product.lawnPlanManualFields?.includes("rate") ? product.rate : "",
-              areaValue: product.lawnPlanManualFields?.includes("areaValue") ? product.areaValue : "",
-              lawnAmountReason: "Plan unavailable. Confirm the treated area and actual amount or retry." } : product));
+          setSelectedProducts(withdrawLawnPlanSuggestions);
         }
       })
       .finally(() => {
@@ -12814,7 +12878,12 @@ export function CompletionPanel({
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? savedDraft.lawnRemovedDefaultIds : []);
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
-    setSelectedProducts(
+    // A draft restored while the plan request has already failed carries the
+    // suggestions saved under an earlier plan, and the reconcile effect stays
+    // off during a plan error — withdraw them exactly as the failed request
+    // does for rows it can see (Codex r8 P1).
+    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows) : rows);
+    setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
             const normalized = normalizeProductArea(product, serviceTypeForArea);
@@ -12832,7 +12901,7 @@ export function CompletionPanel({
             return normalized;
           })
         : [],
-    );
+    ));
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
@@ -13855,14 +13924,19 @@ export function CompletionPanel({
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
     lawnDefaultMixSeededRef.current = true;
-    // An "Additional work" option carries only { id, name } (lawnPlanActionOptions)
-    // and an optional protocol row is not among the defaults, so the row is
-    // built from the catalog product: a bare id/name read Hydretain's fl_oz as
-    // oz and broke the inventory conversion (Codex r6 P1).
+    // An "Additional work" option carries { id, name, applicationMethod }
+    // (lawnPlanActionOptions) and an optional protocol row is not among the
+    // defaults, so the row is built from the catalog product — a bare id/name
+    // read Hydretain's fl_oz as oz and broke the inventory conversion (Codex
+    // r6 P1) — under the protocol row's application mode: the catalog
+    // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
+    // method, area requirement and rate prefill all follow the mode (r7 P1).
     const catalogProduct = lawnDefaultsEnabled
       ? products.find((row) => String(row.id) === String(product.id)) || product
       : product;
-    let row = buildSelectedProduct(catalogProduct);
+    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+      ? { ...catalogProduct, application_method: product.applicationMethod }
+      : catalogProduct);
     if (lawnDefaultsEnabled) {
       const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
       const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];
@@ -14023,7 +14097,10 @@ export function CompletionPanel({
   function removeProduct(productId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
-    if (lawnDefaultsEnabled) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    // A governed row restored while the plan request failed is still a plan
+    // default: its removal must survive a successful retry (pre-push audit).
+    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
+    if (governed) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -14037,8 +14114,13 @@ export function CompletionPanel({
       prev.map((p) => {
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
-        if (lawnDefaultsEnabled && ["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.lawnAreaDefault = false;
-        if (lawnDefaultsEnabled) {
+        // Provenance is per row: a governed row restored while the initial
+        // plan request failed (`lawnDefaultsEnabled` false, no defaults
+        // loaded) still records which fields the tech edited, or a successful
+        // retry would overwrite them in reconciliation (pre-push audit P1).
+        const governed = lawnDefaultsEnabled || !!p.lawnPlanDefaults;
+        if (governed && ["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.lawnAreaDefault = false;
+        if (governed) {
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
@@ -14061,7 +14143,7 @@ export function CompletionPanel({
             ) {
               next.areaValue = Number(tracedLinearFt);
             }
-          } else if (lawnDefaultsEnabled && value === "spot_treatment") {
+          } else if (governed && value === "spot_treatment") {
             next.areaUnit = "sqft";
             next.areaValue = "";
           } else {
@@ -14072,7 +14154,7 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
-            lawnDefaultsEnabled,
+            governed,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
@@ -14083,17 +14165,22 @@ export function CompletionPanel({
         // when the rate/area is cleared or the method stops being area-based,
         // so a stale full-lawn total can't be submitted. The derived total is
         // in the rate's unit, so a rate-unit change moves the total unit too.
-        if (field === "totalAmount" || (lawnDefaultsEnabled && field === "amountUnit")) {
+        if (field === "totalAmount") {
           next.totalAmountManual = true;
+        } else if (governed && field === "amountUnit") {
+          // A still-derived total is the plan's quantity in the plan's unit:
+          // a unit change alone withdraws it (never keeps the number under
+          // the new unit, never converts) until the tech enters the actual.
+          // An entered total keeps its number under the chosen unit as
+          // before (Codex r8 P1).
+          if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
           if (next.areaUnit !== "sqft") {
             if (field === "applicationMethod" && p.areaUnit === "sqft") {
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = isPerBasisUnit(next.rateUnit)
-              ? ""
-              : derivedTotalAmount(next.rate, next.areaValue);
+            next.totalAmount = lawnDerivedTotal(next, next.areaValue);
           } else if (field === "rateUnit") {
             // Per-basis rate units (mix concentrations, spot placements,
             // per-acre…) keep Total in the base quantity unit, and can't
@@ -14104,13 +14191,13 @@ export function CompletionPanel({
             if (perBasis) next.totalAmount = "";
           }
         }
-        if (lawnDefaultsEnabled && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
+        if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
           // Selecting zones alone does not measure a partial application.
           next.areaValue = "";
           if (!next.totalAmountManual) next.totalAmount = "";
           next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "areaValue"])];
         }
-        if (lawnDefaultsEnabled && field === "applicationMethod") {
+        if (governed && field === "applicationMethod") {
           if (!next.totalAmountManual) next.totalAmount = "";
           if (p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")) {
             next.rate = "";
@@ -14723,8 +14810,7 @@ export function CompletionPanel({
       return;
     }
     if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
+      productActualsRequired &&
       selectedProductsMissingActualAmount.length
     ) {
       alert(
@@ -14904,10 +14990,15 @@ export function CompletionPanel({
         })),
         // The existing completion field carries the visit area into the server
         // planner, protocol record and nutrient ledger. Product-specific actuals
-        // remain on each product row; no saved turf profile is changed.
-        // Plan defaults the tech removed ride along as skipped products for
-        // the lawn actuals ledger — id + name only, no reason demanded.
-        lawnProtocolCompletion: lawnDefaultsEnabled
+        // remain on each product row; no saved turf profile is changed. A
+        // governed draft restored while the initial plan request failed still
+        // carries its visit area (`lawnAreaOverride`), and it is serialized
+        // regardless of whether defaults loaded — otherwise the server planner
+        // records the full saved lawn for an entered partial area (pre-push
+        // audit P1). Plan defaults the tech removed ride along as skipped
+        // products for the lawn actuals ledger — id + name only, no reason
+        // demanded.
+        lawnProtocolCompletion: lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined)
           ? {
               treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea),
               ...(lawnSkippedDefaults.length ? { skippedProducts: lawnSkippedDefaults } : {}),

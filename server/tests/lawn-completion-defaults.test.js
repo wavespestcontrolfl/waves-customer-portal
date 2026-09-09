@@ -53,7 +53,32 @@ test.each(['optional', 'conditional', 'inactive', 'unselected'])('%s products do
   if (reason === 'conditional') Object.assign(plan.protocol.structured.products[0], { defaultInPlan: false, gates: { soil_test: true } });
   if (reason === 'inactive') plan.mixCalculator.items[0].product.active = false;
   if (reason === 'unselected') plan.mixCalculator.items[0].selected = false;
-  expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
+  const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.items).toEqual([]);
+  // A selected live recipe the window registers no default for is explained;
+  // a recipe with nothing selected or active is legitimately empty.
+  expect(result.message).toBe(['optional', 'conditional'].includes(reason)
+    ? 'The assigned protocol window lists none of this recipe\'s products as defaults. Enter the actual work.' : null);
+});
+
+test('a live window whose defaults name none of the recipe products explains the empty prefill', () => {
+  const { plan, context } = fixture();
+  // Operating layer seeded with one product (e.g. Liquid SRN) while the field
+  // recipe resolves different catalog rows (e.g. LESCO fertilizer + CarbonPro-L).
+  plan.protocol.structured.products = [{ productId: 'liquid-srn', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' }];
+  plan.mixCalculator.items = [
+    { selected: true, product: { id: 'lesco', name: 'LESCO 24-0-11', active: true, labelVerifiedAt: '2026-01-01' }, mix: { amount: 20, amountUnit: 'lb', treatedSqft: 4000 } },
+    { selected: true, product: { id: 'carbonpro', name: 'CarbonPro-L', active: true, labelVerifiedAt: '2026-01-01' }, mix: { amount: 12, amountUnit: 'fl oz', treatedSqft: 4000 } },
+  ];
+  const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.items).toEqual([]);
+  expect(result.options).toEqual([]);
+  expect(result.message).toBe('The assigned protocol window lists none of this recipe\'s products as defaults. Enter the actual work.');
+  // One registered default is enough: the prefill carries it and the message clears.
+  plan.protocol.structured.products.push({ productId: 'carbonpro', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' });
+  const partial = buildLawnCompletionDefaults(plan, context);
+  expect(partial.items.map(item => item.product.id)).toEqual(['carbonpro']);
+  expect(partial.message).toBeNull();
 });
 
 test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'nonlawn'])('%s mismatch cannot invent an eligible plan', (reason) => {
@@ -66,6 +91,24 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   if (reason === 'nonmember') plan.propertyGate.serviceTier = null;
   if (reason === 'nonlawn') context.isLawn = false;
   expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
+});
+
+test('every option carries the protocol row\'s application mode, so an added herbicide records the prescribed broadcast, not the catalog\'s spot default', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push(
+    { productId: 'speedzone', defaultInPlan: false, gates: { weeds_present: true }, applicationMode: 'broadcast' },
+    { productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+  );
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, product: { id: 'speedzone', name: 'SpeedZone', category: 'herbicide', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', category: 'herbicide', formulation: 'Water-dispersible granule (WG)', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'unlisted', name: 'Not in this protocol', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options).toEqual([
+    { product: { id: 'product', name: 'Fixture product' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'speedzone', name: 'SpeedZone' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' },
+  ]);
 });
 
 test('a nonmember can use a complete explicit assignment; a spot default stays spot work', () => {
@@ -137,6 +180,9 @@ test('an archived recipe accepts derived-rate defaults only inside the archived 
   const stored = { ratePer1000: 3, rateUnit: 'fl oz', gates: {} };
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(true);
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 2.5, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(false);
+  // The catalog spells the protocol row's 'fl oz' as 'fl_oz' — same unit, not drift; a different unit still is.
+  expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'fl_oz', rateSource: 'catalog_default_rate' }))).toBe(true);
+  expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'oz', rateSource: 'catalog_default_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: 0, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: null, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
 });

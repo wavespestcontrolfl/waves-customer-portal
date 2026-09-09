@@ -57,7 +57,7 @@ beforeEach(async () => {
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
           // Optional protocol rows reach the client as id/name only (server options), never as defaults.
-          items, options: [...items, ...optionalOptions.map((product) => ({ product: { id: product.id, name: product.name } }))], propertyMatchesProfile: true,
+          items, options: [...items, ...optionalOptions.map(({ applicationMethod, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -335,8 +335,11 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   }
   fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
   await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe(mode === 'partial-zones' ? '' : mode === 'measured-zones' ? '1000' : '4000'));
-  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '5', 'partial-zones': '', 'measured-zones': '1' }[mode];
+  // manual-unit: the derived 5 was fl oz; under the tech's gallons it is
+  // withdrawn rather than kept or re-derived (Codex r8 P1).
+  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '', 'partial-zones': '', 'measured-zones': '1' }[mode];
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12', '8', expectedAmount]));
+  if (mode === 'manual-unit') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('gal');
 });
 
 it('a withdrawn suggestion requires actual units and method instead of displaying hidden fallbacks', async () => {
@@ -431,4 +434,197 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
   expect(totals()[2].value).toBe('');
   expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+});
+
+it.each([
+  ['broadcast_spray', 'broadcast_spray'],
+  [undefined, 'spot_treatment'],
+])('an added herbicide records the protocol row\'s application mode (%s → %s), not the catalog category\'s spot default', async (applicationMethod, expected) => {
+  enableDefaults();
+  const optional = { id: 'test-speedzone', name: 'SpeedZone', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1.5, applicationMethod };
+  optionalOptions = [optional];
+  const { applicationMethod: _mode, ...catalogRow } = optional;
+  render(<CompletionPanel service={service} products={[...catalog, catalogRow]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: `lawn-plan-${optional.id}` } });
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  const selects = within(totals()[2].parentElement).getAllByRole('combobox');
+  // The option's mode governs the row (Codex r7 P1): SpeedZone is a broadcast
+  // herbicide in its window while the catalog category alone reads it as spot
+  // work. Without a mode on the option the catalog default still applies.
+  expect(selects[2].value).toBe(expected);
+  expect(totals()[2].value).toBe('');
+});
+
+it('changing only the amount unit withdraws a plan-suggested total: blank through a refresh and a rate edit, and a typed total keeps its number under the chosen unit', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  const unitOf = (index) => within(totals()[index].parentElement).getAllByRole('combobox')[1];
+  fireEvent.change(unitOf(0), { target: { value: 'gal' } });
+  // The suggestion was 15 fl oz; 15 gal must never stand (Codex r8 P1).
+  expect(totals()[0].value).toBe('');
+  expect(unitOf(0).value).toBe('gal');
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[1].value).toBe('8'));
+  expect(totals()[0].value).toBe('');
+  expect(unitOf(0).value).toBe('gal');
+  // The untouched product area still follows the visit (Codex r9 P1): a unit
+  // choice alone does not freeze the row's rate or treated area.
+  expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('4000');
+  // A rate edit derives the total in the RATE's unit — not under the tech's gallons.
+  fireEvent.change(screen.getAllByPlaceholderText('Rate')[0], { target: { value: '4' } });
+  expect(totals()[0].value).toBe('');
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  fireEvent.change(totals()[0], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[0]).toMatchObject({ productId: 'test-k', totalAmount: '2', amountUnit: 'gal', rate: '4' });
+});
+
+it('a draft restored during a plan outage withdraws the suggestions saved under the earlier plan', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // The entered 9 survives; the saved 10 was a suggestion the failed plan can
+  // no longer stand behind (Codex r8 P1).
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  failPlan = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry plan' }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '10']));
+});
+
+it('a tierless visit with governed defaults still requires every product\'s actual amount', async () => {
+  enableDefaults();
+  render(<CompletionPanel service={{ ...service, waveguardTier: null }} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[1], { target: { value: '' } });
+  // No WaveGuard tier, but the server enabled completion defaults for the
+  // explicit assignment: a governed row without an amount cannot close out
+  // (Codex r8 P1).
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: /complete & send recap/i })).toBeNull();
+  fireEvent.change(totals()[1], { target: { value: '6' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products.map(product => product.totalAmount)).toEqual([15, '6']);
+});
+
+it('a governed draft restored on a tierless visit whose plan failed at open still requires every actual amount', async () => {
+  enableDefaults();
+  const tierless = { ...service, waveguardTier: null };
+  const view = render(<CompletionPanel service={tierless} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  failPlan = true;
+  render(<CompletionPanel service={tierless} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  // No tier and no loaded defaults, yet the restored row carries a withdrawn
+  // suggestion: it cannot close out without its actual (pre-push audit P1).
+  expect(screen.getByRole('button', { name: /Product Actuals Required/ }).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: /complete & send recap/i })).toBeNull();
+});
+
+it('edits and removals on a governed draft restored under an initial plan outage survive a successful retry', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(totals()[0], { target: { value: '9' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).selectedProducts[0].totalAmount).toBe('9'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['9', '']));
+  // Defaults never loaded, but the rows are governed: a measured area and a
+  // removal recorded now must not be undone by the retry (pre-push audit P1).
+  fireEvent.change(screen.getAllByPlaceholderText('Sq ft')[1], { target: { value: '1000' } });
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  failPlan = false;
+  fireEvent.click(screen.getByRole('button', { name: 'Retry plan' }));
+  await waitFor(() => expect(screen.queryByText('Lawn plan unavailable.')).toBeNull());
+  await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());
+  expect(totals()).toHaveLength(1);
+  expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('1000');
+});
+
+it('a governed draft restored under an initial plan outage still submits its saved visit area', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['3', '2']));
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  // The withdrawn rows ask for the actual area and amount; the visit area
+  // itself was restored from the draft.
+  screen.getAllByPlaceholderText('Sq ft').forEach((input) => fireEvent.change(input, { target: { value: '1000' } }));
+  fireEvent.change(totals()[0], { target: { value: '3' } });
+  fireEvent.change(totals()[1], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  // Defaults never loaded, but the entered 1,000 sq ft is the visit area the
+  // server must plan and record against — not the full saved lawn.
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({ treatedSqft: 1000 });
+});
+
+it('changing visits after a governed draft was restored under a plan outage drops the first visit\'s area and rows', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['3', '2']));
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  const second = mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  failPlan = false;
+  second.rerender(<CompletionPanel service={{ ...service, id: 'second-visit' }} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  // The second visit plans against its own saved lawn: no build request
+  // carries the first visit's 1,000 sq ft, and its rows are its own.
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  expect(screen.getByLabelText('Area for this visit (sq ft)').value).toBe('5000');
+  expect(fetch.mock.calls.filter(([url, options]) => url.includes('treatment-plans/second-visit') && options?.body)
+    .map(([, options]) => JSON.parse(options.body).lawnSqft)).toEqual([]);
+});
+
+it('changing visits after a partial-zone edit gives the next visit its own full zones, saved area and defaults', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  const areas = document.getElementById('cp-areas-treated-desktop');
+  fireEvent.click(areas);
+  fireEvent.click(within(areas.parentElement).getByRole('button', { name: 'Back yard', exact: true }));
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['', '']));
+  expect(screen.getByLabelText('Area for this visit (sq ft)').value).toBe('');
+  view.rerender(<CompletionPanel service={{ ...service, id: 'second-visit' }} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  // The first visit's zone subset must not seed the second visit or clear its
+  // saved lawn area (Codex r10 P1).
+  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
+  expect(screen.getByLabelText('Area for this visit (sq ft)').value).toBe('5000');
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products.map(row => row.applicationArea)).toEqual(['Front yard, Back yard, Side yards', 'Front yard, Back yard, Side yards']);
 });

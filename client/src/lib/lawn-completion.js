@@ -17,7 +17,11 @@ export function previousLawnAssessment(history, service) {
 }
 
 const PLAN_FIELDS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'totalAmount', 'applicationMethod'];
-const CALCULATION_INPUTS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'applicationMethod'];
+// A chosen amount unit is not a calculation input: the derived total is
+// withdrawn while that unit differs from the plan's (below), but an untouched
+// rate or treated area must still follow a visit-area refresh — a stale
+// product area would be the nutrient ledger's denominator (Codex r9 P1).
+const CALCULATION_INPUTS = ['rate', 'rateUnit', 'areaValue', 'areaUnit', 'applicationMethod'];
 
 export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_DEFAULT_AREAS, governed = false } = {}) {
   const seen = new Set();
@@ -56,6 +60,23 @@ export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_
   });
 }
 
+// The plan request failed: every still-derived suggestion is withdrawn (an
+// entered value keeps its number and unit) and the row asks for the actual.
+// Applied by the failed request itself and again by a draft restored while
+// that failure stands — the reconcile effect is off during a plan error, so a
+// restored row would otherwise keep the suggestions saved under an earlier
+// plan and pass the actuals gate with them.
+export const LAWN_PLAN_UNAVAILABLE_REASON = 'Plan unavailable. Confirm the treated area and actual amount or retry.';
+export function withdrawLawnPlanSuggestions(rows) {
+  return rows.map((row) => row.lawnPlanDefaults ? {
+    ...row,
+    totalAmount: row.totalAmountManual ? row.totalAmount : '',
+    rate: row.lawnPlanManualFields?.includes('rate') ? row.rate : '',
+    areaValue: row.lawnPlanManualFields?.includes('areaValue') ? row.areaValue : '',
+    lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON,
+  } : row);
+}
+
 // Reconcile each row, not the whole list: an edited total or a removed default
 // must not freeze every other product when the plan or visit area changes.
 // A legacy/manual row has no provenance and stays entirely technician-owned.
@@ -88,6 +109,10 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
       if (manual.has(key) || ownCalculation) continue;
       next[key] = fresh[key];
     }
+    // The plan's amount is in the plan's unit and is never scaled into the
+    // unit the tech chose: a still-derived total stays withdrawn until the
+    // units agree again or the tech enters the actual.
+    if (manual.has('amountUnit') && !manual.has('totalAmount') && next.amountUnit !== fresh.amountUnit) next.totalAmount = '';
     if (fresh.totalAmount === '' && !row.totalAmountManual) next.totalAmount = '';
     if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
     if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
@@ -97,11 +122,14 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
   return rows;
 }
 
+// The option's product keeps the protocol row's application mode (server
+// `completionDefaults.options`): addProduct builds an added optional product
+// from that mode, not from the catalog category's default.
 export function lawnPlanActionOptions(items = []) {
   return items.filter(item => item.product?.id).map(item => ({
     id: `lawn-plan-${item.product.id}`,
     label: item.product.name, note: item.product.name,
-    product: { id: item.product.id, name: item.product.name },
+    product: { id: item.product.id, name: item.product.name, ...(item.applicationMethod ? { applicationMethod: item.applicationMethod } : {}) },
     scope: 'exterior', treatmentApplied: true,
   }));
 }
