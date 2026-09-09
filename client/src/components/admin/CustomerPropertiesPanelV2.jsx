@@ -521,7 +521,7 @@ export default function CustomerPropertiesPanelV2({
           </form>
         )}
       </CardBody>
-      {primaryPreview && <Dialog open style={{ zIndex: 1100 }} onClose={() => { if (!writeBusy) setPrimaryPreview(null); }}>
+      {primaryPreview && <Dialog open layer={1100} onClose={() => { if (!writeBusy) setPrimaryPreview(null); }}>
         <DialogHeader><DialogTitle>Change primary property</DialogTitle></DialogHeader>
         <DialogBody className="text-14 space-y-3">
           <p className="font-medium">{primaryPreview.primary_property.address}</p>

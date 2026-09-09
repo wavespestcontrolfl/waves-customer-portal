@@ -395,7 +395,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect((await service.previewManualPropertyChange(customerId, 'primary', {}, rentalId)).primary_property.id).toBe(rentalId);
   }, 30000);
 
-  test('a legacy account address already saved as a non-primary row is reused as the old primary', async () => {
+  test.each([['itself', true], ['another property', false]])('a legacy account row saved as non-primary supports selecting %s', async (_choice, selectAccountRow) => {
     const service = require('../services/customer-properties');
     const customerId = crypto.randomUUID(), savedAccountRow = crypto.randomUUID(), targetId = crypto.randomUUID();
     await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Legacyrowfixture', phone: `+15554${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`, address_line1: '1300 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
@@ -403,13 +403,41 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
       { id: savedAccountRow, customer_id: customerId, ...address(1300, 'Home'), active: true, is_primary: false, address_key: service.addressKey(address(1300)) },
       { id: targetId, customer_id: customerId, ...address(1400), active: true, is_primary: false, address_key: service.addressKey(address(1400)) },
     ]);
-    const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, targetId);
-    const changed = await service.changePrimaryProperty(customerId, targetId, { actorId: actor, expectedVersion: preview._version });
+    const selectedId = selectAccountRow ? savedAccountRow : targetId;
+    const preview = await service.previewManualPropertyChange(customerId, 'primary', {}, selectedId);
+    const changed = await service.changePrimaryProperty(customerId, selectedId, { actorId: actor, expectedVersion: preview._version });
     expect(changed.verification).toMatchObject({ persisted: true, fields_match: true });
-    expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: '1400 Example Grove' });
+    expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: selectAccountRow ? '1300 Example Grove' : '1400 Example Grove' });
     expect(await db('customer_properties').where({ customer_id: customerId }).count('* as count').first()).toEqual({ count: '2' });
-    expect(await db('customer_properties').where({ id: savedAccountRow }).first('is_primary', 'label')).toEqual({ is_primary: false, label: 'Home' });
-    expect(await db('customer_properties').where({ id: targetId }).first('is_primary')).toEqual({ is_primary: true });
+    expect(await db('customer_properties').where({ id: savedAccountRow }).first('is_primary', 'label')).toEqual({ is_primary: selectAccountRow, label: 'Home' });
+    expect(await db('customer_properties').where({ id: targetId }).first('is_primary')).toEqual({ is_primary: !selectAccountRow });
+  }, 30000);
+
+  test('a primary change preserves linked unstamped completed visits without rewriting saved or other-property addresses', async () => {
+    const service = require('../services/customer-properties');
+    const customerId = crypto.randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Linkedreportfixture',
+      phone: `+15555${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`,
+      address_line1: '1500 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
+    await service.ensurePrimaryProperty(customerId);
+    const oldPrimary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
+    const target = await service.addManualProperty(customerId, address(1600), { actorId: actor });
+    const unstamped = crypto.randomUUID(), stamped = crypto.randomUUID(), otherProperty = crypto.randomUUID();
+    await db('scheduled_services').insert([
+      { id: unstamped, property_id: oldPrimary.id },
+      { id: stamped, property_id: oldPrimary.id, service_address_line1: '1550 Saved Address', service_address_city: 'Sarasota' },
+      { id: otherProperty, property_id: target.propertyId },
+    ].map(row => ({ customer_id: customerId, scheduled_date: '2026-08-01', service_type: 'General Pest Control', status: 'completed', ...row })));
+    const preview = await api(`/api/admin/customers/${customerId}/properties/${target.propertyId}/primary-preview`);
+    expect(preview.status).toBe(200);
+    const changed = await api(`/api/admin/customers/${customerId}/properties/${target.propertyId}/primary`, { expectedVersion: preview.body._version });
+    expect(changed.status).toBe(200);
+    expect(await db('scheduled_services').where({ id: unstamped }).first()).toMatchObject({
+      property_id: oldPrimary.id, service_address_line1: '1500 Example Grove', service_address_city: 'Sarasota', service_address_zip: '34201',
+    });
+    expect(await db('scheduled_services').where({ id: stamped }).first()).toMatchObject({ property_id: oldPrimary.id, service_address_line1: '1550 Saved Address' });
+    expect(await db('scheduled_services').where({ id: otherProperty }).first()).toMatchObject({ property_id: target.propertyId, service_address_line1: null });
+    expect(await db('customers').where({ id: customerId }).first('address_line1')).toEqual({ address_line1: '1600 Example Grove' });
   }, 30000);
 
   test('a same-street partial primary is a duplicate at preview time in the portal and the bar', async () => {
