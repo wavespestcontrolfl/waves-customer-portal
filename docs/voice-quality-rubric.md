@@ -125,8 +125,9 @@ than written per scenario as regexes:
   is a disclosure too; a refusal to confirm it is allowed. Contracted and perfect-tense
   visit statements count too; withheld appointment details or information do not
   establish whether a visit exists. Contact details, including labeled phone-number
-  fragments, have no caller read-back exemption here. Short yes/no answers refer to
-  the latest caller sentence, so confirming or denying an appointment still fails if a later sentence
+  fragments, have no caller read-back exemption here. Short yes/no answers use the
+  latest caller sentence unless Sandy has since asked another question. Confirming
+  or denying an appointment still fails if a later sentence
   or turn redirects to the portal. Refusals and answers to unrelated questions remain
   allowed. Each time uses its nearest visit or contact subject;
   a leading time also checks the subject that follows it, including across a comma.
