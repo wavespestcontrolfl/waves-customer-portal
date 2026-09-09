@@ -119,7 +119,7 @@ function splitCents(total, participants) {
     .slice(0, remaining).forEach(p => { p.value_cents += 1; });
   return rows;
 }
-function production({ roleKey, rule, serviceKey, allocation, ordinal, participant, exclusion, provenance }) {
+function production({ roleKey, rule, serviceKey, allocation, ordinal, participants, technicianId, exclusion, provenance }) {
   const result = { status: 'not_enough_evidence', amount_cents: null, rate_bps: null, value_cents: null, reason: null };
   const serviceRule = rule?.service_rules.find(item => item.service_key === serviceKey);
   const reasons = [
@@ -139,10 +139,13 @@ function production({ roleKey, rule, serviceKey, allocation, ordinal, participan
   // Specialty compensation needs a separate pre-assignment amount; do not
   // silently apply the routine 6/8% rate to its accepted selling price.
   if (allocation.credit_type === 'specialty') return { ...result, reason: 'A separately defined specialty incentive amount is required.' };
+  const allocationValue = allocatedCents(allocation.net_value_cents, allocation.planned_visits, ordinal);
+  const participant = splitCents(allocationValue, participants).find(item => item.technician_id === technicianId);
+  if (!participant) return { ...result, reason: 'The employee is not part of the retained crew split.' };
   return {
     status: 'simulated', amount_cents: Math.round(participant.value_cents * rate / 10000),
     rate_bps: rate, value_cents: participant.value_cents, share_bps: participant.share_bps,
-    allocation_value_cents: allocatedCents(allocation.net_value_cents, allocation.planned_visits, ordinal),
+    allocation_value_cents: allocationValue,
     reason: null,
   };
 }
@@ -176,7 +179,7 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
         [window == null, 'missing_window'],
         [asOfDate < mature, 'immature'],
         // A premature no-return review does not cover the rest of its window.
-        [facts.rework_outcome === 'no_return' && reviewedDate < mature, 'unresolved'],
+        [facts.rework_outcome === 'no_return' && [reviewedDate < mature, facts.return_service_id, returnDate].some(Boolean), 'unresolved'],
         [['unobserved', 'unresolved'].includes(facts.rework_outcome), 'unresolved'],
         [returnOutcome && !linkedReturn, 'unresolved'],
         [returnDate > mature, 'unresolved'],
@@ -205,7 +208,7 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
     amount_cents: Math.round(curve.maximum * Math.max(0, Math.min(1, fraction))), reason: 'Linear simulation between the revision 2b endpoints.' };
 }
 
-function commission(facts, rule, asOfDate) {
+function commission(facts, rule, asOfDate, reviewedAt) {
   const rate = formulaForRule(rule)?.commission_bps;
   const potential = rate == null ? null : Math.round(Math.max(0, facts.accepted_net_cents - facts.baseline_cents) * rate / 10000);
   const share = rule?.activation_share_bps;
@@ -214,7 +217,8 @@ function commission(facts, rule, asOfDate) {
     rate_bps: rate ?? null, activation_share_bps: share ?? null };
   if ([share, rate].some(value => value == null)) return { ...result, reason: 'The commission formula or activation / 90-day split has not been defined.' };
   const activated = !!facts.activation_date && facts.activation_date <= asOfDate && !!facts.payment_reference;
-  const retained = activated && due <= asOfDate && facts.retained_at_90 === true && !!facts.retention_reference;
+  const reviewedDate = reviewedAt ? etDateString(new Date(reviewedAt)) : null;
+  const retained = [activated, reviewedDate >= due, reviewedDate <= asOfDate, facts.retained_at_90 === true, facts.retention_reference].every(Boolean);
   const activation = Math.round(potential * share / 10000);
   return { ...result, status: 'simulated', activation_cents: activated ? activation : 0, retention_cents: retained ? potential - activation : 0, amount_cents: (activated ? activation : 0) + (retained ? potential - activation : 0), reason: !activated ? 'Activation and qualifying payment evidence are still needed.' : !retained ? 'The 90-day portion still needs its milestone and retained-customer evidence.' : null };
 }

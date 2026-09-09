@@ -19,6 +19,8 @@ Claims require a retained allocation and positive ordinal; absent or half-presen
 allocation pairs cannot permanently consume a service's claim.
 The database also rejects application ordinals beyond the retained allocation's
 scheduled count. Production requires the allocation's exact service key.
+The calculator derives every crew member's cents from that allocation and the
+full retained split; it never trusts a supplied participant dollar amount.
 
 Each new effective definition retains its monetary formula inputs. Already-stored
 revision 2b definitions resolve through a fixed legacy version definition;
@@ -34,6 +36,8 @@ A rework finding needs a linked later return, same-issue confirmation and date.
 Missing cutoffs, minimum samples, observation windows and commission splits do
 not become passing results or implicit defaults. A premature no-return review
 needs a later review after the complete observation window.
+Contradictory no-return links remain unresolved. The 90-day commission portion
+requires the retained review timestamp to be on or after the milestone.
 
 Customer merges leave immutable accepted-value ownership intact. The API follows
 active merge history when resolving those allocations and preserving their caps.
