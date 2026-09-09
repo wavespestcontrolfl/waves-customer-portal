@@ -26,7 +26,7 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { smtpFallbackAllowed } = require('./email-fallback-gate');
 
 const RENEWAL_DAYS = 7;
-const { hasFixedBidValidity, FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
+const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 
 function canFallbackFromTemplateEmailError(err) {
   return /relation .*email_templates.* does not exist|active template not found|template version not found|template not found/i.test(err?.message || '');
@@ -70,7 +70,14 @@ const EstimateAutoRenew = {
 
       for (const est of stale) {
         try {
-          if (estimateOptedOutOfAutoRenew(est) || hasFixedBidValidity(est)) continue;
+          if (estimateOptedOutOfAutoRenew(est)) continue;
+          // A renewal is a silent group extension: the same group-wide fixed
+          // hold verdict the generic extension applies (any live fixed
+          // sibling, including one mid-send) refuses it here, or an ordinary
+          // sibling would be renewed and emailed while the fixed property
+          // drops out of the revived group link (pre-push codex P1 on #4309).
+          const { fixedBidBlocksExtension } = require('./estimate-extension');
+          if (await fixedBidBlocksExtension(db, est)) continue;
           // Engine-authoritative pricing gate (#3750, GH codex P1 r13): a
           // renewal re-emails the estimate link — never for a delivered row
           // the engine never verified while the gate is on. Not renewed
@@ -80,9 +87,18 @@ const EstimateAutoRenew = {
             continue;
           }
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
-          const updated = await db('estimates').where({ id: est.id }).whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL).update({
-            expires_at: newExpiry,
-            renewal_count: db.raw('COALESCE(renewal_count, 0) + 1'),
+          const updated = await db.transaction(async (trx) => {
+            if (est.estimate_group_id) {
+              // Same lock proposal saves, grouped sends and extensions take,
+              // then the fixed verdict is re-read under it before writing.
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                ['estimate-group-send', String(est.estimate_group_id)]);
+              if (await fixedBidBlocksExtension(trx, est)) return 0;
+            }
+            return trx('estimates').where({ id: est.id }).whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL).update({
+              expires_at: newExpiry,
+              renewal_count: trx.raw('COALESCE(renewal_count, 0) + 1'),
+            });
           });
           if (!updated) continue;
 

@@ -19,6 +19,10 @@ function query(result) {
     whereIn: jest.fn(() => chain),
     whereNull: jest.fn(() => chain),
     whereNotNull: jest.fn(() => chain),
+    whereNot: jest.fn(() => chain),
+    forUpdate: jest.fn(() => chain),
+    orderBy: jest.fn(() => chain),
+    select: jest.fn(async () => result),
     orWhereNull: jest.fn(() => chain),
     orWhereNotNull: jest.fn(() => chain),
     update: jest.fn(async () => 1),
@@ -34,6 +38,7 @@ const mockDb = jest.fn((table) => {
 });
 mockDb.__estimateQueries = [];
 mockDb.raw = jest.fn((sql) => sql);
+mockDb.transaction = jest.fn(async (run) => run(mockDb));
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => mockLogger);
@@ -80,6 +85,35 @@ function staleEstimate(overrides = {}) {
 }
 
 describe('estimate auto-renew email automation cutover', () => {
+  test('an ordinary grouped row is not renewed or emailed while any live sibling holds a fixed date (pre-push codex P1 on #4309)', async () => {
+    const grouped = staleEstimate({ estimate_group_id: 'synthetic-group', estimate_data: { proposal: { enabled: true } } });
+    const siblingRead = query([{ estimate_data: { proposal: { enabled: true, validThrough: '2026-09-22' } } }]);
+    mockDb.__estimateQueries = [query([grouped]), siblingRead];
+    const { renewed } = await EstimateAutoRenew.checkAll();
+    expect(renewed).toBe(0);
+    expect(siblingRead.whereIn).toHaveBeenCalledWith('status', ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired']);
+    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.__estimateQueries).toHaveLength(0);
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('a grouped renewal re-reads the fixed verdict under the group lock before writing', async () => {
+    const grouped = staleEstimate({ estimate_group_id: 'synthetic-group', estimate_data: { proposal: { enabled: true } } });
+    const preflight = query([]);
+    const locked = query([{ estimate_data: { proposal: { enabled: true, validThrough: '2026-09-22' } } }]);
+    const update = query([]);
+    mockDb.__estimateQueries = [query([grouped]), preflight, locked, update];
+    const { renewed } = await EstimateAutoRenew.checkAll();
+    expect(renewed).toBe(0);
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(mockDb.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), ['estimate-group-send', 'synthetic-group']);
+    expect(update.update).not.toHaveBeenCalled();
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
   test('a fixed bid deadline is never renewed or emailed automatically', async () => {
     mockDb.__estimateQueries = [query([staleEstimate({ estimate_data: { proposal: { enabled: true, validThrough: '2026-09-22' } } })])];
     await EstimateAutoRenew.checkAll();

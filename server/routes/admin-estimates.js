@@ -59,7 +59,7 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -4123,8 +4123,12 @@ router.put('/:id/proposal', async (req, res, next) => {
       || (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(locked))) {
       throw retry('The saved proposal changed while you were editing. Reload and review the current proposal before saving.');
     }
+    // A pending send is judged at the first scheduler tick it can reach,
+    // exactly as scheduling judged it (pre-push codex P1 on #4309): a 23:58
+    // ET send whose hold is shortened to that day would otherwise save, then
+    // fail at the midnight tick with nothing delivered.
     if (locked.status === 'scheduled' && locked.scheduled_at && authoredExpiry
-      && authoredExpiry < new Date(locked.scheduled_at)) {
+      && authoredExpiry < earliestScheduledDelivery(locked.scheduled_at)) {
       throw retry('Valid through must include the scheduled send date. Extend the validity date or reschedule before saving.');
     }
     // The engine block is carried from the LOCKED row, never the pre-read:
@@ -4169,7 +4173,7 @@ router.put('/:id/proposal', async (req, res, next) => {
       if (authoredExpiry) {
         const laterSchedule = await trx('estimates').where({ estimate_group_id: groupId, status: 'scheduled' })
           .whereNot({ id: estimate.id }).whereNull('archived_at').whereNull('price_locked_at')
-          .where('scheduled_at', '>', authoredExpiry).first('id');
+          .where('scheduled_at', '>', latestReachableSchedule(authoredExpiry)).first('id');
         if (laterSchedule) throw retry('Valid through must include this group’s scheduled send date. Extend the validity date or reschedule before saving.');
       }
     }
