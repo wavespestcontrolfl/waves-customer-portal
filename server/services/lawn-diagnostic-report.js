@@ -527,7 +527,7 @@ const CONDITION_LABELS = [
   [/(large[\s‐‑‒–—-]*patch|brown[\s‐‑‒–—-]*patch|rhizoctonia)/, 'large patch (fungal) activity'],
   [/(gray|grey)[\s‐‑‒–—-]*leaf/, 'gray leaf spot'],
   [/dollar[\s‐‑‒–—-]*spot/, 'dollar spot'],
-  [/(fungus|fungi|fungal|disease|leaf[\s‐‑‒–—-]*spot|mold|mildew|take[\s‐‑‒–—-]*all)/, 'fungal activity'],
+  [/(fungus|fungi|fungal|disease|leaf[\s‐‑‒–—-]*spot|mold|mildew|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)/, 'fungal activity'],
   [/(nutsedge|sedge|crabgrass|dollarweed|clover|spurge|\bweed)/, 'weed pressure'],
   [/(overwater|too much water|excess(ive)?\s+(water|moisture)|soggy|saturat)/, 'overwatering signal'],
   [/(drought|\bdry\b|water[\s‐‑‒–—-]*stress|wilt|under[\s‐‑‒–—-]*water)/, 'drought stress'],
@@ -608,8 +608,11 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // so a stale/LLM summary like "most consistent with caterpillar activity" is replaced
 // even though the public finding label is already downgraded to a symptom.
 // Separators inside a multi-word cause are optional ("gray leaf", "gray-leaf",
-// "grayleaf") so the gate accepts every spelling safeConditionLabel accepts.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[\s‐‑‒–—-]?all|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
+// "grayleaf") so the gate accepts every spelling safeConditionLabel accepts. Take-all
+// is governed only as the hyphenated shorthand or the full "take all root rot" — the
+// ordinary phrase "may take all season" is not a disease — and the full phrase is
+// consumed whole so a predicate after it ("… is confirmed") is still scrubbed.
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -687,10 +690,12 @@ function stripConfirmedLanguage(text) {
   return String(text).replace(/\s+/g, ' ')
     .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3}\\s+confirmed\\b`, 'gi'),
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3}\\s+confirmed\\b`, 'gi'),
       '$1 most consistent with the visible pattern')
-    // Cause-first active predicate ("Chinch bugs are active along the edge").
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were)(?:\\s+(?:now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
+    // Cause-first active predicate ("Chinch bugs are active along the edge"). Both
+    // predicate passes accept a short parenthetical after the cause
+    // ("Large patch (Rhizoctonia) is confirmed").
+    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were)(?:\\s+(?:now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
       '$1 may be active')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }

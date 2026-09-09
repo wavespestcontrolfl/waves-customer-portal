@@ -52,7 +52,7 @@ const GENERIC_CAUSE_TERMS = ['insect', 'pest', 'disease', 'infestation'];
 // specific member ("Large patch (fungal) activity", "Armyworm caterpillars",
 // "Chlorosis (iron deficiency)") — so those stay one cause, while two specific
 // causes ("Large patch and dollar spot", "Chinch bugs, drought stress") are two.
-const CAUSE_SYNONYMS = { 'water stress': 'drought', underwater: 'drought', wilt: 'drought', 'brown patch': 'large patch', mold: 'fungal', mildew: 'fungal' };
+const CAUSE_SYNONYMS = { 'water stress': 'drought', underwater: 'drought', wilt: 'drought', 'brown patch': 'large patch', rhizoctonia: 'large patch', mold: 'fungal', mildew: 'fungal' };
 const GENERIC_FAMILY_WORDS = { fungal: 'fungal', caterpillar: 'caterpillar', worm: 'caterpillar', chlorosis: 'nutrient', sedge: 'weed', weed: 'weed' };
 const SPECIFIC_FAMILY = {
   'large patch': 'fungal', 'gray leaf': 'fungal', 'dollar spot': 'fungal', 'leaf spot': 'fungal', rhizoctonia: 'fungal', 'take all': 'fungal',
@@ -69,7 +69,7 @@ function distinctCauseCount(name) {
 }
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/deficiencies\b/, 'deficiency').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/deficiencies\b/, 'deficiency').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   // Singularize before the synonym lookup so "molds" folds like "mold".
   const singular = /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
   return CAUSE_TERM_SYNONYMS[singular] || CAUSE_TERM_SYNONYMS[base] || singular;

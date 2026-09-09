@@ -555,8 +555,13 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Gray-leaf-spot lesions', 'gray leaf spot'], ['Greyleaf spot', 'gray leaf spot'], ['Dollar-spot lesions', 'dollar spot'],
     ['Leaf-spot activity', 'fungal activity'], ['Water-stress pattern', 'drought stress'], ['Underwatered turf', 'drought stress'],
     ['Fungi spreading', 'fungal activity'], ['Molds spreading', 'fungal activity'], ['Rhizoctonia rings', 'large patch (fungal) activity'], ['Take-all root rot', 'fungal activity'],
+    ['Take-all patch', 'fungal activity'], ['Take all root rot', 'fungal activity'],
   ])('safeConditionLabel maps the separator spelling %s to %s at moderate confidence', (name, label) => {
     expect(safeConditionLabel(name, 'moderate')).toBe(label);
+  });
+
+  test.each(['Recovery may take all season', 'Thin turf may take all summer to recover', 'This will take all of the fall'])('safeConditionLabel never reads the ordinary phrase in %s as take-all disease', (name) => {
+    expect(safeConditionLabel(name, 'high')).not.toBe('fungal activity');
   });
 
   test('safeConditionLabel downgrades a named cause to a generic symptom below moderate confidence', () => {

@@ -51,7 +51,7 @@ describe('customer publication', () => {
     expect(copy.safeConfirmationStep(text)).toBe('');
   });
 
-  test.each(['Chinch  bugs', 'Chinch\n  bugs', 'Drought stress', 'Gray leaf spot', 'Grayleaf spot'])('cannot publish a confirmed claim for %s', (cause) => {
+  test.each(['Chinch  bugs', 'Chinch\n  bugs', 'Drought stress', 'Gray leaf spot', 'Grayleaf spot', 'Take-all root rot', 'Large patch (Rhizoctonia)'])('cannot publish a confirmed claim for %s', (cause) => {
     const text = `${cause} is confirmed along the edge.`;
     const evidence = { name: cause, label: 'general lawn stress', confidence: 'moderate' };
     expect(copy.customerObservations(text, [evidence])).not.toMatch(/confirmed/i);
@@ -81,6 +81,8 @@ describe('customer publication', () => {
 
   test.each([
     ['Large patch (fungal) activity', 'Large patch is spreading in the shade.', /large patch/i],
+    ['Large patch (Rhizoctonia)', 'Large patch is spreading in the shade.', /large patch/i],
+    ['Take-all root rot', 'Take-all is thinning the roots along the edge.', /take-all/i],
     ['Armyworm caterpillars', 'Armyworm feeding is visible along the edge.', /armyworm/i],
     ['Chlorosis (iron deficiency)', 'Iron deficiency is showing in the front.', /iron deficiency/i],
     ['Drought stress (water stress)', 'Drought stress is spreading along the edge.', /drought/i],
