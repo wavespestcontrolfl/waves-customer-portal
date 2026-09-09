@@ -174,6 +174,22 @@ postgres('visit summary recipient recovery', () => {
       .toMatchObject({ status: 'suppressed' });
   });
 
+  test.each(['sms_enabled', 'service_completed'])('a queued summary whose customer turned off %s is refused at the dispatch claim', async (toggle) => {
+    const queued = await heldSummary();
+    // The sender's own consent read happens before the claim callback; the
+    // claim holds and re-reads the preference row itself.
+    await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, [toggle]: false });
+    try {
+      const replay = require('../services/messaging/deferred-replay-registry');
+      expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+      expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
+    }
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
   test('revocation between replay validation and the atomic dispatch claim still blocks sending', async () => {
     const queued = await heldSummary();
     // The claim runs on a transaction client, which inherits the prototype.
@@ -591,6 +607,67 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
     const { getCloseoutStatus } = require('../services/closeout-status');
     expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'done' });
+  });
+
+  test.each([
+    ['opt_out', async () => mockPg('notification_prefs').insert({ customer_id: fixture.customerId, email_enabled: false })],
+    ['revocation', async () => mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() })],
+    ['contact', async () => mockPg('customers').where({ id: fixture.customerId })
+      .update({ email: 'replaced@example.invalid', service_contact_email: 'replaced-service@example.invalid' })],
+  ])('the provider-retry rail re-authorizes a blocked summary recipient before resending (%s)', async (change, apply) => {
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    for (const message of messages) {
+      await handleEmailMessageEvent({ event: 'blocked', reason: '550 temporarily deferred', type: 'blocked',
+        timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
+    }
+    await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
+    await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: null });
+    sendOne.mockClear();
+    await apply();
+    try {
+      expect(await require('../services/transactional-email-provider-retry').runDueRetries()).toMatchObject({ claimed: 1, sent: 0 });
+    } finally {
+      await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
+    }
+    expect(sendOne).not.toHaveBeenCalled();
+    expect(await mockPg('email_messages').where({ id: messages[0].id }).first())
+      .toMatchObject({ status: 'blocked', error_message: expect.stringMatching(/^Suppressed before retry: visit_summary_/) });
+    // The leg stays on office review: the bounce alert and the reopened effect remain.
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+  });
+
+  test('a recovery delivery keeps the coordinator alert while the SMS leg is still uncertain', async () => {
+    await priorClaim('completion_sms', { status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    sendOne.mockImplementation(async ({ customArgs }) => {
+      await mockPg('email_messages').where({ id: customArgs.email_message_id })
+        .update({ status: 'bounced', bounced_at: new Date(), error_message: 'mailbox unavailable' });
+      return { messageId: randomUUID() };
+    });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    const [original] = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    const [recovery] = await mockPg('email_messages').insert({
+      provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: 'corrected@example.invalid',
+      idempotency_key: `bounce_recovery:${original.id}`, status: 'sent', sent_at: new Date(), provider_message_id: randomUUID(),
+      send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com',
+      categories: JSON.stringify(['email_template', 'bounce_recovery']),
+    }).returning('*');
+    const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, recovery);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    // The email leg settled, but the SMS leg is terminal-uncertain: the office still owns this visit.
+    const open = await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at');
+    expect(open).toHaveLength(1);
+    expect(open[0].payload).toMatchObject({ delivery: 'delivery_review' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
   });
 
   test.each([

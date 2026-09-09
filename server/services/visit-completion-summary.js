@@ -171,6 +171,11 @@ async function claimDispatchForRecipient({ visitId, customerId, kind, token, aut
 async function beginDeferredSummarySms(meta) {
   return db.transaction(async (trx) => {
     await trx('customers').where({ id: meta.customer_id }).forShare().first('id');
+    // The sender's consent read ran before this callback. Hold the
+    // preference row too, so an opt-out (STOP, or the service_completed
+    // toggle) cannot commit between that read and the dispatch claim.
+    const prefs = await trx('notification_prefs').where({ customer_id: meta.customer_id }).forShare().first() || {};
+    if (prefs.sms_enabled === false || prefs.service_completed === false) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
     if (!(await recheckDeferredSummarySms(meta, trx)).eligible) return { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
     const owned = await VisitGroups.beginVisitNotificationDispatch(meta.visit_id, 'completion_sms',
       meta.visit_summary_claim_token, { scheduled: true, database: trx });
@@ -370,6 +375,27 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   return { reconciled: true };
 }
 
+// The provider-retry rail resends a stored recipient snapshot. A summary is a
+// bearer link, so before that handoff the recipient must STILL be one of the
+// customer's current summary recipients under their current preferences, and
+// the link must not have been revoked; the rail's own template and
+// suppression checks know nothing about visits.
+async function summaryRetryAuthorized(message, database = db) {
+  const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
+  if (!match || message.template_key !== 'service.visit_summary') return { ok: true };
+  const visit = await database('service_visits').where({ id: match[1] }).whereNull('summary_token_revoked_at')
+    .whereIn('status', ['closing', 'closed']).first('id', 'customer_id');
+  if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
+  const customer = await withAccountPrimaryContact(
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+  );
+  if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
+  const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
+  const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
+  const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
+  return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
+}
+
 // The provider-retry rail can resend a blocked summary recipient later. When
 // the ledger proves an accepted send again, the effect a bounce reopened
 // returns to sent and the bounce alert it raised is resolved.
@@ -391,14 +417,19 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     await trx('visit_effects').where({ id: effect.id })
       .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the
-    // email leg was the only reason for review.
+    // email leg was the only reason for review: an SMS leg still parked as
+    // unknown_delivery is terminal and needs the office, so that alert stays.
+    const otherUncertain = await trx('visit_effects').where({ visit_id: visitId, status: 'unknown_delivery' })
+      .whereNot('id', effect.id).first('id');
     const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
       .whereRaw("payload->>'visitId' = ?", [visitId])
       .where(function reviewOnlyForDelivery() {
-        this.whereRaw("payload->>'reason' = 'summary_email_bounced'")
-          .orWhere(function coordinator() {
+        this.whereRaw("payload->>'reason' = 'summary_email_bounced'");
+        if (!otherUncertain) {
+          this.orWhere(function coordinator() {
             this.whereRaw("payload->>'delivery' = 'delivery_review'").whereRaw("COALESCE(payload->>'payment', '') <> 'office_required'");
           });
+        }
       }).select('id');
     for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
     return { reconciled: true };
@@ -437,5 +468,5 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 }
 
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
-  deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery,
+  deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms };
