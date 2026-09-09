@@ -57,9 +57,8 @@ const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
-// A visit within this many days of the requested date is a candidate for
-// "the visit the caller meant". Wide enough for "push Thursday to Monday",
-// narrow enough that a quarterly cadence (~90 days) never yields two.
+// The uniquely identified occurrence may move within this span. Destination
+// proximity never identifies an occurrence among multiple recurring visits.
 const CANDIDATE_SPAN_DAYS = 14;
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
 const CARD_REASON_CODES = ['reschedule_or_cancel', 'existing_appointment_coordination'];
@@ -164,12 +163,12 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
     .some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
   const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.service_type).toLowerCase()));
   if (programIds.size !== 1) return skip('service_needs_review');
+  if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
   const nearby = matchingServices.filter((row) => {
     const d = dateOnly(row.scheduled_date);
     return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
   });
   if (nearby.length === 0) return skip('no_visit_on_books');
-  if (nearby.length > 1) return skip('ambiguous_visit', { candidateIds: nearby.map((r) => r.id) });
   const visit = nearby[0];
   if (!LIVE_STATUSES.includes(visit.status)) return skip('visit_not_live', { visitId: visit.id });
   if (visit.visit_id) return skip('grouped_visit', { visitId: visit.id });
@@ -326,8 +325,9 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     if (handled || moved) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
+    const latestCandidates = await loadCandidates(trx, settled.customer_id, now);
     const checked = planRescheduleFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
-      candidates: [{ ...visit, ...service }], appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels') });
+      candidates: latestCandidates.map((row) => row.id === visit.id ? { ...row, ...service } : row), appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels') });
     const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
       && ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
         .every((key) => (service[key] ?? null) === (visit[key] ?? null));

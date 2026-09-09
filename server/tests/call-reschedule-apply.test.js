@@ -189,12 +189,12 @@ describe('planRescheduleFromCall', () => {
     expect(two).toMatchObject({ reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000002'] });
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ visit_id: 'v1' })], now: NOW }).reason).toBe('grouped_visit');
     expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), candidates: [visit({ source_action: 'ai_call_pipeline_followup' })], now: NOW }).reason).toBe('dispatch_owned_pending');
-    // The December quarterly sibling is outside the span and does not make the September move ambiguous.
+    // The agreed destination does not identify which quarterly occurrence the caller meant.
     const withSibling = planRescheduleFromCall({
       v2: v2(), call: call(), customer: customer(), now: NOW,
       candidates: [visit(), visit({ id: '70000000-0000-4000-8000-000000000003', scheduled_date: '2026-12-17', window_start: '14:00:00', window_end: '15:00:00' })],
     });
-    expect(withSibling).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    expect(withSibling).toMatchObject({ action: 'skip', reason: 'ambiguous_visit', candidateIds: [VISIT_ID, '70000000-0000-4000-8000-000000000003'] });
   });
 
   test('duration falls back to estimated_duration_minutes, then 60', () => {
