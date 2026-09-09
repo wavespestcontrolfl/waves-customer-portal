@@ -2980,40 +2980,6 @@ const InvoiceService = {
       }
     }
 
-    if (effectiveRequestReview && (sms.ok || email.ok)) {
-      try {
-        const ReviewService = require("./review-request");
-        const inv = await db("invoices")
-          .where({ id: invoiceId })
-          .select("customer_id", "service_record_id", "status")
-          .first();
-        // Unpaid COMPLETION invoices defer the review ask to payment — the
-        // Stripe paid-invoice webhook enrolls then, reading the completion's
-        // requestReview intent from the service record. Enrolling here would
-        // text a review ask alongside an open pay link (Codex P1, PR #3104
-        // r1). Standalone invoices (no service_record_id) keep the legacy
-        // at-delivery ask: their operator opt-in has no other trigger (a
-        // cash/manual payment never reaches the webhook).
-        const deferToPayment = inv
-          && inv.service_record_id
-          && !["paid", "prepaid"].includes(String(inv.status || ""));
-        if (deferToPayment) {
-          logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
-        } else if (inv) {
-          await ReviewService.enrollPostService({
-            customerId: inv.customer_id,
-            serviceRecordId: inv.service_record_id || null,
-            triggeredBy: "auto",
-            delayMinutes: effectiveReviewDelayMinutes,
-          });
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed: ${err.message}`,
-        );
-      }
-    }
-
     const ok = sms.ok || email.ok;
     if (ok) {
       await db("invoices")
@@ -3068,9 +3034,56 @@ const InvoiceService = {
     // behind GATE_INVOICE_ISSUED_CLOSES_VISIT): a delivered invoice closes
     // the open visit it bills, quietly. Best-effort after the send — the
     // customer already has the invoice either way.
+    let issuedCloseout = null;
     if (ok) {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+      issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+    }
+
+    // The review decision waits for the closeout (GitHub r4 P1 #4127): a
+    // linked pre-completion invoice has no service_record_id until the
+    // closeout writes it, so deciding first would classify it standalone
+    // and enroll an at-delivery review ask — the one thing the quiet
+    // closeout promises never to send. A closeout that completed the visit
+    // suppresses the ask outright (its record froze requestReview: false, so
+    // the paid webhook enrolls nothing later either); otherwise the fresh
+    // read below sees whatever linkage now stands.
+    if (effectiveRequestReview && ok) {
+      try {
+        const ReviewService = require("./review-request");
+        if (issuedCloseout?.closed) {
+          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly`);
+        } else {
+          const inv = await db("invoices")
+            .where({ id: invoiceId })
+            .select("customer_id", "service_record_id", "status")
+            .first();
+          // Unpaid COMPLETION invoices defer the review ask to payment — the
+          // Stripe paid-invoice webhook enrolls then, reading the completion's
+          // requestReview intent from the service record. Enrolling here would
+          // text a review ask alongside an open pay link (Codex P1, PR #3104
+          // r1). Standalone invoices (no service_record_id) keep the legacy
+          // at-delivery ask: their operator opt-in has no other trigger (a
+          // cash/manual payment never reaches the webhook).
+          const deferToPayment = inv
+            && inv.service_record_id
+            && !["paid", "prepaid"].includes(String(inv.status || ""));
+          if (deferToPayment) {
+            logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
+          } else if (inv) {
+            await ReviewService.enrollPostService({
+              customerId: inv.customer_id,
+              serviceRecordId: inv.service_record_id || null,
+              triggeredBy: "auto",
+              delayMinutes: effectiveReviewDelayMinutes,
+            });
+          }
+        }
+      } catch (err) {
+        logger.error(
+          `[invoice] Review request schedule failed: ${err.message}`,
+        );
+      }
     }
     return { ok, sms, email, payUrl, creditApplied: sendCreditResult?.applied || 0 };
   },
@@ -3138,36 +3151,6 @@ const InvoiceService = {
       await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
     }
 
-    // Queue the review request only when THIS call performed the finalization
-    // (`updated` set) — a concurrent path that finalized first cleared the
-    // stored flags itself and already took the review decision.
-    if (updated && effectiveRequestReview) {
-      try {
-        // Same unpaid-completion-invoice hold as sendViaSMSAndEmail (Codex
-        // P1, PR #3104 r1): delivery of an unpaid completion invoice must
-        // not start review outreach — the paid webhook enrolls on payment
-        // from the service record's requestReview intent. Standalone
-        // invoices (no service_record_id) keep the legacy at-delivery ask.
-        const deferToPayment = finalInvoice.service_record_id
-          && !["paid", "prepaid"].includes(String(finalInvoice.status || ""));
-        if (deferToPayment) {
-          logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
-        } else {
-          const ReviewService = require("./review-request");
-          await ReviewService.enrollPostService({
-            customerId: invoice.customer_id,
-            serviceRecordId: invoice.service_record_id || null,
-            triggeredBy: "auto",
-            delayMinutes: effectiveReviewDelayMinutes,
-          });
-        }
-      } catch (err) {
-        logger.error(
-          `[invoice] Review request schedule failed after ${source}: ${err.message}`,
-        );
-      }
-    }
-
     try {
       await require("./invoice-followups").scheduleForInvoice(invoiceId);
     } catch (err) {
@@ -3191,23 +3174,48 @@ const InvoiceService = {
       );
 
     // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
-
     // GATE_INVOICE_ISSUED_CLOSES_VISIT): every delivery finalization that
-
     // does not run through sendViaSMS / sendViaSMSAndEmail (deferred rails,
-
     // project reports with an invoice, completion-owned notices) lands here.
-
     // Best-effort; the closeout refuses a visit that is already completed,
-
     // so a completion-owned finalization is a quiet no-op.
+    const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+    const issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
 
-    {
-
-      const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-
-      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
-
+    // Queue the review request only when THIS call performed the finalization
+    // (`updated` set) — a concurrent path that finalized first cleared the
+    // stored flags itself and already took the review decision. Decided
+    // AFTER the closeout (GitHub r4 P1 #4127): a linked pre-completion
+    // invoice has no service_record_id until the closeout writes it, and a
+    // closeout that completed the visit quietly suppresses the ask outright
+    // — its record froze requestReview: false, so nothing enrolls later.
+    if (updated && effectiveRequestReview) {
+      try {
+        // Same unpaid-completion-invoice hold as sendViaSMSAndEmail (Codex
+        // P1, PR #3104 r1): delivery of an unpaid completion invoice must
+        // not start review outreach — the paid webhook enrolls on payment
+        // from the service record's requestReview intent. Standalone
+        // invoices (no service_record_id) keep the legacy at-delivery ask.
+        const deferToPayment = finalInvoice.service_record_id
+          && !["paid", "prepaid"].includes(String(finalInvoice.status || ""));
+        if (issuedCloseout?.closed) {
+          logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: the invoice-issued closeout completed visit ${issuedCloseout.visitId} quietly (source=${source})`);
+        } else if (deferToPayment) {
+          logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
+        } else {
+          const ReviewService = require("./review-request");
+          await ReviewService.enrollPostService({
+            customerId: invoice.customer_id,
+            serviceRecordId: invoice.service_record_id || null,
+            triggeredBy: "auto",
+            delayMinutes: effectiveReviewDelayMinutes,
+          });
+        }
+      } catch (err) {
+        logger.error(
+          `[invoice] Review request schedule failed after ${source}: ${err.message}`,
+        );
+      }
     }
 
     return finalInvoice;

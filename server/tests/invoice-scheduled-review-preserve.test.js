@@ -26,10 +26,16 @@ jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => {}),
   stopSequence: jest.fn(async () => {}),
 }));
+// The invoice-issued closeout (GATE_INVOICE_ISSUED_CLOSES_VISIT) runs before
+// the review decision; gate-off by default here, one test flips its verdict.
+jest.mock('../services/invoice-issued-closeout', () => ({
+  closeOutVisitForIssuedInvoice: jest.fn(async () => ({ closed: false, reason: 'gate_off' })),
+}));
 
 const db = require('../models/db');
 const ReviewService = require('../services/review-request');
 const InvoiceService = require('../services/invoice');
+const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
 
 function chain({ first, returning } = {}) {
   const q = {};
@@ -58,17 +64,17 @@ function scheduledInvoice(overrides = {}) {
 
 // Mocks the db() call sequence inside sendViaSMSAndEmail:
 //   1. payer_statement_id accrual pre-check   2. claimInvoiceForSend read
-//   3. claim update→returning   4. (review block) invoice read
-//   5. success-path update
-// The chains are permissive, so the same sequence also covers runs where
-// the review block is skipped (call 4 becomes the success update).
+//   3. claim update→returning   4. success-path update
+//   5. (review block, AFTER the invoice-issued closeout) invoice read
+// Every `invoices` read from call 4 on answers with the post-delivery row
+// the review block reads back; other tables get a permissive chain.
 function mockSendSequence(invoice, reviewRead = {}) {
   db
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(chain({ returning: [{ ...invoice, status: 'sending' }] }))
-    .mockReturnValueOnce(
-      chain({
+    .mockImplementation((table) => (table === 'invoices'
+      ? chain({
         first: {
           customer_id: invoice.customer_id,
           service_record_id: invoice.service_record_id,
@@ -77,9 +83,8 @@ function mockSendSequence(invoice, reviewRead = {}) {
           status: 'sent',
           ...reviewRead,
         },
-      }),
-    )
-    .mockReturnValue(chain());
+      })
+      : chain()));
 }
 
 describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
@@ -165,6 +170,34 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     expect(ReviewService.enrollPostService).toHaveBeenCalledWith(
       expect.objectContaining({ delayMinutes: 30 }),
     );
+  });
+
+  // Invoice issued ⇒ visit completed (GitHub r4 P1 #4127): a linked
+  // pre-completion invoice carries no service_record_id until the closeout
+  // writes it, so a review decision taken BEFORE the closeout would read it
+  // as standalone and enroll an at-delivery ask — the one thing the quiet
+  // closeout promises never to send.
+  test('the review decision waits for the invoice-issued closeout — a closeout that completed the visit suppresses the ask', async () => {
+    closeOutVisitForIssuedInvoice.mockResolvedValueOnce({ closed: true, visitId: 'svc-1', resumed: false });
+    mockSendSequence(scheduledInvoice({ service_record_id: null }));
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { requestReview: true });
+
+    expect(result.ok).toBe(true);
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'sent', actorTechnicianId: null });
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+  });
+
+  test('a closeout that left the visit alone (gate off / refused) keeps the standalone at-delivery ask, decided after it', async () => {
+    mockSendSequence(scheduledInvoice({ service_record_id: null }));
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+    expect(result.ok).toBe(true);
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
+    expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+    expect(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0])
+      .toBeLessThan(ReviewService.enrollPostService.mock.invocationCallOrder[0]);
   });
 });
 
@@ -260,5 +293,32 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
 
     expect(result.status).toBe('paid');
     expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+    expect(closeOutVisitForIssuedInvoice).not.toHaveBeenCalled();
+  });
+
+  test('the review decision waits for the invoice-issued closeout — a closeout that completed the visit suppresses the ask (GitHub r4 P1 #4127)', async () => {
+    closeOutVisitForIssuedInvoice.mockResolvedValueOnce({ closed: true, visitId: 'svc-1', resumed: false });
+    mockMarkDeliverySequence(scheduledInvoice({ service_record_id: null }));
+
+    const result = await InvoiceService.markDeliverySent('inv-1', {
+      sms: true,
+      source: 'scheduled_send',
+      actorTechnicianId: 'staff-1',
+    });
+
+    expect(result.status).toBe('sent');
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'sent', actorTechnicianId: 'staff-1' });
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+  });
+
+  test('a closeout that left the visit alone keeps the standalone ask, decided after the closeout', async () => {
+    mockMarkDeliverySequence(scheduledInvoice({ service_record_id: null }));
+
+    await InvoiceService.markDeliverySent('inv-1', { sms: true, source: 'scheduled_send' });
+
+    expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledTimes(1);
+    expect(ReviewService.enrollPostService).toHaveBeenCalledTimes(1);
+    expect(closeOutVisitForIssuedInvoice.mock.invocationCallOrder[0])
+      .toBeLessThan(ReviewService.enrollPostService.mock.invocationCallOrder[0]);
   });
 });

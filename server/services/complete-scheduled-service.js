@@ -4641,7 +4641,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // attempt 'pending' (retries would then 409 until the stale window expires)
         // — on timeout (or error) we fall back to the deterministic recap.
         let effectiveCustomerRecap = customerRecap;
-        if (!String(effectiveCustomerRecap || '').trim() && !isIncompleteVisit) {
+        // An invoice-issued closeout has no form, no products and no
+        // application evidence behind it, and renders no report — a
+        // generated recap would spend an LLM call (plus its six-second
+        // timeout, once per linked invoice, serially across the batch send
+        // routes) to freeze a narrative asserting treatment nobody
+        // described (GitHub r4 P2 #4127). Suppressed like report delivery:
+        // the record keeps no customer recap at all.
+        if (!String(effectiveCustomerRecap || '').trim() && !isIncompleteVisit && !issuedInvoiceCloseout) {
           // Season/weather/expectations context — the PRODUCTION recap path
           // gets the same prompt inputs the preview path does (codex P2
           // r14): tech-selected products + visit context. Best-effort only.

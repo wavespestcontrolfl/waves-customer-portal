@@ -13,6 +13,17 @@ jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: je
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+// The post-service review ask and the LLM recap are both suppressed for an
+// invoice-issued closeout: spied, never mocked away, so a regression that
+// reaches either shows up as a call.
+jest.mock('../services/review-request', () => {
+  const actual = jest.requireActual('../services/review-request');
+  return { ...actual, enrollPostService: jest.fn(actual.enrollPostService) };
+});
+jest.mock('../services/completion-recap', () => {
+  const actual = jest.requireActual('../services/completion-recap');
+  return { ...actual, generateRecap: jest.fn(actual.generateRecap) };
+});
 // Annual-prepay coverage is stamped rows + a live term; one test forces the
 // coverage verdict to exercise the settlement branch without that fixture.
 const mockAnnualPrepay = { covers: false };
@@ -27,6 +38,8 @@ const { etDateString } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+const ReviewService = require('../services/review-request');
+const CompletionRecap = require('../services/completion-recap');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let database;
@@ -49,6 +62,22 @@ describe('source contracts', () => {
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
     expect(source).toMatch(/if \(smsDelivered\) \{[\s\S]{0,5000}?closeOutVisitForIssuedInvoice\(\{ invoiceId, trigger: "sent", actorTechnicianId \}\);[\s\S]{0,600}?return \{ sent: true, payUrl, finalizeError: err\.message \};/);
+  });
+  test('every hand-payment writer reaches the closeout: /payments/reconcile after its commit, the prepaid receipt on both the newly-paid and already-paid legs (GitHub r4 P1)', () => {
+    const reconcile = fs.readFileSync(path.join(__dirname, '../routes/admin-payments-reconcile.js'), 'utf8');
+    const commitAt = reconcile.indexOf('txResult = await db.transaction(async (trx) => {');
+    const closeoutAt = reconcile.indexOf("closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null })");
+    expect(commitAt).toBeGreaterThan(-1);
+    expect(closeoutAt).toBeGreaterThan(commitAt);
+    // …and after the conflict / zero-row refusals, never on a refused reconcile.
+    expect(closeoutAt).toBeGreaterThan(reconcile.indexOf("while reconciling — no changes applied"));
+    const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const fn = schedule.slice(schedule.indexOf('async function generatePrepaidReceiptForService('), schedule.indexOf('// POST /api/admin/schedule/:id/prepaid'));
+    expect(fn).toMatch(/closeOutVisitForIssuedInvoice\(\{ invoiceId: invoice\.id, trigger: 'paid', actorTechnicianId \}\)/);
+    expect(fn).toMatch(/if \(\['paid', 'prepaid'\]\.includes\(invoice\.status\)\) \{\s*\n\s*await closeOutOnPaid\(\);/);
+    expect(fn).toMatch(/await closeOutOnPaid\(\);\s*\n\s*\n\s*return sendPrepaidReceiptForInvoice\(outcome\.invoice/);
+    // The route hands the operator through.
+    expect(schedule).toMatch(/generatePrepaidReceiptForService\(req\.params\.id, \{ operatorInitiated: true, actorTechnicianId: req\.technicianId \|\| null \}\)/);
   });
   test('the issued-invoice recheck locks the invoice AFTER the customer and visit rows (customer → visit → invoice)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -73,7 +102,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
   // is rolled back — the catalog row in particular must never outlive the
   // test: the serial CI run's completion-lane coverage contract reads the
   // migrated catalog next and fails on a leaked `fixture_*` service.
-  beforeEach(async () => { mockPg = await database.transaction(); });
+  beforeEach(async () => { jest.clearAllMocks(); mockPg = await database.transaction(); });
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => { if (database) await database.destroy(); });
 
@@ -119,6 +148,12 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(invoices[0].status).toBe('sent');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    // No form, no application evidence — no LLM recap is generated or frozen
+    // (GitHub r4 P2), and no review outreach is enrolled (GitHub r4 P1).
+    expect(CompletionRecap.generateRecap).not.toHaveBeenCalled();
+    expect(records[0].structured_notes.customerRecap ?? null).toBeNull();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+    expect(await mockPg('review_requests').where({ customer_id: f.customerId })).toHaveLength(0);
   }
 
   test('a pest visit closes quietly on its sent invoice', async () => {
@@ -151,9 +186,13 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
   });
 
-  test('a delivery finalized through markDeliverySent (deferred / report-with-invoice rails) closes the visit too', async () => {
+  test('a delivery finalized through markDeliverySent (deferred / report-with-invoice rails) closes the visit too — and a scheduled review ask on it is never enrolled', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
-    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'sending', sent_at: null });
+    // A pre-completion invoice scheduled WITH a review ask: before the
+    // closeout it has no service_record_id, so a review decision taken
+    // ahead of the closeout would read it as standalone and enroll an
+    // at-delivery ask (GitHub r4 P1).
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'sending', sent_at: null, scheduled_request_review: true, scheduled_review_delay_minutes: 120 });
     const InvoiceService = require('../services/invoice');
     await InvoiceService.markDeliverySent(f.invoiceId, { sms: true, source: 'scheduled_send' });
     const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
@@ -162,6 +201,10 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     const records = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
     expect(records).toHaveLength(1);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+    expect(await mockPg('review_requests').where({ customer_id: f.customerId })).toHaveLength(0);
+    expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBe(records[0].id);
+    expect(records[0].structured_notes).toMatchObject({ requestReview: false });
     // An automated trigger closes the visit out as the system: the visit's
     // technician is neither the transition actor nor the audit actor
     // (GitHub r2 P2) — the service record still carries the technician.
