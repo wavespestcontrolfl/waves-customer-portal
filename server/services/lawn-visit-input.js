@@ -1,6 +1,8 @@
 /** The numbered-photo input and shared diagnostic rubric for the gated lawn visit call. */
 const crypto = require('crypto');
-const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
+const { CURATED_REFERENCE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
+const { isValidBase64 } = require('../utils/base64-validate');
+const { decodedBase64Bytes, MAX_PHOTO_BYTES } = require('../utils/request-photo-validation');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
 const PROMPT_VERSION = 'lawn-visit-v1';
@@ -23,7 +25,7 @@ const STR_LIST = { type: 'array', items: STR };
 const obj = (properties) => ({ type: 'object', additionalProperties: false, required: Object.keys(properties), properties });
 const enumOf = (values) => ({ type: 'string', enum: values });
 const signal = (levels) => obj({ level: enumOf(levels), evidence: STR, confidence: enumOf(CONFIDENCE) });
-const score = obj({ determinable: { type: 'boolean' }, value: { type: 'integer' } });
+const score = (minimum, maximum) => obj({ determinable: { type: 'boolean' }, value: { type: 'integer', minimum, maximum } });
 
 const RESPONSE_SCHEMA = obj({
   photo_quality: { type: 'array', items: obj({ photo: { type: 'integer' }, quality: enumOf(PHOTO_QUALITY), issue: STR }) },
@@ -57,7 +59,7 @@ const RESPONSE_SCHEMA = obj({
     thatch_visibility: signal(THATCH_LEVELS),
     overwatering_signal: signal(SIGNAL_LEVELS),
   }),
-  scores: obj({ turf_density: score, weed_coverage: score, color_health: score }),
+  scores: obj({ turf_density: score(0, 100), weed_coverage: score(0, 100), color_health: score(1, 10) }),
   observations: STR,
 });
 
@@ -77,7 +79,11 @@ reaches the customer.
 Accuracy over reassurance. Evidence over assumption. Honest confidence over false
 certainty. Selection over invention. Missing evidence is UNKNOWN, never "healthy".
 
-${AUTO_RELEASE_RULE}
+# TECHNICIAN REVIEW
+This is an internal assessment for technician review. Preserve unknown or
+undeterminable results for that review; never invent a value to make a visit
+complete. Confirmation and customer delivery wait for every required score.
+The server derives customer labels and prose from the reviewed evidence.
 
 # THE PHOTOS
 Photos are numbered in the order given ("Photo 1", "Photo 2", …). A label after the
@@ -85,7 +91,9 @@ number is the technician's zone (front / back / side) and is the ONLY source of 
 — never infer one from the image. Every finding cites the photo numbers it is visible
 in (photo_refs). Rate every photo's quality: adequate (clear, close enough, lawn fills
 the frame), limited (one angle, glare, distance, white-balance), poor (blurred, too far,
-not a lawn) — and name the issue.
+not a lawn) — and name the issue. Keep every supporting photo reference when a
+finding spans zones. Set its single zone to "unknown" when those references cover
+multiple technician zones; the references and photo labels preserve each location.
 
 # FINDINGS (evidence-first)
 Produce one finding per distinct condition or symptom across the whole visit — not per
@@ -95,7 +103,9 @@ band, never a number you did not measure), urgency, photo_refs, zone, observed_e
 negative_evidence (what you looked for and did not see), confirmation_step (the field
 test or closer look that would raise confidence), can_determine (false when the photos
 cannot settle the question) with cannot_determine_reason, and one plain,
-confidence-matched customer_wording sentence. A lawn with nothing to report returns a
+confidence-matched customer_wording sentence as an INTERNAL drafting hint, never
+text to publish verbatim. finding_id is a temporary model label; the server assigns
+the stable identifiers used by technician review. A lawn with nothing to report returns a
 single finding named "No major visible stress" at the confidence the photos support.
 
 ## CONFIDENCE RUBRIC (by evidence, not by model agreement)
@@ -140,7 +150,7 @@ cannot show a signal (no close-up, wrong angle, no thatch layer visible) return
 - turf_density 0-100: canopy fill and stand density across the lawn shown.
 - weed_coverage 0-100: share of the visible lawn carrying weeds.
 - color_health 1-10: 10 = uniformly deep green for the season.
-Set determinable false (value is then ignored) when the photos cannot support the
+Set determinable false (value is then ignored; keep it within its declared range) when the photos cannot support the
 number. Never let the known context inflate or deflate a score the images contradict.
 
 # GRASS TYPE
@@ -148,12 +158,14 @@ Identify the turf from blade width, growth habit and color; confirm the type on 
 when given and override only when the morphology clearly differs; "unknown" when the
 turf genuinely does not match a known type.
 
-# OBSERVATIONS
-One concise, plain-English paragraph (2-3 sentences, one voice, no lists, no
-contradictions) a homeowner could read: overall condition and how much the photos
-could show. It is stored where the customer's report can display it, so it carries
-no names, no addresses, no access or gate details, nothing quoted or paraphrased from
-the technician's notes, and no product or brand names.
+# OBSERVATIONS — INTERNAL EVIDENCE
+One concise paragraph (2-3 sentences, one voice, no lists, no contradictions) for
+the technician: overall condition and how much the photos could show. This field
+stays internal to the assessment run. Never store it directly in customer report
+fields; customer prose is derived server-side only after technician review and
+confidence, privacy and compliance checks. Include no names, addresses, access or
+gate details, nothing quoted or paraphrased from the technician's notes, and no
+product or brand names.
 
 ${CURATED_REFERENCE}
 
@@ -221,6 +233,11 @@ function validateVisitPhotos(photos) {
   const zones = [];
   for (const photo of photos) {
     if (!photo || typeof photo.data !== 'string' || !photo.data) return { error: 'Every photo needs base64 image data', zones: [] };
+    if (decodedBase64Bytes(photo.data) > MAX_PHOTO_BYTES) return { error: 'Each photo must be 5 MB or smaller', zones: [] };
+    if (!isValidBase64(photo.data)) return { error: 'Every photo needs valid raw base64 image data', zones: [] };
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(photo.mimeType ?? 'image/jpeg')) {
+      return { error: 'Photos must be JPEG, PNG, or WebP images', zones: [] };
+    }
     if (photo.zone != null && photo.zone !== '' && !normalizePhotoZone(photo.zone)) {
       return { error: `photo zone must be one of: ${PHOTO_ZONES.join(', ')}`, zones: [] };
     }
@@ -231,7 +248,7 @@ function validateVisitPhotos(photos) {
 
 // The composed system prompt and the response schema, digested once. The
 // prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
-// AUTO_RELEASE_RULE, FALSE_PRECISION_RULE): editing one changes what the
+// FALSE_PRECISION_RULE): editing one changes what the
 // model sees without a PROMPT_VERSION bump here, so the context hash seeds
 // with what was actually sent, not only the version label.
 const PROMPT_DIGEST = crypto.createHash('sha256').update(SYSTEM_PROMPT).update('\n').update(JSON.stringify(RESPONSE_SCHEMA)).digest('hex');
@@ -255,7 +272,7 @@ function contextHash({ photos = [], photoZones = [], visionContext = {} } = {}) 
   })).update('\n');
   photos.forEach((photo, index) => {
     hash.update(`${index}:${photoZones[index] || ''}:${String(photo?.mimeType || 'image/jpeg').toLowerCase()}:`);
-    hash.update(crypto.createHash('sha256').update(String(photo?.data || '')).digest('hex')).update('\n');
+    hash.update(crypto.createHash('sha256').update(Buffer.from(photo?.data || '', 'base64')).digest('hex')).update('\n');
   });
   return hash.digest('hex');
 }
