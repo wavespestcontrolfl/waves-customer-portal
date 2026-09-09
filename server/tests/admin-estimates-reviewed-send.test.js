@@ -204,6 +204,8 @@ describe('commercial bid authoring', () => {
     row.status = 'draft';
     const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal(), projectCosting: costing });
     expect(res.statusCode).toBe(200);
+    // The response carries the version this write committed (pre-push codex P1 r3).
+    expect(res.body.editVersion).toBe(persistence.estimateEditVersion(row));
     expect(row.onetime_total).toBe(2580);
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
     expect(dataOf().proposalCosting).toEqual(costing);

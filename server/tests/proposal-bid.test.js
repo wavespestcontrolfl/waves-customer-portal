@@ -8,7 +8,7 @@ const { normalizeProposal, computeProposalTotals } = require('../services/estima
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
 const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCosting, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule } = require('../services/proposal-bid');
-const { computeProjectCosts, roundCents } = require('../../shared/proposal-bid.cjs');
+const { computeProjectCosts, roundCents, showsLineBasis } = require('../../shared/proposal-bid.cjs');
 const { mapFormPrices, buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 
 const line = (id, quantity, unitPrice, unit = 'acre') => ({ id, description: `Synthetic ${id}`, quantity, unitPrice, unit, frequency: 'one_time' });
@@ -21,6 +21,15 @@ describe('bid quantity and costing authority', () => {
     expect(proposal.buildings[0].lineItems[0].amount).toBe(expected);
     expect(computeProposalTotals(proposal).oneTime).toBe(expected);
     expect(buildProposalFirstInvoice(proposal).subtotal).toBe(expected);
+  });
+  test.each([
+    [{ quantity: 1, unitPrice: 95 }, false],
+    [{ quantity: 1, unitPrice: 10.075 }, true],
+    [{ quantity: 1, unitPrice: 0.0755 }, true],
+    [{ quantity: 2, unitPrice: 95 }, true],
+    [{ quantity: 1, unit: 'each', unitPrice: 95 }, true],
+  ])('customer documents show the basis for %o: %s', (line, shown) => {
+    expect(showsLineBasis(line)).toBe(shown);
   });
   test('rounds decimal half cents without magnitude-dependent binary drift', () => {
     expect([10.075, -10.075, 1.005, 0.00000001].map(roundCents)).toEqual([10.08, -10.08, 1.01, 0]);

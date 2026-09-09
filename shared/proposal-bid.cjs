@@ -47,6 +47,11 @@ const proposalLineAmount = (line, occurrences = 1) => {
 const formatQuantity = (line) => `${Number(line.quantity).toLocaleString('en-US', { maximumFractionDigits: 4 })}${PROPOSAL_UNITS[line.unit] ? ` ${PROPOSAL_UNITS[line.unit]}` : ''}`;
 const formatUnitPrice = (value) => Number(value || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const formatLineBasis = (line) => `${formatQuantity(line)} × ${formatUnitPrice(line.unitPrice)}`;
+// Customer documents print the quantity × rate basis whenever the cent-rounded
+// amount alone would hide a reviewed input: an explicit unit, a quantity other
+// than one, or a rate with fractional cents (1 × $10.075 shows as $10.08
+// otherwise). Shared by the public card, the browser document and SSR.
+const showsLineBasis = (line) => Boolean(line.unit) || Number(line.quantity) !== 1 || roundDecimal(line.unitPrice) !== roundCents(line.unitPrice);
 
 function computeProjectCosts(costing, totals) {
   const rows = Array.isArray(costing?.rows) ? costing.rows : [];
@@ -69,4 +74,4 @@ function computeProjectCosts(costing, totals) {
   return { cost, revenue, revenueYears, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
-module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, computeProjectCosts };
+module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, computeProjectCosts };

@@ -1,7 +1,7 @@
 import { fmtMoney } from '../../lib/money';
 import { glassRowInclusions } from '../../lib/estimate-glass-copy';
 import { commercialTermRows, proposalHasAuthoredTerms } from '../../lib/proposal-sections';
-import { formatLineBasis } from '@proposal-bid';
+import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { estimateCard, estimateInnerBox } from './cardStyles';
 import { W } from './tokens';
 
@@ -182,7 +182,7 @@ export default function ProposalDetailCard({ proposal, pdfEmailed = false }) {
             <div key={`${item.description || 'line'}-${iIdx}`} style={lineRow}>
               <span style={{ minWidth: 0 }}>
                 {item.description || 'Service'}
-                {(item.unit || Number(item.quantity) !== 1) ? <span style={{ display: 'block', color: W.textCaption }}>{formatLineBasis(item)}</span> : ''}
+                {showsLineBasis(item) ? <span style={{ display: 'block', color: W.textCaption }}>{formatLineBasis(item)}</span> : ''}
               </span>
               <span style={amtStyle}>
                 {fmtMoney(item.amount)}

@@ -820,10 +820,15 @@ function CommercialProposalEditor() {
           setError('Programs replace building line items. Use “Clear building lines” (or remove the programs) before saving — building lines are never silently discarded.');
           return false;
         }
-        await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
+        const committed = await adminFetch(`/admin/estimates/${estimateId}/proposal`, {
           method: 'PUT',
           body: JSON.stringify(payload),
         });
+        // The version THIS save committed keys every later save and the
+        // delivery review — never a version observed on the reload, which
+        // could belong to another editor's save (pre-push codex P1 r3).
+        const committedVersion = committed?.editVersion || null;
+        if (committedVersion) loadedVersionRef.current = committedVersion;
         // What this PUT just persisted is now the server-side truth — a
         // retry (concurrent edit) must guard against discarding it even
         // before applyLoaded refreshes loadedAuthored.
@@ -835,7 +840,15 @@ function CommercialProposalEditor() {
         // #3297 r2). Direct fetch, NOT reload(): reload swallows its error
         // into the page-level banner and resolves (codex #3297 r3).
         const fresh = await adminFetch(`/admin/estimates/${estimateId}/proposal`);
-        loadedVersionRef.current = fresh.estimate?.editVersion;
+        if (committedVersion && fresh.estimate?.editVersion && fresh.estimate.editVersion !== committedVersion) {
+          // Another editor saved between this PUT and its reload: their
+          // content is on the server under a newer version. Applying it
+          // here would drop it from view while keeping ours in the form;
+          // adopting its version would let the next save overwrite it.
+          setError('The proposal was changed by another editor right after your save. Reload to review the latest version before editing further.');
+          return false;
+        }
+        if (!committedVersion) loadedVersionRef.current = fresh.estimate?.editVersion;
         if (editGenRef.current === genAtSave) {
           applyLoaded(fresh);
           setDirty(false);

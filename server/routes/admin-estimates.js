@@ -4105,7 +4105,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // fresh delivery claim (GH codex P1 r32): an anchor accepted mid-handoff
     // leaves 'sending' while the automated link is still being delivered.
     const retry = (message) => { const err = new Error(message); err.statusCode = 409; return err; };
-    const updatedCount = await db.transaction(async (trx) => {
+    const { updatedCount, editVersion: committedEditVersion } = await db.transaction(async (trx) => {
     const observed = await trx('estimates').where({ id: estimate.id }).first('id', 'estimate_group_id');
     if (!observed) throw retry('This estimate changed while you were editing — reload and retry.');
     const groupId = observed.estimate_group_id || null;
@@ -4203,7 +4203,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
-    return updateQuery.update({
+    const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
       // Authored totals are NOT engine output: the engine stamp a generated
@@ -4221,6 +4221,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
       updated_at: db.fn.now(),
     });
+    if (!count) return { updatedCount: 0 };
+    // The version THIS write committed, read under the same lock: the editor
+    // keys its next save and its delivery review on it, so a save that lands
+    // in the window before the editor's reload cannot be adopted as if it
+    // were this one (pre-push codex P1 r3 on #4305).
+    const committed = await trx('estimates').where({ id: estimate.id }).first();
+    return { updatedCount: count, editVersion: committed ? estimateEditVersion(committed) : null };
     });
     if (!updatedCount) {
       return res.status(409).json({
@@ -4231,7 +4238,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     }
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
-    res.json({ success: true, proposal: normalized, totals });
+    res.json({ success: true, proposal: normalized, totals, editVersion: committedEditVersion });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);

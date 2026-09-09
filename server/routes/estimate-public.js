@@ -5792,7 +5792,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   if (commercialProposal && featureGates.isEnabled('estimateCommercialGlass')) {
     try {
       const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
-      const { formatLineBasis } = require('../../shared/proposal-bid.cjs');
+      const { formatLineBasis, showsLineBasis } = require('../../shared/proposal-bid.cjs');
       // renderPage carries the parsed estimate_data separately — hand the
       // normalizer the estData it already trusts, not whatever serialization
       // rides the row object.
@@ -5810,7 +5810,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${building.note ? `<div class="proposal-building-note">${escapeHtml(building.note)}</div>` : ''}
         ${(building.lineItems || []).map((item) => `
         <div class="proposal-line">
-          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${(item.unit || Number(item.quantity) !== 1) ? `<span class="proposal-line-basis">${escapeHtml(formatLineBasis(item))}</span>` : ''}</span>
+          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${showsLineBasis(item) ? `<span class="proposal-line-basis">${escapeHtml(formatLineBasis(item))}</span>` : ''}</span>
           <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.taxable === true ? ' *' : ''}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
         </div>`).join('')}
       </div>`).join('');

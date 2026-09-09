@@ -11,9 +11,9 @@ const fixture = {
   estimate: { id: 'synthetic-proposal', status: 'draft', editVersion: 'loaded-version', customerName: 'Synthetic Office', customerEmail: 'office@example.invalid', customerPhone: '+19415550100' },
   proposal: { enabled: true, title: 'Synthetic proposal', buildings: [{ name: 'Office', lineItems: [{ description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false }] }] },
 };
-let saved; let previewVersion; let failSave; let calls;
+let saved; let previewVersion; let failSave; let calls; let interloperAfterSave;
 beforeEach(() => {
-  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = [];
+  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false;
   localStorage.setItem('waves_admin_token', 'synthetic-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), ...options });
@@ -26,7 +26,7 @@ beforeEach(() => {
     else if (String(url).endsWith('/send')) data = { channels: { email: { ok: true, real: true } } };
     else if (options.method === 'PUT') {
       if (failSave) { status = 409; data = { error: 'Proposal changed; reload.' }; }
-      else { saved.proposal = JSON.parse(options.body).proposal; saved.projectCosting = JSON.parse(options.body).projectCosting; saved.estimate.editVersion = 'saved-version'; previewVersion = 'saved-version'; data = {}; }
+      else { saved.proposal = JSON.parse(options.body).proposal; saved.projectCosting = JSON.parse(options.body).projectCosting; saved.estimate.editVersion = 'saved-version'; previewVersion = 'saved-version'; data = { editVersion: 'saved-version' }; if (interloperAfterSave) { saved.proposal = { ...saved.proposal, title: 'Interloper edit' }; saved.estimate.editVersion = 'interloper-version'; previewVersion = 'interloper-version'; } }
     } else data = saved;
     return { ok: status < 400, status, json: async () => structuredClone(data), clone() { return this; } };
   }));
@@ -122,4 +122,21 @@ it('retains edits and never opens delivery review after a failed save', async ()
   await waitFor(() => expect(screen.getByRole('button', { name: 'Review and send' })).toBeEnabled());
   expect(screen.getByDisplayValue('Unsaved proposal')).toBeInTheDocument();
   expect(calls.some((call) => /\/send(?:-preview)?$/.test(call.url))).toBe(false);
+});
+
+it('keys the next save on the version its PUT committed and refuses to adopt a concurrent save from the reload', async () => {
+  interloperAfterSave = true;
+  mount(); await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'My edit' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByText(/changed by another editor right after your save/);
+  expect(screen.queryByRole('button', { name: 'Saved' })).toBeNull();
+  // The form keeps the operator's text; the interloper's content was not silently swapped in.
+  expect(screen.getByDisplayValue('My edit')).toBeInTheDocument();
+  // A retry carries the version THIS editor committed, so the server's stale check sees the interloper.
+  interloperAfterSave = false; failSave = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByText('Proposal changed; reload.');
+  const puts = calls.filter((call) => call.method === 'PUT').map((call) => JSON.parse(call.body).expectedEditVersion);
+  expect(puts).toEqual(['loaded-version', 'saved-version']);
 });
