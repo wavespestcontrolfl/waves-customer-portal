@@ -2294,3 +2294,7 @@ A separate regression fix clears customer-specific notes and custom discounts wh
 
 **Why:** owner 2026-09-03 — "termite bait stations should be linked to inventory for price changes — this is an easy one". The catalog already carried $24 while quotes priced off the stale $22.05 literal.
 
+
+## 2026-09-08 — Record the Tech shared-foundation proof
+
+The accepted Tech migration reuses shared field/action accessibility and explicit touch density with Tech-owned tokens and the Today / Visit / Complete workflow. Recap text and actual rates use explicit, visit-scoped recovery; pending photos remain in memory while their dialog stays open. The Intelligence Bar retains its separate UX scope. Synthetic Chromium/WebKit evidence covers the actual visit, photo and nested marking workflows; physical camera, keyboard and home-screen checks remain required before release. Source and reproduction details are in `docs/design/tech-foundation-acceptance-2026-09-08.md`.
