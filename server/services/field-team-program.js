@@ -87,13 +87,25 @@ async function saveAllocation(input, actor) {
     if (prior) return prior;
     if (!await trx('services').where({ service_key: data.service_key }).first('id')) reject('Service key not found.', 404);
     if (data.property_id && !await trx('customer_properties').where({ id: data.property_id, customer_id: data.customer_id }).first('id')) reject('The property does not belong to this customer.');
-    const overlap = await trx('field_credit_allocations').where({ customer_id: data.customer_id, property_id: data.property_id, service_key: data.service_key, credit_type: data.credit_type })
+    const owners = await allocationCustomers(trx, data.customer_id);
+    const overlap = await trx('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: data.property_id, service_key: data.service_key, credit_type: data.credit_type })
       .where('coverage_start', '<=', data.coverage_end).where('coverage_end', '>=', data.coverage_start).first();
     if (overlap) reject('An allocation already covers this service and period. Use its original scheduled count.', 409);
     const [row] = await trx('field_credit_allocations').insert({ ...data, ...baseRow(data, actor) }).returning('*');
     await audit(trx, 'field_credit_allocations', row, actor);
     return row;
   });
+}
+
+// The merge journal retains original account identities. Follow only active
+// merges; never repoint immutable accepted-value history or duplicate its cap.
+async function allocationCustomers(conn, customerId) {
+  const result = await conn.raw(`WITH RECURSIVE owners(id) AS (
+    SELECT ?::uuid UNION
+    SELECT j.loser_customer_id FROM customer_merge_journal j
+    JOIN owners o ON j.winner_customer_id = o.id WHERE j.undone_at IS NULL
+  ) SELECT id FROM owners`, [customerId]);
+  return result.rows.map(row => row.id);
 }
 
 async function visitFacts(conn, id, lock = false) {
@@ -140,7 +152,8 @@ async function allocationForVisit(conn, data, visit) {
     return null;
   }
   const allocation = await conn('field_credit_allocations').where({ id: data.allocation_id }).forUpdate().first();
-  if (!allocation || allocation.customer_id !== visit.customer_id || allocation.property_id !== visit.property_id || allocation.service_key !== visit.service_key) reject('Use this property’s allocation for the same service key.');
+  const owners = await allocationCustomers(conn, visit.customer_id);
+  if (!allocation || !owners.includes(allocation.customer_id) || allocation.property_id !== visit.property_id || allocation.service_key !== visit.service_key) reject('Use this property’s allocation for the same service key.');
   if (visit.service_date < dateOnly(allocation.coverage_start) || visit.service_date > dateOnly(allocation.coverage_end)) reject('The service date is outside the allocation coverage period.');
   if (data.ordinal == null || data.ordinal > allocation.planned_visits) reject('Choose an application number within the original scheduled count.');
   const claim = await conn('field_service_evidence').where({ allocation_id: data.allocation_id, ordinal: data.ordinal, claims_allocation: true }).first();
@@ -362,9 +375,10 @@ async function visitOptions(technicianId, selectedMonth) {
 
 async function evidenceDetail(serviceId) {
   const visit = await visitFacts(db, serviceId);
+  const owners = await allocationCustomers(db, visit.customer_id);
   const [revisions, allocations, returns] = await Promise.all([
     db('field_service_evidence').where({ service_id: serviceId }).orderBy('revision', 'desc'),
-    db('field_credit_allocations').where({ customer_id: visit.customer_id, property_id: visit.property_id, service_key: visit.service_key }).orderBy('coverage_start', 'desc'),
+    db('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: visit.property_id, service_key: visit.service_key }).orderBy('coverage_start', 'desc'),
     db('scheduled_services as ss').leftJoin('services as s', 's.id', 'ss.service_id')
       .where({ 'ss.customer_id': visit.customer_id, 'ss.property_id': visit.property_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
       .where('ss.scheduled_date', '>=', visit.service_date).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
