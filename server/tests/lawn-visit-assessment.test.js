@@ -417,14 +417,28 @@ describe('run row', () => {
 });
 
 describe('legacy baseline on confirm', () => {
-  const knexWith = (existing) => () => ({ where() { return this; }, whereNot() { return this; }, first: async () => existing });
+  // A transaction stub: the customer's baseline lock (pg_advisory_xact_lock)
+  // must be taken BEFORE the existence check reads.
+  const trxWith = (existing) => {
+    const calls = [];
+    const trx = () => ({ where() { return this; }, whereNot() { return this; }, first: async () => { calls.push('check'); return existing; } });
+    trx.raw = async (sql, bindings) => { calls.push(`lock:${sql} ${JSON.stringify(bindings)}`); };
+    trx.calls = calls;
+    return trx;
+  };
   const args = { assessment: { id: 'a1', customer_id: 'c1' }, run: { id: 'r1' }, confirmed: true, propertyHistoryEnabled: false };
   test('a run-backed row becomes the customer baseline on the confirm that completes it, when none exists', async () => {
-    expect(await visit.legacyBaselineFields(args, knexWith(null))).toEqual({ is_baseline: true });
-    expect(await visit.legacyBaselineFields(args, knexWith({ id: 'older' }))).toEqual({});
-    expect(await visit.legacyBaselineFields({ ...args, confirmed: false }, knexWith(null))).toEqual({});
-    expect(await visit.legacyBaselineFields({ ...args, run: null }, knexWith(null))).toEqual({});
-    expect(await visit.legacyBaselineFields({ ...args, propertyHistoryEnabled: true }, knexWith(null))).toEqual({});
+    const trx = trxWith(null);
+    expect(await visit.legacyBaselineFields(args, trx)).toEqual({ is_baseline: true });
+    expect(trx.calls).toEqual(['lock:SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text)) ["lawn-baseline","c1"]', 'check']);
+    expect(await visit.legacyBaselineFields(args, trxWith({ id: 'older' }))).toEqual({});
+  });
+  test('a pending, pre-gate or property-history confirm neither stamps nor locks', async () => {
+    for (const variant of [{ confirmed: false }, { run: null }, { propertyHistoryEnabled: true }]) {
+      const trx = trxWith(null);
+      expect(await visit.legacyBaselineFields({ ...args, ...variant }, trx)).toEqual({});
+      expect(trx.calls).toEqual([]);
+    }
   });
 });
 

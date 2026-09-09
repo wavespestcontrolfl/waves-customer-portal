@@ -47,7 +47,7 @@ const {
 } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { CURATED_REFERENCE, AUTO_RELEASE_RULE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-prompt');
-const { FUNGUS_DISPLAY, THATCH_DISPLAY } = require('./lawn-assessment');
+const { FUNGUS_DISPLAY, THATCH_DISPLAY, lockCustomerBaseline } = require('./lawn-assessment');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
@@ -737,9 +737,15 @@ async function attachRunPhotos(runId, photoIds, knex) {
 // false — /assess never stamps it) and becomes the baseline on the confirm
 // that completes it, when the customer still has none; a property-history
 // confirm installs its baseline itself. Returns the update fields to spread.
-async function legacyBaselineFields({ assessment, run, confirmed, propertyHistoryEnabled }, knex) {
+// `trx` is the transaction the confirm's update runs in: the existence check
+// happens under the customer's baseline lock (pg_advisory_xact_lock, the one
+// installConfirmedBaseline takes), so two first confirms for one customer
+// serialize and the second sees the first's baseline — without it both read
+// "none yet" and both rows came out is_baseline (Codex #4150 r7).
+async function legacyBaselineFields({ assessment, run, confirmed, propertyHistoryEnabled }, trx) {
   if (!run || !confirmed || propertyHistoryEnabled) return {};
-  const existing = await knex('lawn_assessments').where({ customer_id: assessment.customer_id, is_baseline: true }).whereNot({ id: assessment.id }).first('id');
+  await lockCustomerBaseline(assessment.customer_id, trx);
+  const existing = await trx('lawn_assessments').where({ customer_id: assessment.customer_id, is_baseline: true }).whereNot({ id: assessment.id }).first('id');
   return existing ? {} : { is_baseline: true };
 }
 

@@ -125,6 +125,32 @@ const analysis = (overrides = {}) => ({
     expect(visit.responseForRun(again)).toMatchObject({ runId: run.id, status: 'complete', reviewedFindings: [expect.objectContaining({ keep: false })] });
   });
 
+  test('two first confirms for one customer serialize on the baseline lock: only the first becomes the legacy baseline', async () => {
+    const { customerId, assessment } = await seed();
+    const [later] = await db.knex('lawn_assessments').insert({ customer_id: customerId, service_date: '2026-09-09', turf_density: 70 }).returning('*');
+    const run = { id: 'run' };
+    const seen = [];
+    const confirm = (row, tag, hold) => db.knex.transaction(async (trx) => {
+      const fields = await visit.legacyBaselineFields({ assessment: row, run, confirmed: true, propertyHistoryEnabled: false }, trx);
+      seen.push(`${tag}:${fields.is_baseline ? 'baseline' : 'none'}`);
+      await hold;
+      await trx('lawn_assessments').where({ id: row.id }).update({ ...fields, confirmed_by_tech: true });
+    });
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const first = confirm(assessment, 'first', held);
+    while (!seen.length) await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = confirm(later, 'second', Promise.resolve());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    // The second confirm is waiting on the lock: it has not read yet.
+    expect(seen).toEqual(['first:baseline']);
+    release();
+    await Promise.all([first, second]);
+    expect(seen).toEqual(['first:baseline', 'second:none']);
+    const baselines = await db.knex('lawn_assessments').where({ customer_id: customerId, is_baseline: true });
+    expect(baselines.map((row) => row.id)).toEqual([assessment.id]);
+  });
+
   test('deleting the assessment cascades to its run', async () => {
     const { assessment } = await seed();
     await visit.recordRun({ assessment, analysis: analysis(), photoRecords: [] }, db.knex);

@@ -1104,7 +1104,6 @@ router.post('/confirm', async (req, res, next) => {
 
     const updateData = {
       ...(confirmed ? { confirmed_by_tech: true, confirmed_at: new Date() } : {}),
-      ...(await visitAssessment.legacyBaselineFields({ assessment, run: visitRun, confirmed, propertyHistoryEnabled }, db)),
       updated_at: new Date(),
       ...finalScores,
       overall_score: overallScore,
@@ -1127,34 +1126,29 @@ router.post('/confirm', async (req, res, next) => {
       updateData.stress_flags = JSON.stringify(normalizedStressFlags);
     }
 
-    // Run-backed row whose confirm carries a review: the confirm and the
-    // review (kept findings reconciled against the products the technician
-    // confirmed) commit TOGETHER — a lost review can never ride a successful
-    // confirm. A score-only confirm from a client that never showed the
-    // findings is not a finding review and stamps nothing; a pre-gate row has
-    // no run and confirms exactly as before. A pending (incomplete) row is a
-    // plain update — installConfirmedBaseline stamps confirmed_by_tech and
-    // installs the row as the property baseline, which only a confirmed row
-    // may become.
+    // A run-backed row writes in ONE transaction: the legacy baseline check
+    // under the customer's baseline lock (legacyBaselineFields), the update,
+    // and — when the confirm carries a review (kept findings reconciled
+    // against the products the technician confirmed) — the review, so a lost
+    // review can never ride a successful confirm and two first confirms for
+    // one customer cannot both become the baseline. A score-only confirm from
+    // a client that never showed the findings is not a finding review and
+    // stamps nothing. A pending (incomplete) row is a plain update —
+    // installConfirmedBaseline stamps confirmed_by_tech and installs the row
+    // as the property baseline, which only a confirmed row may become. A
+    // pre-gate row has no run and confirms exactly as before.
     const installBaseline = propertyHistoryEnabled && confirmed;
-    let updated;
-    let reviewedVisitRun = null;
-    if (reviewedRun && visitReview.provided) {
-      ({ updated, reviewedVisitRun } = await db.transaction(async (trx) => {
-        const row = installBaseline
-          ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
-          : (await trx('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
-        const run = await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, trx);
-        return { updated: row, reviewedVisitRun: run };
-      }));
-    } else if (installBaseline) {
-      updated = await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: db });
-    } else {
-      [updated] = await db('lawn_assessments')
-        .where({ id: assessmentId })
-        .update(updateData)
-        .returning('*');
-    }
+    const writeConfirm = async (trx) => {
+      Object.assign(updateData, await visitAssessment.legacyBaselineFields({ assessment, run: visitRun, confirmed, propertyHistoryEnabled }, trx));
+      const row = installBaseline
+        ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: trx })
+        : (await trx('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
+      const run = reviewedRun && visitReview.provided
+        ? await visitAssessment.reviewRun({ run: visitRun, review: visitReview, technicianId: req.technicianId }, trx)
+        : null;
+      return { updated: row, reviewedVisitRun: run };
+    };
+    const { updated, reviewedVisitRun } = reviewedRun ? await db.transaction(writeConfirm) : await writeConfirm(db);
     if (protocolFieldChecksProvided) {
       await persistProtocolFieldChecks({ assessment: updated, checks: protocolFieldChecks });
       Object.assign(updated, protocolFieldChecks, { protocol_field_checks: protocolFieldChecks });
@@ -1214,7 +1208,11 @@ router.post('/confirm', async (req, res, next) => {
             const parts = [f, t, 95].filter(Number.isFinite);
             if (parts.length > 1) aiScores.stress_damage = Math.min(...parts);
           }
-          await LawnIntel.recordTechCalibration(assessmentId, aiScores, adjustedScores);
+          // The technician's side is the RESOLVED confirmation — every score
+          // the row confirmed with, including overrides an earlier confirm of
+          // an incomplete run already saved — not this request's payload,
+          // which may carry only the last missing field (Codex #4150 r7).
+          await LawnIntel.recordTechCalibration(assessmentId, aiScores, finalScores);
         }
 
         // Customer-facing steps — a run-backed row reaches here only once it
