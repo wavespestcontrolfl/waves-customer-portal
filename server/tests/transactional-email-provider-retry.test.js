@@ -11,7 +11,9 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: jest.fn((value) => String(value).replace(/\b[^\s@]+@[^\s@]+\b/g, '[redacted-email]')),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
-jest.mock('../services/visit-completion-summary', () => ({ summaryRetryAuthorized: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/visit-completion-summary', () => ({
+  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
+}));
 
 const retry = require('../services/transactional-email-provider-retry');
 const db = require('../models/db');
@@ -119,14 +121,14 @@ describe('transactional email provider retry classification', () => {
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
     emailTemplates.activeSuppressionFor.mockResolvedValue(null);
     const summary = require('../services/visit-completion-summary');
-    summary.summaryRetryAuthorized.mockResolvedValueOnce({ ok: false, reason: 'visit_summary_recipient_changed' });
+    summary.retrySummaryThroughHandoff.mockResolvedValueOnce({ ok: false, reason: 'visit_summary_recipient_changed' });
 
     const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
       send_attempt_token: 'attempt-2' });
     const result = await retry.retryOne(stored);
 
     expect(result).toMatchObject({ sent: false, stopped: true, reason: 'Suppressed before retry: visit_summary_recipient_changed' });
-    expect(summary.summaryRetryAuthorized).toHaveBeenCalledWith(stored);
+    expect(summary.retrySummaryThroughHandoff).toHaveBeenCalledWith(stored, expect.any(Function));
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
     expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
@@ -142,7 +144,7 @@ describe('transactional email provider retry classification', () => {
     emailTemplates.activeSuppressionFor.mockResolvedValue(null);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-3' });
     expect((await retry.retryOne(message({ send_attempt_token: 'attempt-3' }))).sent).toBe(true);
-    expect(require('../services/visit-completion-summary').summaryRetryAuthorized).not.toHaveBeenCalled();
+    expect(require('../services/visit-completion-summary').retrySummaryThroughHandoff).not.toHaveBeenCalled();
   });
 
   test('stops without touching SendGrid when the recipient became suppressed', async () => {

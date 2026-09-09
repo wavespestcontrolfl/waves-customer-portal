@@ -941,6 +941,14 @@ async function sendTemplate({
   // the send before dispatch (the row is marked failed, pre-provider); a
   // throw is logged and the send proceeds.
   onQueued = null,
+  // The email twin of the SMS sender's locked handoff: called with a
+  // `dispatch` that performs the actual provider request. The caller holds
+  // whatever authority rows it needs and awaits `dispatch()` while they are
+  // held. A refusal without dispatching aborts the queued attempt
+  // pre-provider (ABORTED_BEFORE_DISPATCH), a throw after dispatch began is
+  // the provider outcome, and a caller failure after acceptance keeps the
+  // acceptance.
+  withProviderHandoff = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   let template;
@@ -1205,6 +1213,27 @@ async function sendTemplate({
       return await resolveIdempotencyCollision(err, idempotencyKey);
     }
   }
+  // The caller's sibling lease is LOST (an overlapping worker owns the
+  // decision now), or its locked handoff refused: never dispatch this
+  // attempt. The queued row becomes a pre-provider failure — no provider id
+  // — so the customer-week reconciliation reads it as retryable, not as a
+  // delivery (codex #3565 gh-r20).
+  const abortBeforeDispatch = async () => {
+    const reason = ABORTED_BEFORE_DISPATCH;
+    let aborted;
+    try {
+      // Scoped to THIS queued attempt (id + queued + send_attempt_token),
+      // exactly like the provider-error path: a newer worker that has
+      // reclaimed the row owns a new token and must never be marked
+      // failed by this one (0 rows → leave it alone; still no dispatch).
+      [aborted] = await db('email_messages')
+        .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
+        .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
+    } catch (err) {
+      logger.warn(`[email-template-library] abort bookkeeping failed for ${templateKey}: ${err.message}`);
+    }
+    return { sent: false, aborted: true, reason, message: aborted || { ...message, status: 'failed', error_message: reason }, rendered };
+  };
   if (typeof onQueued === 'function') {
     let keep = true;
     try {
@@ -1212,48 +1241,58 @@ async function sendTemplate({
     } catch (err) {
       logger.warn(`[email-template-library] onQueued hook failed for ${templateKey}: ${err.message}`);
     }
-    if (!keep) {
-      // The caller's sibling lease is LOST (an overlapping worker owns the
-      // decision now): never dispatch this attempt. The queued row becomes
-      // a pre-provider failure — no provider id — so the customer-week
-      // reconciliation reads it as retryable, not as a delivery
-      // (codex #3565 gh-r20).
-      const reason = ABORTED_BEFORE_DISPATCH;
-      let aborted;
-      try {
-        // Scoped to THIS queued attempt (id + queued + send_attempt_token),
-        // exactly like the provider-error path: a newer worker that has
-        // reclaimed the row owns a new token and must never be marked
-        // failed by this one (0 rows → leave it alone; still no dispatch).
-        [aborted] = await db('email_messages')
-          .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
-          .update({ status: 'failed', error_message: reason, updated_at: new Date() }).returning('*');
-      } catch (err) {
-        logger.warn(`[email-template-library] abort bookkeeping failed for ${templateKey}: ${err.message}`);
-      }
-      return { sent: false, aborted: true, reason, message: aborted || { ...message, status: 'failed', error_message: reason }, rendered };
-    }
+    if (!keep) return abortBeforeDispatch();
   }
 
   try {
-    const result = await sendgrid.sendOne({
-      to,
-      fromEmail,
-      fromName,
-      replyTo,
-      subject: message.subject_snapshot,
-      html: rendered.html,
-      text: rendered.text,
-      categories: allCategories,
-      asmGroupId,
-      attachments,
-      // Echoed on every webhook event so bounce recovery can resolve this row
-      // even if a hard bounce arrives before provider_message_id is written (or
-      // SendGrid returns no X-Message-Id). The attempt token lets the webhook
-      // reject a stale prior-attempt event. See email-bounce-recovery.js.
-      customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
-      suppressErrorLog: suppressProviderErrorLog,
-    });
+    let result;
+    const dispatchToProvider = async () => {
+      result = await sendgrid.sendOne({
+        to,
+        fromEmail,
+        fromName,
+        replyTo,
+        subject: message.subject_snapshot,
+        html: rendered.html,
+        text: rendered.text,
+        categories: allCategories,
+        asmGroupId,
+        attachments,
+        // Echoed on every webhook event so bounce recovery can resolve this row
+        // even if a hard bounce arrives before provider_message_id is written (or
+        // SendGrid returns no X-Message-Id). The attempt token lets the webhook
+        // reject a stale prior-attempt event. See email-bounce-recovery.js.
+        customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
+        suppressErrorLog: suppressProviderErrorLog,
+      });
+    };
+    if (typeof withProviderHandoff === 'function') {
+      let dispatchStarted = false;
+      let verdict;
+      try {
+        verdict = await withProviderHandoff(async () => {
+          dispatchStarted = true;
+          await dispatchToProvider();
+        });
+      } catch (err) {
+        // The provider request itself failed: the existing provider-error
+        // path below classifies it.
+        if (dispatchStarted && !result) throw err;
+        if (!dispatchStarted) {
+          verdict = { ok: false, reason: err.message };
+        } else {
+          // The caller's guard failed to commit after SendGrid accepted.
+          // Preserve that acceptance so nobody resends this recipient.
+          logger.warn(`[email-template-library] provider handoff guard failed after acceptance for ${templateKey}: ${err.message}`);
+        }
+      }
+      if (!result) {
+        if (verdict?.ok !== true || !dispatchStarted) return abortBeforeDispatch();
+        throw new Error('provider handoff returned without a provider result');
+      }
+    } else {
+      await dispatchToProvider();
+    }
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via
     // custom_args.email_message_id before this commit) may have already moved the

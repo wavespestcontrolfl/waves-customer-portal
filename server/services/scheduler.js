@@ -3687,8 +3687,8 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
-            preDispatchCheck: () => require('./messaging/deferred-replay-registry')
-              .preDispatchDeferredReplay(claimMeta.entry_point, { ...claimMeta,
+            withSmsHandoff: require('./messaging/deferred-replay-registry')
+              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
                 customer_id: msg.customer_id || claimMeta.customer_id || null,
                 to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
@@ -3920,9 +3920,7 @@ function initScheduledJobs() {
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              // The provider's HTTP status is the replay's proof of a refusal
-              // (408/429/5xx = no message created) versus an ambiguous timeout.
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text, 'provider_retry_http_status', ?::int)", [completedAt, smsResult.code || null, Number.isInteger(smsResult.providerHttpStatus) ? smsResult.providerHttpStatus : null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
