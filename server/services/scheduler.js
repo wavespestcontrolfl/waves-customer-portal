@@ -2695,6 +2695,40 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY MONDAY 3:50AM ET — Voice relay conversation eval. Replays the
+  // synthetic-caller scenario fixture (server/fixtures/voice-relay-eval/)
+  // through the LIVE Sandy conversation loop and the pinned judge, in a CHILD
+  // PROCESS: each scenario sets the relay's gate env vars (context, booking,
+  // transfer, recovery) for its own run, and those must never touch the
+  // process that is answering real calls. The harness never closes a session
+  // (no call_log write, no capture floor) and refuses DB access while a
+  // scenario runs; the child emits one regression bell plus the existing
+  // ops digest/email on repeated failure. Judge telemetry uses its normal
+  // replay-labelled ledger lane. runExclusive: live model calls; don't double-spend on
+  // deploy-overlap ticks. Kill switch: GATE_VOICE_RELAY_EVAL=false.
+  // =========================================================================
+  cron.schedule('50 3 * * 1', async () => {
+    if (!isEnabled('voiceRelayEval')) return;
+    logger.info('Running: voice relay conversation eval');
+    try {
+      await runExclusive('voice-relay-eval', async () => {
+        const { runVoiceRelayEvalProcess, summaryLine } = require('./eval/voice-relay-replay');
+        const result = await runVoiceRelayEvalProcess();
+        logger.info(`Voice relay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
+      });
+    } catch (err) {
+      // The child could not send its own alert (crash / timeout / no JSON):
+      // page through the same inconclusive path, never a log line alone.
+      logger.error(`Voice relay eval failed: ${err.message}`);
+      try {
+        await require('./eval/voice-relay-replay').notifyEvalCrash(err);
+      } catch (notifyErr) {
+        logger.error(`Voice relay eval crash notification failed: ${notifyErr.message}`);
+      }
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
   // 'expired' status and nothing else transitions an event out of its fresh
   // state once its date passes, so a one_time/annual event would keep its high
@@ -3704,6 +3738,10 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
+                service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
+                request_status_version: claimMeta.request_status_version,
+                request_updated_at: claimMeta.request_updated_at } : {}),
               useCustomerChannel: claimMeta.useCustomerChannel === true,
               bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
@@ -4055,6 +4093,16 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MIN — Retry queued service report v1 email deliveries
   // =========================================================================
+  // Saved visit packets outlive their creation gate. Resume through the
+  // canonical member and effect claims after a process restart.
+  cron.schedule('2-57/5 * * * *', async () => {
+    try {
+      await runExclusive('visit-closeout-resume', () => require('./visit-completion-packets').resumePendingVisitCompletions());
+    } catch (err) {
+      logger.error(`[visit-closeout] resume sweep failed (${err.name || 'Error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { processDueServiceReportDeliveries } = require('./service-report/delivery-queue');
@@ -4283,17 +4331,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // EVERY 2 MINUTES — Call-alert durable retry (owner ruling
   // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
   // post-call timer is in-memory and the sweep window is 24h, so a Gmail
   // hang must never be able to starve it (hook P1).
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
-    try {
-      await require('./missed-call-bell').sweepMissedCalls();
-    } catch (err) {
-      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
-    }
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
+      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
+    ]);
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller'][index]} sweep failed: ${result.reason.message}`);
+    });
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -6027,7 +6077,7 @@ function initScheduledJobs() {
       await runExclusive('billing-monthly', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processMonthlyBilling();
-        logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+        logger.info(`Monthly billing done: ${result.charged} charged, ${result.processing} processing, ${result.failed} failed, ${result.skipped} skipped`);
       });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
@@ -6039,7 +6089,7 @@ function initScheduledJobs() {
       await runExclusive('billing-retries', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processPaymentRetries();
-        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded, ${result.processing} processing`);
       });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);

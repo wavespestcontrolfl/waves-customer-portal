@@ -94,14 +94,18 @@ const SCHEDULE_TOOLS = [
   },
   {
     name: 'find_schedule_gaps',
-    description: `Find open capacity/gaps in the schedule for a date or date range. Shows which techs have room for more stops, and which zones are underserved. Useful for "any room on Tuesday?" or "where can I fit 3 more pest stops this week?"`,
+    description: `Inspect schedule gaps for a date or date range. When schedule-quality measurements are enabled, reports stored service minutes, modeled driving/waiting, overlaps and unknown capacity; gross gaps or minute budgets never prove an extra visit fits. candidate_service_id tests a specific existing visit against the saved route and known constraints; suggested times still require staff review of commitments/access and a locked save recheck. Supply the operator's workday/break allowance if known; never invent it. Otherwise returns legacy stop-count estimates, which are not bookable capacity.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD single day' },
         date_from: { type: 'string', description: 'Start of range' },
         date_to: { type: 'string', description: 'End of range' },
-        service_type: { type: 'string', description: 'Optional: filter capacity for a specific service type' },
+        service_type: { type: 'string', description: 'Requested service; all existing work still counts toward the route workload.' },
+        candidate_service_id: { type: 'string', format: 'uuid', description: 'Existing appointment to test in the gaps. Loads its stored location/duration; does not move it or assume customer permission.' },
+        departure_time: { type: 'string', description: 'Known departure time, HH:MM; otherwise the route model uses 08:00.' },
+        target_return_time: { type: 'string', description: 'Operator-provided target return to base, HH:MM. Omit if unknown.' },
+        break_minutes: { type: 'number', minimum: 0, description: 'Operator-provided daily lunch/restock allowance. Omit if unknown.' },
       },
     },
   },
@@ -1522,6 +1526,9 @@ async function swapTechAssignments(input, actionContext = {}) {
 
 
 async function findScheduleGaps(input) {
+  if (require('../../config/feature-gates').gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS')) {
+    return require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db);
+  }
   const { date, date_from, date_to, service_type } = input;
   const MAX_STOPS_PER_DAY = 10;
 

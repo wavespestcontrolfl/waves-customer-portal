@@ -1949,7 +1949,7 @@ function UnitReviewTab({ showToast }) {
 // ══════════════════════════════════════════════════════════════
 // PRODUCTS TAB — with inline editing
 // ══════════════════════════════════════════════════════════════
-function ProductsTab({
+export function ProductsTab({
   showToast,
   filter = "all",
   onFilterChange,
@@ -1973,6 +1973,7 @@ function ProductsTab({
   const [search, setSearch] = useState("");
   const [catFilter, setCatFilter] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -2000,20 +2001,28 @@ function ProductsTab({
           ? "&needsPricing=false"
           : "";
     const stockParam = filter === "low_stock" ? "&stock=low" : "";
-    const [pData, vData] = await Promise.all([
-      adminFetch(
-        `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
-      ),
-      // Vendors are owner-only under the role lockdown — a technician's
-      // Products load must not hang on that 403 (codex P1). Empty vendor
-      // list just hides per-vendor pricing affordances they can't use.
-      adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
-    ]);
-    setProducts(pData.products || []);
-    setCategories(pData.categories || []);
-    setTotalProducts(pData.total || 0);
-    setVendors(vData.vendors || []);
-    setLoading(false);
+    try {
+      const [pData, vData] = await Promise.all([
+        adminFetch(
+          `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
+        ),
+        // Vendors are owner-only under the role lockdown — a technician's
+        // Products load must not hang on that 403 (codex P1). Empty vendor
+        // list just hides per-vendor pricing affordances they can't use.
+        adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
+      ]);
+      setProducts(pData.products || []);
+      setCategories(pData.categories || []);
+      setTotalProducts(pData.total || 0);
+      setVendors(vData.vendors || []);
+      setLoadError(null);
+    } catch (e) {
+      // The products request had no catch, so a non-2xx left
+      // "Loading products..." up forever (UI audit F0474).
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      setLoading(false);
+    }
   }, [search, catFilter, page, filter]);
 
   useEffect(() => {
@@ -2070,6 +2079,25 @@ function ProductsTab({
     }
   };
 
+  if (loadError)
+    return (
+      <div role="alert" style={{ color: D.red, padding: 40, textAlign: "center" }}>
+        Failed to load products: {loadError}{" "}
+        <button
+          type="button"
+          style={{ ...sBtn(D.teal, D.white), marginLeft: 8 }}
+          onClick={() => {
+            // Clear the error first so the loading branch renders during the
+            // retry; leaving it up allowed repeated clicks and overlapping loads.
+            setLoadError(null);
+            setLoading(true);
+            load();
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    );
   if (loading)
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>

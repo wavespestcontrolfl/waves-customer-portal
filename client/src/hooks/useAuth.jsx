@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
+import { clearNativeBadge } from '../native/nativeBadge';
 
 const AuthContext = createContext(null);
 
@@ -43,6 +44,19 @@ function tokenSessionIdentity(token) {
   }
 }
 
+// Selected saved property baked into the session JWT (GATE_APP_PROPERTY_SCOPE;
+// server/middleware/auth.js `propertyId` claim). Null when the token carries
+// none (profile scope, or the primary).
+export function tokenPropertyId(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=')));
+    return payload.propertyId == null ? null : String(payload.propertyId);
+  } catch {
+    return null;
+  }
+}
+
 // Same ASYMMETRIC semantics as api.js sameRequestSession: only the OLD
 // (current) side wildcards — a legacy token with no sessionId upgrading
 // into a durable family via its first routine refresh is the same session,
@@ -53,6 +67,39 @@ function sameSessionFamily(a, b) {
   return !!a && !!b
     && a.customerId === b.customerId
     && (a.sessionId === null || a.sessionId === b.sessionId);
+}
+
+// Saved-property entries (GET /auth/properties?scope=saved, GATE_APP_PROPERTY_SCOPE)
+// rendered through the client property shape every switcher already uses
+// (id / profileLabel / isPrimaryProfile / address / tier), keyed by the entry
+// key so three saved properties on one profile stay distinct. The label is
+// what the picker, the chips and the Visits header print.
+export function savedPropertyDisplayLabel(entry) {
+  if (entry.label && entry.label !== 'Primary') return entry.label;
+  if (entry.isPrimaryProperty) {
+    return entry.profileLabel && entry.profileLabel !== 'Primary' ? entry.profileLabel : 'Home';
+  }
+  // Secondary saved property: the street keeps two "Family home" entries apart.
+  return entry.address?.line1 || 'Property';
+}
+
+export function toClientProperty(entry) {
+  return {
+    ...entry,
+    id: entry.key,
+    profileLabel: savedPropertyDisplayLabel(entry),
+    // "Primary residence" (home tile) = the primary profile's primary property.
+    isPrimaryProfile: entry.isPrimaryProfile === true && entry.isPrimaryProperty === true,
+  };
+}
+
+// Pure: the /auth/properties payload → { scope, properties, selected }.
+// A profile-list answer (gate off, or an older server) keeps today's shape.
+export function applyPropertyPayload(data) {
+  if (data?.scope === 'saved') {
+    return { scope: 'saved', properties: (data.properties || []).map(toClientProperty), selected: data.selected || null };
+  }
+  return { scope: 'profile', properties: data?.properties || [], selected: null };
 }
 
 function authErrorCopy(err) {
@@ -71,9 +118,41 @@ export function AuthProvider({ children }) {
   const [customer, setCustomer] = useState(null);
   const [properties, setProperties] = useState([]);
   const [propertiesError, setPropertiesError] = useState(null);
+  // Saved-property scope: which list shape `properties` holds ('profile' |
+  // 'saved') and the session's current selection { key, customerId, propertyId }.
+  const [propertyScope, setPropertyScope] = useState('profile');
+  const propertyScopeRef = useRef('profile');
+  const [selectedProperty, setSelectedProperty] = useState(null);
+  // Mirror of `properties` for the storage handler (stable callback, stale closure).
+  const propertiesRef = useRef([]);
+  useEffect(() => { propertiesRef.current = properties; }, [properties]);
+  const adoptPropertyPayload = (data) => {
+    const payload = applyPropertyPayload(data);
+    propertyScopeRef.current = payload.scope;
+    setPropertyScope(payload.scope);
+    setProperties(payload.properties);
+    setSelectedProperty(payload.selected);
+  };
+  // Session boundary (logout, a new login, another tab's sign-out or a
+  // different customer's token): the previous session's selection must never
+  // outlive it — a later failed list read would otherwise leave a stale house
+  // selected while the new token scopes reads elsewhere (codex #4207 r1c).
+  const resetPropertyScope = () => {
+    propertyScopeRef.current = 'profile';
+    setPropertyScope('profile');
+    setSelectedProperty(null);
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const retryTimer = useRef(null);
+  // Property-list reads race: loadCustomer's read, refreshProperties (the
+  // shared refresh cycle, the revalidator — whose 15s bound abandons but
+  // does not cancel the underlying request) and a later switch overlap
+  // under ONE session epoch. Only the LATEST-issued read may adopt its
+  // payload or its failure (uncapped codex r1s P1): a delayed older response
+  // would otherwise restore a retired house's selection after a newer read
+  // already adopted the fallback.
+  const propertyReadSeqRef = useRef(0);
   const logoutTokenReleaseRef = useRef(null);
   // Mirrors `customer` for reads inside the stable loadCustomer callback
   // (empty deps ⇒ stale closure) — the transient branch needs to know
@@ -86,6 +165,7 @@ export function AuthProvider({ children }) {
   // Sign out, and a slow /auth/me must not paint a previous identity over
   // the one the current token authenticates (last-response-wins).
   const sessionEpochRef = useRef(0);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -94,11 +174,59 @@ export function AuthProvider({ children }) {
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       loadCustomer();
     } else {
+      void clearNativeBadge();
       setLoading(false);
     }
     return () => {
       if (retryTimer.current) clearTimeout(retryTimer.current);
     };
+  }, []);
+
+  // The list could not be read: scope the session from what /auth/me
+  // resolved instead. Split from loadCustomer so the load and this
+  // reconciliation stay separately readable (GitHub codex r13 P2). Refs and
+  // setters only — stable.
+  const adoptScopeFromMe = useCallback((data) => {
+    // A saved-property session scopes every read to the selection the
+    // SERVER RESOLVED even when the list cannot be read (codex #4207 r1 /
+    // r1e / r1w): take it from /auth/me's `propertyScope` — the honored
+    // claim, else the fallback the server chose (a lone secondary after
+    // the primary was retired), else `closed` — never the raw token
+    // claim. The entry details arrive with the next refresh.
+    const claimed = data?.propertyScope?.propertyId ? String(data.propertyScope.propertyId) : null;
+    if (data?.propertyScope && data.propertyScope.enabled === false) {
+      // The server is NOT scoping this session (gate off, cancelled): the
+      // saved-property labels must go with it, even though the list could
+      // not be re-read — composite entries would otherwise dress
+      // customer-wide reads as one house. The next successful list read
+      // (profile shape) restores the switcher.
+      resetPropertyScope();
+      if (propertiesRef.current.some((p) => p.key)) setProperties([]);
+    } else if (data?.propertyScope?.closed === true && data?.id) {
+      // Every saved property of this profile retired — the server resolved
+      // NO house (uncapped codex r1w P1): the session is scoped to nothing
+      // selectable. Saved scope with a null-key selection, which the page
+      // reads as "property unavailable" (no address, the profile-scoped
+      // My Property notice, no ticket) — never the retired primary's
+      // screens. A successful list read lands the same shape.
+      propertyScopeRef.current = 'saved';
+      setPropertyScope('saved');
+      setSelectedProperty({ key: null, customerId: data.id, propertyId: null, closed: true });
+    } else if (claimed && data?.id) {
+      setSelectedProperty((prev) => (prev && String(prev.propertyId) === claimed && String(prev.customerId) === String(data.id)
+        ? prev
+        : { key: `${data.id}:${claimed}`, customerId: data.id, propertyId: claimed }));
+    } else {
+      // No claim = this profile's PRIMARY. Resolve it from the entries
+      // already held (a profile-only switch keeps the unified list, and
+      // customer.id matches no composite key), else leave the selection
+      // unavailable — never a leftover house from an earlier session.
+      const mine = (propertiesRef.current || []).filter((p) => String(p.customerId || p.id) === String(data?.id));
+      const primaryEntry = mine.find((p) => p.isPrimaryProperty) || (mine.length === 1 ? mine[0] : null);
+      setSelectedProperty(primaryEntry && primaryEntry.propertyId !== undefined
+        ? { key: primaryEntry.id, customerId: primaryEntry.customerId, propertyId: primaryEntry.propertyId }
+        : null);
+    }
   }, []);
 
   const loadCustomer = useCallback(async (attempt) => {
@@ -116,13 +244,19 @@ export function AuthProvider({ children }) {
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
+      // Cancelled accounts never mount the bell, including on a fresh launch.
+      if (data?.cancelled === true) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
+      const propertyReadSeq = ++propertyReadSeqRef.current;
       try {
-        const propertyData = await api.getAuthProperties();
+        const propertyData = await api.getAuthProperties({ scope: 'saved' });
         if (sessionEpochRef.current !== epoch) return;
-        setProperties(propertyData.properties || []);
-        setPropertiesError(null);
+        // Superseded by a newer list read: that read owns the selection.
+        if (propertyReadSeqRef.current === propertyReadSeq) {
+          adoptPropertyPayload(propertyData);
+          setPropertiesError(null);
+        }
       } catch (propertyErr) {
         // Same staleness rule as the success path: if the session changed
         // while this secondary fetch was in flight, this failure describes a
@@ -130,11 +264,16 @@ export function AuthProvider({ children }) {
         // (setLoading(false) below) while the previous customer's state is
         // still rendered under the new token.
         if (sessionEpochRef.current !== epoch) return;
-        // The active customer is still valid. Preserve any property list we
-        // already have instead of collapsing a multi-property account to a
-        // single property, and surface a retry in the account menu.
-        console.error('Failed to load service properties:', propertyErr);
-        setPropertiesError('Other service properties are temporarily unavailable.');
+        // A newer list read is in flight or has landed: it owns the
+        // selection and the error state; this stale failure changes nothing.
+        if (propertyReadSeqRef.current === propertyReadSeq) {
+          adoptScopeFromMe(data);
+          // The active customer is still valid. Preserve any property list we
+          // already have instead of collapsing a multi-property account to a
+          // single property, and surface a retry in the account menu.
+          console.error('Failed to load service properties:', propertyErr);
+          setPropertiesError('Other service properties are temporarily unavailable.');
+        }
       }
       setError(null);
       // Now authenticated — flush any APNs token captured before login (native
@@ -153,7 +292,7 @@ export function AuthProvider({ children }) {
         // (a concurrent property switch, another load) must be discarded
         // too, or its later success would adopt tokens / repaint the
         // customer and undo this sign-out.
-        sessionEpochRef.current += 1;
+        setSessionEpoch(++sessionEpochRef.current);
         api.clearTokens();
         customerRef.current = null;
         setCustomer(null);
@@ -199,11 +338,12 @@ export function AuthProvider({ children }) {
         retryTimer.current = null;
       }
       if (!token) {
-        sessionEpochRef.current += 1;
+        setSessionEpoch(++sessionEpochRef.current);
         api.clearTokens();
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        resetPropertyScope();
         setPropertiesError(null);
         setError(null);
         setLoading(false);
@@ -220,8 +360,28 @@ export function AuthProvider({ children }) {
       // this tab's in-flight flows (e.g. a property switch mid-await) —
       // that identity is still current (Codex #2859 r1+r2+r3).
       const familyChanged = !sameSessionFamily(tokenSessionIdentity(api.token), tokenSessionIdentity(token));
-      if (familyChanged) sessionEpochRef.current += 1;
+      // A same-profile SAVED-PROPERTY switch in another tab rotates the
+      // family but changes the token's propertyId. The selection this tab
+      // shows must follow it, and a property list still in flight from
+      // BEFORE the switch must not land afterwards and paint the previous
+      // selection — so it counts as an identity transition for the epoch.
+      const propertyChanged = tokenPropertyId(api.token) !== tokenPropertyId(token);
+      if (familyChanged || propertyChanged) setSessionEpoch(++sessionEpochRef.current);
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
+      if (propertyChanged && !identityChanged) {
+        // The previous selection is gone the moment the token changes, and
+        // the new one is NOT reconstructed from the raw claim (the server may
+        // ignore it: retired property, gate off). Go PENDING exactly like a
+        // profile switch (codex #4207 r1g P1): the old customer must not keep
+        // rendering house A's label while requests already run under house
+        // B's token; loadCustomer below adopts the selection the server
+        // honored (/auth/me propertyScope, then the list), and its retry
+        // branch keeps the shell pending on failure.
+        setSelectedProperty(null);
+        customerRef.current = null;
+        setCustomer(null);
+        setLoading(true);
+      }
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
         // keep rendering (and firing actions) against it while loadCustomer
@@ -230,6 +390,7 @@ export function AuthProvider({ children }) {
         customerRef.current = null;
         setCustomer(null);
         setProperties([]);
+        resetPropertyScope();
         setPropertiesError(null);
         setError(null);
         setLoading(true);
@@ -261,8 +422,9 @@ export function AuthProvider({ children }) {
       const data = await api.verifyCode(phone, code);
       // Another tab logged in / adopted a session while the code verified.
       if (sessionEpochRef.current !== epoch) return false;
-      sessionEpochRef.current += 1;
+      setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
+      resetPropertyScope();
       setProperties(data.properties || []);
       setPropertiesError(null);
       await loadCustomer();
@@ -274,10 +436,11 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    void clearNativeBadge();
     // Invalidate every in-flight auth response (property switch, /auth/me)
     // — without this, a delayed switch response re-writes tokens after
     // sign-out and walks the user back into the portal.
-    sessionEpochRef.current += 1;
+    setSessionEpoch(++sessionEpochRef.current);
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -288,6 +451,7 @@ export function AuthProvider({ children }) {
     customerRef.current = null;
     setCustomer(null);
     setProperties([]);
+    resetPropertyScope();
     setPropertiesError(null);
     setError(null);
     setLoading(false);
@@ -324,47 +488,75 @@ export function AuthProvider({ children }) {
     });
   };
 
-  const refreshProperties = async () => {
+  // Stable identity (uncapped codex r1t P1): the tabs re-read the list from
+  // an effect keyed on this callback; a new function per provider render
+  // would re-fire that effect after every successful refresh — an endless
+  // loop while the selection stays stale (every property retired). Only
+  // refs and setters inside, so an empty dependency list is exact.
+  const refreshProperties = useCallback(async () => {
     // Same staleness rule as loadCustomer: a response (or failure) that
     // started under a superseded session must not overwrite the new
     // session's property list or surface its error.
     const epoch = sessionEpochRef.current;
+    const seq = ++propertyReadSeqRef.current;
     try {
-      const data = await api.getAuthProperties();
+      const data = await api.getAuthProperties({ scope: 'saved' });
       if (sessionEpochRef.current !== epoch) return false;
-      setProperties(data.properties || []);
+      // Superseded by a newer list read (uncapped codex r1s P1): a delayed
+      // response must not restore a house a newer read already retired.
+      if (propertyReadSeqRef.current !== seq) return false;
+      adoptPropertyPayload(data);
       setPropertiesError(null);
       return true;
     } catch (err) {
-      if (sessionEpochRef.current !== epoch) return false;
+      if (sessionEpochRef.current !== epoch || propertyReadSeqRef.current !== seq) return false;
       console.error('Failed to reload service properties:', err);
       setPropertiesError('Other service properties are temporarily unavailable.');
       return false;
     }
-  };
+  }, []);
 
-  const switchProperty = async (customerId) => {
+  // target: a profile id (string — every shipped caller) or a saved-property
+  // pair { customerId, propertyId } (GATE_APP_PROPERTY_SCOPE). A same-profile
+  // property switch re-issues the tokens with the new claim; every read then
+  // re-scopes exactly as a profile switch does.
+  const switchProperty = async (target) => {
+    const { customerId, propertyId = null } = typeof target === 'string' ? { customerId: target } : (target || {});
+    if (!customerId) return false;
     setError(null);
     try {
       const epoch = sessionEpochRef.current;
-      const data = await api.selectAuthProperty(customerId);
+      const data = await api.selectAuthProperty(customerId, propertyId);
       // Signed out (or superseded by another transition) while the switch
       // was in flight — the response must not restore credentials. The
       // server has revoked the family on logout, so the returned tokens are
       // a ≤15-minute zombie; never adopt them.
       if (sessionEpochRef.current !== epoch) return false;
-      sessionEpochRef.current += 1;
+      setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
       // Re-point this device's push subscription at the newly selected
       // customer — otherwise pushes keep flowing to the previous property.
-      repostNativePushToken();
+      // (The subscription follows the customer ROW; a same-profile saved-
+      // property switch keeps it.)
+      if (String(customerId) !== String(customerRef.current?.id)) repostNativePushToken();
       // The token now points at the TARGET property — the old customer must
       // not keep rendering (and firing actions) against it if the reload
       // hits a transient failure. Go pending until the target customer
       // loads; loadCustomer's retry branch keeps it pending on failure.
       customerRef.current = null;
       setLoading(true);
-      setProperties(data.properties || []);
+      // The switch response carries the PROFILE list (shipped-client shape).
+      // Under the saved-property scope the unified list is re-read by
+      // loadCustomer (GET /auth/properties?scope=saved); adopting the profile
+      // list here would collapse three saved properties into one entry.
+      if (propertyScopeRef.current !== 'saved') setProperties(data.properties || []);
+      // The switch response names the selection by ids; the entry key the
+      // page compares against is derived the same way the server keys its
+      // list (`customerId:propertyId`, or `:profile` for a row-less profile).
+      if (data.selected) {
+        const sel = data.selected;
+        setSelectedProperty({ ...sel, key: sel.key || `${sel.customerId}:${sel.propertyId || 'profile'}` });
+      }
       setPropertiesError(null);
       await loadCustomer();
       return true;
@@ -377,8 +569,11 @@ export function AuthProvider({ children }) {
   return (
     <AuthContext.Provider value={{
       customer,
+      sessionEpoch,
       properties,
       propertiesError,
+      propertyScope,
+      selectedProperty,
       loading,
       error,
       isAuthenticated: !!customer,
