@@ -6,6 +6,7 @@
  */
 jest.mock('../models/db', () => {
   const fn = jest.fn();
+  fn.transaction = jest.fn(async (run) => run(fn));
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
   return fn;
 });

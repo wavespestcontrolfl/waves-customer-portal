@@ -7,7 +7,7 @@ New unit and validity controls are behind `GATE_COMMERCIAL_BID_BUILDER`, off by 
 ## Author a bid
 
 1. Add building or area line items using reviewed treatment quantities. Quantities and unit prices support four decimal places; each extended charge rounds to cents. Choose square feet, linear feet, acres, pounds, gallons, each, lump sum, hours, days, or trips. Record scope, drawing references, phases, and contractual requirements in the existing scope, building-note, and terms fields.
-2. Set **Valid through (Eastern time)** to the required end date. A fixed date lasts through 11:59:59.999 p.m. Eastern and survives resends. Sending or scheduling after it is refused. Automatic renewal and generic extensions do not change it. An expired fixed-date bid can be explicitly revised in this editor. A blank date retains the standard seven-day send window.
+2. Set **Valid through (Eastern time)** to the required end date. A fixed date lasts through 11:59:59.999 p.m. Eastern and survives resends. Sending or scheduling after it is refused. Automatic renewal and generic extensions do not change it. A grouped extension refuses before changing any property if a revivable sibling has a fixed date; proposal edits and the extension share the group lock. Ordinary siblings keep their own seven-day send window. An expired fixed-date bid can be explicitly revised in this editor. A blank date retains the standard seven-day send window.
 3. Save, review the quoted quantities, prices and terms, then download the branded proposal.
 
 Quantities are operator-reviewed inputs. Building coverage, gross floor area and treated slab area are different measurements. Application rates must come from the reviewed scope and business inputs.

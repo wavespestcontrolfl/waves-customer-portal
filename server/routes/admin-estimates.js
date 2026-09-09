@@ -2996,7 +2996,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // final attempt the sibling is released for an operator re-send.
           // A sibling is delivered by the anchor's handoff — the same
           // real-channel test decides whether its scope stamp moves.
-          const siblingExpiry = proposalExpiry(sibling) || nextExpiresAt;
+          const siblingExpiry = estimateExpiresAt(now, sibling);
           const snapshot = await buildEstimateSendSnapshot({ ...sibling, expires_at: siblingExpiry }, now, { delivered: stampChannels.length > 0, deliveredAt: lastDeliveredAt });
           if (!snapshot?.sendSnapshot || snapshot.sendSnapshot.pricingBundleError) {
             throw new Error(`sibling send snapshot did not freeze pricing${snapshot?.sendSnapshot?.pricingBundleError ? `: ${snapshot.sendSnapshot.pricingBundleError}` : ''}`);
@@ -3087,7 +3087,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // Forward-only expiry inside the SET (not the WHERE): a sibling
           // already extended past this send still needs its reminder flags
           // burned — the anchor owns all group comms (codex #3244 r5).
-          expires_at: db.raw(`CASE WHEN ${FIXED_BID_VALIDITY_ABSENT_SQL} THEN GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz) ELSE expires_at END`, [nextExpiresAt, nextExpiresAt]),
+          expires_at: db.raw(`CASE WHEN ${FIXED_BID_VALIDITY_ABSENT_SQL} THEN GREATEST(COALESCE(expires_at, ?::timestamptz), ?::timestamptz) ELSE expires_at END`, [estimateExpiresAt(now), estimateExpiresAt(now)]),
           followup_unviewed_sent: true,
           followup_viewed_sent: true,
           followup_final_sent: true,

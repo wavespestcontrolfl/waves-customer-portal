@@ -22,6 +22,7 @@ jest.mock('../models/db', () => {
     });
     return b;
   });
+  dbFn.transaction = jest.fn(async (run) => run(dbFn));
   dbFn.fn = { now: jest.fn(() => 'NOW()') };
   dbFn._deletes = mockDeletes;
   dbFn._raws = mockRaws;
@@ -125,6 +126,24 @@ describe('extendEstimate validation (pre-write throws)', () => {
       estimate: { id: 'group-anchor', estimate_group_id: 'fixed-group', status: 'viewed', sent_at: PAST, expires_at: PAST },
       days: 7, silent: true, entryPoint: 'test', workflow: 'test',
     })).rejects.toMatchObject({ statusCode: 400, message: expect.stringMatching(/fixed validity/) });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a fixed sibling after acquiring the group lock without writing either row', async () => {
+    const anchor = { id: 'anchor', estimate_group_id: 'group', status: 'viewed', expires_at: PAST };
+    const update = jest.fn();
+    let locked = false;
+    const query = { update, select: jest.fn(async (...columns) => columns.includes('id')
+      ? [anchor]
+      : [{ estimate_data: { proposal: locked ? { validThrough: '2099-12-21' } : {} } }]) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw', 'orderBy', 'forUpdate']) query[method] = jest.fn(() => query);
+    const trx = jest.fn(() => query);
+    trx.raw = jest.fn(async () => { locked = true; });
+    db.mockImplementationOnce(() => query);
+    db.transaction.mockImplementationOnce(async (run) => run(trx));
+    await expect(extendEstimate({ estimate: anchor, days: 7, silent: true }))
+      .rejects.toMatchObject({ code: 'FIXED_BID_VALIDITY' });
+    expect(locked).toBe(true);
     expect(update).not.toHaveBeenCalled();
   });
 
