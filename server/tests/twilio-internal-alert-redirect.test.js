@@ -192,7 +192,7 @@ describe('Twilio internal admin alert redirect', () => {
     expect(triggerNotification).toHaveBeenCalledWith('internal_admin_alert', expect.objectContaining({
       title: 'SMS guard blocked outbound message',
       body: expect.stringContaining('Reason: unsubstituted_variable'),
-      link: '/admin/sms-templates',
+      link: '/admin/communications#tab=templates',
       originalMessageType: 'sms_guard_blocked',
       originalToMasked: '***0123',
     }));
