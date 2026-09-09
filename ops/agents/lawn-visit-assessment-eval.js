@@ -200,7 +200,7 @@ async function runReplay(args) {
   const title = `Lawn visit assessment eval — ${visit.PROMPT_VERSION}${variant}`;
   if (args.json) {
     process.stdout.write(`${JSON.stringify({
-      generatedAt: new Date().toISOString(), promptVersion: visit.PROMPT_VERSION,
+      generatedAt: new Date().toISOString(), promptVersion: visit.PROMPT_VERSION, promptDigest: visit.PROMPT_DIGEST,
       policy, options: { thinking: args.thinking, forceFallback: args.forceFallback, repeat: args.repeat, concurrency: args.concurrency },
       summary, skipped, results,
     }, null, 2)}\n`);
