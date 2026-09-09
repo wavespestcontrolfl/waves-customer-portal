@@ -118,3 +118,17 @@ test('a recovered expired receipt asks for a fresh proposal without implying exe
   expect(screen.queryByText('Failed')).toBeNull();
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });
+
+test('an unknown confirm outcome is neither done nor failed and never re-offers confirmation', async () => {
+  localStorage.setItem('waves_admin_token', 'fixture-token');
+  const body = { success: false, outcome: 'outcome_unknown', tool: 'send_email_reply', result: { outcome_unknown: true, warning: 'Gmail did not confirm the send outcome. Check the sent thread before creating another send.' } };
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => body })));
+  render(<PendingActionsCard actions={[{ ...action, tool: 'send_email_reply', receivedAt: Date.now() }]} variant="light" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  expect(await screen.findByText('Outcome unknown')).toBeTruthy();
+  expect(screen.getByText(body.result.warning)).toBeTruthy();
+  expect(screen.queryByText('✓ Done')).toBeNull();
+  expect(screen.queryByText('Failed — see error above')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+  vi.unstubAllGlobals();
+});

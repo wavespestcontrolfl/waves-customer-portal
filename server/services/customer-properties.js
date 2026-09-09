@@ -722,11 +722,19 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
   return preview;
 }
 
+// Relationships that record the property as something other than the home
+// the customer lives in. Occupancy may still read 'unknown' for them, so the
+// relationship is checked in its own right before a promotion.
+const NON_RESIDENCE_RELATIONSHIPS = new Set(['rental_owned', 'managed_for_client']);
+
 function primaryPropertyUnavailable(target) {
   if (target.is_primary) return { message: 'This property is already primary', code: 'already_primary' };
   if (require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) === 'commercial'
     || !['owner_occupied', 'unknown'].includes(normalizeOccupancy(target.occupancy_type))) {
     return { message: 'Primary requires an owner-occupied or unclassified residential property.', code: 'primary_role_unavailable' };
+  }
+  if (NON_RESIDENCE_RELATIONSHIPS.has(String(target.relationship || '').trim().toLowerCase())) {
+    return { message: 'This property is recorded as a rental or a client-managed property. Correct its relationship before making it primary.', code: 'primary_role_unavailable' };
   }
   if (!['address_line1', 'city', 'state', 'zip'].every(field => String(target[field] || '').trim())) {
     return { message: 'Complete the street, city, state and ZIP before making this property primary.', code: 'property_incomplete' };
@@ -744,7 +752,7 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
     protected_invoice_count: invoices.length, _invoice_ids: invoices.map(row => row.id),
     effects: [
       'Makes this property primary and mirrors its address, coordinates and saved property measurements onto the customer profile.',
-      'Registers the existing account address as a saved property if needed. Preserves existing appointment and recurring-service locations. Historical service records stay unchanged.',
+      'Registers the existing account address as a saved property if needed. Preserves existing appointment and recurring-service locations. Completed visits keep the address they were serviced at on their reports; historical service records stay unchanged.',
       'Preserves the displayed address on existing invoices and receipts. Third-party billing addresses and all amounts stay unchanged.',
       'The new primary is owner-occupied; custom labels are retained. Sprinkler settings require review for the new property. Sends no messages.',
     ] };
@@ -803,10 +811,18 @@ async function editManualProperty(customerId, propertyId, input, options = {}) {
 async function changePrimaryProperty(customerId, propertyId, options = {}) {
   if (!options.expectedVersion) throw propertyActionError('Review the primary-property preview first', 409, 'preview_required');
   return writeManualProperty(customerId, 'primary', {}, propertyId, options, async (trx, { customer, properties }) => {
+    // A legacy account whose address is already saved as a non-primary row
+    // reuses that row as the old primary instead of inserting a duplicate,
+    // which the address-key index would refuse.
+    if (customer.address_line1 && !properties.some(p => p.is_primary && p.active)) {
+      const saved = properties.find(p => p.active && p.id !== propertyId && addressKey(p) === addressKey(customer));
+      if (saved) await trx('customer_properties').where({ id: saved.id }).update({ is_primary: true, updated_at: trx.fn.now() });
+    }
     await ensurePrimaryProperty(customer, { conn: trx });
     const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
     if (customer.address_line1 && !primary) throw propertyActionError('The existing account property could not be preserved. Review the saved properties before changing the primary.', 409, 'primary_missing');
     const target = properties.find(p => p.id === propertyId);
+    await preserveSettledVisitAddresses(trx, customerId, primary);
     const result = await require('./property-role-proposals').applyPropertyRoleProposals(trx, { customerId, proposals: [{
       kind: 'primary_flip', new_primary_property_id: propertyId, new_primary_address_key: addressKey(target),
       old_primary_property_id: primary?.id || null, old_primary_address_key: primary ? addressKey(primary) : null,
@@ -814,6 +830,39 @@ async function changePrimaryProperty(customerId, propertyId, options = {}) {
     if (result.applied !== 1 || result.skipped) throw propertyActionError('The primary property could not be changed. Request a fresh preview.', 409, 'preview_changed');
     return propertyId;
   });
+}
+
+// Settled visits (completed, cancelled, skipped, rescheduled, no-show) with no
+// saved service address are rendered by the report loaders from the account
+// address (COALESCE(ss.service_address_line1, customers.address_line1)). The
+// role-proposal pin deliberately leaves them alone, so before a manual primary
+// change moves the account address they are stamped with the address they
+// were serviced at. Fill-only, and never a visit whose estimate targets
+// another property.
+async function preserveSettledVisitAddresses(trx, customerId, oldPrimary) {
+  if (!oldPrimary) return;
+  const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
+  await trx('scheduled_services')
+    .where({ customer_id: customerId })
+    .whereNull('property_id')
+    .whereNull('service_address_line1')
+    .whereIn('status', TERMINAL_VISIT_STATUSES)
+    .where(function () {
+      this.whereNull('source_estimate_id').orWhereNotExists(trx('estimates')
+        .whereRaw('estimates.id = scheduled_services.source_estimate_id')
+        .whereNotNull('property_id').whereNot('property_id', oldPrimary.id));
+    })
+    .update({
+      property_id: oldPrimary.id,
+      service_address_line1: oldPrimary.address_line1,
+      service_address_line2: oldPrimary.address_line2 || null,
+      service_address_city: oldPrimary.city,
+      service_address_state: oldPrimary.state || 'FL',
+      service_address_zip: oldPrimary.zip,
+      lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude ?? null]),
+      lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
+      updated_at: new Date(),
+    });
 }
 
 module.exports = {
