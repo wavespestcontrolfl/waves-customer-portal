@@ -1890,10 +1890,15 @@ describe('Communications review ask serialization', () => {
       expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
     });
   });
-  test('ordinary invoice-review text retains its send behavior', async () => {
+  test.each([
+    'Please review your invoice when you have time.',
+    'Office directions: https://maps.app.goo.gl/abc123',
+    'Meet here: https://goo.gl/maps/abc123',
+    'https://maps.google.com/?q=office',
+  ])('ordinary message retains its send behavior: %s', async body => {
     history.lastManualAskAt.mockRejectedValue(new Error('must not read history'));
     await withServer(async baseUrl => {
-      expect((await send(baseUrl, { body: 'Please review your invoice when you have time.' })).status).toBe(200);
+      expect((await send(baseUrl, { body })).status).toBe(200);
       expect(history.lastManualAskAt).not.toHaveBeenCalled();
       expect(locks.runExclusive).not.toHaveBeenCalled();
     });
