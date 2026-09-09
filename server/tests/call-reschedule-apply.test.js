@@ -3,6 +3,7 @@
 // connection. Fixtures are fictitious (555-01xx numbers, synthetic ids).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: jest.fn((name) => name === 'callAgentCommitTrustedLabels' || actual.isEnabled(name)) };
@@ -35,6 +36,7 @@ function v2(overrides = {}) {
     caller: { decision_maker_present: true },
     consent: { do_not_contact_request: false },
     confidence: { scheduling_window: 0.99 },
+    service_request: { primary_service_category: 'pest_general', specific_service_name: 'Quarterly Pest Control Service' },
     scheduling: {
       status: 'reschedule_requested',
       agent_committed_booking: true,
@@ -63,12 +65,31 @@ const call = (overrides = {}) => ({
 });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
 const visit = (overrides = {}) => ({
-  id: VISIT_ID, customer_id: CUSTOMER_ID, property_id: null, scheduled_date: new Date('2026-09-24T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
+  id: VISIT_ID, customer_id: CUSTOMER_ID, property_id: null, service_id: 'pest-quarterly', service_type: 'Quarterly Pest Control Service',
+  scheduled_date: new Date('2026-09-24T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
   estimated_duration_minutes: null, status: 'pending', source_action: null, visit_id: null, internal_notes: null, is_recurring: true,
   ...overrides,
 });
 
 describe('planRescheduleFromCall', () => {
+  test('a different program near the destination cannot replace the requested service outside the span', () => {
+    const args = { v2: v2(), call: call(), customer: customer(), now: NOW,
+      candidates: [visit({ scheduled_date: '2026-11-01' }), visit({ id: 'mosquito-visit', service_id: 'mosquito-monthly', service_type: 'Monthly Mosquito Control Service' })] };
+    expect(planRescheduleFromCall(args).reason).toBe('no_visit_on_books');
+    expect(planRescheduleFromCall({ ...args, candidates: [visit(), ...args.candidates.slice(1)] })).toMatchObject({ action: 'apply', visitId: VISIT_ID });
+  });
+
+  test('a coarse category or an ambiguous program name needs staff review', () => {
+    const args = { v2: v2({ service_request: { specific_service_name: null } }), call: call(), customer: customer(), now: NOW, candidates: [visit()] };
+    expect(planRescheduleFromCall(args).reason).toBe('service_needs_review');
+    expect(planRescheduleFromCall({ ...args, v2: v2(), candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
+  });
+
+  test('a known service-name alias retains the same catalog identity', () => {
+    expect(planRescheduleFromCall({ v2: v2({ service_request: { specific_service_name: 'Quarterly Pest Control' } }), call: call(), customer: customer(), now: NOW,
+      candidates: [visit({ service_type: 'Quarterly Pest Control Service - 1 hour - $117' })] }).action).toBe('apply');
+  });
+
   test.each(['2026-09-24T12:30:00-04:00', '2026-09-24T12:00:30-04:00', '2026-09-24T12:00:00.500-04:00'])('rejects off-hour instant %s', (confirmed_start_at) => {
     expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at } }), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('off_grid_start_time');
   });
@@ -230,6 +251,26 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
 }
 
 describe('applyCallReschedule', () => {
+  test('a service identity edited during the move cannot receive the stale call decision', async () => {
+    const conn = makeConn();
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: conn,
+      service: { ...conn.visits[0], service_id: 'mosquito-monthly', service_type: 'Monthly Mosquito Control Service' } })) };
+    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ reason: 'changed_before_apply' });
+    expect(conn.writes.inserts).toHaveLength(0);
+  });
+
+  test('a recurring move finishes its durable effects with customer notification disabled', async () => {
+    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }) });
+    const result = { success: true, seriesMoveId: 'series-1', notifyRequested: false, rescheduledOccurrences: [{ id: 'later', date: '2026-10-25', conflicted: true }] };
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] }); return result;
+    }) };
+    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'applied' });
+    expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({ sourceSurface: 'call_reschedule', notifyRequested: false });
+    expect(require('../routes/admin-dispatch').applySeriesMoveEffects).toHaveBeenCalledWith({ result, serviceId: VISIT_ID,
+      newDate: '2026-09-25', newWindow: { start: '10:00', end: '11:00' }, notify: false, actorId: null, reasonText: null });
+  });
+
   test.each([null, 'another-customer'])('a finalized link edit to %s cannot use the stale customer', async (customer_id) => {
     const conn = makeConn({ settledCall: { customer_id } });
     const rebooker = { reschedule: jest.fn() };

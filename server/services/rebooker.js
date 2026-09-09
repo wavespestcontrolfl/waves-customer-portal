@@ -2736,7 +2736,7 @@ class SmartRebooker {
           await AppointmentReminders.precloseWindowlessReminderInTx(trx, sib.id);
         }
 
-        if (isAnchor && sib.status !== 'confirmed') {
+        if (updateData.status !== sib.status) {
           // transitioned_by is a UUID FK to technicians; the route
           // currently passes the sentinel 'admin' string for
           // initiatedBy, which would violate the FK. Until we plumb
@@ -2746,7 +2746,7 @@ class SmartRebooker {
           await trx('job_status_history').insert({
             job_id: sib.id,
             from_status: sib.status,
-            to_status: 'confirmed',
+            to_status: updateData.status,
             transitioned_by: null,
           });
         }

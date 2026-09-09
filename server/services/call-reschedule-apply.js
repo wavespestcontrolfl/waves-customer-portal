@@ -19,10 +19,12 @@
  *     the existing trusted-speaker-label gate is enabled
  *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE live visit (pending/confirmed/rescheduled, not dispatch-
- *     owned pending, not grouped) of that customer sits within
+ *     owned pending, not grouped) of that customer's named service at the
+ *     identified property sits within
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
  *     zero means the call was about a visit we don't have (the booking lane
- *     owns that), and a grouped visit needs the whole-visit mover's
+ *     owns that); coarse or ambiguous service names stay in review. A
+ *     grouped visit needs the whole-visit mover's
  *     disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
  *
@@ -49,6 +51,8 @@ const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
+const { stripServiceSuffixes } = require('../utils/service-normalizer');
+const { serviceNameCandidates } = require('./service-completion-profiles');
 const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
 
@@ -149,7 +153,18 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
       address_line2: row.service_address_line2, city: row.service_address_city, zip: row.service_address_zip }) : primaryKey;
     return key === targetKey;
   });
-  const nearby = atProperty.filter((row) => {
+  if (!atProperty.length) return skip('no_visit_on_books');
+  // Match the named service BEFORE proximity. A different program near the
+  // destination cannot stand in for the requested visit outside the span.
+  // Coarse categories cannot distinguish programs, so absent/ambiguous
+  // catalog identity stays in office review.
+  const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
+    .map((name) => stripServiceSuffixes(name).toLowerCase()));
+  const matchingServices = atProperty.filter((row) => serviceNameCandidates(row.service_type)
+    .some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
+  const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.service_type).toLowerCase()));
+  if (programIds.size !== 1) return skip('service_needs_review');
+  const nearby = matchingServices.filter((row) => {
     const d = dateOnly(row.scheduled_date);
     return d && Math.abs(calendarDaysBetween(d, newDate)) <= CANDIDATE_SPAN_DAYS;
   });
@@ -194,7 +209,7 @@ async function loadCandidates(conn, customerId, now = new Date()) {
     .whereIn('status', LIVE_STATUSES)
     .where('scheduled_date', '>=', etDateString(now))
     .orderBy('scheduled_date', 'asc')
-    .select('id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'status', 'source_action', 'visit_id', 'internal_notes', 'is_recurring',
+    .select('id', 'customer_id', 'property_id', 'service_id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'status', 'source_action', 'visit_id', 'internal_notes', 'is_recurring',
       'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
 }
 
@@ -303,8 +318,10 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     const applied = await trx('activity_log').where({ action: ACTIVITY_ACTION })
       .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)]).first('id');
     if (applied) throw Object.assign(new Error('This call was already applied'), { code: 'CALL_RESCHEDULE_ALREADY_APPLIED' });
-    const handled = await trx('triage_items').where({ call_log_id: call.id, resolution_source: 'human' })
-      .whereIn('reason_code', CARD_REASON_CODES).whereIn('status', ['resolved', 'dismissed']).first('id');
+    const handled = await trx('triage_items').where({ call_log_id: call.id })
+      .whereIn('reason_code', CARD_REASON_CODES)
+      .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
+        .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed']))).first('id');
     const moved = await newerMove(trx);
     if (handled || moved) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
@@ -312,7 +329,7 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     const checked = planRescheduleFromCall({ v2, call: current, customer: latestCustomer, properties: latestProperties,
       candidates: [{ ...visit, ...service }], appointmentCreated, now, transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels') });
     const unchanged = service && dateOnly(service.scheduled_date) === dateOnly(visit.scheduled_date)
-      && ['customer_id', 'property_id', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
+      && ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'source_action', 'visit_id', 'is_recurring', 'window_start', 'window_end', 'estimated_duration_minutes']
         .every((key) => (service[key] ?? null) === (visit[key] ?? null));
     if (!unchanged || checked.action !== plan.action || checked.visitId !== plan.visitId || checked.propertyKey !== plan.propertyKey) {
       throw Object.assign(new Error('The visit changed before its reschedule could apply'), { code: 'CALL_RESCHEDULE_CHANGED' });
@@ -338,11 +355,17 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       });
       return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
     }
-    await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
+    const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
       keepStatus: true, beforeMove, ...(plan.dateMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
+      sourceSurface: 'call_reschedule', notifyRequested: false,
       expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
-        property_id: visit.property_id, status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
+        property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
+        status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
+    });
+    if (result?.seriesMoveId) await require('../routes/admin-dispatch').applySeriesMoveEffects({
+      result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+      notify: false, actorId: null, reasonText: null,
     });
   } catch (err) {
     const reasons = { CALL_RESCHEDULE_CHANGED: 'changed_before_apply', CALL_RESCHEDULE_HANDLED: 'handled_after_call', CALL_RESCHEDULE_ALREADY_APPLIED: 'already_applied' };
