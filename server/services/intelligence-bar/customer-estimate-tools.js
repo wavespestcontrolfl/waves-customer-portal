@@ -197,15 +197,22 @@ async function saveCustomerEstimate(input, actionContext) {
     throw failure('A fresh administrator confirmation is required.', 'approval_required');
   }
   return db.transaction(async trx => {
+    // Lock order: customer (and its properties) FIRST, then the estimate.
+    // updateCustomer locks the customers row and its fanout then touches the
+    // open estimates rows, so taking the estimate lock before the customer
+    // lock here would be an AB-BA deadlock against a concurrent profile edit.
+    const context = await loadContext(input, trx, true);
     if (input.estimate_id) {
       const observed = await trx('estimates').where({ id: input.estimate_id }).first();
       if (!observed) throw failure('Estimate not found', 'target_not_found', 404);
       await persistence.lockEstimateGroupAddressRevision(trx, observed.estimate_group_id);
       await persistence.lockScheduledGroupGuardGroups(trx, observed, observed);
       const locked = await trx('estimates').where({ id: observed.id }).forUpdate().first();
+      // A draft deleted between the observed read and the row lock is a
+      // deterministic refusal, never a TypeError that strands the action.
+      if (!locked) throw failure('The estimate was deleted after the preview. Nothing was saved.', 'target_not_found', 404);
       if (locked.estimate_group_id !== observed.estimate_group_id) throw failure('Estimate group changed. Review again.', 'preview_changed');
     }
-    const context = await loadContext(input, trx, true);
     const preview = await estimatePreview(input, trx, context);
     if (JSON.stringify(preview._version) !== JSON.stringify(input._verified_estimate_version)) {
       throw failure('The customer, property, estimate or pricing changed. Review a fresh preview.', 'preview_changed');

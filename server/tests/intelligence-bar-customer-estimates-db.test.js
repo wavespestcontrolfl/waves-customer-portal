@@ -302,6 +302,51 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
   }, 60000);
 
+  test('a draft deleted between the preview and the row lock refuses deterministically', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const persistence = require('../services/admin-estimate-persistence');
+    const original = persistence.lockEstimateGroupAddressRevision;
+    jest.spyOn(persistence, 'lockEstimateGroupAddressRevision').mockImplementation(async (...args) => {
+      // Another admin deletes the draft after the observed read, before FOR UPDATE.
+      await db('estimates').where({ id: estimateId }).del();
+      return original(...args);
+    });
+    try {
+      const confirmed = await confirm(proposed);
+      expect(confirmed.body).toMatchObject({ success: false, result: { code: 'target_not_found' } });
+      expect(confirmed.body.result.error).not.toMatch(/Cannot read properties/);
+    } finally {
+      persistence.lockEstimateGroupAddressRevision = original;
+    }
+  }, 60000);
+
+  test('a confirmed revision locks the customer before the estimate, matching the profile-edit fanout order', async () => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id;
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    const persistence = require('../services/admin-estimate-persistence');
+    const original = persistence.lockEstimateGroupAddressRevision;
+    let customerLockedFirst = null;
+    jest.spyOn(persistence, 'lockEstimateGroupAddressRevision').mockImplementation(async (trx, ...rest) => {
+      // Probe from OUTSIDE the confirming transaction: the customer row must already be locked at this point.
+      const probe = await db.raw('SELECT id FROM customers WHERE id = ? FOR UPDATE SKIP LOCKED', [fixture.customer.id]);
+      customerLockedFirst = probe.rows.length === 0;
+      return original(trx, ...rest);
+    });
+    try {
+      const revised = await confirm(proposed);
+      expect(revised.body).toMatchObject({ success: true, result: { estimate_id: estimateId } });
+      expect(customerLockedFirst).toBe(true);
+    } finally {
+      persistence.lockEstimateGroupAddressRevision = original;
+    }
+  }, 60000);
+
   test('grouped address revision waits for the editor address lock before taking its send lock', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
