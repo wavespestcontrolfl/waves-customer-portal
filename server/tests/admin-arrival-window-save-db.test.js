@@ -65,8 +65,19 @@ const { maybeGroupRow, dateOnly } = require('../services/visit-groups');
 const { geocodeAddress } = require('../services/geocoder');
 const connection = process.env.ARRIVAL_ROUTE_TEST_DATABASE_URL;
 const describeDb = connection ? describe : describe.skip;
-const DAY = etDateString(addETDays(new Date(), 10));
-const LATER = etDateString(addETDays(new Date(), 40));
+// The seeder shifts weekend occurrences (recurring-appointment-seeder
+// shiftPastWeekend), so a series anchored on a Saturday rewrites its cadence
+// dates away from the day these tests expect. Anchor every fixture date on a
+// weekday; the offsets below keep the same spacing.
+function weekdayFrom(days) {
+  let date = addETDays(new Date(), days);
+  while ([0, 6].includes(new Date(`${etDateString(date)}T12:00:00Z`).getUTCDay())) date = addETDays(date, 1);
+  return date;
+}
+const DAY_DATE = weekdayFrom(10);
+const DAY = etDateString(DAY_DATE);
+const LATER_DATE = weekdayFrom(40);
+const LATER = etDateString(LATER_DATE);
 const TECH = '10000000-0000-4000-8000-000000000001';
 const OLD_TECH = '10000000-0000-4000-8000-000000000002';
 const CUSTOMER = '30000000-0000-4000-8000-000000000001';
@@ -173,7 +184,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   });
 
   test('a combined series reassignment and cadence edit checks the new occurrence date', async () => {
-    const rewrittenDay = etDateString(addETDays(new Date(), 17));
+    const rewrittenDay = etDateString(addETDays(DAY_DATE, 7)); // one weekly step from the anchor
     await mockConn('scheduled_services').where({ id: CHILD }).update({ estimated_duration_minutes: 240 });
     await mockConn('scheduled_services').where({ id: NEIGHBOUR }).update({ scheduled_date: rewrittenDay });
     const result = await save({
@@ -259,7 +270,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   });
 
   test.each([
-    ['date', { scheduled_date: etDateString(addETDays(new Date(), 41)) }],
+    ['date', { scheduled_date: etDateString(addETDays(LATER_DATE, 1)) }], // always differs from LATER
     ['technician', { technician_id: null }],
   ])('a stale series %s plan returns 409 before assigning any occurrence', async (_field, change) => {
     mockBeforeSave = () => mockConn('scheduled_services').where({ id: CHILD }).update(change);
