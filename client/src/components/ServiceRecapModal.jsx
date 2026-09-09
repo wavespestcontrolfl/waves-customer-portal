@@ -93,6 +93,11 @@ export default function ServiceRecapModal({
   const P = PALETTES[theme] || PALETTES.dark;
   const serviceId = service?.id;
   const base = `/admin/dispatch/${serviceId}/pest-recap`;
+  const draftActionStyle = {
+    border: `1px solid ${P.border}`, background: P.card, color: P.text,
+    borderRadius: 10, padding: '12px 18px', minHeight: 48, fontSize: 16,
+    cursor: 'pointer', fontFamily: P.bodyFont,
+  };
 
   const [loading, setLoading] = useState(true);
   const [ctx, setCtx] = useState(null);
@@ -463,8 +468,10 @@ export default function ServiceRecapModal({
             {draft.candidate && <div role="status" style={{ color: P.text, marginBottom: 16 }}>
               <p>A saved draft is available for this visit.</p>
               {draft.restoreError && <p role="alert">{draft.restoreError}</p>}
-              <button type="button" disabled={!!draft.restoreError} onClick={restoreDraft}>Restore draft</button>{' '}
-              <button type="button" onClick={draft.discard}>Discard draft</button>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                <button type="button" disabled={!!draft.restoreError} onClick={restoreDraft} style={{ ...draftActionStyle, opacity: draft.restoreError ? 0.5 : 1 }}>Restore draft</button>
+                <button type="button" onClick={draft.discard} style={draftActionStyle}>Discard draft</button>
+              </div>
             </div>}
             {draft.saved && <p role="status" style={{ color: P.muted }}>Draft saved on this device. Not submitted.</p>}
             {draft.storageError && <p role="alert" style={{ color: P.red }}>{draft.storageError}</p>}
@@ -543,7 +550,7 @@ export default function ServiceRecapModal({
                 (no catalog default, nothing recorded) record no rate. */}
             {missingSelections.map((id) => <div key={id} role="alert" style={{ color: P.red, marginBottom: 16 }}>
               Unavailable product from draft: {restoredNames[id] || id}. Review the actual treatment before completing.
-              <button type="button" onClick={() => toggleProduct(id)}>Remove {restoredNames[id] || id}</button>
+              <button type="button" onClick={() => toggleProduct(id)} style={draftActionStyle}>Remove {restoredNames[id] || id}</button>
             </div>)}
             {[...selected].some((id) => rates[id]?.unit) && (
               <div style={{
@@ -676,7 +683,7 @@ export default function ServiceRecapModal({
                 style={{
                   flex: 1, border: 'none', background: P.green, color: '#fff',
                   borderRadius: 10, padding: '12px 18px', fontSize: 15, fontWeight: 700,
-                  cursor: submitting ? 'default' : 'pointer', opacity: submitting ? 0.7 : 1,
+                  cursor: submitting ? 'default' : 'pointer', opacity: submitting || draft.candidate || missingSelections.length ? 0.5 : 1,
                   fontFamily: P.bodyFont,
                 }}
               >
