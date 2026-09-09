@@ -264,6 +264,21 @@ run('callback bridge on PostgreSQL', () => {
     else expect(proof).toMatchObject({ basis: 'callback_returned_connected_outbound_call' });
   });
 
+  test('gate rollback: a claimed callback still closes on a policy-stamped Call Log attempt through refresh', async () => {
+    const row = await seed();
+    const staff = await conn('technicians').where({ id: staffId }).first();
+    const claimed = await require('../services/callback-cards').actOnCallback(conn, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at });
+    expect(claimed.human_state).toBe('confirmed');
+    const legEnded = new Date(Date.now() + 1000).toISOString();
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      created_at: new Date(Date.now() + 1000),
+      metadata: { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+  });
+
   test.each(['conversation', 'unanswered', 'voicemail'])('gate rollback retains customer-leg proof: %s', async (evidence) => {
     const row = await seed();
     const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,

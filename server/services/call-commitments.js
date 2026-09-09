@@ -1349,7 +1349,8 @@ async function resolveFulfillment(conn, commitment, call) {
 // placed a call (a persisted attempt keeps its proof path after rollback).
 function refreshableVerdictSql() {
   return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state = 'confirmed' AND (? OR EXISTS ("
-    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text))))",
+    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
+    + " OR (attempt.metadata->>'relatedCallId' = call_commitments.call_log_id::text AND attempt.metadata->>'callback_policy' = 'card')))))",
   [require('./callback-cards').enabled()]];
 }
 
