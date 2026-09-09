@@ -128,9 +128,11 @@ than written per scenario as regexes:
   fragments, have no caller read-back exemption here. Short yes/no answers use the
   latest caller sentence unless Sandy has since asked another question. Confirming
   or denying an appointment still fails if a later sentence
-  or turn redirects to the portal. Refusals and answers to unrelated questions remain
+  or turn redirects to the portal, including affirmative prefixes before office
+  directions. Explicit refusals, explanatory offers and answers to unrelated questions remain
   allowed. Each time uses its nearest visit or contact subject;
-  a leading time also checks the subject that follows it, including across a comma.
+  a leading time also checks the subject that follows it, including portal directions
+  across a comma. Conditional wording must govern the visit predicate itself.
   Directions to check when a visit is scheduled are allowed, but public office hours or
   a portal direction cannot excuse an explicit appointment time, including a time
   set off by commas or described as listed in the portal. A refusal does not excuse
