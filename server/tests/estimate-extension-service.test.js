@@ -117,7 +117,18 @@ describe('extendEstimate validation (pre-write throws)', () => {
     expect(await fixedBidBlocksExtension(database, anchor)).toBe(true);
   });
 
-  it.each(['sent', 'expired'])('refuses the entire extension before writing when a %s sibling has fixed validity', async (status) => {
+  it('reads every live sibling for the fixed-hold verdict, not only the revivable ones (GH codex P1 on #4309)', async () => {
+    const query = { select: jest.fn(async () => []) };
+    for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
+    const database = jest.fn(() => query);
+    expect(await fixedBidBlocksExtension(database, { id: 'group-anchor', estimate_group_id: 'ordinary-group' })).toBe(false);
+    expect(query.whereIn).toHaveBeenCalledWith('status', ['draft', 'scheduled', 'sending', 'send_failed', 'sent', 'viewed', 'expired']);
+    expect(query.whereNull).toHaveBeenCalledWith('archived_at');
+    expect(query.whereNull).not.toHaveBeenCalledWith('price_locked_at');
+    expect(query.whereRaw).toHaveBeenCalledWith(expect.stringMatching(/^NOT \(COALESCE\(estimate_data->'proposal'->>'validThrough'/));
+  });
+
+  it.each(['sending', 'scheduled', 'sent', 'expired'])('refuses the entire extension before writing when a %s sibling has fixed validity', async (status) => {
     const update = jest.fn();
     const query = { update, select: jest.fn(async () => [{ status, estimate_data: { proposal: { validThrough: '2020-01-01' } } }]) };
     for (const method of ['where', 'whereNot', 'whereNull', 'whereIn', 'whereRaw']) query[method] = jest.fn(() => query);
