@@ -122,6 +122,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
     const unstated = raw.can_determine !== true;
     const canDetermine = !unstated && !untraceable && !unsupported;
     const confidence = canDetermine ? finding.confidence : 'unknown';
+    const label = canDetermine ? safeConditionLabel(finding.name, confidence) : 'general lawn stress';
     return {
       ...finding,
       // Server-authored ids: the review keys on them, so a duplicate or a
@@ -135,7 +136,7 @@ function normalizeAssessment(json, photoCount, photoZones = []) {
       cannot_determine_reason: canDetermine ? '' : (clip(raw.cannot_determine_reason, 300) || (untraceable ? 'no photo of this visit cited' : '') || (unsupported ? 'every cited photo rated poor' : '') || (unstated && raw.can_determine !== false ? 'determinability not stated' : '')),
       // The allowlisted customer label — the naming gate applied here, once,
       // so no consumer ever maps the raw name itself.
-      label: canDetermine ? safeConditionLabel(finding.name, confidence) : 'general lawn stress',
+      label: label === NO_STRESS_LABEL && !['moderate', 'high'].includes(confidence) ? 'general lawn stress' : label,
       source: 'model',
     };
   });
@@ -187,6 +188,7 @@ function photoRowInputs(analysis) {
 function compositeFor(analysis) {
   if (!analysis) return { grass_type: null };
   const level = (key) => analysis.severities?.[key]?.level ?? null;
+  const overwatering = level('overwatering_signal');
   return {
     grass_type: analysis.grassType || null,
     turf_density: analysis.scores?.turf_density ?? null,
@@ -197,7 +199,7 @@ function compositeFor(analysis) {
     drought_stress: level('drought_stress'),
     mechanical_damage: level('mechanical_damage'),
     thatch_visibility: level('thatch_visibility'),
-    overwatering_signal: level('overwatering_signal') === 'yes',
+    overwatering_signal: ['yes', 'no'].includes(overwatering) ? overwatering === 'yes' : null,
     observations: analysis.observations || '',
   };
 }
