@@ -40,6 +40,7 @@ jest.mock('../utils/cron-lock', () => ({
   // 'lease_held' = another holder is mid-send (→ concurrent); a
   // 'no_connection' skip means the body never ran and maps to 'error'.
   runExclusive: async (_key, fn) => (lockState.held ? { skipped: true, reason: 'lease_held' } : fn()),
+  wasLockSkipped: result => result?.skipped === true,
 }));
 jest.mock('../services/customer-contact', () => ({
   getServiceContact: (c) => ({ phone: c.phone, email: c.email, name: c.first_name }),
