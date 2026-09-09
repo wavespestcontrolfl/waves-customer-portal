@@ -1232,6 +1232,37 @@ function configKeySubFeaturesAvailable(key) {
   return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
 }
 
+// The station/cartridge cost the ENGINE is pricing with right now: the
+// pricing_config row overlaid by the inventory catalog link (db-bridge
+// syncTermiteStationCostsFromCatalog), which the row itself cannot show.
+// Served with termite_install so the Admin V1 fallback estimator previews —
+// and stamps — the same hardware cost the server will price (codex #4313
+// r1 P1: the client literal never saw a catalog move). Syncs first when the
+// bridge's cache is stale so a fresh vendor approval reaches the preview.
+async function effectiveTermiteInstallBasis() {
+  try {
+    const bridge = require('../services/pricing-engine/db-bridge');
+    if (bridge.needsSync && bridge.needsSync()) await bridge.syncConstantsFromDB();
+    const { TERMITE } = require('../services/pricing-engine/constants');
+    const trelona = TERMITE.systems?.trelona || {};
+    const cartridges = TERMITE.cartridges || {};
+    return {
+      trelona_station_cost: Number(trelona.stationCost),
+      trelona_station_cost_source: trelona.stationCostSource === 'catalog' ? 'catalog' : 'config',
+      advance_station_cost: Number(TERMITE.systems?.advance?.stationCost),
+      labor_material_per_station: Number(trelona.laborMaterial),
+      misc_per_station: Number(trelona.misc),
+      install_multiplier: Number(TERMITE.installMultiplier),
+      cartridge_cost: Number(cartridges.cartridgeCost),
+      cartridge_cost_source: cartridges.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
+      link_station_costs_to_catalog: TERMITE.linkStationCostsToCatalog === true,
+      synced_at: bridge.getLastSyncAt ? bridge.getLastSyncAt() : null,
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
@@ -1242,6 +1273,7 @@ router.get('/:key', async (req, res, next) => {
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
       ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
+      ...(req.params.key === 'termite_install' ? { effective: await effectiveTermiteInstallBasis() } : {}),
     });
   } catch (err) { next(err); }
 });

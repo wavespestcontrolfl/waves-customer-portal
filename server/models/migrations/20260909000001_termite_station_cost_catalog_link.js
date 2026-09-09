@@ -23,16 +23,15 @@
  * Read-modify-write: an admin-tuned station cost (anything other than the
  * retired 22.05) is preserved; cost inputs are only added where absent.
  *
- * service_product_usage "Termite Bait" (Trelona ATBS Bait Station): the note
- * said 1 station per 10 LF — the engine and the label default is 15 ft
- * (owner 2026-07-28). A second BOM row records replacement cartridges
- * (2 per station × 33% = 0.67 per station per year) against the EXISTING
- * cartridge catalog row "Trelona Compressed Termite Bait Cartridges" (no new
- * SKU — the repo already carries a dedupe migration for twin catalog rows).
- * That row holds the station box price today; the owner corrects it in the
- * inventory UI (25-pack, $170.75) and the engine's catalog link picks it up.
- * When the row is absent (an environment seeded without it) the BOM row is
- * skipped and logged — never fabricated against a guessed product.
+ * service_product_usage "Termite Bait": every row still carrying the seeded
+ * "1 per 10 linear ft" note (both the older "Trelona ATBS" product row and
+ * the "Trelona ATBS Bait Station" row) is corrected to the 15-ft label default
+ * (owner 2026-07-28). NO replacement-cartridge usage row is added: the usage
+ * registry's consumers cost usage_amount as a fixed per-visit quantity and
+ * never scale it by station count (product-costing.js, estimate-pricing-audit),
+ * so a per-station cartridge rate there would understate COGS ~15x. The
+ * per-station cartridge economics live in the engine's station-aware cost
+ * model instead (priceTermiteBait → costs.cartridgeReplacementAnnual).
  *
  * The termite_install read-modify-write locks the row (FOR UPDATE) so the
  * admin PUT handler, which relies on migrations serializing against it,
@@ -41,12 +40,9 @@
  *
  * down(): restores the audited pre-migration termite_install data only if
  * the row still carries exactly what up() wrote (an admin-tuned row survives
- * a rollback/re-apply cycle). The service_product_usage half is a DOCUMENTED
- * NO-OP on rollback: up() preserves admin edits there, and the rows it wrote
- * are admin-editable data (usage_amount / usage_unit / is_primary can be
- * tuned in the inventory UI without touching notes), so a blanket revert or
- * delete would erase exactly the edits up() preserved. Seed rollbacks are
- * never destructive (waves-db skill).
+ * a rollback/re-apply cycle). The service_product_usage note correction is a
+ * DOCUMENTED NO-OP on rollback: it is admin-editable seed data, and seed
+ * rollbacks are never destructive (waves-db skill).
  */
 const MIGRATION_TAG = 'migration:20260909000001';
 const OLD_STATION_COST = 22.05;
@@ -67,12 +63,9 @@ const CHANGELOG_IDENTITY = {
   summary: 'Termite bait station cost follows the inventory catalog ($24.00/station fallback); cartridge replacement enters the cost model.',
 };
 
-const STATION_PRODUCT = 'Trelona ATBS Bait Station';
-const CARTRIDGE_PRODUCT = 'Trelona Compressed Termite Bait Cartridges';
 const USAGE_SERVICE_TYPE = 'Termite Bait';
 const OLD_STATION_NOTE = 'Bait station — 1 per 10 linear ft perimeter';
-const NEW_STATION_NOTE = 'Loaded station (2 cartridges included) — 1 per 15 linear ft perimeter (Trelona label default; engine spacingFt)';
-const CARTRIDGE_NOTE = 'Replacement cartridges — 2 per station × 33% label-driven replacement per annual service (planning rate until the completion ledger measures it)';
+const NEW_STATION_NOTE = 'Loaded station (2 cartridges included) — 1 per 15 linear ft perimeter (Trelona label default; engine spacingFt). Replacement cartridges are costed per station by the pricing engine, not here.';
 
 function parseData(row) {
   return typeof row.data === 'string' ? JSON.parse(row.data) : (row.data || {});
@@ -127,35 +120,13 @@ exports.up = async function up(knex) {
     }
   }
 
-  if (!(await knex.schema.hasTable('service_product_usage')) || !(await knex.schema.hasTable('products_catalog'))) return;
-
-  const station = await knex('products_catalog').where({ name: STATION_PRODUCT }).first('id');
-  if (station) {
-    await knex('service_product_usage')
-      .where({ service_type: USAGE_SERVICE_TYPE, product_id: station.id, notes: OLD_STATION_NOTE })
-      .update({ notes: NEW_STATION_NOTE, updated_at: knex.fn.now() });
-  }
-
-  const cartridge = await knex('products_catalog').where({ name: CARTRIDGE_PRODUCT }).first('id');
-  if (!cartridge) {
-     
-    console.log(`[20260909000001] catalog row ${JSON.stringify(CARTRIDGE_PRODUCT)} not present — replacement-cartridge BOM row skipped`);
-    return;
-  }
-  const existingBom = await knex('service_product_usage')
-    .where({ service_type: USAGE_SERVICE_TYPE, product_id: cartridge.id })
-    .first('id');
-  if (!existingBom) {
-    await knex('service_product_usage').insert({
-      service_type: USAGE_SERVICE_TYPE,
-      product_id: cartridge.id,
-      usage_amount: 0.67,
-      usage_unit: 'each',
-      usage_per_1000sf: null,
-      is_primary: false,
-      notes: CARTRIDGE_NOTE,
-    });
-  }
+  if (!(await knex.schema.hasTable('service_product_usage'))) return;
+  // Every legacy Termite Bait usage row, whichever Trelona product it points
+  // at (codex #4313 r1 P2) — matched on the seeded note so an admin-edited
+  // note is left alone.
+  await knex('service_product_usage')
+    .where({ service_type: USAGE_SERVICE_TYPE, notes: OLD_STATION_NOTE })
+    .update({ notes: NEW_STATION_NOTE, updated_at: knex.fn.now() });
 };
 
 exports.down = async function down(knex) {
@@ -188,6 +159,6 @@ exports.down = async function down(knex) {
     }
   }
 
-  // service_product_usage: documented NO-OP (see header) — admin-editable
-  // seed data is never reverted or deleted on rollback.
+  // service_product_usage note correction: documented NO-OP (see header) —
+  // admin-editable seed data is never reverted on rollback.
 };

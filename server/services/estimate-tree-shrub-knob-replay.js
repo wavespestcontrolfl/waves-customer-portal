@@ -81,6 +81,31 @@ const PRE_STAMP_TERMITE_STATION_COST = Object.freeze({
   trelona: 22.05, // Apr 2026 wholesale ($352.80 / 16), the value every unstamped quote priced under
   advance: 13.16,
 });
+// The A1 value (2026-09-09, $384 / 16). An UNSTAMPED row can also be a
+// post-A1 client-fallback save (the Admin V1 estimator stamps since A1, but
+// a row saved by a client bundle cached from before this deploy would not),
+// so the stored RESULT is consulted before the pre-stamp default applies:
+// if the persisted install reproduces from the station count at exactly one
+// of the two known costs, that cost is the evidence. Neither reproducing
+// (property modifiers in play) → the pre-stamp default, which is what every
+// unstamped row priced under before the stamp existed.
+const A1_TERMITE_STATION_COST = Object.freeze({ trelona: 24.00, advance: 13.16 });
+// Per-station labor-material + misc buildup and the install multiplier as
+// they have stood since Apr 2026 — the reader must not read live constants.
+const TERMITE_INSTALL_BUILDUP = Object.freeze({ laborMaterial: 5.25, misc: 0.75, multiplier: 1.45 });
+function unstampedTermiteStationCost(system, stations, storedInstall) {
+  const legacy = PRE_STAMP_TERMITE_STATION_COST[system];
+  const current = A1_TERMITE_STATION_COST[system];
+  if (!Number.isFinite(legacy)) return null;
+  const n = Number(stations);
+  const install = Number(storedInstall);
+  if (!(n > 0) || !(install > 0) || !Number.isFinite(current) || current === legacy) return legacy;
+  const priced = (cost) => Math.round(n * (cost + TERMITE_INSTALL_BUILDUP.laborMaterial + TERMITE_INSTALL_BUILDUP.misc) * TERMITE_INSTALL_BUILDUP.multiplier);
+  const matchesLegacy = priced(legacy) === Math.round(install);
+  const matchesCurrent = priced(current) === Math.round(install);
+  if (matchesCurrent && !matchesLegacy) return current;
+  return legacy;
+}
 
 function termiteKnobSignalForReplay(estData = {}) {
   const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
@@ -109,7 +134,10 @@ function termiteKnobSignalForReplay(estData = {}) {
       stationCost: stampedCost,
     };
   }
-  const fallback = PRE_STAMP_TERMITE_STATION_COST[storedSystem];
+  const storedStations = (tmBait && tmBait.sta) ?? (termiteLine && termiteLine.stations);
+  const storedInstall = (tmBait && (tmBait.ti ?? tmBait.ai))
+    ?? (termiteLine && (termiteLine.installation?.retailValue ?? termiteLine.installation?.price));
+  const fallback = unstampedTermiteStationCost(storedSystem, storedStations, storedInstall);
   if (!Number.isFinite(fallback)) return null;
   return { system: storedSystem, stationCost: fallback };
 }

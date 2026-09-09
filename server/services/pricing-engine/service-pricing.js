@@ -4701,8 +4701,13 @@ function priceTermiteStationRental(installPrice) {
 // cartridge costs may come from the inventory catalog (db-bridge link),
 // which is what materialCostSource reports.
 const TERMITE_SERVICE_MINUTES_PER_STATION = 5;
-function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, stationCost }) {
-  const c = TERMITE.cartridges || {};
+function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, stationCost, system }) {
+  // TERMITE.cartridges describes Trelona ATBS (two cartridges per station,
+  // Trelona replacement rate and cartridge cost). Advance stays priceable
+  // for stored-estimate replay only and has no consumable model here —
+  // its cartridge terms are zero, never Trelona's (codex #4313 r1 P2).
+  const hasCartridgeModel = system === 'trelona' && TERMITE.cartridges && typeof TERMITE.cartridges === 'object';
+  const c = hasCartridgeModel ? TERMITE.cartridges : {};
   const nonNegative = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
   const cartridgesPerStation = nonNegative(c.cartridgesPerStation);
   const replacementRate = nonNegative(c.replacementRate);
@@ -4730,6 +4735,7 @@ function termiteProgramCostModel({ stations, installMaterialCost, installLabor, 
     cartridgeReplacementAnnual: roundMoney(cartridgeReplacementAnnual),
     followUpReserveAnnual: roundMoney(followUpReserveAnnual),
     annualTotal: roundMoney(serviceLaborAnnual + cartridgeReplacementAnnual + followUpReserveAnnual),
+    cartridgeModel: hasCartridgeModel ? 'trelona' : 'none',
   };
 }
 
@@ -4907,6 +4913,7 @@ function priceTermiteBait(property, options = {}) {
     installLabor,
     visitsPerYear: TERMITE.monitoringVisitsPerYear,
     stationCost,
+    system: selectedSystem,
   });
 
   return {
@@ -4968,7 +4975,11 @@ function priceTermiteBait(property, options = {}) {
     // quote. Never silent — a stale catalog prices as 'config'.
     materialCostSource: {
       station: stationCostSource,
-      cartridge: TERMITE.cartridges?.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
+      // The cartridge model is Trelona's (two pre-baited cartridges per
+      // ATBS station); a legacy Advance replay carries no consumable model.
+      cartridge: costs.cartridgeModel === 'trelona'
+        ? (TERMITE.cartridges?.cartridgeCostSource === 'catalog' ? 'catalog' : 'config')
+        : 'none',
     },
     // Quote-time cost-basis snapshot (plan §A1 replay rule — the T&S
     // pricingKnobs shape). Persisted with the estimate so a later constant,
@@ -4977,7 +4988,10 @@ function priceTermiteBait(property, options = {}) {
     // authoritative replay paths inject it as options.knobs.
     pricingKnobs: {
       system: selectedSystem,
-      stationCost: roundMoney(stationCost),
+      // The EXACT value, never rounded: the replay guarantee is
+      // "reprices to the cent", and a sub-cent config value rounded here
+      // would replay one dollar off at scale (codex #4313 r1 P2).
+      stationCost,
       stationCostSource,
     },
     // Report-only program cost model (LAB-006): install cost plus the

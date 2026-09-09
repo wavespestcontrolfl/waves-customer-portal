@@ -14,6 +14,7 @@ import {
   applyServerTermiteBondPricingConfig,
   applyServerTermiteRentalPricingConfig,
   applyServerTermiteMonitoringPricingConfig,
+  applyServerTermiteInstallPricingConfig,
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
   applyServerRodentWaveguardPricingConfig,
@@ -1404,6 +1405,9 @@ function EstimateToolView() {
             ok: true,
             data: body?.data ?? null,
             featureAvailable: body?.featureAvailable !== false,
+            // Engine-effective values some keys carry beside the row
+            // (termite_install: the catalog-linked station cost).
+            effective: body?.effective ?? null,
           };
         } catch {
           return { ok: false, data: null, featureAvailable: false }; /* last applied state stands */
@@ -1411,12 +1415,13 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, installRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
         fetchConfigRow("termite_monitoring"),
+        fetchConfigRow("termite_install"),
         fetchConfigRow("rodent_bait_brackets"),
         fetchConfigRow("rodent_setup_fee"),
         fetchConfigRow("rodent_waveguard"),
@@ -1436,6 +1441,11 @@ function EstimateToolView() {
       // Station-check brackets: same live-rates posture as the rental horizon
       // above, and same not-part-of-readiness reasoning (new row shape).
       if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
+      // Station hardware cost basis — the row overlaid by the server's
+      // inventory catalog link (served as `effective`); the fallback quote
+      // prices and stamps what the server will price (codex #4313 r1 P1).
+      // Same not-part-of-readiness posture as the rows above.
+      if (installRow.ok) applyServerTermiteInstallPricingConfig(installRow.data, installRow.effective);
       // Rodent bait ladder + setup fee: live-rates posture, not part of the
       // readiness return (new rows — codex #3591 r10 P1). A missing row
       // leaves the in-code default in place.

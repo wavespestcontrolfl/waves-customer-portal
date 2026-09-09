@@ -793,11 +793,12 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
 }
 
 // Catalog rows the pricing engine may price from: ACTIVE, priced rows whose
-// best_price is backed by an ACTIVE, APPROVED/auto-approved vendor_pricing
-// row. Some inventory recalc paths cache the lowest vendor_pricing.price
-// without filtering approval_status/is_active, and a pending scrape must
-// never reprice customer quotes (codex r1). Shared by the pre-slab and the
-// termite links — one trust rule, one round trip each.
+// best_price is backed by an ELIGIBLE vendor_pricing row (the repo's one
+// predicate: positive, active, approved/auto-approved, unexpired). Some
+// inventory recalc paths cache the lowest vendor_pricing.price without
+// filtering approval_status/is_active, and a pending scrape or a lapsed
+// quote must never reprice customer quotes (codex r1). Shared by the
+// pre-slab and the termite links — one trust rule, one round trip each.
 async function loadApprovedCatalogRows(db, names, columns) {
   if (!names.length || !(await db.schema.hasTable('products_catalog'))) return new Map();
   const rows = await db('products_catalog')
@@ -807,11 +808,12 @@ async function loadApprovedCatalogRows(db, names, columns) {
   const backingIds = rows.map((row) => row.best_vendor_pricing_id).filter(Boolean);
   const approvedBackingIds = new Set();
   if (backingIds.length) {
-    const backing = await db('vendor_pricing')
-      .whereIn('id', backingIds)
-      .where({ is_active: true })
-      .whereIn('approval_status', ['approved', 'auto_approved'])
-      .select('id');
+    // The ONE definition of a vendor price that may steer money: positive,
+    // active, approved/auto-approved AND unexpired (codex #4313 r1 P1 — a
+    // reduced copy here accepted an expired approval).
+    const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
+    const backing = await eligibleVendorPricing(db('vendor_pricing').whereIn('vendor_pricing.id', backingIds))
+      .select('vendor_pricing.id');
     for (const row of backing) approvedBackingIds.add(row.id);
   }
   return new Map(rows
@@ -838,10 +840,13 @@ function warnCatalogRefusalOnce(key, message) {
 // In-code termite cost-basis defaults, captured ONCE at load (before any
 // sync mutates the constants) so every sync can restore them before the DB
 // row and the catalog link re-apply — see the termite branch of the sync.
+const TERMITE_CARTRIDGE_INPUT_KEYS = ['cartridgeCost', 'cartridgesPerStation', 'replacementRate', 'followUpVisitReserve'];
 const TERMITE_COST_BASIS_DEFAULTS = Object.freeze({
   linkStationCostsToCatalog: constants.TERMITE.linkStationCostsToCatalog === true,
   trelonaStationCost: Number(constants.TERMITE.systems?.trelona?.stationCost),
-  cartridgeCost: Number(constants.TERMITE.cartridges?.cartridgeCost),
+  cartridges: Object.freeze(Object.fromEntries(
+    TERMITE_CARTRIDGE_INPUT_KEYS.map((key) => [key, Number(constants.TERMITE.cartridges?.[key])]),
+  )),
 });
 function resetTermiteCostBasisDefaults() {
   const termite = constants.TERMITE;
@@ -853,8 +858,12 @@ function resetTermiteCostBasisDefaults() {
     termite.systems.trelona.stationCostSource = 'config';
   }
   if (termite.cartridges) {
-    if (Number.isFinite(TERMITE_COST_BASIS_DEFAULTS.cartridgeCost)) {
-      termite.cartridges.cartridgeCost = TERMITE_COST_BASIS_DEFAULTS.cartridgeCost;
+    // Every DB-backed cartridge input (codex #4313 r1 P2): a key removed from
+    // the row — most directly a rollback restoring the pre-A1 blob — must
+    // fall back to the default on the next sync, not survive until restart.
+    for (const key of TERMITE_CARTRIDGE_INPUT_KEYS) {
+      const value = TERMITE_COST_BASIS_DEFAULTS.cartridges[key];
+      if (Number.isFinite(value)) termite.cartridges[key] = value;
     }
     termite.cartridges.cartridgeCostSource = 'config';
   }
@@ -870,7 +879,8 @@ function resetTermiteCostBasisDefaults() {
 // counted, not measured in ounces, so the per-unit cost is best_price ÷ the
 // pack count the inventory module parses from container_size ("1 station",
 // "16 stations", "25 cartridges"; an unparseable label such as
-// "16 cartridges/box" or "Box of 16" is refused, never guessed at 1).
+// "16 cartridges/box" or "Box of 16", or a container noun such as "1 box",
+// is refused, never guessed at 1).
 // Fail-open: any miss keeps the config value. The winning source is stamped
 // on the constants (stationCostSource / cartridgeCostSource) so the priced
 // line can carry materialCostSource — a stale or missing catalog price is
@@ -880,8 +890,8 @@ async function syncTermiteStationCostsFromCatalog(db) {
   const termite = constants.TERMITE;
   if (termite?.linkStationCostsToCatalog !== true) return;
   const targets = [
-    { key: 'station', target: termite.systems?.trelona, costKey: 'stationCost', sourceKey: 'stationCostSource' },
-    { key: 'cartridge', target: termite.cartridges, costKey: 'cartridgeCost', sourceKey: 'cartridgeCostSource' },
+    { key: 'station', target: termite.systems?.trelona, costKey: 'stationCost', sourceKey: 'stationCostSource', units: ['station', 'each'] },
+    { key: 'cartridge', target: termite.cartridges, costKey: 'cartridgeCost', sourceKey: 'cartridgeCostSource', units: ['cartridge', 'each'] },
   ].filter(({ target }) => typeof target?.catalogProductName === 'string' && target.catalogProductName.trim());
   if (!targets.length) return;
   try {
@@ -891,14 +901,17 @@ async function syncTermiteStationCostsFromCatalog(db) {
       targets.map(({ target }) => target.catalogProductName.trim()),
       ['name', 'best_price', 'container_size', 'best_vendor_pricing_id'],
     );
-    for (const { key, target, costKey, sourceKey } of targets) {
+    for (const { key, target, costKey, sourceKey, units } of targets) {
       const row = byName.get(target.catalogProductName.trim());
       if (!row) continue;
       const price = Number(row.best_price);
       const pack = parsePackCount(row.container_size);
       if (!Number.isFinite(price) || price <= 0) continue;
-      if (!pack) {
-        warnCatalogRefusalOnce(`termite.${key}.pack`, `[pricing-engine] termite ${key}: catalog container_size ${JSON.stringify(row.container_size)} is not a pack count — keeping config value`);
+      // The pack must be counted in the unit we divide into — a container
+      // noun ("1 box", "2 cases") has no known box-to-station conversion and
+      // would price the whole box as one station (codex #4313 r1 P1).
+      if (!pack || !units.includes(pack.unit)) {
+        warnCatalogRefusalOnce(`termite.${key}.pack`, `[pricing-engine] termite ${key}: catalog container_size ${JSON.stringify(row.container_size)} is not a count of ${units[0]}s — keeping config value`);
         continue;
       }
       const perUnit = Math.round((price / pack.count) * 100) / 100;

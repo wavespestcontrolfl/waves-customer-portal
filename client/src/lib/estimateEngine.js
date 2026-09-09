@@ -560,6 +560,40 @@ export function applyServerTermiteRentalPricingConfig(config) {
   return TERMITE_RENTAL_QUARTERS;
 }
 
+// Station hardware cost basis (plan 2026-09-03 §A1) — DB-tunable via
+// pricing_config.termite_install AND, on the server, overlaid by the
+// inventory catalog link. GET /admin/pricing-config/termite_install serves
+// the ENGINE'S effective values under `effective` (station cost + its
+// source), so this fallback previews — and stamps — the same hardware cost
+// the server will price. Same live-rates posture as the appliers above;
+// absent/invalid resets the in-code default (kill-value pattern).
+const TERMITE_INSTALL_DEFAULTS = Object.freeze({
+  trelonaStationCost: 24.00, // $384 / 16-station box (owner 2026-09-02)
+  trelonaStationCostSource: 'config',
+  advanceStationCost: 13.16,
+  laborMaterial: 5.25,
+  misc: 0.75,
+  multiplier: 1.45,
+});
+let TERMITE_INSTALL = { ...TERMITE_INSTALL_DEFAULTS };
+
+export function applyServerTermiteInstallPricingConfig(config, effective = config?.effective) {
+  const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+  const eff = effective && typeof effective === 'object' ? effective : null;
+  const row = config && typeof config === 'object' ? config : null;
+  const trelonaStationCost = pos(eff?.trelona_station_cost) ?? pos(row?.trelona_bait ?? row?.trelona_station_cost) ?? TERMITE_INSTALL_DEFAULTS.trelonaStationCost;
+  TERMITE_INSTALL = {
+    trelonaStationCost,
+    trelonaStationCostSource: eff?.trelona_station_cost_source === 'catalog' && pos(eff?.trelona_station_cost) != null ? 'catalog' : 'config',
+    advanceStationCost: pos(eff?.advance_station_cost) ?? pos(row?.advance_bait ?? row?.advance_station_cost) ?? TERMITE_INSTALL_DEFAULTS.advanceStationCost,
+    laborMaterial: nonNeg(eff?.labor_material_per_station) ?? nonNeg(row?.labor_per_station ?? row?.labor_material_per_station) ?? TERMITE_INSTALL_DEFAULTS.laborMaterial,
+    misc: nonNeg(eff?.misc_per_station) ?? nonNeg(row?.misc_per_station) ?? TERMITE_INSTALL_DEFAULTS.misc,
+    multiplier: pos(eff?.install_multiplier) ?? pos(row?.multiplier ?? row?.install_multiplier) ?? TERMITE_INSTALL_DEFAULTS.multiplier,
+  };
+  return { ...TERMITE_INSTALL };
+}
+
 // Station-check brackets (owner 2026-07-28) — DB-tunable via
 // pricing_config.termite_monitoring, same live-rates posture as the bond and
 // rental appliers above. monthly = base + step × max(0, ceil(sta/bracket)−2):
@@ -2677,12 +2711,13 @@ export function calculateEstimate(inputs) {
       const staAdv = Math.max(8, Math.ceil(perim / 10));
       const staTre = Math.max(8, Math.ceil(perim / 15));
       const sta = tmSystem === 'advance' ? staAdv : staTre;
-      const ai = Math.round((staAdv * (13.16 + 5.25 + 0.75)) * 1.45);
-      // Trelona station cost mirrors the server fallback constant ($24.00 =
-      // $384 / 16-station box, owner 2026-09-02). The SERVER may price off
-      // the inventory catalog (materialCostSource 'catalog'); this client
-      // preview is the constants-only mirror and is never the price of record.
-      const ti = Math.round((staTre * (24.00 + 5.25 + 0.75)) * 1.45);
+      // Hardware cost basis from the live server config + catalog link
+      // (applyServerTermiteInstallPricingConfig), never a baked literal —
+      // this preview is a CLIENT_FALLBACK save candidate and must price and
+      // stamp what the server prices (codex #4313 r1 P1).
+      const TI = TERMITE_INSTALL;
+      const ai = Math.round((staAdv * (TI.advanceStationCost + TI.laborMaterial + TI.misc)) * TI.multiplier);
+      const ti = Math.round((staTre * (TI.trelonaStationCost + TI.laborMaterial + TI.misc)) * TI.multiplier);
       // Bracketed by the selected system's station count; the retired
       // Basic/Premier tier input no longer changes price (bmo/pmo kept for
       // legacy readers, both stamped with the bracket monthly).
@@ -2704,6 +2739,19 @@ export function calculateEstimate(inputs) {
         measurements: {
           footprintSqFt: { value: fpEff || null, source: termiteFootprintSqFt ? 'manual_override' : 'property_footprint' },
           perimeterLF: { value: perim, source: termitePerimeterLF ? 'manual_override' : 'computed_from_footprint' },
+        },
+        // Quote-time station-cost snapshot — the server's pricingKnobs shape
+        // (plan §A1 replay rule). A CLIENT_FALLBACK save persists this
+        // envelope, and the replay reader treats an UNSTAMPED termite result
+        // as pre-A1 ($22.05); stamping here keeps a new $24 quote at $24.
+        pricingKnobs: {
+          system: tmSystem,
+          stationCost: tmSystem === 'advance' ? TI.advanceStationCost : TI.trelonaStationCost,
+          stationCostSource: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
+        },
+        materialCostSource: {
+          station: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
+          cartridge: tmSystem === 'trelona' ? 'config' : 'none',
         },
       };
       wgServices.push({
