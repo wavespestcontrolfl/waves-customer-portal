@@ -560,7 +560,7 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel(name, 'moderate')).toBe(label);
   });
 
-  test.each(['Recovery may take all season', 'Thin turf may take all summer to recover', 'This will take all of the fall'])('safeConditionLabel never reads the ordinary phrase in %s as take-all disease', (name) => {
+  test.each(['Recovery may take all season', 'Thin turf may take all summer to recover', 'This will take all of the fall', 'Preventive fungicide application', 'Fungicide-treated area'])('safeConditionLabel never reads the ordinary phrase in %s as a fungal disease', (name) => {
     expect(safeConditionLabel(name, 'high')).not.toBe('fungal activity');
   });
 

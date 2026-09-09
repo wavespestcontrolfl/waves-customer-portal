@@ -101,7 +101,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['are active', 'is active', 'are clearly active', 'were still active', 'are now very active'])(
+  test.each(['are active', 'is active', 'are clearly active', 'were still active', 'are now very active', 'have been active', 'has been active', 'have just been active', 'had been very active'])(
     'cannot publish a cause-first active claim that chinch bugs %s', (claim) => {
       const text = `Chinch bugs ${claim} along the edge.`;
       const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
