@@ -4,6 +4,7 @@
  */
 
 const db = require('../models/db');
+const { randomUUID } = require('node:crypto');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
 const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
@@ -13,18 +14,26 @@ const {
 } = require('./estimate-automation-duplicates');
 
 const { phoneMatchDigits } = require('../utils/phone');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // Authority comes from the server's assigned session, never model arguments.
-async function resolveLeadSubject(input, context) {
+async function resolveLeadSubject(input, context, conn = db, lock = false) {
   if (!context?.leadId || !context?.customerId) return { error: 'Missing assigned lead context', validationError: true };
   if ((input.lead_id && input.lead_id !== context.leadId) ||
       (input.customer_id && input.customer_id !== context.customerId)) {
     return { error: 'Tool target does not match assigned lead', validationError: true };
   }
-  const customerQuery = db('customers').where('id', context.customerId).whereNull('deleted_at');
+  // Booking and estimate acceptance hold this advisory key before rows.
+  // Join their fence before either row lock, including legacy lead-first writers.
+  if (lock) await lockCustomerComms(conn, context.customerId);
+  // Customer 360 locks the customer before its lead fanout. Use the same
+  // order so database mutations remain live and bound to that customer.
+  const customerQuery = conn('customers').where('id', context.customerId).whereNull('deleted_at');
+  if (lock) customerQuery.forNoKeyUpdate();
   const customer = await customerQuery.first();
   if (!customer) return { error: 'Assigned customer is unavailable', validationError: true };
-  const query = db('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
+  const query = conn('leads').where({ id: context.leadId, customer_id: context.customerId }).whereNull('deleted_at');
+  if (lock) query.forUpdate();
   const lead = await query.first();
   if (!lead) return { error: 'Assigned lead is unavailable', validationError: true };
   if (input.phone != null) {
@@ -33,6 +42,13 @@ async function resolveLeadSubject(input, context) {
     if (!matches) return { error: 'Tool phone does not match assigned lead', validationError: true };
   }
   return { lead, customer };
+}
+
+async function withLockedLeadSubject(input, context, write) {
+  return db.transaction(async trx => {
+    const current = await resolveLeadSubject(input, context, trx, true);
+    return current.error ? current : write(current, trx);
+  });
 }
 
 async function executeLeadTool(toolName, input, context) {
@@ -403,46 +419,72 @@ async function executeLeadTool(toolName, input, context) {
     }
 
     case 'queue_for_adam': {
-      // Same liveness rule as send_lead_response: a removed lead must not
-      // generate an SLA ping or a queued draft.
-      if (input.lead_id) {
-        const liveLead = await db('leads').where('id', input.lead_id).whereNull('deleted_at').first('id');
-        if (!liveLead) return { error: 'Lead was removed from the pipeline — nothing to queue' };
-      }
-      const customer = await db('customers').where('id', input.customer_id).first();
-
-      // Save draft
-      if (input.lead_id) {
-        await db('lead_activities').insert({
-          lead_id: input.lead_id,
+      if (!context.sessionId || !context.toolUseId) return { error: 'Missing queue invocation identity', validationError: true };
+      const queued = await db.transaction(async trx => {
+        const current = await resolveLeadSubject(input, context, trx, true);
+        if (current.error) return current;
+        const existing = await trx('lead_activities')
+          .where({ lead_id: context.leadId, activity_type: 'draft_queued' })
+          .whereRaw("metadata->>'sessionId' = ? AND metadata->>'toolUseId' = ?", [context.sessionId, context.toolUseId])
+          .first();
+        const metadata = existing
+          ? (typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : existing.metadata)
+          : { draftResponse: input.draft_response, reason: input.reason, urgency: input.urgency,
+            sessionId: context.sessionId, toolUseId: context.toolUseId };
+        if (existing && ['notified', 'sent', 'suppressed'].includes(metadata.alertStatus)) {
+          return { id: existing.id, replayed: true, alertStatus: metadata.alertStatus };
+        }
+        if (existing && new Date(metadata.alertLeaseUntil).getTime() > Date.now()) {
+          return { id: existing.id, replayed: true, alertStatus: 'pending', nextAllowedAt: metadata.alertLeaseUntil };
+        }
+        const [activity] = existing ? [existing] : await trx('lead_activities').insert({
+          lead_id: context.leadId,
           activity_type: 'draft_queued',
           description: `Queued for Adam: ${input.reason}`,
           performed_by: 'lead_agent',
-          metadata: JSON.stringify({
-            draftResponse: input.draft_response,
-            reason: input.reason,
-            urgency: input.urgency,
-          }),
-        });
-      }
+          metadata: JSON.stringify(metadata),
+        }).returning('id');
+        // Extend this draft's replay state with a bounded alert claim. No
+        // database connection stays pinned while the notification sends.
+        const alertClaimToken = randomUUID();
+        await trx('lead_activities').where({ id: activity.id }).update({ metadata: JSON.stringify({
+          ...metadata, alertClaimToken, alertLeaseUntil: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+        }) });
+        return { id: activity.id, customer: current.customer, metadata, alertClaimToken, replayed: !!existing };
+      });
+      if (queued.error) return queued;
+      if (!queued.alertClaimToken) return { queued: true, activityId: queued.id, replayed: true, alertStatus: queued.alertStatus,
+        ...(queued.alertStatus === 'pending' ? { retryable: true, nextAllowedAt: queued.nextAllowedAt } : {}) };
+      const customer = queued.customer;
+      let alertStatus = 'not_configured';
 
       // SMS Adam with the lead details + suggested reply
       try {
         const TwilioService = require('./twilio');
-        const slaLabel = { urgent: '15 min', normal: '1 hour', low: '4 hours' }[input.urgency || 'normal'];
+        const slaLabel = { urgent: '15 min', normal: '1 hour', low: '4 hours' }[queued.metadata.urgency || 'normal'];
         const adamMsg = `📋 Lead needs your reply (${slaLabel} SLA):\n` +
           `${customer ? customer.first_name + ' ' + customer.last_name : 'Unknown'}\n` +
           `📞 ${customer?.phone || 'N/A'}\n` +
-          `Reason: ${input.reason}\n\n` +
-          `Suggested reply:\n"${(input.draft_response || '').substring(0, 200)}"`;
+          `Reason: ${queued.metadata.reason}\n\n` +
+          `Suggested reply:\n"${(queued.metadata.draftResponse || '').substring(0, 200)}"`;
 
         if (process.env.ADAM_PHONE) {
-          await TwilioService.sendSMS(process.env.ADAM_PHONE, adamMsg, { messageType: 'internal_alert' });
+          const alert = await TwilioService.sendSMS(process.env.ADAM_PHONE, adamMsg, { messageType: 'internal_alert' });
+          if (!alert?.success || alert.notificationUndelivered || alert.notificationError) alertStatus = 'failed';
+          else if (alert.notificationRedirected || alert.pushRouted) alertStatus = 'notified';
+          else if (alert.suppressed || alert.gateBlocked) alertStatus = 'suppressed';
+          else alertStatus = alert.sid ? 'sent' : 'failed';
         }
-      } catch { /* best effort */ }
+      } catch { alertStatus = 'failed'; }
 
-      logger.info(`[lead-agent] Queued for Adam: ${input.reason}`);
-      return { queued: true, reason: input.reason, urgency: input.urgency || 'normal' };
+      await db('lead_activities').where({ id: queued.id })
+        .whereRaw("metadata->>'alertClaimToken' = ?", [queued.alertClaimToken])
+        .update({ metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'alertClaimToken' - 'alertLeaseUntil') || jsonb_build_object('alertStatus', ?::text)", [alertStatus]) });
+
+      logger.info('[lead-agent] Draft queued', { leadId: context.leadId, activityId: queued.id, alertStatus });
+      return { queued: true, activityId: queued.id, alertStatus, replayed: queued.replayed,
+        reason: queued.metadata.reason, urgency: queued.metadata.urgency || 'normal',
+        ...(['failed', 'not_configured'].includes(alertStatus) ? { failed: true, retryable: true, error: 'Draft saved; owner alert delivery failed' } : {}) };
     }
 
     // ── Pipeline & follow-up ────────────────────────────────────
@@ -452,6 +494,7 @@ async function executeLeadTool(toolName, input, context) {
 
       // Map stage names to pipeline events
       const eventMap = {
+        estimate_viewed: 'estimate_viewed',
         contacted: 'first_contact',
         estimate_sent: 'estimate_sent',
         follow_up: 'estimate_followup_sent',
@@ -459,19 +502,21 @@ async function executeLeadTool(toolName, input, context) {
         lost: 'estimate_declined',
       };
 
-      const event = eventMap[input.stage] || input.stage;
-      await PipelineManager.onEvent(input.customer_id, event);
+      const event = Object.hasOwn(eventMap, input.stage) ? eventMap[input.stage] : null;
+      if (!event) return { error: 'Unsupported lead pipeline stage', validationError: true };
+      return withLockedLeadSubject(input, context, async (_current, trx) => {
+        await PipelineManager.onEvent(context.customerId, event, {}, { database: trx });
 
-      if (input.lead_id && input.note) {
-        await db('lead_activities').insert({
-          lead_id: input.lead_id,
-          activity_type: 'pipeline_update',
-          description: input.note,
-          performed_by: 'lead_agent',
-        }).catch(() => {});
-      }
-
-      return { updated: true, stage: input.stage };
+        if (input.note) {
+          await trx('lead_activities').insert({
+            lead_id: input.lead_id,
+            activity_type: 'pipeline_update',
+            description: input.note,
+            performed_by: 'lead_agent',
+          });
+        }
+        return { updated: true, stage: input.stage };
+      });
     }
 
     case 'flag_for_estimate': {
@@ -490,7 +535,10 @@ async function executeLeadTool(toolName, input, context) {
       const customer = await db('customers').where('id', input.customer_id).first();
       const crypto = require('crypto');
 
-      const result = await withAutomatedEstimatePhoneLock(customer?.phone, async (trx) => {
+      const result = await db.transaction(database => withAutomatedEstimatePhoneLock(customer?.phone, async (trx) => {
+        const current = await resolveLeadSubject(input, context, trx, true);
+        if (current.error) return current;
+        if (current.customer.phone !== customer?.phone) return { error: 'Assigned contact changed before estimate creation', validationError: true };
         const duplicateBlock = await blockIfAutomatedEstimateDuplicate(customer?.phone, { database: trx });
         if (duplicateBlock) {
           logger.info(`[lead-agent] Estimate flag blocked by duplicate estimate ${duplicateBlock.existingEstimateId} for customer ${input.customer_id}`);
@@ -506,10 +554,10 @@ async function executeLeadTool(toolName, input, context) {
 
         const [estimate] = await trx('estimates').insert({
           customer_id: input.customer_id,
-          customer_name: customer ? `${customer.first_name} ${customer.last_name}` : 'Unknown',
-          customer_phone: customer?.phone,
-          customer_email: customer?.email,
-          address: input.address || customer?.address_line1 || '',
+          customer_name: `${current.customer.first_name} ${current.customer.last_name}`,
+          customer_phone: current.customer.phone,
+          customer_email: current.customer.email,
+          address: input.address || current.customer.address_line1 || '',
           status: 'draft',
           source: 'lead_agent',
           service_interest: input.service_interest,
@@ -518,8 +566,9 @@ async function executeLeadTool(toolName, input, context) {
         }).returning('*');
 
         return { estimate };
-      });
+      }, { database }));
 
+      if (result.error) return result;
       if (result.blocked) {
         return { flagged: false, ...result };
       }
@@ -530,22 +579,24 @@ async function executeLeadTool(toolName, input, context) {
 
     case 'save_lead_response_report': {
       try {
-        await db('lead_agent_responses').insert({
-          lead_id: input.lead_id,
-          customer_id: input.customer_id,
-          action_taken: input.action_taken,
-          response_message: input.response_message,
-          response_time_seconds: input.response_time_seconds,
-          triage_summary: input.triage_summary,
-          follow_up_scheduled: input.follow_up_scheduled || false,
-          created_at: new Date(),
+        const result = await withLockedLeadSubject(input, context, async (_current, trx) => {
+          await trx('lead_agent_responses').insert({
+            lead_id: input.lead_id,
+            customer_id: input.customer_id,
+            action_taken: input.action_taken,
+            response_message: input.response_message,
+            response_time_seconds: input.response_time_seconds,
+            triage_summary: input.triage_summary,
+            follow_up_scheduled: input.follow_up_scheduled || false,
+            created_at: new Date(),
+          });
+          return { saved: true };
         });
-      } catch (err) {
-        // Table may not exist
-        logger.debug(`[lead-agent] Report save failed (table may not exist): ${err.message}`);
+        return result.error ? { saved: false, ...result } : result;
+      } catch {
+        logger.warn('[lead-agent] Report save failed', { leadId: context.leadId });
+        return { saved: false, error: 'Lead response report could not be saved' };
       }
-
-      return { saved: true };
     }
 
     default:
