@@ -2230,6 +2230,10 @@ The owner-approved audit sequence promotes comfortable 44px controls, sentence-c
 
 The existing `/admin/_design-system` route demonstrates labeled fields, stable loading and retry states, missing values versus zero, nested overlays, and record/role draft ownership, with the source for each example. `AdminCommandHeader` gains an explicit workspace variant. These examples do not establish estimate pricing, durable offline recovery, or technician completion behavior; those remain separate workflow proofs in the approved sequence.
 
+## 2026-09-09 — Group the admin sidebar around daily work
+
+The owner-approved navigation scope retains every destination while grouping the sidebar into six daily links, four expandable management areas, direct Agent Ops and footer Settings. Leaf roles and feature gates remain authoritative. The default-off `admin-navigation` per-user flag enables the shared desktop/mobile workspace metadata, account-specific expansion and rendered-tab selection. Existing routes, mobile tabs, settings leaves, page data and usage beacons remain intact. New chrome uses the incoming shared UI foundation and its 14px text and responsive control density. See `docs/admin-sidebar-navigation.md` for behavior, rollout and integration dependencies.
+
 ## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
 
 The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
