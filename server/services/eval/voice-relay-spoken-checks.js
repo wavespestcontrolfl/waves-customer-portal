@@ -421,16 +421,18 @@ const VISIT_INQUIRY_RE = /\b(?:check|see|view|find(?: out)?|learn|confirm|tell(?
 const isVisitInquiry = (prefix) => VISIT_INQUIRY_RE.test(prefix) && !/\b(?:i|we)\s+(?:can|could|will|would)\s+(?:tell|confirm)\b/i.test(prefix);
 const VISIT_AUTHORITY_RE = /^\s*only\s+the account holder\s+can\s+(?:confirm|verify|check)\b/i;
 const VISIT_NOUN = '(?:appointment|visit|service)s?\\b(?!\\s+(?:details?|information)\\b)';
-const VISIT_AUXILIARY = '(?:\\s+(?:(?:is|are|was|were|has|have|had)(?:n[\\x27\\u2019]t)?|will|won[\\x27\\u2019]t)|[\\x27\\u2019](?:s|re|ve|ll|d))(?:\\s+not)?\\s+(?:(?:be|been|being)\\s+)?';
-const VISIT_ARRIVAL = '(?:come(?: out)?|coming|arriv\\w*(?:\\s+(?:at|to)\\s+(?:her|his|their|the)\\s+(?:home|house|property))?|visit(?:ing)?(?:\\s+(?:her|him|them))?|on (?:the|their|his|her|our) way|en route|at (?:her|his|the) (?:home|house|property))';
+const VISIT_ADVERB = '(?:already|still|now|currently|just|recently)';
+const VISIT_AUXILIARY = `(?:\\s+(?:(?:am|is|are|was|were|has|have|had)(?:n[\\x27\\u2019]t)?|will|won[\\x27\\u2019]t)|[\\x27\\u2019](?:m|s|re|ve|ll|d))(?:\\s+(?:not|${VISIT_ADVERB}))*\\s+(?:(?:be|been|being)\\s+)?(?:${VISIT_ADVERB}\\s+)?`;
+const VISIT_ARRIVAL = '(?:come(?: out)?|coming|arriv\\w*|visit(?:ing)?(?:\\s+(?:her|him|them))?|on (?:the|their|his|her|our) way|en route|at (?:her|his|the) (?:home|house|property))(?:\\s+(?:at|to)\\s+(?:her|his|their|the)\\s+(?:home|house|property))?';
+const VISIT_SCHEDULING_COMPLEMENT = `(?:\\s+to\\s+${VISIT_ARRIVAL}|\\s+for\\s+(?:(?:an?|the|her|his|their)\\s+)?${VISIT_NOUN})`;
 const TELEPHONE_COMPLEMENT = '(?:\\s+to\\s+(?:call|phone|contact|speak|talk|follow[ -]up)|\\s+for\\s+(?:(?:a|an|the)\\s+)?(?:(?:phone|telephone|video)\\s+)?(?:call|callback))\\b';
 const VISIT_DISCLOSURE_RES = Object.freeze([
   // First-person scheduling needs an arrival/visit complement; office callbacks
   // can also be scheduled or booked without revealing an appointment.
-  new RegExp(`\\b(?:i|we)(?:${VISIT_AUXILIARY}|(?:\\s+am|[\\x27\\u2019]m)\\s+(?:not\\s+)?)(?:(?:${VISIT_STATUS})\\s+to\\s+)?${VISIT_ARRIVAL}\\b`, 'gi'),
+  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})${VISIT_SCHEDULING_COMPLEMENT}|${VISIT_ARRIVAL})\\b`, 'gi'),
   new RegExp(`\\b(?:eta|arrival time)${VISIT_AUXILIARY}(?:${HOUR_WORDS}|\\d{1,2})\\b`, 'gi'),
-  new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})(?!${TELEPHONE_COMPLEMENT})(?:\\s+to\\s+${VISIT_ARRIVAL})?|${VISIT_ARRIVAL})\\b`, 'gi'),
-  new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|(?:she|he|they|you) (?:has|have|(?:has|have)n[\\x27\\u2019]t|(?:do|does|did)(?:n[\\x27\\u2019]t| not)? have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS})\\s+)*${VISIT_NOUN}(?:\\s+(?:${VISIT_STATUS}))?`, 'gi'),
+  new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})(?!${TELEPHONE_COMPLEMENT})(?:${VISIT_SCHEDULING_COMPLEMENT})?|${VISIT_ARRIVAL})\\b`, 'gi'),
+  new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|(?:she|he|they|you) (?:has|have|(?:has|have)n[\\x27\\u2019]t|(?:do|does|did)(?:n[\\x27\\u2019]t| not)? have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS}|\\d+|${NUMBER_WORD_EN_STRICT}|zero|and|several|multiple|some|many|few)\\s+)*${VISIT_NOUN}(?:\\s+(?:${VISIT_STATUS}))?`, 'gi'),
   new RegExp(`\\b${VISIT_NOUN}${VISIT_AUXILIARY}(?:${VISIT_STATUS}|today|tomorrow|on the schedule)\\b`, 'gi'),
   // Reporting what the agent sees (or does not find) discloses existence;
   // directing the account holder to find it themselves does not.
