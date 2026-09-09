@@ -1662,6 +1662,10 @@ class SmartRebooker {
       }
     }
 
+    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+      jobId: serviceId, dates: [originalDate, newDateStr],
+    });
+
     if (overlapWarned) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       // previousStatus: the status the CAS matched — the row's real
@@ -2996,6 +3000,9 @@ class SmartRebooker {
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
     }
+    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+      jobId: serviceId, dates: moveRows.flatMap(row => [row.before?.scheduled_date, row.after?.scheduled_date]),
+    });
     return { ...committedResult, originalDate: service.scheduled_date, seriesMoveId };
   }
 

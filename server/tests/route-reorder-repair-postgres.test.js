@@ -118,6 +118,52 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     expect(await mockConnection('plan_holds').where('id', hold.id).first('status')).toEqual({ status: 'active' });
   });
 
+  test('a dispatch update remeasures the source and destination without changing appointments', async () => {
+    const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+    const { getRoutePerformance } = require('../services/scheduling/route-performance');
+    const original = etDateString(addETDays(new Date(), 10));
+    const destination = etDateString(addETDays(new Date(), 11));
+    await mockConnection('scheduled_services').whereIn('id', ids).update({ scheduled_date: original });
+    await mockConnection('scheduled_services').where('id', ids[2]).update({ scheduled_date: destination });
+    const before = await mockConnection('scheduled_services').whereIn('id', ids).orderBy('id').select('*');
+    await emitDispatchJobUpdate({ jobId: ids[2], previousDate: original });
+    expect(await mockConnection('scheduled_services').whereIn('id', ids).orderBy('id').select('*')).toEqual(before);
+    const ledger = await mockConnection('route_optimization_planner_runs').where('run_type', 'schedule_quality_change').first();
+    expect(ledger).toMatchObject({ applied_count: 0, status: 'completed' });
+    const details = typeof ledger.result === 'string' ? JSON.parse(ledger.result) : ledger.result;
+    const snapshots = details.route_quality.filter(row => row.technician_id === technicianId);
+    expect(snapshots.map(row => [row.date, row.plannedStops.length])).toEqual([[original, 2], [destination, 1]]);
+    expect(JSON.stringify(details)).not.toContain('Synthetic routing technician');
+    const measured = await getRoutePerformance({ from: original, to: destination, now: addETDays(new Date(), 12) }, mockConnection);
+    expect(measured.plans.filter(plan => plan.technicianId === technicianId).map(plan => plan.snapshotPhase))
+      .toEqual(['schedule_change', 'schedule_change']);
+    expect(measured.missingBaselineDates).toEqual([]);
+  });
+
+  test('removing the last appointment replaces the prior planning snapshot with an empty route', async () => {
+    const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
+    const { getRoutePerformance } = require('../services/scheduling/route-performance');
+    const future = etDateString(addETDays(new Date(), 10));
+    await mockConnection('scheduled_services').whereIn('id', ids).update({ scheduled_date: future });
+    await refreshScheduleQualityAfterChange({ jobId: ids[0] }, mockConnection);
+    await mockConnection('scheduled_services').whereIn('id', ids).update({ status: 'cancelled' });
+    const refreshed = await refreshScheduleQualityAfterChange({ jobId: ids[0] }, mockConnection);
+    expect(refreshed).toMatchObject({ status: 'recorded', dates: [future] });
+    const result = await getRoutePerformance({ from: future, to: future, now: addETDays(new Date(), 11) }, mockConnection);
+    expect(result.plans.find(plan => plan.technicianId === technicianId)).toMatchObject({
+      planningRunId: refreshed.ledgerId, snapshotPhase: 'schedule_change', plannedVisits: 0, onTimeRate: null,
+    });
+  });
+
+  test('a measurement query failure rolls back its savepoint and leaves the caller transaction usable', async () => {
+    const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
+    await mockConnection.schema.renameTable('schedule_blackout_dates', 'synthetic_hidden_blackouts');
+    const refreshed = await refreshScheduleQualityAfterChange({ dates: [etDateString(addETDays(new Date(), 10))] }, mockConnection);
+    expect(refreshed).toEqual({ status: 'failed' });
+    expect(await mockConnection('scheduled_services').whereIn('id', ids)).toHaveLength(3);
+    expect(await mockConnection('route_optimization_planner_runs').where('run_type', 'schedule_quality_change')).toHaveLength(0);
+  });
+
   test.each([
     [false, 'rescheduled', false],
     [true, 'rescheduled', true],

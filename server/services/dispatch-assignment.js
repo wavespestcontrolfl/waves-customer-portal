@@ -103,16 +103,21 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
   };
 }
 
-async function emitDispatchJobUpdate({ jobId, actorId }) {
+async function emitDispatchJobUpdate({ jobId, actorId, previousDate }) {
   const payload = await buildDispatchJobUpdatePayload(jobId, actorId);
   if (!payload) return null;
 
   const io = getIo();
   if (!io) {
     logger.warn('[dispatch-assignment] io not initialized; skipping dispatch:job_update');
-    return payload;
+  } else {
+    io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
   }
-  io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+  // Publish the job payload before doing additional reads so measurement
+  // latency cannot delay an older board update behind a newer one.
+  await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+    jobId, dates: [previousDate, payload.scheduled_date],
+  });
   return payload;
 }
 

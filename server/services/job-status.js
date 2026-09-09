@@ -632,6 +632,8 @@ async function transitionJobStatus({
     // ordering easier to follow.
     emitToCustomer(customerId, customerPayload);
     emitToAdmins(adminPayload);
+    void require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ jobId, trx })
+      .catch(() => logger.error(`[job-status] route measurement failed for ${jobId}`));
   }
 
   function processCancelNoticeClaim() {

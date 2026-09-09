@@ -7224,6 +7224,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             } catch (e) {
               logger.error(`[admin-schedule] bulk reschedule call follow-up shift failed for ${id}: ${e.message}`);
             }
+            await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+              jobId: id, dates: [callFollowUpShiftFrom, bulkTargetDate],
+            });
             break;
           }
           case 'cancel': {
@@ -8565,6 +8568,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
     let recurringUpdatedJobIds = [];
+    const qualityPreviousDates = new Map();
     // Children spawned inside the trx below; reminder rows are registered for
     // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
     // never reads a row whose visit could still roll back.
@@ -9919,6 +9923,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 );
               }
               recurringUpdatedJobIds.push(child.id);
+              qualityPreviousDates.set(child.id, child.scheduled_date);
             }
             if (pendingBoosters.length > 0) {
               for (const booster of pendingBoosters) {
@@ -9979,6 +9984,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   );
                 }
                 recurringUpdatedJobIds.push(booster.id);
+                qualityPreviousDates.set(booster.id, booster.scheduled_date);
               }
             }
           }
@@ -10737,13 +10743,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
 
     if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
       try {
+        qualityPreviousDates.set(req.params.id, callFollowUpShiftFrom);
         const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
         for (const id of addressUpdatedIds) broadcastJobIds.add(id);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
         await Promise.all([...broadcastJobIds].map((jobId) =>
-          emitDispatchJobUpdate({ jobId, actorId: req.technicianId })
+          emitDispatchJobUpdate({ jobId, actorId: req.technicianId, previousDate: qualityPreviousDates.get(jobId) })
         ));
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
