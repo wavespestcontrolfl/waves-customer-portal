@@ -151,7 +151,7 @@ async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
         `Recipient: ${maskPhone(to)}`,
         `Body length: ${body?.length || 0}`,
       ].join("\n"),
-      link: "/admin/sms-templates",
+      link: "/admin/communications#tab=templates",
       originalMessageType: "sms_guard_blocked",
       originalToMasked: maskPhone(to),
     });
@@ -810,6 +810,7 @@ const TwilioService = {
           scheduledSmsLogId: options.scheduledSmsLogId,
           explicitPushOnly: options.explicitPushOnly,
           notificationEventKey: options.notificationEventKey,
+          invoiceId: options.invoiceId,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
         });
@@ -820,6 +821,8 @@ const TwilioService = {
           return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
         }
         if (options.explicitPushOnly) {
+          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
+          if (pushed.retryable) return { success: false, appRetryable: true, error: pushed.reason };
           if (pushed.pending) return { success: false, appPending: true, error: pushed.reason };
           return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
         }

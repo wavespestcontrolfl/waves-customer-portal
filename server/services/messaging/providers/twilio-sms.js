@@ -115,6 +115,7 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
       explicitPushOnly: input.channel === 'push',
       skipPushRouting: Boolean(input.metadata?.appFallbackReason),
       notificationEventKey: input.metadata?.notificationEventKey,
+      invoiceId: input.invoiceId,
       messageType,
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
@@ -166,6 +167,9 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     }
     if (result.appPending) {
       return { sent: false, blocked: true, provider: 'push', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+    }
+    if (result.appRetryable) {
+      return { sent: false, blocked: true, provider: 'push', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
     }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {

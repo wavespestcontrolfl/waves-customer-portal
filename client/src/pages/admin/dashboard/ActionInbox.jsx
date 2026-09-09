@@ -1,4 +1,5 @@
 import { Badge, Card, CardBody, CardHeader, CardTitle, cn } from "../../../components/ui";
+import { RowLink } from "./RowLink";
 import { CHART_SUCCESS, fmtMoneyCompact } from "../../../components/dashboard/charts";
 
 // Rank: what to do first. Critical before warn; within a severity, do-this-now
@@ -85,9 +86,9 @@ export default function ActionInbox({ alerts, stale = false }) {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {items.map((item) => (
-              <a
+              <RowLink
                 key={item.id}
-                href={item.href || "#"}
+                href={item.href}
                 className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
               >
                 <span className="flex items-center gap-2 min-w-0">
@@ -111,7 +112,7 @@ export default function ActionInbox({ alerts, stale = false }) {
                     →
                   </span>
                 </span>
-              </a>
+              </RowLink>
             ))}
           </div>
         )}
