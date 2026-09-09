@@ -504,6 +504,16 @@ describe('POST /admin/communications/customer-link', () => {
       });
     });
 
+    test('email: unavailable review history remains a retryable service failure', async () => {
+      wireDb({ customers: soloCustomer() });
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503, reason: 'Could not verify review history.' });
+      await withServer(async baseUrl => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(503);
+        expect(await res.json()).toMatchObject({ code: 'REVIEW_HISTORY_UNAVAILABLE' });
+      });
+    });
+
     test('email: a gate refusal is a 409 with the shared gate copy', async () => {
       wireDb({ customers: soloCustomer() });
       ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'cooldown' });

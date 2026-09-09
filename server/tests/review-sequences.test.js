@@ -4495,6 +4495,7 @@ describe('shared ask history foundation', () => {
     'Please review and sign your agreement: https://portal.test/contract/abc',
     'Could you review the service report?',
     'Please submit your review of the attached estimate.',
+    'Please submit your review for the attached estimate.',
     'Shipping details: https://vendor.example/rate/abc',
     'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
@@ -4512,6 +4513,7 @@ describe('shared ask history foundation', () => {
     'portal.wavespestcontrol.com/api/rate/abc/go',
     'We’d appreciate a Google review.',
     'A quick Google review would mean the world.',
+    'A Google review would be greatly appreciated.',
     'We would really love your honest review.',
     'A review could help our little crew.',
     'Would you mind leaving us a Google review?',
@@ -4634,8 +4636,8 @@ describe('direct outreach serialization', () => {
     } else {
       expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_ASK_SPACING' });
       expect(result.deferred).toBeUndefined();
-      expect(request.status).toBe('deferred');
-      expect(request.scheduled_for).toBeUndefined();
+      expect(request).toBeUndefined();
+      expect(mock.__state.rows.review_requests).toEqual([]);
     }
   });
 
@@ -4644,9 +4646,9 @@ describe('direct outreach serialization', () => {
     const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] }, { throwSelectWhen: q => q.table === 'sms_log' });
     db.mockImplementation(mock);
     const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
-    expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE' });
+    expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503 });
     expect(mockEmailSendTemplate).not.toHaveBeenCalled();
-    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeUndefined();
+    expect(mock.__state.rows.review_requests).toEqual([]);
   });
 
   test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {
