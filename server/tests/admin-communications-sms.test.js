@@ -1909,6 +1909,33 @@ describe('Communications review ask serialization', () => {
     });
   });
 
+  test.each([false, true])('definite retryable no-send releases the bare reservation (audit throw: %s)', async auditThrows => {
+    let reserved = false;
+    db.mockImplementation(table => {
+      const b = makeUniversalBuilder();
+      if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'sms_log') {
+        b.insert.mockImplementation(() => { reserved = true; return b; });
+        b.del.mockImplementation(async () => {
+          expect(held.has('review-send:cust-A')).toBe(true);
+          reserved = false;
+          return 1;
+        });
+      }
+      return b;
+    });
+    history.lastManualAskAt.mockImplementation(async () => reserved ? new Date() : null);
+    const outcome = { sent: false, retryable: true, deferred: true, code: 'PROVIDER_FAILURE' };
+    if (auditThrows) sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
+    else sendCustomerMessage.mockResolvedValueOnce(outcome);
+    await withServer(async baseUrl => {
+      await send(baseUrl);
+      expect(reserved).toBe(false);
+      expect((await send(baseUrl)).status).toBe(200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test('a failed pre-send reservation prevents the provider call', async () => {
     db.mockImplementation(table => {
       const b = makeUniversalBuilder();
