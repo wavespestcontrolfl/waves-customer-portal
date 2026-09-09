@@ -296,11 +296,13 @@ function payerNameCorroborates(payerName, customer = {}) {
 // shared initial is the corroboration (codex r1 P1): a household line is
 // exactly where "Mary" and "Gary" — one edit apart — are two people, and a
 // reused lead there overwrites the first prospect's extraction and loses the
-// second. Transcription drift ADDS or DROPS a letter mid-word (Jason /
-// Jayson, Debbie / Debbi); a same-length substitution is a different name
-// (Maria / Marie, Mary / Gary — codex r2 P1), and so is a different first
-// letter. Not for money: the payer matcher keeps exact / single-group
-// nickname semantics.
+// second. Transcription drift ADDS or DROPS one letter INSIDE the name
+// (Jason / Jayson, Jennifer / Jenifer) or a silent final e / h (Debbie /
+// Debbi, Hannah / Hanna); a same-length substitution is a different name
+// (Maria / Marie, Mary / Gary — codex r2 P1), so is a different first
+// letter, and so is any other appended letter — Julia / Julian and Andre /
+// Andrea are two people, not one spelling (codex r4 P1). Not for money: the
+// payer matcher keeps exact / single-group nickname semantics.
 function editDistanceAtMostOne(a, b) {
   if (a === b) return true;
   const la = a.length; const lb = b.length;
@@ -314,10 +316,15 @@ function editDistanceAtMostOne(a, b) {
   }
   return edits + (la - i) + (lb - j) <= 1;
 }
+const SILENT_FINALS = new Set(['e', 'h']);
 function sameSpokenFirstName(a, b) {
   if (sameFirstName(a, b)) return true;
   if (!a || !b || a.length < 5 || b.length < 5 || a[0] !== b[0] || a.length === b.length) return false;
-  return editDistanceAtMostOne(a, b);
+  if (!editDistanceAtMostOne(a, b)) return false;
+  const [short, long] = a.length < b.length ? [a, b] : [b, a];
+  // An appended letter is a different name unless it is a silent final.
+  if (long.startsWith(short)) return SILENT_FINALS.has(long[long.length - 1]);
+  return true;
 }
 
 module.exports = {

@@ -6114,7 +6114,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // booking (the duplicate-appointment path).
     knownCaller: opts.knownCaller,
     // Carrier caller-ID name as a NAME CANDIDATE (2026-09-02..08 audit:
-    // "Bell" won over a spelled B-E-A-L-L and caller ID BEALL).
+    // "Smith" won over a spelled S-M-Y-T-H-E and caller ID SMYTHE).
     callerIdName: opts.callerIdName,
     // Cross-call threading: prior call from this number, so a continuation
     // completes the earlier record instead of restarting from nothing.

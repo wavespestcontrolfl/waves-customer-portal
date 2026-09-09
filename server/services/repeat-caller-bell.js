@@ -97,9 +97,14 @@ async function ringRepeatCallerIfNeeded(callSid) {
         .select('id', 'created_at', 'answered_by', 'customer_id',
           trx.raw("(metadata->>'repeat_caller_alerted_at') as repeat_caller_alerted_at"),
           trx.raw("(metadata->>'repeat_caller_claim') as repeat_caller_claim"),
-          trx.raw('EXISTS (SELECT 1 FROM scheduled_services s WHERE s.source_call_log_id = call_log.id) AS booked'));
+          // Live or completed bookings only (the triage resolver's set): a
+          // booking that was cancelled or skipped may be WHY the number
+          // keeps calling (codex r4 P2).
+          trx.raw("EXISTS (SELECT 1 FROM scheduled_services s WHERE s.source_call_log_id = call_log.id AND s.status IN ('pending', 'confirmed', 'en_route', 'on_site', 'completed')) AS booked"));
       const p = repeatCallerPlan(rows);
       if (!p) return null;
+      // A stale lease on THIS call means a previous owner died mid-delivery.
+      p.reclaimed = Boolean(rows.find((r) => String(r.id) === String(call.id))?.repeat_caller_claim);
       const claimed = await trx('call_log')
         .where({ id: call.id })
         .whereRaw("COALESCE(metadata->>'repeat_caller_alerted_at','') = ''")
@@ -111,6 +116,18 @@ async function ringRepeatCallerIfNeeded(callSid) {
     // Every later write is fenced on the token: a stale owner waking up late
     // cannot settle or release a lease someone else now holds.
     const fenced = () => db('call_log').where({ id: call.id }).whereRaw("metadata->>'repeat_caller_claim' = ?", [token]);
+    const settle = () => fenced().update({ metadata: db.raw("(metadata - 'repeat_caller_claim') || jsonb_build_object('repeat_caller_alerted_at', ?::text)", [new Date().toISOString()]) });
+    // Reclaimed a stale lease: the previous owner may have died AFTER the
+    // bell row was written. A repeat_caller notification for this call means
+    // it delivered — settle instead of ringing twice (codex r4 P2; a
+    // push-only delivery leaves no row and its re-send is coalesced by the
+    // per-call push tag).
+    if (plan.reclaimed) {
+      const prior = await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' })
+        .whereRaw("metadata->>'triggerKey' = 'repeat_caller'")
+        .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(call.id)]).first('id');
+      if (prior) { await settle().catch(() => {}); return false; }
+    }
     let stats = null;
     let delivered = false;
     try {
@@ -136,7 +153,7 @@ async function ringRepeatCallerIfNeeded(callSid) {
       delivered = Boolean(stats && !stats.error
         && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
       if (delivered) {
-        await fenced().update({ metadata: db.raw("(metadata - 'repeat_caller_claim') || jsonb_build_object('repeat_caller_alerted_at', ?::text)", [new Date().toISOString()]) }).catch(() => {});
+        await settle().catch(() => {});
       } else {
         await fenced().update({ metadata: db.raw("metadata - 'repeat_caller_claim'") }).catch(() => {});
         logger.warn(`[repeat-caller-bell] delivery did not happen for call ${String(callSid).slice(-6)} — lease released`);

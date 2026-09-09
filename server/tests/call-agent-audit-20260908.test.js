@@ -231,6 +231,9 @@ describe('codex round 1', () => {
     expect(sameSpokenFirstName('dana', 'dane')).toBe(false); // four letters: too short to trust one edit
     expect(sameSpokenFirstName('karen', 'karin')).toBe(false); // codex r2: a same-length substitution is a different name (Maria / Marie are one via the nickname table, not this rule)
     expect(sameSpokenFirstName('jennifer', 'jenifer')).toBe(true); // a dropped letter is drift
+    expect(sameSpokenFirstName('hannah', 'hanna')).toBe(true); // silent final h
+    expect(sameSpokenFirstName('julia', 'julian')).toBe(false); // codex r4: an appended letter is a different name
+    expect(sameSpokenFirstName('andre', 'andrea')).toBe(false);
   });
 
   test('a unit spoken inside raw_text is compared too (r2 P1)', () => {
@@ -251,6 +254,15 @@ describe('codex round 1', () => {
     expect(statesNewAddress(raw('123 New Palm Ave'), lake)).toBe(true);
     expect(statesNewAddress(raw('123 Wrong Road'), lake)).toBe(true);
     expect(statesNewAddress(raw('123 w lake, same place'), lake)).toBe(false);
+  });
+
+  test('a raw street with no house number is new-address evidence even beside a matching city (r4 P1)', () => {
+    const lake = { hasAddress: true, addressLine1: '123 W Lake Dr', addressLine2: null, addressCity: 'Sarasota', addressZip: '34240' };
+    const said = (raw_text, extra = {}) => v2({ property: { service_address: { raw_text, ...extra } } });
+    expect(statesNewAddress(said('Oak Avenue, Sarasota', { city: 'Sarasota' }), lake)).toBe(true);
+    expect(statesNewAddress(said('over on Oak Avenue'), lake)).toBe(true);
+    expect(statesNewAddress(said('on W Lake, same place', { city: 'Sarasota' }), lake)).toBe(false);
+    expect(statesNewAddress(said("I'm in Sarasota, same place", { city: 'Sarasota' }), lake)).toBe(false);
   });
 
   test('the shadow bridge applies the same relationship rule as routing (P2)', () => {

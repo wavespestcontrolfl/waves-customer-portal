@@ -1294,6 +1294,8 @@ function canAutoRoute(extraction, opts = {}) {
 // second-address check, so "123 Main St" and "123 Main Street" compare equal
 // (otherwise a benign expansion opens a false second_service_address review).
 const streetHouseNum = (s) => (String(s || '').trim().match(/^\d+/) || [''])[0];
+const STREET_PHRASE_STOPWORDS = new Set(['same', 'the', 'this', 'that', 'my', 'our', 'your', 'a', 'an', 'one', 'any', 'other', 'right', 'no', 'in', 'on', 'by', 'of']);
+const STREET_SUFFIX_WORDS = new Set(['st', 'street', 'ave', 'avenue', 'rd', 'road', 'dr', 'drive', 'ln', 'lane', 'ct', 'court', 'blvd', 'boulevard', 'cir', 'circle', 'pl', 'place', 'ter', 'terrace', 'way', 'trl', 'trail', 'pkwy', 'parkway', 'hwy', 'highway']);
 const streetNameOnly = (s) => String(s || '').toLowerCase().replace(/[.,#]/g, ' ')
   .replace(/^\s*\d+\s*/, '')
   .replace(/\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|ct|court|blvd|boulevard|cir|circle|pl|place|ter|terrace|way|trl|trail|pkwy|parkway|hwy|highway)\b/g, '')
@@ -1610,6 +1612,20 @@ function restatesOnFileAddress(sa, knownCustomer) {
   }
   // A bare community name locates nothing we can compare.
   if (community && !city && !zip) return false;
+  // Raw text that names a STREET without a house number ("Oak Avenue,
+  // Sarasota") is new-address evidence too (codex r4 P1): unless it carries
+  // every word of the on-file street name it fails closed, even when the
+  // city or ZIP beside it agreed. A remark with no street words ("I'm in
+  // Parrish", "same place") is judged on the locality components alone.
+  if (raw) {
+    const rawList = String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
+    const rawTokens = new Set(rawList);
+    // A suffix word names a street only after a name-like word: "Oak
+    // Avenue" does, "same place" / "on the road" do not.
+    const namesAStreet = /\d/.test(raw)
+      || rawList.some((t, i) => i > 0 && STREET_SUFFIX_WORDS.has(t) && !STREET_PHRASE_STOPWORDS.has(rawList[i - 1]));
+    if (namesAStreet && !(onFileNameTokens.length > 0 && onFileNameTokens.every((t) => rawTokens.has(t)))) return false;
+  }
   // City and/or ZIP only, and both agreed above.
   return !!(city || zip);
 }

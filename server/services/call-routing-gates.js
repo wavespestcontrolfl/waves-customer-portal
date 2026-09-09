@@ -82,8 +82,14 @@ function checkTcpaConsent(extraction, opts = {}) {
 // a force-reprocess would keep the stale auto_route recommendation while the
 // fresh run holds the call — corrupting the promotion metrics and any
 // feedback tied to that decision row.
-const V2_DECISION_VERSION = 'v2-1.3.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0'];
+// v2-1.4.0: caller_not_authorized fires only for an EXPLICIT third party, a
+// restated on-file address (street, city, ZIP, unit — structured or spoken)
+// is not a new address, the confidence threshold moved to 0.5, and address
+// validation pins Florida (2026-09-08 call-agent audit). Each changes what
+// canAutoRoute can decide, so a force-reprocess must write a fresh decision
+// row instead of onConflict-ignoring into the v2-1.3.0 one (codex r4 P1).
+const V2_DECISION_VERSION = 'v2-1.4.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0'];
 
 function buildRouteDecision({
   callLogId,
