@@ -455,7 +455,7 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})${LEADING_VISIT_TIME}${VISIT_SCHEDULING_COMPLEMENT}|${VISIT_ARRIVAL})\\b`, 'gi'),
   new RegExp(`\\b(?:eta|arrival time|(?:appointment|visit) (?:time|date|window))${VISIT_AUXILIARY}(?:${HOUR_WORDS}|\\d{1,2}|${RELATIVE_DAY_RE.source}|today|tonight)\\b`, 'gi'),
   new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})(?:${VISIT_SCHEDULING_COMPLEMENT})?|${VISIT_ARRIVAL})\\b`, 'gi'),
-  new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|[a-z]+ (?:has|have|had|(?:has|have|had)n[\\x27\\u2019]t|(?:do|does|did)(?:n[\\x27\\u2019]t| not)? have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS}|\\d+|${NUMBER_WORD_EN_STRICT}|zero|and|several|multiple|some|many|few)\\s+)*${VISIT_NOUN}(?:\\s+(?:${VISIT_STATUS}))?`, 'gi'),
+  new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|[a-z]+(?:[\\x27\\u2019]ll| will)? (?:has|have|had|(?:has|have|had)n[\\x27\\u2019]t|(?:do|does|did)(?:n[\\x27\\u2019]t| not)? have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS}|\\d+|${NUMBER_WORD_EN_STRICT}|zero|and|several|multiple|some|many|few)\\s+)*${VISIT_NOUN}(?:\\s+(?:${VISIT_STATUS}))?`, 'gi'),
   new RegExp(`\\b${VISIT_NOUN}${VISIT_AUXILIARY}(?:${VISIT_STATUS}|today|tomorrow|on the schedule)\\b`, 'gi'),
   // Status reported through a verb: "status shows cancelled", "got cancelled".
   new RegExp(`\\b${VISIT_NOUN}\\s+(?:(?:now|currently|just|already)\\s+)?(?:shows?|showed|reads?|says?|got|gets|became|becomes|changed|went|(?:is|was|has been|have been|got|gets)\\s+(?:listed|marked|updated|set|changed|showing|reading)|is\\s+(?:listed|marked)\\s+as)(?:\\s+(?:as|to))?\\s+(?:${VISIT_STATUS})\\b`, 'gi'),
@@ -514,7 +514,7 @@ function isNonVisitPredicate(clause, match) {
 
 const CONVERSATIONAL_CONDITION_RE = /^\s*(?:(?:that|this|it)(?:[\x27\u2019]s|\s+(?:is|was|helps|answers|clarifies|makes sense))\b|you\s+(?:were|are|was|want|wanted|need|needed|would like|care|asked|ask|like|mean|meant|are referring|were referring)\b|(?:anyone|anybody)\s+(?:is|was)\s+(?:wondering|asking)\b|your\s+(?:question|concern|call)\b|[^,;]{0,40}?\bwhat\s+you\s+(?:mean|meant|are asking|were asking|want|wanted|need)\b)/i;
 function isConditionalVisitSuffix(clause, match) {
-  if (!/\bwill\b/i.test(match[0])) return false;
+  if (!/\bwill\b|[\x27\u2019]ll\b/i.test(match[0])) return false;
   const suffix = clause.slice(match.index + match[0].length);
   const condition = /\b(?:only\s+)?(?:if|unless)\b/i.exec(suffix);
   // "if she requests it" governs the visit; "if that is what you wanted to
