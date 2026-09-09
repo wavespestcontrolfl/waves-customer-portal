@@ -129,7 +129,11 @@ async function evaluate(conn, invoiceId) {
   const day = dateOnly(inv.service_date);
   if (!day || day >= etDateString()) return { skip: 'notPast' };
   const visits = await conn('scheduled_services').where({ customer_id: inv.customer_id })
-    .whereRaw('scheduled_date::date = ?::date', [day]).whereNotIn('status', DEAD_VISIT_STATUSES).select(VISIT_DIGEST_FIELDS);
+    .whereRaw('scheduled_date::date = ?::date', [day])
+    // scheduled_services.status is nullable and NULL is a live (pending)
+    // legacy shape; a bare NOT IN would hide that visit from the uniqueness count.
+    .whereRaw(`coalesce(status, '') not in (${DEAD_VISIT_STATUSES.map(() => '?').join(', ')})`, DEAD_VISIT_STATUSES)
+    .select(VISIT_DIGEST_FIELDS);
   if (visits.length !== 1) return { skip: visits.length ? 'ambiguous' : 'noVisit' };
   const svc = visits[0];
   const sameDayLive = await liveInvoices(conn).where({ customer_id: inv.customer_id })
