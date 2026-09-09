@@ -1343,6 +1343,10 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       cleared += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .whereRaw("fulfillment ->> 'strength' = 'association'")
         .update({ fulfillment: null, updated_at: new Date() });
       continue;
@@ -1351,12 +1355,20 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       fulfilled += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
         .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .whereRaw("(fulfillment IS NULL OR fulfillment ->> 'strength' = 'association')")
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
