@@ -287,10 +287,44 @@ function payerNameCorroborates(payerName, customer = {}) {
   return personsOf(payerName).some((person) => personCorroborates(person, customerFirst, customerLast));
 }
 
+// Transcription-variant first names. Speech-to-text spells the same spoken
+// name several ways across calls ("Jason" / "Jayson", "Debbie" / "Debby"),
+// and the call pipeline minted a duplicate lead on the second spelling
+// (2026-09-08 audit). Two NORMALIZED first names of five+ letters, sharing
+// their initial, within one edit of each other are the same spoken name for
+// CALL matching, where the phone number already narrows the household. The
+// shared initial is the corroboration (codex r1 P1): a household line is
+// exactly where "Mary" and "Gary" — one edit apart — are two people, and a
+// reused lead there overwrites the first prospect's extraction and loses the
+// second. Transcription drift ADDS or DROPS a letter mid-word (Jason /
+// Jayson, Debbie / Debbi); a same-length substitution is a different name
+// (Maria / Marie, Mary / Gary — codex r2 P1), and so is a different first
+// letter. Not for money: the payer matcher keeps exact / single-group
+// nickname semantics.
+function editDistanceAtMostOne(a, b) {
+  if (a === b) return true;
+  const la = a.length; const lb = b.length;
+  if (Math.abs(la - lb) > 1) return false;
+  let i = 0; let j = 0; let edits = 0;
+  while (i < la && j < lb) {
+    if (a[i] === b[j]) { i += 1; j += 1; continue; }
+    if (edits) return false;
+    edits = 1;
+    if (la > lb) i += 1; else if (lb > la) j += 1; else { i += 1; j += 1; }
+  }
+  return edits + (la - i) + (lb - j) <= 1;
+}
+function sameSpokenFirstName(a, b) {
+  if (sameFirstName(a, b)) return true;
+  if (!a || !b || a.length < 5 || b.length < 5 || a[0] !== b[0] || a.length === b.length) return false;
+  return editDistanceAtMostOne(a, b);
+}
+
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
   firstNameVariants,
   sameFirstName,
+  sameSpokenFirstName,
   payerNameCorroborates,
 };

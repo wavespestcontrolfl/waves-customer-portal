@@ -1214,6 +1214,13 @@ const gates = {
   // lead path (existing-customer or content-veto'd voicemails with concrete
   // service intent + callback number). Bell only — no customer comms.
   voicemailCallbackAlert: process.env.GATE_VOICEMAIL_CALLBACK_ALERT === 'true',
+  // Missed-call bell for numbers with NO customer on file (new prospects who
+  // hung up at the voicemail greeting). Bell only — no customer comms. Ships
+  // dark; the bell stays customers-only until the owner flips it.
+  missedCallUnknownCallers: process.env.GATE_MISSED_CALL_UNKNOWN_CALLERS === 'true',
+  // Admin bell when one number places 3+ inbound calls inside 3 hours
+  // (repeat-caller-bell.js). Bell only — no customer comms. Ships dark.
+  repeatCallerBell: process.env.GATE_REPEAT_CALLER_BELL === 'true',
   // Nightly self-audit: samples recent calls, strong-model re-read, drift
   // metrics to call_audit_findings; alerts ONLY on threshold breach.
   callSelfAudit: process.env.GATE_CALL_SELF_AUDIT === 'true',

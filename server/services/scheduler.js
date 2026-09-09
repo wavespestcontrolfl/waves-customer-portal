@@ -4297,6 +4297,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 MINUTES — Repeat-caller bell durable retry (GATE_REPEAT_CALLER_BELL).
+  // The post-call timer is in-memory (codex r1 P2): a deploy inside its five
+  // minutes loses the check for a window whose third call has no later
+  // sibling. Its own callback, for the same reason as the missed-call sweep.
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await require('./repeat-caller-bell').sweepRepeatCallers();
+    } catch (err) {
+      logger.warn(`[scheduler] repeat-caller sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
   // Runs before the 7:30 digest so the digest reports what actually happened.
   // =========================================================================

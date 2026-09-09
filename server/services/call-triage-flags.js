@@ -124,8 +124,39 @@ function isInServiceAreaCounty(county) {
   return normalized !== null && SERVICE_AREA_COUNTIES_NORMALIZED.has(normalized);
 }
 
-const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
+// 0.5 is the prompt rubric's "very uncertain" boundary. The old 0.7 sat in
+// the "inferred with reasonable confidence" band and, combined with a rubric
+// that scored completeness rather than fidelity, flagged 19 clear calls in
+// the 2026-09-02..08 audit (short calls with no address to extract scored
+// 0.05-0.45). The rubric now scores only what was returned; this threshold
+// catches genuinely garbled extractions, not short ones.
+const DEFAULT_CONFIDENCE_THRESHOLD = 0.5;
 const DEFAULT_ADDRESS_CONFIDENCE_THRESHOLD = 0.6;
+
+// Relationships that make the caller a third party to the property. 'owner'
+// is the account holder; 'unknown' is NOT non-owner (owner ruling
+// 2026-07-31, call a771fa15) — most homeowners never state "it's my house",
+// so the model returns 'unknown' plus on_site_authorization=false and the
+// pair used to hard-block every ordinary call (31 of 65 processed calls in
+// the 2026-09-02..08 audit, none of them a real third party). A spouse or
+// partner on the household is an authorized party for pest service, not a
+// stranger arranging it for someone else, so it is owner-equivalent here.
+const OWNER_EQUIVALENT_RELATIONSHIPS = new Set(['owner', 'spouse_partner', 'unknown']);
+function isExplicitlyNonOwner(relationship) {
+  const r = String(relationship || 'unknown').trim().toLowerCase() || 'unknown';
+  return !OWNER_EQUIVALENT_RELATIONSHIPS.has(r);
+}
+
+// The model emits triage_flags of its own (same vocabulary). A model-emitted
+// caller_not_authorized is only as good as the relationship it rests on:
+// when the caller is not explicitly a third party, drop it so the merge
+// cannot reintroduce the block the deterministic pass no longer raises.
+function suppressUnsupportedModelFlags(modelFlags, extraction) {
+  const flags = Array.isArray(modelFlags) ? modelFlags : [];
+  if (!flags.includes('caller_not_authorized')) return flags;
+  if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return flags;
+  return flags.filter((f) => f !== 'caller_not_authorized');
+}
 
 function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (!extraction || !extraction.meta) return [];
@@ -263,7 +294,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('low_extraction_confidence');
   }
 
-  if (caller.on_site_authorization === false && caller.relationship_to_property !== 'owner') {
+  if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)) {
     flags.push('caller_not_authorized');
   }
 
@@ -360,6 +391,11 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
 // known set now demote to failedOpenFlags in canAutoRoute — advisory card
 // files, booking proceeds. Sources of truth: the deterministic emitters
 // above + the model-output schema triage_flags enum.
+// Blocking flags that mean "someone must act on an existing visit". The
+// enforce path opens call_log.review_status when one of these holds the
+// call, so the change has a visible owner and not just a triage card.
+const SCHEDULING_CHANGE_REVIEW_FLAGS = ['cancellation_request', 'reschedule_or_cancel', 'existing_appointment_coordination'];
+
 const BLOCKING_TRIAGE_FLAGS = new Set([
   'out_of_service_area',
   'hoa_common_area_requires_approval',
@@ -999,7 +1035,7 @@ function confirmedStartOnTheHour(confirmedStartAt) {
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
-  const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
+  const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(extraction.triage_flags, extraction), opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
   // Allowlist, not blocklist (owner ruling 2026-07-31): only flags in
@@ -1035,7 +1071,7 @@ function canAutoRoute(extraction, opts = {}) {
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
   const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
-  const newAddressGiven = statesNewAddress(extraction);
+  const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -1070,50 +1106,23 @@ function canAutoRoute(extraction, opts = {}) {
   const startOnTheHour = confirmedStartOnTheHour(extraction.scheduling?.confirmed_start_at);
 
   // A POSITIVE Address Validation verdict — Google accepted (or corrected)
-  // the stated address AND placed it in the service area. Required before
-  // the authorization demotion below (codex round-3 P1): when AV is disabled
-  // or returns not_attempted, computeDeterministicTriageFlags raises NO
-  // address flag for a populated, high-confidence address, so
-  // caller_not_authorized was the incidental last block standing between an
-  // unvalidated address and an auto-dispatch. Demoting it unconditionally
-  // would let an unknown-relationship call book against an address nobody
-  // ever validated (AGENTS.md L367-370: never silent auto-route).
+  // the stated address AND placed it in the service area. One of the two
+  // ways the central address-trust gate below is satisfied (codex round-3
+  // P1): when AV is disabled or returns not_attempted,
+  // computeDeterministicTriageFlags raises NO address flag for a populated,
+  // high-confidence address, so without this gate nothing would stand
+  // between an unvalidated address and an auto-dispatch (AGENTS.md
+  // L367-370: never silent auto-route).
   const avPositivelyValidated = !!opts.addressValidation
     && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
     && opts.addressValidation.inServiceArea === true;
 
-  // Unknown relationship is NOT non-owner (owner ruling 2026-07-31, call
-  // log a771fa15): most homeowners never STATE "it's my house", so
-  // relationship_to_property arrives 'unknown' and on_site_authorization
-  // false — and the hard block held a caller who requested service, gave
-  // their info, and agreed a start time. The hard block now applies only
-  // when the caller is EXPLICITLY a non-owner (tenant/realtor/
-  // property_manager/...) — those still route through the agent-commitment
-  // demotion below. The flag moves to failedOpenFlags so the office still
-  // gets the "confirm the account holder" advisory card — book-and-flag,
-  // never book-and-hide.
-  //
-  // Guarded on a confirmed, on-the-hour start AND a positively validated
-  // address: this is the last block on the path, so everything it used to
-  // backstop has to be satisfied some other way before it lifts.
-  const callerRelationship = String(extraction.caller?.relationship_to_property || 'unknown').trim() || 'unknown';
-  const explicitlyNonOwner = callerRelationship !== 'owner' && callerRelationship !== 'unknown';
-  // What the guard actually needs is a TRUSTED dispatch address, and the
-  // central address-trust gate below recognises exactly two ways to have one:
-  // a positive AV verdict, or a known customer's on-file address they did not
-  // restate (verified when it was saved). Demanding only the first blocked the
-  // commonest shape of the very call this ruling exists for (codex round-20
-  // P1) — a returning customer says "same place as always", so nothing is
-  // stated, no AV runs, no address flag fires, and caller_not_authorized was
-  // left as the incidental last block. Same predicate as the central gate, so
-  // the two can never disagree about what "trusted" means.
-  const trustedDispatchAddress = avPositivelyValidated || dispatchesToOnFileAddress(extraction, opts);
-  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour && trustedDispatchAddress) {
-    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
-      if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
-      return true;
-    });
-  }
+  // caller_not_authorized now fires only for an EXPLICIT third party
+  // (isExplicitlyNonOwner) — an 'unknown' relationship never raises it and a
+  // model-emitted copy is dropped above — so the unknown-relationship
+  // demotion that used to live here (owner ruling 2026-07-31) is satisfied
+  // at derivation time. Explicit third parties still route through the
+  // agent-commitment demotion below.
 
   // Agent-commitment authorization (opts.agentCommitFailOpen ←
   // GATE_CALL_AGENT_COMMIT_BOOKING): when OUR agent explicitly committed to
@@ -1394,7 +1403,12 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   }
 
   const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
-  if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
+  // Same relationship rule as routing (codex r1 P2): in shadow mode the
+  // processor hands the RAW V2 flags here, so a model-emitted
+  // caller_not_authorized on an unknown / spouse caller would still open
+  // the review card enforce mode no longer raises. Only an explicit third
+  // party (tenant, agent, manager, other) carries the ask.
+  if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)) needsConfirmation.push('caller_not_authorized');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -1521,10 +1535,78 @@ const NEW_ADDRESS_FIELDS = [
   'subdivision_or_community', 'raw_text',
 ];
 
-/** Did the caller state a service address on this call at all? */
-function statesNewAddress(extraction) {
+/**
+ * Did the caller state a NEW service address on this call? A known
+ * customer's on-file address (opts.knownCustomer.addressLine1/addressCity/
+ * addressZip) may be passed so that RESTATING it — "1234 Sample Palm", "I'm
+ * in Parrish", "same zip" — is not mistaken for a second property. Live
+ * misses (2026-09-05): a matched customer who said only "I'm in Parrish"
+ * had the city-only fragment sent to Google, returned missing_component,
+ * and lost the on-file trust that would have booked the confirmed estimate.
+ * A restatement must AGREE with the file on every component it names; any
+ * conflicting street, city or ZIP is a new address and holds for review.
+ */
+function statesNewAddress(extraction, knownCustomer = null) {
   const sa = extraction?.property?.service_address || {};
-  return NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+  const stated = NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+  if (!stated) return false;
+  return !restatesOnFileAddress(sa, knownCustomer);
+}
+
+const zip5Of = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
+const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+// Unit designators KEEP their digits (codex r1 P1): cityKey strips them, so
+// "Apt 4B" and "Apt 5B" compared equal and a caller who moved one door down
+// would have booked against the old unit. Designator words and punctuation
+// are noise ("Apt 4B" / "#4B" / "Unit 4-B" are one unit); the alphanumerics
+// are the identity.
+const unitKey = (v) => String(v || '').toLowerCase()
+  .replace(/\b(apt|apartment|unit|ste|suite|bldg|building|no|number)\b/g, ' ')
+  .replace(/[^a-z0-9]/g, '');
+
+function restatesOnFileAddress(sa, knownCustomer) {
+  const onFileStreet = String(knownCustomer?.addressLine1 || '').trim();
+  if (!onFileStreet) return false;
+  const onFileCity = cityKey(knownCustomer.addressCity);
+  const onFileZip = zip5Of(knownCustomer.addressZip);
+  const onFileKey = streetCompareKey(onFileStreet);
+  const onFileHouse = streetHouseNum(onFileStreet);
+  const onFileNameWord = streetNameOnly(onFileStreet).split(' ').filter(Boolean)[0] || '';
+
+  const street = [sa.street_line_1, sa.line1, sa.street].map((v) => String(v || '').trim()).find(Boolean) || '';
+  const unit = [sa.street_line_2, sa.line2, sa.unit, sa.apt].map((v) => String(v || '').trim()).find(Boolean) || '';
+  const city = cityKey([sa.city, sa.locality].map((v) => String(v || '').trim()).find(Boolean));
+  const zip = zip5Of([sa.postal_code, sa.zip, sa.zip_code].map((v) => String(v || '').trim()).find(Boolean));
+  const raw = String(sa.raw_text || '').trim();
+  const community = String(sa.subdivision_or_community || '').trim();
+
+  // Every stated locality component must agree with the file.
+  if (city && (!onFileCity || city !== onFileCity)) return false;
+  if (zip && (!onFileZip || zip !== onFileZip)) return false;
+  // A unit we cannot compare is new information (condo tower, second unit).
+  if (unit && !String(knownCustomer.addressLine2 || '').trim()) return false;
+  if (unit && unitKey(unit) !== unitKey(knownCustomer.addressLine2)) return false;
+
+  if (street) return streetCompareKey(street) === onFileKey;
+  if (raw && /\d{2,}/.test(raw)) {
+    // The parser could not split a numbered address: accept only when the
+    // spoken text carries the on-file house number AND the street's first
+    // word. A raw remark with no number ("I'm in Parrish") is judged on
+    // the locality components below.
+    const rawKey = String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+    // A unit spoken inside the raw text is compared like a structured one
+    // (codex r2 P1): "... Apt 5B" against an on-file Apt 4B is a new door,
+    // and a unit the file cannot compare is new information.
+    const rawUnit = (String(raw).toLowerCase().match(/(?:\b(?:apt|apartment|unit|ste|suite)\.?|#)\s*([a-z0-9]+(?:-[a-z0-9]+)?)/) || [])[1] || '';
+    if (rawUnit && !String(knownCustomer.addressLine2 || '').trim()) return false;
+    if (rawUnit && unitKey(rawUnit) !== unitKey(knownCustomer.addressLine2)) return false;
+    return !!onFileHouse && !!onFileNameWord
+      && new RegExp(`\\b${onFileHouse}\\b`).test(rawKey) && rawKey.includes(onFileNameWord);
+  }
+  // A bare community name locates nothing we can compare.
+  if (community && !city && !zip) return false;
+  // City and/or ZIP only, and both agreed above.
+  return !!(city || zip);
 }
 
 /**
@@ -1544,10 +1626,12 @@ function statesNewAddress(extraction) {
 function dispatchesToOnFileAddress(extraction, opts = {}) {
   return !!(opts.failOpen
     && opts.knownCustomer && opts.knownCustomer.hasAddress
-    && !statesNewAddress(extraction));
+    && !statesNewAddress(extraction, opts.knownCustomer));
 }
 
 module.exports = {
+  SCHEDULING_CHANGE_REVIEW_FLAGS,
+  isExplicitlyNonOwner,
   computeDeterministicTriageFlags,
   statesNewAddress,
   dispatchesToOnFileAddress,

@@ -140,7 +140,16 @@ function deriveStatus(result, county) {
   return { status: STATUSES.VALIDATED_ACCEPT, ...base };
 }
 
-async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
+// Florida-only portal: every service address is in FL, so the request pins
+// administrativeArea. Without it a partial street went wherever Google
+// found a match — a house number plus a street name matched a same-numbered
+// ZIP in New Jersey, a bare street name matched a Nevada street — and came
+// back out_of_service_area or missing_component with an out-of-state
+// normalized address (2026-09-02..08 audit). Pinning the state keeps a
+// fragment unresolved instead of wrong.
+const SERVICE_STATE = 'FL';
+
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = SERVICE_STATE } = {}) {
   const lines = (addressLines || []).filter(Boolean);
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
@@ -156,7 +165,7 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
       method: 'POST',
       signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ address: { regionCode, addressLines: lines } }),
+      body: JSON.stringify({ address: { regionCode, ...(administrativeArea ? { administrativeArea } : {}), addressLines: lines } }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -177,9 +186,15 @@ async function validateAddress({ addressLines, regionCode = 'US' } = {}) {
 // Build Google AV `addressLines` from the extraction's nested service_address.
 // Two lines (street, then "city ST zip") so AV parses locality/postal cleanly.
 // Returns [] when there's no street AND no city — nothing worth validating.
+// A street line that is only a house number names no street: Google matched
+// one to a random premise in another state (2026-09-06 audit), so it is
+// dropped and the call validates on the locality alone, if any. The test is
+// on street_line_1 ITSELF (codex r2 P2): a unit designator in line 2 ("Apt
+// 4") carries letters but still names no street.
 function buildAddressLines(serviceAddress) {
   const sa = serviceAddress || {};
-  const line1 = [sa.street_line_1, sa.street_line_2].filter(Boolean).join(' ').trim();
+  const street1 = String(sa.street_line_1 || '').trim();
+  const line1 = /[a-z]/i.test(street1) ? [street1, sa.street_line_2].filter(Boolean).join(' ').trim() : '';
   const line2 = [sa.city, sa.state, sa.postal_code].filter(Boolean).join(' ').trim();
   if (!line1 && !sa.city) return [];
   return [line1, line2].filter(Boolean);
