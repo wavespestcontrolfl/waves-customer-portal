@@ -129,7 +129,7 @@ describe('precheck — decided before the customer leg is hung up', () => {
   test('a technician en route / on site at this customer → no text, decided before the dedupe probe', async () => {
     visitInProgress.mockResolvedValueOnce(true);
     await expect(precheck({ phone: PHONE, customerId: 'cust-1' })).resolves.toEqual({ ok: false, skipped: 'visit_in_progress' });
-    expect(visitInProgress).toHaveBeenCalledWith({ customerId: 'cust-1', before: IN_WINDOW });
+    expect(visitInProgress).toHaveBeenCalledWith({ customerId: 'cust-1', phone: PHONE, before: IN_WINDOW });
     expect(smsLogFirst).not.toHaveBeenCalled();
   });
 

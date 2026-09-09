@@ -160,17 +160,37 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
  * inside the last 3h before `before`)? Live rows carry the status; the
  * en_route_at / arrived_at stamps make the check replayable on history.
  */
-async function visitInProgress({ customerId, before = new Date() } = {}) {
-  if (!customerId) return false;
-  const since = new Date(new Date(before).getTime() - VISIT_IN_PROGRESS_WINDOW_MS);
-  const row = await db('scheduled_services')
-    .where('customer_id', customerId)
-    .where(function active() {
-      this.whereIn('status', VISIT_IN_PROGRESS_STATUSES)
-        .orWhereBetween('en_route_at', [since, before])
-        .orWhereBetween('arrived_at', [since, before]);
+async function visitInProgress({ customerId, phone = null, before = new Date() } = {}) {
+  const phoneLast10 = last10(phone);
+  if (!customerId && !phoneLast10) return false;
+  const at = new Date(before);
+  const since = new Date(at.getTime() - VISIT_IN_PROGRESS_WINDOW_MS);
+  // Live status counts only for a visit dated today: the audit found rows
+  // left at on_site for days (never transitioned), and a visit booked AFTER
+  // the call must not suppress it. The en_route_at / arrived_at stamps are
+  // exact and make the check replayable on history.
+  const dayStart = new Date(at); dayStart.setUTCHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart.getTime() + 36 * 60 * 60 * 1000); // ET-safe slack over the UTC day
+  const dayStartSlack = new Date(dayStart.getTime() - 12 * 60 * 60 * 1000);
+  const row = await db('scheduled_services as ss')
+    .modify((qb) => {
+      // No linked customer on the call row → match the dialed number to a
+      // customer record (the audit's "no name" click during a visit).
+      if (customerId) qb.where('ss.customer_id', customerId);
+      else qb.join('customers as c', 'c.id', 'ss.customer_id')
+        .whereNull('c.deleted_at')
+        .whereRaw("right(regexp_replace(c.phone, '\\D', '', 'g'), 10) = ?", [phoneLast10]);
     })
-    .first('id');
+    .where('ss.created_at', '<', at)
+    .where(function active() {
+      this.where(function liveToday() {
+        this.whereIn('ss.status', VISIT_IN_PROGRESS_STATUSES)
+          .whereBetween('ss.scheduled_date', [dayStartSlack, dayEnd]);
+      })
+        .orWhereBetween('ss.en_route_at', [since, at])
+        .orWhereBetween('ss.arrived_at', [since, at]);
+    })
+    .first('ss.id');
   return !!row;
 }
 

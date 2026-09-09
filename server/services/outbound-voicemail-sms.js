@@ -134,7 +134,7 @@ async function precheck({ phone: rawPhone, customerId = null, now = new Date() }
   // about access/address, the en-route + arrived texts just went out, and
   // any "why we called" text would be wrong. Fail closed on a probe error.
   try {
-    if (await visitInProgress({ customerId, before: now })) return { ok: false, skipped: 'visit_in_progress' };
+    if (await visitInProgress({ customerId, phone, before: now })) return { ok: false, skipped: 'visit_in_progress' };
   } catch (e) {
     logger.warn(`[outbound-voicemail-sms] visit-in-progress probe failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
     return { ok: false, skipped: 'visit_probe_failed' };

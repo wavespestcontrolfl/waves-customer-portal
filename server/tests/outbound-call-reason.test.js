@@ -53,6 +53,9 @@ function installDb(byTable = {}) {
     b.whereIn = jest.fn((...a) => { q.wheres.push(['IN', ...a]); return b; });
     b.whereNull = jest.fn((...a) => { q.wheres.push(['NULL', ...a]); return b; });
     b.orWhereBetween = jest.fn((...a) => { q.wheres.push(['OR BETWEEN', ...a]); return b; });
+    b.whereBetween = jest.fn((...a) => { q.wheres.push(['BETWEEN', ...a]); return b; });
+    b.join = jest.fn((...a) => { q.wheres.push(['JOIN', ...a]); return b; });
+    b.modify = jest.fn((fn) => { fn(b); return b; });
     b.select = jest.fn(async () => rowsFor());
     b.first = jest.fn(async () => rowsFor()[0]);
     return b;
@@ -249,21 +252,41 @@ describe('resolveOutboundCallReason', () => {
     expect(r).toEqual({ reason: REASONS.GENERIC, evidence: {} });
   });
 
-  test('visitInProgress: live en_route/on_site status OR an en_route/arrived stamp inside the last 3h', async () => {
-    installDb({ scheduled_services: [{ id: 'v1' }] });
+  test('visitInProgress: TODAY\'s en_route/on_site visit, or an en_route/arrived stamp inside the last 3h; visit booked after the call never counts', async () => {
+    installDb({ 'scheduled_services as ss': [{ id: 'v1' }] });
     await expect(visitInProgress({ customerId: 'cust-1', before: T0 })).resolves.toBe(true);
     const q = state.queries[0];
-    expect(q.table).toBe('scheduled_services');
+    expect(q.table).toBe('scheduled_services as ss');
     expect(q.wheres).toEqual(expect.arrayContaining([
-      ['customer_id', 'cust-1'],
-      ['IN', 'status', ['en_route', 'on_site']],
-      ['OR BETWEEN', 'en_route_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
-      ['OR BETWEEN', 'arrived_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
+      ['ss.customer_id', 'cust-1'],
+      ['ss.created_at', '<', T0],
+      ['IN', 'ss.status', ['en_route', 'on_site']],
+      ['OR BETWEEN', 'ss.en_route_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
+      ['OR BETWEEN', 'ss.arrived_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
     ]));
+    // The live-status branch is fenced to the call's day (stale on_site rows from days ago never count).
+    const dateFence = q.wheres.find((w) => w[0] === 'BETWEEN' && w[1] === 'ss.scheduled_date');
+    expect(dateFence).toBeTruthy();
+    expect(dateFence[2][0] < T0 && dateFence[2][1] > T0).toBe(true);
+    expect(dateFence[2][1] - dateFence[2][0]).toBeLessThanOrEqual(48 * 3600000);
+    expect(q.wheres.some((w) => w[0] === 'JOIN')).toBe(false);
     expect(VISIT_IN_PROGRESS_WINDOW_MS).toBe(3 * 3600000);
     installDb({});
     await expect(visitInProgress({ customerId: 'cust-1', before: T0 })).resolves.toBe(false);
-    await expect(visitInProgress({ customerId: null, before: T0 })).resolves.toBe(false);
+    await expect(visitInProgress({ customerId: null, phone: null, before: T0 })).resolves.toBe(false);
+    expect(state.queries).toHaveLength(1);
+  });
+
+  test('visitInProgress with no linked customer matches the dialed number to a customer record', async () => {
+    installDb({ 'scheduled_services as ss': [{ id: 'v1' }] });
+    await expect(visitInProgress({ customerId: null, phone: '(941) 555-0101', before: T0 })).resolves.toBe(true);
+    const q = state.queries[0];
+    expect(q.wheres).toEqual(expect.arrayContaining([
+      ['JOIN', 'customers as c', 'c.id', 'ss.customer_id'],
+      ['NULL', 'c.deleted_at'],
+    ]));
+    expect(q.raws[0][0]).toContain('c.phone');
+    expect(q.raws[0][1]).toEqual(['9415550101']);
   });
 
   test('a probe failure falls back to generic instead of throwing', async () => {
