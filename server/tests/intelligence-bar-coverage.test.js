@@ -1,4 +1,4 @@
-const { frontendSourceCensus, checkCoverage } = require('../../scripts/check-ib-coverage');
+const { frontendSourceCensus, checkCoverage, coverageCounts } = require('../../scripts/check-ib-coverage');
 
 const source = `
 const save = async () => {
@@ -64,10 +64,22 @@ test('verified coverage requires actual policy and evidence for the reviewed imp
   }
 });
 
+test('acknowledging an exact request fingerprint does not remove an unsupported capability', () => {
+  const action = census[0];
+  const reviewed = { ...action, status: 'reviewed_unmapped', reviewedFingerprint: action.fingerprint,
+    exception: { review: 'Fixture source review', reason: 'Same request; formatting only, no tool parity' } };
+  expect(checkCoverage([action], { actions: [reviewed] }, {})).toEqual([]);
+  expect(checkCoverage([{ ...action, fingerprint: 'changed' }], { actions: [reviewed] }, {})).toHaveLength(1);
+  expect(checkCoverage([action], { actions: [{ ...reviewed, exception: {} }] }, {})).toHaveLength(1);
+  expect(coverageCounts([
+    { status: 'unmapped' }, reviewed, { status: 'reviewed_exception' }, { status: 'verified' },
+  ])).toEqual({ recorded: 4, unsupported: 2 });
+});
+
 
 test('baseline provenance cannot silently promote unsupported coverage to a reviewed status', () => {
   const action = census[0], proof = new Set([`${action.id}:${action.fingerprint}`]);
-  for (const status of ['verified', 'reviewed_exception', 'invented']) {
+  for (const status of ['verified', 'reviewed_exception', 'reviewed_unmapped', 'invented']) {
     const record = { ...action, baselineFingerprint: action.fingerprint, status };
     expect(checkCoverage([action], { actions: [record] }, {}, proof)).toHaveLength(1);
   }
@@ -105,4 +117,20 @@ test('shared admin wrappers with variable endpoints stay covered outside admin d
   expect(shared.map(row => row.operation.method).sort()).toEqual(['DELETE', 'GET', 'POST']);
   expect(shared.every(row => row.operation.resolution === 'unresolved')).toBe(true);
   expect(checkCoverage(shared, { actions: [] }, {})).toHaveLength(3);
+});
+
+test('React state setters and lazy module imports are not requests', () => {
+  const rows = frontendSourceCensus(`
+    function Panel() {
+      const [linkRequest, setLinkRequest] = useState(0);
+      const load = async () => {
+        setLinkRequest(0);
+        setLinkRequest((value) => value + 1);
+        const Page = lazy(() => import('../../pages/admin/CommunicationsPageV2'));
+        await adminFetch(dynamic);
+      };
+    }
+  `, 'client/src/components/admin/Fixture.jsx');
+  expect(rows).toHaveLength(1);
+  expect(rows[0].operation).toEqual({ method: 'GET', endpoint: null, resolution: 'unresolved' });
 });

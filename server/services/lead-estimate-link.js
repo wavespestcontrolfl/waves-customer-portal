@@ -612,7 +612,9 @@ async function stampFirstResponseByContact({ database = db, phone = null, email 
     // SLA bookkeeping must never break a live send — but repair jobs (the
     // backfill) pass failSoft:false so a swallowed failure can't report a
     // clean run while eligible leads stay unstamped.
-    logger.warn(`[lead-estimate-link] first-response contact stamp failed: ${e.message}`);
+    // Code only: the query binds the caller's phone / email, and a knex
+    // message quotes its bindings (AGENTS.md PII-in-logs; codex #4072 r9 P1).
+    logger.warn(`[lead-estimate-link] first-response contact stamp failed (${String(e.code || e.name || 'error')})`);
     if (!failSoft) throw e;
   }
   return stamped;
@@ -1435,10 +1437,21 @@ async function convertLeadFromEvent({
   email = null,
   requireAcceptedEstimate = false,
   enforceOriginating = false,
+  // The scheduled_services row the event is about (booked or completed).
+  // A Waves Assessment is NOT a win (owner ruling 2026-09-08,
+  // services/assessment-booking.js): the owner goes out to look and quote,
+  // so neither booking nor completing one closes the deal — the lead stays
+  // open until the quote is accepted or a paid service books/completes.
+  // Every booking/completion trigger passes its row; estimate-driven and
+  // invoice-driven events have no visit and pass nothing.
+  booking = null,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
   try {
+    if (booking && await require('./assessment-booking').isAssessmentBooking(booking, database)) {
+      return { converted: false, reason: 'assessment_not_a_win' };
+    }
     let resolvedCustomerId = customerId || null;
     let resolvedPhone = phone || null;
     let resolvedEmail = email || null;

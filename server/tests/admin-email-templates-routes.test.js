@@ -1,6 +1,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -1032,5 +1033,86 @@ describe('admin email template routes', () => {
       expect(billingQuery.join).toHaveBeenCalledWith('customers as c', 'c.id', 'np.customer_id');
       expect(billingQuery.whereNull).toHaveBeenCalledWith('c.deleted_at');
     });
+  });
+});
+
+describe('onboarding audience checks in the existing admin preview', () => {
+  const appointmentId = '00000000-0000-4000-8000-000000000101';
+  const EmailTemplates = require('../services/email-template-library');
+  const intro = require('../services/recurring-app-intro-email');
+  const welcome = require('../services/new-recurring-welcome-sms');
+  let templateKey;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    templateKey = 'app_intro';
+    jest.spyOn(EmailTemplates, 'renderVersion').mockResolvedValue({ html: '<p>Fixture content</p>', text: 'Fixture content' });
+    jest.spyOn(EmailTemplates, 'loadVersion').mockImplementation(async () => ({ template: { template_key: templateKey } }));
+    jest.spyOn(EmailTemplates, 'sendTemplate').mockResolvedValue({ sent: false });
+    jest.spyOn(intro, 'appIntroEligibility').mockResolvedValue({ eligible: true, reason: 'first_visit' });
+    jest.spyOn(intro, 'isEnabled').mockReturnValue(true);
+    jest.spyOn(welcome, 'oneTimeWelcomeEligibility').mockResolvedValue({ eligible: true, reason: 'first_one_time_booking' });
+    jest.spyOn(welcome, 'oneTimeWelcomeEmailEnabled').mockReturnValue(false);
+    jest.spyOn(welcome, 'queueOneTimeWelcomeEmail').mockResolvedValue({ queued: false });
+    db.raw = jest.fn(sql => sql);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test.each([false, true])('shows the widened intro audience for a non-member appointment (recurring %s)', async recurring => {
+    const service = { id: appointmentId, customer_id: 'customer-1', is_recurring: recurring };
+    setDbQueues({ scheduled_services: [chain({ first: service })], customers: [chain({ first: { id: 'customer-1', waveguard_tier: null } })] });
+    await withServer(async baseUrl => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/versions/version-1/preview`, {
+        method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ payload: {}, scheduledServiceId: appointmentId }),
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).audiencePreview).toMatchObject({ scheduledServiceId: appointmentId, templateKey, before: false, after: true, gateEnabled: true });
+    });
+    expect(intro.appIntroEligibility).toHaveBeenCalledWith(service);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(welcome.queueOneTimeWelcomeEmail).not.toHaveBeenCalled();
+  });
+
+  test('one-time welcome preview shows eligibility while the new email gate is off', async () => {
+    templateKey = 'welcome.new_recurring';
+    const service = { id: appointmentId, customer_id: 'customer-1', is_recurring: false };
+    const customer = { id: 'customer-1', email: 'fixture@example.invalid' };
+    setDbQueues({ scheduled_services: [chain({ first: service })], customers: [chain({ first: customer })] });
+    await withServer(async baseUrl => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/versions/version-1/preview`, {
+        method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ payload: {}, scheduledServiceId: appointmentId }),
+      });
+      expect(res.status).toBe(200);
+      expect((await res.json()).audiencePreview).toMatchObject({ before: false, after: true, gateEnabled: false, applies: true });
+    });
+    expect(welcome.oneTimeWelcomeEligibility).toHaveBeenCalledWith(service, customer);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(welcome.queueOneTimeWelcomeEmail).not.toHaveBeenCalled();
+  });
+
+  test('rejects a malformed appointment before reading or rendering', async () => {
+    await withServer(async baseUrl => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/versions/version-1/preview`, {
+        method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ scheduledServiceId: 'bad-id' }),
+      });
+      expect(res.status).toBe(400);
+    });
+    expect(db).not.toHaveBeenCalled();
+    expect(EmailTemplates.renderVersion).not.toHaveBeenCalled();
+  });
+
+  test.each([null, 'tech'])('keeps the audience read admin-only: %s', async token => {
+    await withServer(async baseUrl => {
+      const res = await fetch(`${baseUrl}/admin/email-templates/versions/version-1/preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ scheduledServiceId: appointmentId }),
+      });
+      expect(res.status).toBe(token ? 403 : 401);
+    });
+    expect(db).not.toHaveBeenCalled();
+    expect(EmailTemplates.renderVersion).not.toHaveBeenCalled();
   });
 });

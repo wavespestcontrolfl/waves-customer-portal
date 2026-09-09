@@ -12,6 +12,10 @@ function isSensitiveQueryKey(key) {
   // the address-keyed lookups). PII in request logs is an AGENTS.md P1;
   // the log keeps the path and every other parameter.
   if (['search', 'q', 'query', 'address'].includes(normalized)) return true;
+  // The click-to-call bridge hands Twilio the customer's number and name on
+  // the /outbound-admin-prompt URL (services/call-bridge.js); Twilio's
+  // callback lands in the request log with them (codex #4072 r2 P1).
+  if (['customernumber', 'leadname'].includes(normalized)) return true;
   return ['auth', 'jwt', 'code', 'key', 'nonce', 'otp', 'session', 'sessionid', 'ticket'].includes(normalized)
     || normalized.includes('token')
     || normalized.includes('authorization')

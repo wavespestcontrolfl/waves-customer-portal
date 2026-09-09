@@ -17,9 +17,16 @@
 // math stays in MobileCheckoutSheet; this panel displays, checkout
 // charges.
 //
+// One exception to read-only: when the tech holds their own Twilio line
+// (GET /api/tech/line → techLine prop), Call and Text go through the line
+// instead of the personal phone — POST /api/tech/line/call (press-1 bridge
+// to the tech's cell, then the customer) and POST /api/tech/line/sms (an
+// inline compose). Without a line the tel:/sms: links stay as they were.
+//
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
-import { stopPropertyAlerts } from './routeStops';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -72,7 +79,7 @@ function MemberLabel({ service, show }) {
 
 // tel:/sms: anchors styled like ActionBtn — real links so iOS hands them
 // to the dialer/Messages without a tap-through.
-function LinkBtn({ href, icon, label, onClick }) {
+function LinkBtn({ href, icon, label, onClick, disabled = false }) {
   const base = {
     flex: 1,
     padding: '10px 4px',
@@ -93,7 +100,7 @@ function LinkBtn({ href, icon, label, onClick }) {
     return <a href={href} style={base}><span style={{ fontSize: 15 }}>{icon}</span> {label}</a>;
   }
   return (
-    <button type="button" onClick={onClick} style={base}>
+    <button type="button" onClick={onClick} disabled={disabled} style={{ ...base, opacity: disabled ? 0.6 : 1 }}>
       <span style={{ fontSize: 15 }}>{icon}</span> {label}
     </button>
   );
@@ -460,10 +467,10 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
   );
 }
 
-// The pre-existing per-service action buttons, moved verbatim from the
-// old ServiceRow (labels + terminal logic + trace-eligibility guard
-// unchanged) — one row per member service on a grouped stop.
+// Per-service actions keep terminal reports read-only and preserve the
+// trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead }) {
+  const reportDisabled = TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status);
   const btn = {
     padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
     border: `1px solid ${DARK.border}`, background: 'transparent',
@@ -483,7 +490,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
         </p>
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button onClick={() => onProject(service)} style={btn}>
+        <button disabled={reportDisabled} onClick={() => onProject(service)} style={{ ...btn, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}>
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
@@ -507,9 +514,116 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   );
 }
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead }) {
+// "Text from my line": a compose box under the action row. The server
+// texts the VISIT's customer (never a number the client picks) from the
+// tech's line; the office sees the thread in /admin/communications.
+const LINE_TEXT_MAX = 600;
+// While a send is in flight the compose cannot be closed (nor collapsed
+// from the Text toggle — onBusyChange tells the panel): unmounting it
+// would drop the pending state and invite a second POST on a slow
+// connection, and the server has no idempotency key (codex #4072 r5 P2).
+function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
+  const [body, setBody] = useState('');
+  const [state, setState] = useState({ busy: false, error: '', sent: false });
+  async function send() {
+    const text = body.trim();
+    if (!text || state.busy) return;
+    setState({ busy: true, error: '', sent: false });
+    onBusyChange?.(true);
+    try {
+      await onSend(text);
+      setState({ busy: false, error: '', sent: true });
+      setBody('');
+    } catch (err) {
+      setState({ busy: false, error: String(err?.message || err).slice(0, 160), sent: false });
+    } finally {
+      onBusyChange?.(false);
+    }
+  }
+  return (
+    <div data-testid="line-text-compose" style={{ marginTop: 8, padding: 10, borderRadius: 8, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
+      <div style={{ ...factMutedStyle, margin: '0 0 6px' }}>Text from your line {line.formatted}</div>
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value.slice(0, LINE_TEXT_MAX))}
+        placeholder="On my way — about 15 minutes out."
+        rows={3}
+        aria-label="Message"
+        style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${DARK.border}`, background: DARK.card, color: DARK.text, fontSize: 15, resize: 'vertical' }}
+      />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: DARK.teal, color: '#0b1220', fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
+          {state.busy ? 'Sending…' : 'Send'}
+        </button>
+        <button type="button" onClick={onClose} disabled={state.busy} style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
+        <span style={{ ...factMutedStyle, margin: 0, marginLeft: 'auto' }}>{body.length}/{LINE_TEXT_MAX}</span>
+      </div>
+      {state.sent && <p role="status" style={{ ...factMutedStyle, color: '#10b981', marginTop: 6 }}>Sent.</p>}
+      {state.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{state.error}</p>}
+    </div>
+  );
+}
+
+// After Twilio accepts a bridge the tech's phone rings for up to ~40s and
+// only then is the customer dialed: Call stays locked for that window so a
+// second tap cannot originate a second bridge (codex #4072 r6 P2).
+const CALL_LOCK_MS = 45000;
+
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, techLine = null, request = null, onBusyChange = null }) {
   const service = stop.primary;
   const phone = service.customerPhone || service.customer_phone || null;
+  // Own-line mode: Call bridges through the line, Text composes from it.
+  // `{ unknown: true }` = the line lookup has not succeeded (it failed on
+  // first load): neither the line buttons nor the personal-phone links
+  // render — a tech who holds a line must never reach the customer from
+  // their handset on a lookup error (codex #4072 r5 P2). The home page
+  // re-reads the line on every schedule refresh.
+  const liveLineUnknown = Boolean(techLine?.unknown);
+  const liveLine = techLine?.line && request ? techLine : null;
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [textBusy, setTextBusy] = useState(false);
+  const [callState, setCallState] = useState({ busy: false, note: '', error: '' });
+  const callLockTimer = useRef(null);
+  useEffect(() => () => clearTimeout(callLockTimer.current), []);
+  // The parent accordion must not unmount a panel with a text or a bridge
+  // in flight (a fresh panel would let the same action go out twice).
+  const busy = textBusy || callState.busy;
+  // …and the panel itself keeps the line mode the action started in while
+  // it is in flight: a schedule refresh answering { line: null } (gate off,
+  // assignment cleared) or a failed lookup mid-send must not unmount the
+  // composer or swap the disabled own-line actions for enabled personal
+  // tel:/sms: links — the request can still succeed and a bridge stays
+  // locked (codex #4072 r12 P2). The latch clears when the action settles;
+  // the newest answer applies from then on. Busy only ever starts from a
+  // line action, so the held value is the line it started with.
+  const heldLine = useRef(null);
+  if (busy) { if (!heldLine.current) heldLine.current = liveLine; } else heldLine.current = null;
+  const line = busy ? heldLine.current : liveLine;
+  const lineUnknown = busy ? false : liveLineUnknown;
+  // Publish the lock before a swipe can follow the Sending paint.
+  useLayoutEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  // A dispatch refresh can remove or reassign the stop while its action is
+  // in flight; the panel then unmounts without ever reporting false, and
+  // the list's busy lock would refuse every header for the rest of the
+  // session (codex #4072 r20 P2). Latest callback through a ref — the
+  // parent passes a fresh arrow each render — cleanup on unmount only.
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  useEffect(() => () => { onBusyChangeRef.current?.(false); }, []);
+  async function callFromLine() {
+    if (callState.busy) return;
+    const name = service.customer_name || service.customerName || 'the customer';
+    if (!window.confirm(`Ring your phone, then connect you to ${name} from ${line.line.formatted}?`)) return;
+    setCallState({ busy: true, note: '', error: '' });
+    try {
+      await request('/tech/line/call', { method: 'POST', body: JSON.stringify({ scheduledServiceId: service.id }) });
+      setCallState({ busy: true, note: 'Ringing your phone — press 1 to connect.', error: '' });
+      clearTimeout(callLockTimer.current);
+      callLockTimer.current = setTimeout(() => setCallState((s) => ({ ...s, busy: false })), CALL_LOCK_MS);
+    } catch (err) {
+      setCallState({ busy: false, note: '', error: String(err?.message || err).slice(0, 160) });
+    }
+  }
   const address = service.address || null;
   const alerts = stopPropertyAlerts(stop);
   const grouped = stop.services.length > 1;
@@ -556,8 +670,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
     <div data-testid="visit-brief-panel" style={{ borderTop: `1px solid ${DARK.border}`, marginTop: 10, paddingTop: 10 }}>
       {(tel || sms || address) && (
         <div style={{ display: 'flex', gap: 8 }}>
-          {tel && <LinkBtn href={tel} icon="📞" label="Call" />}
-          {sms && <LinkBtn href={sms} icon="💬" label="Text" />}
+          {tel && !lineUnknown && (line
+            ? (line.canCall && <LinkBtn icon="📞" label={callState.busy ? 'Calling…' : 'Call'} disabled={callState.busy} onClick={callFromLine} />)
+            : <LinkBtn href={tel} icon="📞" label="Call" />)}
+          {sms && !lineUnknown && (line
+            ? <LinkBtn icon="💬" label="Text" disabled={textBusy} onClick={() => setComposeOpen((o) => !o)} />
+            : <LinkBtn href={sms} icon="💬" label="Text" />)}
           {address && (
             <LinkBtn
               icon="🗺️"
@@ -566,6 +684,19 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
             />
           )}
         </div>
+      )}
+      {lineUnknown && (tel || sms) && (
+        <p role="alert" style={{ ...factMutedStyle, color: DARK.amber, marginTop: 6 }}>Your line couldn't be checked — refresh your route to call or text.</p>
+      )}
+      {line && callState.note && <p role="status" style={{ ...factMutedStyle, marginTop: 6 }}>{callState.note}</p>}
+      {line && callState.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{callState.error}</p>}
+      {line && composeOpen && (
+        <LineTextCompose
+          line={line.line}
+          onSend={(body) => request('/tech/line/sms', { method: 'POST', body: JSON.stringify({ scheduledServiceId: service.id, body }) })}
+          onClose={() => setComposeOpen(false)}
+          onBusyChange={setTextBusy}
+        />
       )}
       {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
 

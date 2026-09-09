@@ -7,7 +7,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
 vi.mock('../../components/admin/Customer360ProfileV2', () => ({
-  default: ({ customerId }) => <div data-testid="customer-profile">Profile {customerId}</div>,
+  default: function Profile({ customerId, initialTab }) {
+    const [tab, setTab] = React.useState(initialTab);
+    return <div data-testid="customer-profile">Profile {customerId}
+      <span data-testid="profile-active-tab">{tab}</span>
+      <button onClick={() => setTab('overview')}>Profile overview</button>
+    </div>;
+  },
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
 vi.mock('../../components/AddressAutocomplete', () => ({
@@ -52,6 +58,11 @@ function NavigateToCustomerButton() {
   );
 }
 
+function RepeatCommsNotification({ workspace = false }) {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate('/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : ''))}>Open SMS notification</button>;
+}
+
 function RemountableDirectory() {
   const location = useLocation();
   const [version, setVersion] = React.useState(0);
@@ -92,6 +103,39 @@ describe('CustomersPageV2 workflow state', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
     expect(screen.getByLabelText('Health / churn risk')).toHaveValue('');
     expect(requests.at(-1).has('healthRisk')).toBe(false);
+  });
+
+  it('retains an edit through workspace navigation and a failed save without creating a membership', async () => {
+    const writes = [];
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (options.method === 'PUT') {
+        writes.push({ path: parsed.pathname, body: JSON.parse(options.body) });
+        return writes.length === 1 ? response({ error: 'Try again' }, 500) : response({ success: true });
+      }
+      return response(parsed.pathname === '/api/admin/customers' ? list : {});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    fireEvent.change(screen.getByDisplayValue('Avery'), { target: { value: 'Edited name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    expect(screen.getByDisplayValue('Edited name')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith('Save failed: Try again'));
+    expect(screen.getByDisplayValue('Edited name')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(screen.queryByDisplayValue('Edited name')).not.toBeInTheDocument());
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual(writes[0]);
+    expect(writes[0]).toMatchObject({
+      path: '/api/admin/customers/customer-a',
+      body: { firstName: 'Edited name', tier: null, serviceContactEmail: '' },
+    });
+    alert.mockRestore();
   });
 
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {
@@ -147,6 +191,18 @@ describe('CustomersPageV2 workflow state', () => {
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
+  });
+
+  it.each([false, true])('reopens Comms after repeat notification navigation (workspace=%s)', async (workspace) => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).includes('/admin/customers?') ? response(list) : response({})));
+    render(<MemoryRouter initialEntries={['/admin/customers?customerId=customer-a&tab=comms' + (workspace ? '&customer360=workspace' : '')]}>
+      <RepeatCommsNotification workspace={workspace} /><CustomersPageV2 />
+    </MemoryRouter>);
+    expect(await screen.findByTestId('profile-active-tab')).toHaveTextContent('comms');
+    fireEvent.click(screen.getByRole('button', { name: 'Profile overview' }));
+    expect(screen.getByTestId('profile-active-tab')).toHaveTextContent('overview');
+    fireEvent.click(screen.getByRole('button', { name: 'Open SMS notification' }));
+    await waitFor(() => expect(screen.getByTestId('profile-active-tab')).toHaveTextContent('comms'));
   });
 
   it('names desktop customer inputs and selects using their visible labels', async () => {
@@ -212,14 +268,14 @@ describe('CustomersPageV2 workflow state', () => {
     });
   });
 
-  it('returns to the filtered directory and preserves the workspace opt-in when switching customers', async () => {
+  it.each(['/admin/customers', '/admin/customers?customer360=workspace'])('returns to the filtered directory when switching customers from %s', async (entry) => {
     const workspaceList = { ...list, customers: [...list.customers, { ...list.customers[0], id: 'customer-b', firstName: 'Blake' }], total: 2 };
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.includes('/admin/customers?')) return response(workspaceList);
       return response({});
     }));
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     expect(screen.getAllByRole('link', { name: '10 Palm Ave, Unit 4, Naples FL 34102' })).toHaveLength(2);
     const search = screen.getByPlaceholderText('Search customers...');

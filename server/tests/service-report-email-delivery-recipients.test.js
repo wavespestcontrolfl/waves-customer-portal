@@ -1,3 +1,4 @@
+jest.mock('../services/customer-visit-history', () => ({ isFirstServiceVisit: jest.fn(async () => false) }));
 jest.mock('../models/db', () => {
   const mock = jest.fn();
   // loadServiceRecord selects db.raw(...) stamped-address expressions —
@@ -76,6 +77,7 @@ describe('service report email recipient delivery', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     emailMessageRows = [];
+    require('../services/customer-visit-history').isFirstServiceVisit.mockResolvedValue(false);
 
     db.mockImplementation((table) => {
       if (table === 'service_records') {
@@ -83,6 +85,7 @@ describe('service report email recipient delivery', () => {
           id: 'record-1',
           customer_id: 'customer-1',
           status: 'completed',
+          service_date: '2030-01-02',
           service_type: 'Residential Pest Control',
           report_view_token: 'token-1',
           first_name: 'Owner',
@@ -150,6 +153,33 @@ describe('service report email recipient delivery', () => {
       }
       return query(null);
     });
+  });
+
+  test.each([true, false])('delivers every recipient with optional first-report guidance: %s', async first => {
+    const { isFirstServiceVisit } = require('../services/customer-visit-history');
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    isFirstServiceVisit.mockResolvedValue(first);
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result.ok).toBe(true);
+    expect(isFirstServiceVisit).toHaveBeenCalledWith('customer-1', '2030-01-02');
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+    for (const [args] of EmailTemplateLibrary.sendTemplate.mock.calls) {
+      expect(args.payload.first_report_note).toEqual(first ? expect.stringContaining('This is your first Waves report') : '');
+      expect(args.payload.first_report_guide_url).toEqual(first ? expect.stringContaining('#read-your-service-report') : '');
+    }
+    expect(result.attachedPdf).toBe(true);
+  });
+
+  test('a failed history read still delivers the report PDF without introduction', async () => {
+    const { isFirstServiceVisit } = require('../services/customer-visit-history');
+    const realHistory = jest.requireActual('../services/customer-visit-history');
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    isFirstServiceVisit.mockImplementationOnce((id, date) => realHistory.isFirstServiceVisit(id, date, () => { throw new Error('fixture database unavailable'); }));
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: true, attachedPdf: true, recipientCount: 2 });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls.every(([args]) => args.payload.first_report_note === '')).toBe(true);
   });
 
   test('forwards the PDF history identity to the final fence and defers without dispatch when refused', async () => {

@@ -175,7 +175,14 @@ function isRowVisitBlocked(row, visit) {
   return String(visit.status) !== 'dissolved';
 }
 
-async function lockStop(trx, baseKey) {
+async function lockStop(trx, baseKey, { noWait = false } = {}) {
+  if (noWait) {
+    const result = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['visit.stop', baseKey]);
+    if (!result.rows[0]?.locked) {
+      throw Object.assign(new Error('This visit is being edited. Retry in a moment.'), { code: 'visit_busy' });
+    }
+    return;
+  }
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', baseKey]);
 }
 
@@ -1054,17 +1061,17 @@ async function handleChildStopChanged(scheduledServiceId) {
  * (reason legacy_completion) so it can never speak for rows that already
  * spoke for themselves. Both idempotent, both stop-lock ordered.
  */
-async function ensureLegacyCompletable(scheduledServiceId) {
-  const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
+async function ensureLegacyCompletable(scheduledServiceId, database = db) {
+  const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
   if (!row) return { ok: false, reason: 'not_found' };
   if (!row.visit_id) return { ok: true };
-  const visit = await db('service_visits').where({ id: row.visit_id }).first('id', 'status');
+  const visit = await database('service_visits').where({ id: row.visit_id }).first('id', 'status');
   if (!visit) return { ok: false, reason: 'orphan', visitId: row.visit_id }; // fail closed
   if (String(visit.status) === 'dissolved') return { ok: true };
   if (['closing', 'closed'].includes(String(visit.status))) {
     return { ok: false, reason: 'visit_' + visit.status, visitId: visit.id };
   }
-  const packet = await db('visit_completion_packets').where({ visit_id: visit.id }).first('id');
+  const packet = await database('visit_completion_packets').where({ visit_id: visit.id }).first('id');
   if (packet) return { ok: false, reason: 'packet_exists', visitId: visit.id };
   return { ok: true, openVisitId: visit.id };
 }
@@ -1359,6 +1366,7 @@ const EFFECT_TYPE_BY_KIND = Object.freeze({
   on_site: 'tracker_arrived',
   reminder_72h: 'reminder_72h',
   reminder_24h: 'reminder_24h',
+  visit_payment: 'visit_payment',
 });
 const REMINDER_EFFECT_TYPES = new Set(['reminder_72h', 'reminder_24h']);
 function effectTypeForKind(kind) {
@@ -1384,18 +1392,26 @@ function dedupeKeyFor(visit, effectType) {
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
   const effectType = effectTypeForKind(kind);
+  const packetEffect = effectType === 'visit_payment';
+  const eligibleStatuses = packetEffect ? ['closing', 'closed'] : ['open'];
   const logger = require('./logger');
   const token = require('crypto').randomBytes(16).toString('hex');
   try {
     return await db.transaction(async (t) => {
       let visit = await t('service_visits').where({ id: row.visit_id }).first();
-      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
+      if (!visit || !eligibleStatuses.includes(String(visit.status))) return { state: 'detached', token: null };
       await lockStop(t, visit.stop_base_key);
       // Re-read the parent AFTER the lock (codex #3603 r14): a whole-visit
       // reassignment / window recompute that committed while we waited
       // must be judged on the current parent, not the pre-lock snapshot.
       visit = await t('service_visits').where({ id: row.visit_id }).first();
-      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
+      if (!visit || !eligibleStatuses.includes(String(visit.status))) return { state: 'detached', token: null };
+      if (packetEffect) {
+        const packet = await t('visit_completion_packets').where({ visit_id: visit.id }).first('id', 'status');
+        if (!packet || !['processing', 'done'].includes(packet.status)) return { state: 'detached', token: null };
+        const pending = await t('visit_completion_packet_items').where({ packet_id: packet.id }).whereNot('status', 'done').first('id');
+        if (pending) return { state: 'in_flight', token: null };
+      }
       // Full stop tuple, not just the id (codex r9): a same-day window move
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
@@ -1487,13 +1503,17 @@ async function otherLiveMembers(t, visitId, rowId) {
  * step: a failure here leaves the row `claimed`, so the caller reports the
  * stop incomplete instead of advertising a status that was never written.
  */
-async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null } = {}) {
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null, lastError, providerId } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
   const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   // Reminder kinds MUST pass the claim's key (it carries the visit date);
   // tracker call sites keep the historical default untouched.
   const key = dedupeKey || `${visitId}:${effectType}`;
+  // Payment classification and its provider reference must survive the same
+  // commit as the terminal state; a later metadata write can be interrupted.
+  const details = Object.fromEntries(Object.entries({ last_error: lastError, provider_id: providerId })
+    .filter(([, value]) => value !== undefined));
   try {
     return await db('visit_effects')
       .insert({
@@ -1503,6 +1523,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         status,
         attempts: 1,
         sent_at: status === 'sent' ? at : null,
+        ...details,
       })
       .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
       .merge({
@@ -1510,6 +1531,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         attempts: db.raw('?? + 1', ['visit_effects.attempts']),
         sent_at: status === 'sent' ? at : null,
         updated_at: at,
+        ...details,
       })
       .where('visit_effects.status', '<>', 'sent')
       // Only the current claim owner finalizes (codex r10): a stale owner's
@@ -3160,6 +3182,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
 module.exports = {
   dateOnly,
+  rowStillAtVisitStop,
   toMinutes,
   // Pure key builder, exported for the reminder cron's visit-scoped email
   // idempotency key (the undelivered-SMS recovery rebuilds it from the

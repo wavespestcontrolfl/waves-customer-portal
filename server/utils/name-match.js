@@ -287,10 +287,31 @@ function payerNameCorroborates(payerName, customer = {}) {
   return personsOf(payerName).some((person) => personCorroborates(person, customerFirst, customerLast));
 }
 
+// Finite transcription spellings for phone-scoped call identity. Do not
+// infer identity from edit distance: Aisha and Alisha can share one phone.
+// Payer identity retains its existing, stricter nickname policy.
+const SPOKEN_FIRST_NAME_GROUPS = [
+  ['jason', 'jayson'], ['jennifer', 'jenifer'],
+  ['debbie', 'debbi'], ['hannah', 'hanna'],
+].map(group => new Set(group.flatMap(firstNameVariants)));
+function spokenFirstNameVariants(name) {
+  if (!name) return [];
+  const variants = new Set(firstNameVariants(name));
+  for (const group of SPOKEN_FIRST_NAME_GROUPS) {
+    if (group.has(name)) for (const variant of group) variants.add(variant);
+  }
+  return [...variants];
+}
+function sameSpokenFirstName(a, b) {
+  return !!b && spokenFirstNameVariants(a).includes(b);
+}
+
 module.exports = {
   normalizeNamePart,
   normalizeNameFolded,
   firstNameVariants,
   sameFirstName,
+  sameSpokenFirstName,
+  spokenFirstNameVariants,
   payerNameCorroborates,
 };

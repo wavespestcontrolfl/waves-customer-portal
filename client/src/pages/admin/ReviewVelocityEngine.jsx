@@ -185,6 +185,12 @@ const STAGES = {
 // 2026-08-06: keep in lockstep when either side changes.
 const TEMPLATES = [
   {
+    id: "day0_ask",
+    name: "Day-0 Ask",
+    sentiment: "happy",
+    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+  },
+  {
     id: "friendly_ask",
     name: "Friendly Ask",
     sentiment: "happy",
@@ -321,6 +327,10 @@ function hydrate(body, c) {
     // server's own first-name substitution never runs on it, and a full name
     // would tip the one-segment ask templates into a second segment.
     .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
+    // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
+    // candidates feed carries no technician, so the server renders it from
+    // the record ("<tech> with Waves", else "Waves Pest Control") — the same
+    // way it swaps {review_url} for the tokenized link.
     .replace(/\{service_type\}/g, c.lastSvc || "pest control")
     .replace(/\{review_url\}/g, c.reviewUrl)
     .replace(/\{date\}/g, c.lastDate);
@@ -369,7 +379,9 @@ function apiToCustomer(row) {
     email: "",
     lastDate: svcDate ? fmtDate(svcDate) : "—",
     lastSvc: svc,
-    lastTech: "Adam",
+    // No technician in the candidates feed: the server resolves the tech
+    // from the latest completed service when the drawer sends none.
+    lastTech: null,
     sentiment,
     stage,
     score,
@@ -438,7 +450,7 @@ function Tag({ type, children }) {
   return (
     <span
       style={{
-        fontSize: 10,
+        fontSize: 12, // UI audit F0517
         fontWeight: 500,
         padding: "3px 8px",
         borderRadius: 20,
@@ -453,14 +465,18 @@ function Tag({ type, children }) {
 }
 
 function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
+  // UI audit F0517: ~28px touch height before; 36px on desktop, 44px below
+  // the 640px mobile breakpoint (live, not a module-load snapshot).
+  const mobile = useIsMobile(640);
   const base = {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
     padding: "7px 14px",
+    minHeight: mobile ? 44 : 36,
     borderRadius: 8,
     fontFamily: C.sans,
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: 500,
     cursor: disabled ? "not-allowed" : "pointer",
     border: "none",
@@ -616,6 +632,11 @@ export default function ReviewVelocityEngine() {
     async (customer, opts = {}) => {
       const svcType = customer.lastSvc;
       try {
+        // `techName` is sent as-is (null when the candidates feed carries no
+        // technician): the route coalesces null to "no tech" and resolves the
+        // sender from the record. Keep this request expression byte-identical
+        // to main — the IB coverage gate fingerprints it, and its operation
+        // has not changed.
         const res = await adminFetch("/admin/reviews/send-request", {
           method: "POST",
           body: JSON.stringify({
@@ -810,7 +831,7 @@ export default function ReviewVelocityEngine() {
                     minWidth: 18,
                     height: 18,
                     borderRadius: 9,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: 700,
                     padding: "0 5px",
                     marginLeft: 6,
@@ -1176,7 +1197,7 @@ function Dashboard({
                   >
                     <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase" }}>{ch.channel}</div>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>{ch.sent}</div>
-                    <div style={{ fontSize: 10, color: C.t3 }}>
+                    <div style={{ fontSize: 11, color: C.t3 }}>
                       {ch.sent > 0 ? Math.round((ch.reviewed / ch.sent) * 100) : 0}% converted
                     </div>
                   </div>
@@ -1325,7 +1346,7 @@ function Dashboard({
                       >
                         {s.v}
                       </div>{" "}
-                      <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+                      <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                         {s.l}
                       </div>{" "}
                     </div>
@@ -1400,20 +1421,35 @@ function VelocityChart({ velocity }) {
         border: `1px solid ${C.bdr}`,
         borderRadius: 12,
         padding: 16,
+        height: 150,
+        // Up to 13 weekly buckets at phone width: keep a floor width per
+        // column so the 11px M/D labels stay inside their columns and let
+        // the row scroll sideways instead of spilling out of the card.
+        overflowX: "auto",
+        WebkitOverflowScrolling: "touch",
+      }}
+    >
+    <div
+      style={{
         display: "flex",
         alignItems: "flex-end",
         gap: 6,
-        height: 150,
+        height: "100%",
+        minWidth: "max-content",
       }}
     >
       {velocity.map((v, i) => {
-        const h = Math.round((v.reviews / max) * 100);
+        // Bars scale against 70% of the column so the value above and the
+        // date below (11px each plus margins) fit inside the 150px chart
+        // instead of pushing the tallest column into the heading.
+        const h = Math.round((v.reviews / max) * 70);
         const wk = v.week ? new Date(v.week) : null;
         return (
           <div
             key={i}
             style={{
               flex: 1,
+              minWidth: 32,
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -1421,7 +1457,7 @@ function VelocityChart({ velocity }) {
               height: "100%",
             }}
           >
-            <div style={{ fontSize: 10, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
               {v.reviews}
             </div>
             <div
@@ -1435,12 +1471,13 @@ function VelocityChart({ velocity }) {
                 transition: "height .3s",
               }}
             />
-            <div style={{ fontSize: 9, color: C.t3, marginTop: 4 }}>
+            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
               {wk ? `${wk.getMonth() + 1}/${wk.getDate()}` : ""}
             </div>
           </div>
         );
       })}
+    </div>
     </div>
   );
 }
@@ -1989,7 +2026,7 @@ function ActivityList({ log, max }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               {" "}
               <div style={{ fontSize: 12, lineHeight: 1.5 }}>{l.msg}</div>{" "}
-              <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                 {l.time}
               </div>{" "}
             </div>{" "}
@@ -2270,7 +2307,7 @@ function CustomerDrawer({
             <Tag type="acc">{gbp?.name || c.gbpId}</Tag>{" "}
             <span
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 color: C.t3,
                 flex: 1,
                 overflow: "hidden",
@@ -2299,14 +2336,14 @@ function CustomerDrawer({
                 >
                   {" "}
                   <span style={{ fontWeight: 500 }}>{j.svcType}</span>{" "}
-                  <span style={{ fontSize: 10, color: C.t3 }}>
+                  <span style={{ fontSize: 11, color: C.t3 }}>
                     {j.date}
                   </span>{" "}
                 </div>
                 {j.notes && (
                   <div style={{ color: C.t3, marginTop: 2 }}>{j.notes}</div>
                 )}
-                <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+                <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                   {j.tech} · ${j.revenue}
                 </div>{" "}
               </div>
@@ -2332,7 +2369,7 @@ function CustomerDrawer({
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 10, color: C.t3, marginBottom: 2 }}>
+                <div style={{ fontSize: 11, color: C.t3, marginBottom: 2 }}>
                   {m.date} {m.dir === "out" ? "→ Sent" : "← Received"}
                 </div>
                 {m.text}
@@ -2399,7 +2436,7 @@ function CustomerDrawer({
             />{" "}
             <div
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 color: C.t3,
                 marginTop: 6,
                 lineHeight: 1.5,

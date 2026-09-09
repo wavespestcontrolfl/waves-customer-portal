@@ -1,5 +1,6 @@
 import React, { forwardRef } from 'react';
 import { cn } from './cn';
+import { CONTROL_DENSITIES, useUiDensity } from './UiSurface';
 
 const BASE =
   'block box-border min-w-0 w-full bg-white text-zinc-900 appearance-none pr-8 ' +
@@ -21,13 +22,14 @@ const CARET_STYLE = {
 };
 
 export const Select = forwardRef(function Select(
-  { size = 'md', className, children, style, ...rest },
+  { size = 'md', density, className, children, style, ...rest },
   ref
 ) {
+  const resolvedDensity = useUiDensity(density);
   return (
     <select
       ref={ref}
-      className={cn(BASE, SIZES[size], CARET, className)}
+      className={cn('ui-control', BASE, resolvedDensity === 'legacy' ? SIZES[size] : cn('ui-select', CONTROL_DENSITIES[resolvedDensity]), CARET, className)}
       style={{ ...CARET_STYLE, ...style }}
       {...rest}
     >
