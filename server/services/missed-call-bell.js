@@ -13,6 +13,8 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
+const { whereNotBlockedCall } = require('../middleware/spam-block');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -33,9 +35,24 @@ function outcomeUnanswered(row) {
   return UNANSWERED_STATUSES.has(row.status);
 }
 
+// Unknown prospects share the missed-call lease; withheld IDs and Nomorobo spam stay silent.
+function unknownCallerAllowed(row, opts) {
+  if (!opts?.unknownCallers) return false;
+  // Withheld caller ID ("anonymous") is not a number anyone can call back.
+  if (isSentinelPhone(row.from_phone) || String(row.from_phone || '').replace(/\D/g, '').length < 10) return false;
+  if (String(row.source || '') === 'voice_relay_sandbox') return false;
+  const meta = parseMeta(row.metadata);
+  try {
+    const nomo = meta.addons?.results?.nomorobo_spamscore;
+    if (nomo?.status === 'successful' && Number(nomo.result?.score) === 1) return false;
+  } catch (_e) { /* fail open — an unparseable envelope is not a spam verdict */ }
+  return true;
+}
+
 /** Pure eligibility — exported for tests. */
-function missedCallEligible(row, now = Date.now()) {
-  if (!row || row.direction !== 'inbound' || !row.customer_id) return false;
+function missedCallEligible(row, now = Date.now(), opts = {}) {
+  if (!row || row.direction !== 'inbound') return false;
+  if (!row.customer_id && !unknownCallerAllowed(row, opts)) return false;
   if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
   if (row.voicemail_callback_alerted_at) return false;                // voicemail lane already rang
   if (row.call_outcome === 'ai_handled' || row.call_outcome === 'ai_transferred') return false; // Sandy handled it / handed it to a person
@@ -59,8 +76,9 @@ function leaseStale(token, now = Date.now()) {
 async function ringMissedCallIfUnanswered(callSid) {
   if (!callSid) return false;
   try {
-    const row = await db('call_log').where('twilio_call_sid', callSid).first();
-    if (!missedCallEligible(row)) return false;
+    const row = await db('call_log').where('twilio_call_sid', callSid).modify(whereNotBlockedCall).first();
+    const { isEnabled } = require('../config/feature-gates');
+    if (!missedCallEligible(row, Date.now(), { unknownCallers: isEnabled('missedCallUnknownCallers') })) return false;
     // Atomic claim: first writer wins across retries / pods. The mutable
     // eligibility predicates are re-checked IN the claim so a voicemail
     // recording or an answered outcome that landed between the read above
@@ -69,6 +87,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     const reclaimed = Boolean(parseMeta(row.metadata).missed_call_notified_at);
     const claimed = await db('call_log')
       .where({ id: row.id })
+      .modify(whereNotBlockedCall)
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
       .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
       .whereNull('recording_sid')
@@ -89,22 +108,28 @@ async function ringMissedCallIfUnanswered(callSid) {
     // settling before dispatch would make the crash a permanent loss.
     if (reclaimed) {
       const prior = await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' })
+        .whereRaw("metadata->>'triggerKey' = 'customer_missed_call'")
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
       if (prior) { await settle(); return false; }
     }
-    const customer = await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone');
+    const customer = row.customer_id
+      ? await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone')
+      : null;
+    const lineLabel = row.customer_id ? null : (parseMeta(row.metadata).location || null);
     const { triggerNotification } = require('./notification-triggers');
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
     const stillMissed = async () => {
-      const cur = await db('call_log').where({ id: row.id }).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
+      const cur = await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
       return Boolean(cur) && !cur.recording_sid && !cur.recording_url && !cur.voicemail_callback_alerted_at;
     };
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
-        customerId: row.customer_id,
-        name: [customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer',
+        customerId: row.customer_id || null,
+        name: row.customer_id
+          ? ([customer?.first_name, customer?.last_name].filter(Boolean).join(' ') || 'Customer')
+          : `unknown caller${lineLabel ? ` (${lineLabel})` : ''}`,
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
@@ -148,28 +173,61 @@ const TERMINAL_STATUSES = ['completed', 'no-answer', 'busy', 'canceled', 'failed
  * atomic claim inside ringMissedCallIfUnanswered makes a re-offer a no-op.
  */
 async function sweepMissedCalls({ limit = 50 } = {}) {
-  const rows = await db('call_log')
-    .where({ direction: 'inbound' })
-    .whereNotNull('customer_id')
-    .whereIn('status', TERMINAL_STATUSES)
-    .whereNull('recording_sid')
-    .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
-    .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
-    // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
-    .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
-    .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-    // Grace runs from the TERMINAL update, not call creation: the no-answer
-    // status lands before the caller records up to 120s of voicemail and
-    // the recording callback persists it (codex r6).
-    .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(Date.now() - VOICEMAIL_GRACE_MS)])
-    .orderBy('created_at', 'asc')
-    .limit(limit)
-    .select('twilio_call_sid');
+  const { isEnabled } = require('../config/feature-gates');
+  const unknownCallers = isEnabled('missedCallUnknownCallers');
+  const now = Date.now();
   let rung = 0;
-  for (const r of rows) {
-    if (await ringMissedCallIfUnanswered(r.twilio_call_sid)) rung += 1;
+  let offered = 0;
+  let cursor = null;
+  // Page past permanently ineligible rows using the same eligibility rule
+  // as delivery, so spam/withheld IDs cannot monopolize the oldest batch.
+  while (offered < limit) {
+    const rows = await db('call_log')
+      .where({ direction: 'inbound' })
+      .modify(whereNotBlockedCall)
+      .modify((q) => {
+        if (!unknownCallers) q.whereNotNull('customer_id');
+        else {
+          q.whereRaw("COALESCE(source, '') <> 'voice_relay_sandbox'");
+          q.where(group => group.whereNotNull('customer_id').orWhere(unknown => unknown
+            .whereRaw("LENGTH(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g')) >= 10")
+            .whereRaw("NOT (regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g') = ANY(?))", [[...PHONE_SENTINELS].flatMap(value => [value, `1${value}`])])
+            .whereRaw("NOT COALESCE(jsonb_path_exists(COALESCE(metadata, '{}'::jsonb), ?::jsonpath, '{}'::jsonb, true), false)",
+              ['strict $.addons.results.nomorobo_spamscore ? (@.status == "successful" && (@.result.score == true || @.result.score.double() == 1))'])));
+        }
+      })
+      .whereIn('status', TERMINAL_STATUSES)
+      .whereNull('recording_sid')
+      .whereNull('recording_url')
+      .whereNull('voicemail_callback_alerted_at')
+      .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
+      .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
+      .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
+      // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
+      .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
+      .where('created_at', '>', new Date(now - 24 * 60 * 60 * 1000))
+      // Grace runs from the TERMINAL update, not call creation: the no-answer
+      // status lands before the caller records up to 120s of voicemail and
+      // the recording callback persists it (codex r6).
+      .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(now - VOICEMAIL_GRACE_MS)])
+      .modify(q => {
+        if (cursor) q.whereRaw('(created_at, id) > (?, ?)', [cursor.sweep_created_at, cursor.id]);
+      })
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc')
+      .limit(limit)
+      // A text cursor preserves PostgreSQL microseconds across tied dates.
+      .select('*', db.raw('created_at::text AS sweep_created_at'));
+    for (const r of rows) {
+      if (!r.twilio_call_sid || !missedCallEligible(r, now, { unknownCallers })) continue;
+      offered += 1;
+      if (await ringMissedCallIfUnanswered(r.twilio_call_sid)) rung += 1;
+      if (offered === limit) return rung;
+    }
+    if (rows.length < limit) break;
+    cursor = rows[rows.length - 1];
   }
   return rung;
 }
 
-module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls };
+module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls, outcomeUnanswered };
