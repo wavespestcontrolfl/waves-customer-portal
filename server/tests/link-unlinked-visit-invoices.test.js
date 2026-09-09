@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 
 // In-memory query boundary; no application startup, credentials, or DB writes.
-function fixture({ invoice = {}, visit = {}, customer = {}, payers = [], records = [], attempt = null } = {}) {
+function fixture({ invoice = {}, visit = {}, customer = {}, payers = [], services = [], records = [], attempt = null } = {}) {
   const inv = { id: 'invoice', customer_id: 'customer', status: 'paid', service_date: '2020-01-01',
     line_items: [{ description: 'Pest Control', amount: 100 }], total: 100, tax_rate: 0, tax_amount: 0,
     payer_id: null, ...invoice };
@@ -19,9 +19,9 @@ function fixture({ invoice = {}, visit = {}, customer = {}, payers = [], records
     status: 'completed', service_type: 'Pest Control', technician_id: 'tech-new', ...visit };
   const cust = { id: 'customer', payer_id: null, ...customer };
   const conn = jest.fn((table) => {
-    let existingLink = false; let payerId;
+    let existingLink = false; let payerId; let serviceId;
     const chain = {
-      where(clause) { if (typeof clause === 'function') existingLink = true; else if (table === 'payers') payerId = clause.id; return chain; },
+      where(clause) { if (typeof clause === 'function') existingLink = true; else if (table === 'payers') payerId = clause.id; else if (table === 'services') serviceId = clause.id; return chain; },
       whereNull: () => chain, whereNotNull: () => chain, whereNotIn: () => chain,
       whereRaw: () => chain, whereNot: () => chain, whereIn: () => chain, orderBy: () => chain,
       modify(fn) { fn(chain); return chain; },
@@ -30,6 +30,7 @@ function fixture({ invoice = {}, visit = {}, customer = {}, payers = [], records
         if (table === 'scheduled_services') return Promise.resolve(svc);
         if (table === 'customers') return Promise.resolve(cust);
         if (table === 'payers') return Promise.resolve(payers.find((p) => p.id === payerId));
+        if (table === 'services') return Promise.resolve(services.find((s) => s.id === serviceId) || null);
         if (table === 'service_completion_attempts') return Promise.resolve(attempt);
         return Promise.resolve(null);
       },
@@ -109,6 +110,42 @@ describe('conservative historical repair evidence', () => {
   ])('rejects a composite visit even without add-on rows: %s', async (label) => {
     expect(isCompositeService(label)).toBe(true);
     expect(await run(fixture({ visit: { service_type: label } }))).toEqual({ skip: 'compositeVisit' });
+  });
+  test.each([
+    'Waves Pest Control Appointment Service', 'Estimate', 'Pest Control Re-Service', 'Follow-Up Visit',
+  ])('refuses an always-free visit type even with a matching positive line: %s', async (service_type) => {
+    const f = fixture({ visit: { service_type }, invoice: { line_items: [{ description: service_type, amount: 100 }] } });
+    expect(await run(f)).toEqual({ skip: 'noCostVisit' });
+  });
+  test('refuses an included follow-up under a billable label', async () => {
+    expect(await run(fixture({ visit: { followup_included: true } }))).toEqual({ skip: 'noCostVisit' });
+  });
+  test.each([
+    { prepaid_method: 'annual_prepay_invoice', prepaid_amount: 40, annual_prepay_term_id: 'term' },
+    { prepaid_method: 'annual_prepay_invoice', prepaid_amount: null, annual_prepay_term_id: null },
+    { prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: 'term' },
+    { prepaid_method: 'cash', prepaid_amount: 100, annual_prepay_term_id: null },
+  ])('refuses prepaid work, verified or not: %j', async (visit) => {
+    expect(await run(fixture({ visit }))).toEqual({ skip: 'prepaid' });
+  });
+  test.each([
+    { service_type: 'Pest Control', service_key_snapshot: 'termite_bait' },
+    { service_type: 'Pest Control', service_key_snapshot: 'lawn_care_monthly' },
+  ])('refuses a label that disagrees with its catalog snapshot: %j', async (visit) => {
+    expect(await run(fixture({ visit }))).toEqual({ skip: 'identityConflict' });
+  });
+  test('refuses a catalog row that disagrees with the label or the snapshot', async () => {
+    const other = { id: 'svc', service_key: 'termite_bait', name: 'Termite Bait Station Service' };
+    expect(await run(fixture({ visit: { service_id: 'svc' }, services: [other] }))).toEqual({ skip: 'identityConflict' });
+    const drifted = { id: 'svc', service_key: 'pest_general_quarterly', name: 'Pest Control' };
+    expect(await run(fixture({ visit: { service_id: 'svc', service_key_snapshot: 'pest_general_bimonthly' }, services: [drifted] })))
+      .toEqual({ skip: 'identityConflict' });
+    expect(await run(fixture({ visit: { service_id: 'missing' } }))).toEqual({ skip: 'identityConflict' });
+  });
+  test('accepts agreeing label, snapshot, and catalog identities', async () => {
+    const same = { id: 'svc', service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control Service' };
+    const f = fixture({ visit: { service_id: 'svc', service_key_snapshot: 'pest_general_quarterly' }, services: [same] });
+    expect((await run(f)).pairing).toBeDefined();
   });
   test('rejects a retired combined snapshot behind a generic label', async () => {
     expect(await run(fixture({ visit: { service_key_snapshot: 'pest_termite_bait_quarterly' } })))

@@ -22,6 +22,7 @@ const InvoiceService = require('../../server/services/invoice');
 const { serviceKeyFor } = require('../../server/services/recurring-appointment-seeder');
 const { assertScheduledInvoiceNotPacketOwned } = require('../../server/services/scheduled-invoice-mint');
 const { etDateString } = require('../../server/utils/datetime-et');
+const { isAlwaysFreeServiceType } = require('../../server/services/no-cost-visit-types');
 
 const PLAN_VERSION = 2;
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
@@ -44,7 +45,7 @@ function isCompositeService(label) {
 }
 
 const INVOICE_DIGEST_FIELDS = ['id', 'customer_id', 'status', 'service_date', 'service_type', 'title', 'line_items', 'subtotal', 'discount_amount', 'tax_amount', 'total', 'technician_id', 'tech_name', 'payer_id', 'po_number', 'tax_rate', 'payer_snapshot'];
-const VISIT_DIGEST_FIELDS = ['id', 'customer_id', 'scheduled_date', 'service_type', 'service_key_snapshot', 'status', 'technician_id', 'payer_id', 'po_number', 'self_pay_override', 'is_callback'];
+const VISIT_DIGEST_FIELDS = ['id', 'customer_id', 'scheduled_date', 'service_type', 'service_key_snapshot', 'service_id', 'status', 'technician_id', 'payer_id', 'po_number', 'self_pay_override', 'is_callback', 'followup_included', 'prepaid_method', 'prepaid_amount', 'annual_prepay_term_id'];
 function pairingDigest(inv, svc, serviceRecordId, billTo, records = []) {
   const pick = (row, keys) => keys.map((k) => { const v = row[k]; return v instanceof Date ? v.toISOString() : (v === undefined ? null : v); });
   const recordEvidence = records.map((r) => [String(r.id), r.is_callback === true]).sort((a, b) => a[0].localeCompare(b[0]));
@@ -82,9 +83,30 @@ function invoiceBillsVisitApplication(invoice, svc) {
   return evidence;
 }
 
+// invoices.status is nullable: NULL is a live, nonterminal bill (the
+// billing-recovery predicate is COALESCE(status, '') <> 'void'), and a bare
+// NOT IN would drop it from both the uniqueness count and the existing-bill check.
 function liveInvoices(conn) {
+  const terminal = InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES;
   return conn('invoices').whereNull('archived_at')
-    .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+    .whereRaw(`coalesce(status, '') not in (${terminal.map(() => '?').join(', ')})`, terminal);
+}
+
+// Every populated identity source of a visit must name the same program:
+// the label, the durable catalog snapshot, and the catalog row. A label that
+// disagrees with its snapshot is recorded as a conflict by the legacy-label
+// migration, never trusted; the same holds for a completed historical row.
+async function visitIdentityConflict(conn, svc) {
+  const family = serviceKeyFor({ service_type: svc.service_type });
+  const snapshot = String(svc.service_key_snapshot || '').trim();
+  const sources = [snapshot];
+  if (svc.service_id) {
+    const catalog = await conn('services').where({ id: svc.service_id }).first('service_key', 'name');
+    if (!catalog) return true;
+    if (snapshot && catalog.service_key && snapshot !== String(catalog.service_key).trim()) return true;
+    sources.push(catalog.service_key, catalog.name);
+  }
+  return sources.filter(Boolean).some((source) => serviceKeyFor({ service_type: String(source).replace(/_/g, ' ') }) !== family);
 }
 
 // Candidate ownership is stricter than ambiguity: a bill attached to a
@@ -111,10 +133,19 @@ async function evaluate(conn, invoiceId) {
   const records = await conn('service_records').where({ scheduled_service_id: svc.id }).select('id', 'is_callback');
   const invoiced = await conn('invoices')
     .where((qb) => qb.where({ scheduled_service_id: svc.id }).orWhereIn('service_record_id', records.map((r) => r.id)))
-    .whereNot('status', 'void').first('id');
+    .whereRaw("coalesce(status, '') <> 'void'").first('id');
   const exclusions = [
     ['callback', [svc, ...records].some((r) => r.is_callback)],
     ['compositeVisit', [svc.service_type, svc.service_key_snapshot].some(isCompositeService)],
+    ['identityConflict', await visitIdentityConflict(conn, svc)],
+    // Always-free types and included follow-ups are $0 by the shared no-cost
+    // classifier; a collectible invoice must never attach to designated-free work.
+    ['noCostVisit', isAlwaysFreeServiceType(svc.service_type) || svc.followup_included === true],
+    // Any prepay evidence (an annual-prepay stamp, a term link, or a prepaid
+    // amount by any method) means the work was paid inside another bill.
+    // Coverage is not re-derived here: stale or unverifiable stamps are
+    // refused too, and stay for manual reconciliation.
+    ['prepaid', Boolean(svc.prepaid_method) || svc.annual_prepay_term_id != null || Number(svc.prepaid_amount) > 0],
     ['ambiguous', sameDayLive.length !== 1],
     ['visitHasAddons', await conn('scheduled_service_addons').where({ scheduled_service_id: svc.id }).first('id')],
     ['visitAlreadyInvoiced', invoiced],
