@@ -182,3 +182,36 @@ describe('ReservicePage states', () => {
     expect(await screen.findByText(/you're covered/)).toBeInTheDocument();
   });
 });
+
+
+it('loads the selected service and discards the old slot and late search when switching lanes', async () => {
+  let finishSearch;
+  const lanes = [
+    { key: 'pest', label: 'Pest Control Re-Service', alreadyBooked: null },
+    { key: 'lawn', label: 'Lawn Care Re-Service', alreadyBooked: null },
+  ];
+  const fetchMock = vi.fn((url, opts = {}) => {
+    if (String(url).includes('/ui-flags')) return Promise.resolve(jsonResponse({ portalGlass: false }));
+    if (String(url).includes('/find-slots')) return new Promise(resolve => { finishSearch = resolve; });
+    const lane = new URL(String(url), 'http://localhost').searchParams.get('lane');
+    return Promise.resolve(jsonResponse(bookablePayload({ lanes, ...(!lane ? { availability: null } : {}) })));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  renderPage();
+  expect(await screen.findByText('Choose a service above to see available times.')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: /Pests inside or out/ }));
+  fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+  expect(screen.getByRole('button', { name: /Book .* free/ })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'Tuesday' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  const search = fetchMock.mock.calls.find(([url]) => String(url).includes('/find-slots'));
+  expect(JSON.parse(search[1].body)).toEqual({ query: 'Tuesday', lane: 'pest' });
+  fireEvent.click(screen.getByRole('button', { name: /My lawn/ }));
+  await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ });
+  expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('?lane=lawn'))).toBe(true);
+  expect(screen.queryByRole('button', { name: /Book .* free/ })).not.toBeInTheDocument();
+  expect(search[1].signal.aborted).toBe(true);
+  finishSearch(jsonResponse({ availability: { days: [] }, summary: 'Old pest result' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument());
+  expect(screen.queryByText('Old pest result')).not.toBeInTheDocument();
+});
