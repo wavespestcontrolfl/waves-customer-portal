@@ -299,6 +299,9 @@ async function loadCallIntelligence(conn, callId) {
   // state; fulfillment is refreshed only while the feature is on.
   const { isEnabled } = require('../config/feature-gates');
   if (isEnabled('callCommitments')) await refreshFulfillment(conn, call.id, call);
+  // This call's undated callback cards get their staffed deadline here, the
+  // same scoped initialization the staff queue performs (no-op gate off).
+  await require('./callback-cards').prepareCallbackCards(conn, { callId: call.id });
   const [commitments, outcomes] = await Promise.all([
     listForCall(conn, call.id),
     buildCallOutcomes(conn, call),

@@ -54,6 +54,8 @@ export function isOverdueNow(row, now = Date.now()) {
 }
 
 export function dueLabel(row, now = Date.now()) {
+  // effective_due_at is the server's judged deadline: the staffed one,
+  // pushed out to the end of an active snooze.
   const due = row.effective_due_at || row.due_at;
   // A human-recorded promise is open since it was RECORDED — the instant its
   // implicit deadline ages from — not since a call that may be weeks older.
@@ -61,6 +63,7 @@ export function dueLabel(row, now = Date.now()) {
   // The server's overdue flag is a snapshot; a stated deadline that passed
   // while the tab stayed open is overdue NOW (Codex #3725 r19 P2).
   if (isOverdueNow(row, now)) return { text: due ? `Overdue · was due ${fmtWhen(due)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
+  if (row.snoozed_until && new Date(row.snoozed_until).getTime() > now) return { text: `Snoozed until ${fmtWhen(row.snoozed_until)}`, tone: "neutral" };
   if (due) {
     const soon = new Date(due).getTime() - now < 24 * 60 * 60 * 1000;
     return { text: `Due ${fmtWhen(due)}`, tone: soon ? "strong" : "neutral" };

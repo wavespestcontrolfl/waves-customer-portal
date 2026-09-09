@@ -3376,7 +3376,10 @@ router.post('/outbound-dial-complete', async (req, res) => {
     try {
       await db('call_log').where({ id, direction: 'outbound' })
         .whereRaw('(twilio_call_sid = ? OR twilio_call_sid IS NULL)', [parentSid])
-        .whereRaw("metadata->>'relatedCommitmentId' IS NOT NULL")
+        // A card bridge links the commitment; the existing call-log callback
+        // links the source call. Both are callback attempts whose customer
+        // leg is the proof the ledger judges.
+        .whereRaw("(metadata->>'relatedCommitmentId' IS NOT NULL OR metadata->>'relatedCallId' IS NOT NULL)")
         .whereRaw("metadata->'customer_leg' IS NULL")
         .update({ twilio_call_sid: parentSid,
           metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_leg}', ?::jsonb)", [leg]), updated_at: new Date() });

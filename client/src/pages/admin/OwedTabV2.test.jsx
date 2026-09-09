@@ -140,6 +140,10 @@ describe("OwedTabV2", () => {
       .toMatchObject({ text: expect.stringContaining("Due Sep 5"), tone: "strong" });
     expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T14:00:00Z" }, now).tone).toBe("alert");
     expect(dueLabel({ overdue: false, due_at: null }, now)).toEqual({ text: "No due time", tone: "neutral" });
+    // The server's effective_due_at already carries an active snooze; the label says so.
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T18:00:00Z", snoozed_until: "2026-09-05T18:00:00Z" }, now))
+      .toEqual({ text: expect.stringMatching(/^Snoozed until /), tone: "neutral" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T14:30:00Z", snoozed_until: "2026-09-05T14:30:00Z" }, now).tone).toBe("alert");
     // A human-recorded promise is open since it was recorded, not since the (older) call.
     expect(dueLabel({ overdue: true, due_at: null, source: "human", created_at: "2026-09-01T15:00:00Z", call_started_at: "2026-07-01T15:00:00Z" }, now).text).toMatch(/open since Sep 1/);
     expect(dueLabel({ overdue: true, due_at: null, source: "ai", created_at: "2026-09-01T15:00:00Z", call_started_at: "2026-07-01T15:00:00Z" }, now).text).toMatch(/open since Jul 1/);

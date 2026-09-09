@@ -25,6 +25,12 @@ describe('callback rollout policy', () => {
       expect(normalizeRow({ ...row, due_at: '2026-09-10T20:00:00Z', callback_due_at: callbackDue }).effective_due_at)
         .toBe('2026-09-10T20:00:00Z');
       expect(normalizeRow({ ...row, party: 'customer', callback_due_at: callbackDue }).effective_due_at).toBeNull();
+      // A retained snooze is projected only while the card policy honours it.
+      const snoozed = normalizeRow({ ...row, due_at: '2020-01-01T00:00:00Z', callback_due_at: callbackDue, snoozed_until: '2099-01-01T00:00:00Z', status: 'open' });
+      expect(snoozed.snoozed_until).toBe(cardGate && commitmentGate ? '2099-01-01T00:00:00Z' : null);
+      expect(snoozed.effective_due_at).toBe(cardGate && commitmentGate ? '2099-01-01T00:00:00Z' : '2020-01-01T00:00:00Z');
+      expect(snoozed.due_at).toBe('2020-01-01T00:00:00Z');
+      expect(require('../services/call-commitments').isOverdue(snoozed)).toBe(!(cardGate && commitmentGate));
       const deadline = require('../services/call-commitments').implicitDueAt(row);
       expect(deadline?.toISOString() || null).toBe(cardGate && commitmentGate ? null : '2026-09-10T04:00:00.000Z');
     },

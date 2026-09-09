@@ -54,7 +54,10 @@ run('callback ledger on PostgreSQL', () => {
   test('existing, human-created and edited callbacks receive deadlines without the notification worker', async () => {
     const ledger = require('../services/call-commitments');
     const existing = await seed({ callback_due_at: null });
+    // A plain read (the Intelligence Bar tool, the integrations worker) writes nothing.
     await ledger.listOpenCommitments(trx);
+    expect((await trx('call_commitments').where({ id: existing.id }).first()).callback_due_at).toBeNull();
+    await ledger.listOpenCommitments(trx, { prepare: true });
     expect((await trx('call_commitments').where({ id: existing.id }).first()).callback_due_at).not.toBeNull();
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
     const added = await ledger.addHumanCommitment(trx, existing.call_log_id, {
@@ -85,6 +88,79 @@ run('callback ledger on PostgreSQL', () => {
     expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('open');
   });
 
+  test('a customer-scoped read prepares its own callback ahead of an older unscoped backlog', async () => {
+    const ledger = require('../services/call-commitments');
+    const older = new Date(ago.getTime() - 86400000);
+    const backlog = Array.from({ length: 200 }, () => ({ callId: randomUUID(), id: randomUUID() }));
+    await trx('call_log').insert(backlog.map(({ callId }) => ({ id: callId, direction: 'inbound', from_phone: phone,
+      to_phone: '+15555550100', status: 'completed', created_at: older, updated_at: older })));
+    await trx('call_commitments').insert(backlog.map(({ callId, id }) => ({ id, call_log_id: callId, commitment_key: `fixture:${id}`,
+      party: 'waves', kind: 'callback', status: 'open', source: 'human', description: 'Synthetic backlog',
+      callback_due_at: null, created_at: older, updated_at: older })));
+    const customer = await trx('customers').first('id');
+    expect(customer).toBeTruthy();
+    const mine = await seed({ callback_due_at: null });
+    await trx('call_log').where({ id: mine.call_log_id }).update({ customer_id: customer.id });
+    const [row] = await ledger.listOpenCommitments(trx, { customerId: customer.id, kind: 'callback', prepare: true });
+    expect(row.id).toBe(mine.id);
+    expect(row.callback_due_at).not.toBeNull();
+    expect((await trx('call_commitments').where({ id: mine.id }).first()).callback_due_at).not.toBeNull();
+  });
+
+  test('a paged walk over more than one preparation batch neither skips nor repeats callbacks', async () => {
+    const ledger = require('../services/call-commitments');
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    // 210 undated AI callbacks whose CREATION order (the preparation order)
+    // is the reverse of their CALL order (the deadline order): the ten
+    // prepared last belong to the oldest calls and would sort first.
+    const batch = Array.from({ length: 210 }, (_, i) => ({ callId: randomUUID(), id: randomUUID(),
+      callAt: new Date(ago.getTime() - (210 - i) * 60000), createdAt: new Date(ago.getTime() - 3600000 + i * 1000) }));
+    await trx('call_log').insert(batch.map(({ callId, callAt }) => ({ id: callId, direction: 'inbound', from_phone: phone,
+      to_phone: '+15555550100', status: 'completed', duration_seconds: 60, created_at: callAt, updated_at: callAt })));
+    await trx('call_commitments').insert(batch.map(({ callId, id, createdAt }) => ({ id, call_log_id: callId, commitment_key: `fixture:${id}`,
+      party: 'waves', kind: 'callback', status: 'open', source: 'ai', description: 'Synthetic backlog',
+      callback_due_at: null, created_at: createdAt, updated_at: createdAt })));
+    const mine = new Set(batch.map((b) => b.id));
+    const seen = [];
+    for (let offset = 0, more = true; more;) {
+      const page = await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 101, offset, prepare: true, now });
+      more = page.length > 100;
+      seen.push(...page.slice(0, 100).map((r) => r.id).filter((id) => mine.has(id)));
+      offset += 100;
+    }
+    expect(seen).toHaveLength(210);
+    expect(new Set(seen).size).toBe(210);
+    expect(staff).toBeTruthy();
+    // The rows left undated by the first walk are prepared by the next first-page read.
+    await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 1, offset: 0, prepare: true, now });
+    expect(Number((await trx('call_commitments').whereIn('id', [...mine]).whereNull('callback_due_at').count('id as n').first()).n)).toBe(0);
+  }, 180000); // 210 remote preparation transactions
+
+  test('a snoozed callback is not overdue and queues behind actionable work', async () => {
+    const ledger = require('../services/call-commitments');
+    const snoozed = await seed(), due = await seed({ created_at: new Date(ago.getTime() - 60000) });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, snoozed.id, { action: 'snooze', actorId: staff.id, expectedAt: snoozed.updated_at, snooze: 'two_hours', now });
+    const rows = (await ledger.listOpenCommitments(trx, { kind: 'callback', now })).filter((r) => [snoozed.id, due.id].includes(r.id));
+    expect(rows.map((r) => [r.id, r.overdue])).toEqual([[due.id, true], [snoozed.id, false]]);
+    const later = new Date(now.getTime() + 3 * 3600000);
+    const rearmed = (await ledger.listOpenCommitments(trx, { kind: 'callback', now: later })).find((r) => r.id === snoozed.id);
+    expect(rearmed.overdue).toBe(true);
+  });
+
+  test('an action that leaves the callback open releases its reminder identity for the next due sweep', async () => {
+    const row = await seed();
+    const key = `call-commitment-overdue:${row.id}:2026-09-09`;
+    const [bell] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture reminder',
+      metadata: { commitment_id: row.id, dedupeKey: key } }).returning('*');
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, row.id, { action: 'snooze', actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
+    const after = await trx('notifications').where({ id: bell.id }).first();
+    expect(after.read_at).not.toBeNull();
+    expect(after.metadata.dedupeKey.startsWith(`${key}:superseded:`)).toBe(true);
+    expect(await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key])).toEqual([]);
+  });
+
   test('acting on one callback preserves a shared reminder for other open promises', async () => {
     const row = await seed(), other = await seed();
     const [bell] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture backlog',
@@ -94,6 +170,84 @@ run('callback ledger on PostgreSQL', () => {
     expect((await trx('notifications').where({ id: bell.id }).first()).read_at).toBeNull();
     await cards.actOnCallback(trx, row.id, { action: 'fulfill', actorId: staff.id, expectedAt: claimed.updated_at, now });
     expect((await trx('notifications').where({ id: bell.id }).first()).read_at).toBeNull();
+  });
+
+  test.each(['claim', 'snooze', 'release'])('%s on an AI callback records the review, so a later extraction cannot withdraw it', async (action) => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    const acted = await cards.actOnCallback(trx, row.id, { action, actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
+    expect(acted.human_state).toBe('confirmed');
+    expect(acted.reviewed_by).toBe(staff.id);
+    expect(acted.updated_at).toEqual(now);
+    await trx('call_commitments').insert({ call_log_id: row.call_log_id, commitment_key: 'waves:send_report',
+      party: 'waves', kind: 'send_report', description: 'Newer extraction', source: 'ai', last_seen_generation: 2 });
+    const live = await ledger.listOpenCommitments(trx, { kind: 'callback', now: new Date(now.getTime() + 3 * 3600000) });
+    expect(live.map((r) => r.id)).toContain(row.id);
+  });
+
+  // applyHumanUpdate stamps reviewed_at from the real clock, so returned-call
+  // evidence is placed strictly after the persisted review it must follow.
+  const afterReview = async (id, ms = 1) => new Date(new Date((await trx('call_commitments').where({ id }).first()).reviewed_at).getTime() + ms);
+  const tick = () => new Promise((resolve) => { setTimeout(resolve, 5); });
+  // Evidence in the shape the callback bridge requires: this promise's own
+  // attempt (source-call link), a completed customer leg, a valid
+  // non-voicemail extraction.
+  const returnedCall = (at, callId) => trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
+    status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+    metadata: { relatedCallId: callId, customer_leg: { status: 'completed', duration_seconds: 120, ended_at: at.toISOString() } },
+    created_at: at, updated_at: at });
+
+  test('a claimed callback still closes on its own returned-call evidence', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
+    expect((await trx('call_commitments').where({ id: row.id }).first()).human_state).toBe('confirmed');
+    await returnedCall(await afterReview(row.id), row.call_log_id);
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+    // Reopening the callback does not let the SAME evidence close it again;
+    // only a call returned after the reopen does.
+    const kept = await trx('call_commitments').where({ id: row.id }).first();
+    await tick();
+    await cards.actOnCallback(trx, row.id, { action: 'reopen', actorId: staff.id, expectedAt: kept.updated_at, now: new Date() });
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+    expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('open');
+    await returnedCall(await afterReview(row.id), row.call_log_id);
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    // A human verdict on any other promise is still never rewritten.
+    const other = await seed({ source: 'ai', last_seen_generation: 1, kind: 'send_report', commitment_key: `fixture:report:${randomUUID()}` });
+    await ledger.applyHumanUpdate(trx, other.id, { action: 'confirm', reviewedBy: staff.id });
+    expect(await ledger.refreshFulfillment(trx, other.call_log_id)).toMatchObject({ checked: 0 });
+  });
+
+  test('a reopen that lands while proof is being looked up keeps the callback open', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
+    await returnedCall(await afterReview(row.id), row.call_log_id);
+    const source = await trx('call_log').where({ id: row.call_log_id }).first();
+    // The evidence lookup yields to a concurrent reopen before it resolves;
+    // the source call is passed in so that lookup is the first call_log read.
+    let interleaved = false;
+    const racing = (table) => {
+      const builder = trx(table);
+      if (table === 'call_log' && !interleaved) {
+        interleaved = true;
+        const then = builder.then.bind(builder);
+        builder.then = (resolve, reject) => tick().then(() => trx('call_commitments').where({ id: row.id }).first())
+          .then((current) => cards.actOnCallback(trx, row.id, { action: 'reopen', actorId: staff.id, expectedAt: current.updated_at, now: new Date() }))
+          .then(() => then(resolve, reject));
+      }
+      return builder;
+    };
+    expect(await ledger.refreshFulfillment(racing, row.call_log_id, source)).toMatchObject({ fulfilled: 0 });
+    expect(interleaved).toBe(true);
+    const after = await trx('call_commitments').where({ id: row.id }).first();
+    expect(after.status).toBe('open');
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
   });
 
   test.each(['confirm', 'edit', 'claim'])('a newer extraction rejects a stale %s action without reviving the callback', async (action) => {

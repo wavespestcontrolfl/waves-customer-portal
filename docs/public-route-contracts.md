@@ -159,7 +159,8 @@ and `GATE_CALL_COMMITMENTS` are enabled, or the persisted bridge already links
 to a callback commitment (including rollback before staff press 1). Both lanes use this one completion
 route. Signed terminal child-leg results with a valid duration and SID record
 the first `metadata.customer_leg` on an outbound row matching the call-log UUID,
-parent CallSid and validated commitment link. If its parent SID backfill
+parent CallSid and a validated callback link (the card's commitment link, or
+the existing call-log callback's source-call link). If its parent SID backfill
 failed, the signed completion atomically adopts the missing SID on that
 server-linked outbound row. An existing different SID cannot be replaced.
 Retries cannot replace that

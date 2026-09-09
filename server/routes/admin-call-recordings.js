@@ -271,41 +271,24 @@ router.get('/commitments/sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/follow-through', async (req, res, next) => {
-  try {
-    const cards = require('../services/callback-cards');
-    const offset = Number(req.query.offset || 0);
-    if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
-    const callbacksEnabled = cards.enabled();
-    let callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
-    if (callbacksEnabled) {
-      const { refreshFulfillment } = require('../services/call-commitments');
-      let changed = 0;
-      for (const callId of rotatingRefreshWindow([...new Set(callbacks.map((row) => row.call_log_id))])) {
-        const result = await refreshFulfillment(db, callId).catch(() => ({}));
-        changed += (result.fulfilled || 0) + (result.hinted || 0) + (result.cleared || 0);
-      }
-      if (changed) callbacks = await cards.listCallbackCards(db, { limit: 101, offset });
-    }
-    res.json({ actor_id: req.technicianId, callbacks_enabled: callbacksEnabled,
-      callbacks: callbacks.slice(0, 100), has_more: callbacks.length > 100, next_offset: offset + 100 });
-  } catch (err) { next(err); }
-});
-
+// The one commitments feed for every staff view, callback cards included:
+// `kind=callback` narrows it to the callback lane and the rows carry their
+// owner projection (callback-cards.decorateCallbackRows).
 router.get('/commitments/open', async (req, res, next) => {
   try {
-    const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
+    const { party, kind, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
     if (party && party !== 'waves' && party !== 'customer') return res.status(400).json({ error: 'party must be waves or customer' });
     if (customerId && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID' });
     if (leadId && !UUID_RE.test(String(leadId))) return res.status(400).json({ error: 'lead_id must be a UUID' });
     if (offset !== undefined && !/^\d{1,9}$/.test(String(offset))) return res.status(400).json({ error: 'offset must be a non-negative integer' });
-    const { listOpenCommitments, refreshFulfillment, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../services/call-commitments');
+    const { listOpenCommitments, refreshFulfillment, COMMITMENT_KINDS, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../services/call-commitments');
+    if (kind && !COMMITMENT_KINDS.includes(String(kind))) return res.status(400).json({ error: 'kind must be a commitment kind' });
     // Pages: the client walks the queue with offset; the read asks for ONE
     // row past the page so the response can say has_more instead of a
     // 200-row page passing as the whole worklist (Codex #3725 r17 P2).
     const pageLimit = Math.max(1, Math.min(200, Number(limit) || 100));
     const pageOffset = Number(offset) || 0;
-    const opts = { party: party || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0' };
+    const opts = { party: party || null, kind: kind || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0', prepare: true };
     const { isEnabled } = require('../config/feature-gates');
     const enabled = isEnabled('callCommitments');
     let rows = await listOpenCommitments(db, opts);
@@ -335,13 +318,15 @@ router.get('/commitments/open', async (req, res, next) => {
       if (changed > 0) rows = await listOpenCommitments(db, opts);
     }
     const hasMore = rows.length > pageLimit;
+    const cards = require('../services/callback-cards');
     res.json({
-      commitments: hasMore ? rows.slice(0, pageLimit) : rows,
+      commitments: await cards.decorateCallbackRows(db, hasMore ? rows.slice(0, pageLimit) : rows),
       has_more: hasMore,
       next_offset: hasMore ? pageOffset + pageLimit : null,
       overdue_implicit_days: OVERDUE_IMPLICIT_DAYS,
       overdue_implicit_estimate_hours: OVERDUE_IMPLICIT_ESTIMATE_HOURS,
-      callbacks_enabled: require('../services/callback-cards').enabled(),
+      callbacks_enabled: cards.enabled(),
+      actor_id: req.technicianId,
       enabled,
     });
   } catch (err) { next(err); }

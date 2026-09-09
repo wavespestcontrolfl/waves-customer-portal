@@ -120,13 +120,15 @@ const ACTIVE_BRIDGE_WINDOW_MS = 15 * 60 * 1000;
  * P2). A row Twilio never called back on ages out of the window rather than
  * locking the caller out for good.
  */
-async function activeBridgeCall({ source, customerId, fromPhone = null, withinMs = ACTIVE_BRIDGE_WINDOW_MS }, connection = db) {
-  if (!source || (!customerId && !fromPhone)) return null;
+async function activeBridgeCall({ source, customerId, fromPhone = null, toPhone = null, withinMs = ACTIVE_BRIDGE_WINDOW_MS }, connection = db) {
+  if (!source || (!customerId && !fromPhone && !toPhone)) return null;
   return connection('call_log')
     .where({ source, direction: 'outbound' })
     .where(function scope() {
       if (customerId) this.orWhere({ customer_id: customerId });
       if (fromPhone) this.orWhere({ from_phone: fromPhone });
+      // An unlinked callback has no customer row: the dialed number is its identity.
+      if (toPhone) this.orWhere({ to_phone: toPhone });
     })
     .whereNotIn('status', TERMINAL_CALL_STATUSES)
     .where('created_at', '>', new Date(Date.now() - withinMs))
