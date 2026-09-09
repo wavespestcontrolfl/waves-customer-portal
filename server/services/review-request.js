@@ -3020,7 +3020,7 @@ const ReviewService = {
       // aged from the LATER channel: a Both email retried after the text
       // must not leave the row instantly follow-up eligible (r17 P2).
       .whereNotNull("sms_sent_at")
-      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [new Date(Date.now() - ASK_SPACING_MS)])
       .where({ followup_sent: false })
       .whereNull("rated_at")
       // Draft score taps are durable but not final. Do not send the
@@ -3040,125 +3040,139 @@ const ReviewService = {
     let suppressed = 0;
     const sentThisRun = new Set();
     const { getServiceContactSmsRecipient } = require("./customer-contact");
-    for (const request of eligible) {
-      // Dedup #1: another row in this same batch already triggered a followup
-      if (sentThisRun.has(request.customer_id)) {
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
-        suppressed++;
-        continue;
-      }
-
-      // Dedup #2: a sibling row already sent a followup to this customer recently
-      const recentFollowup = await db("review_requests")
-        .where({ customer_id: request.customer_id, followup_sent: true })
-        .where("followup_sent_at", ">=", recentFollowupCutoff)
-        .first();
-      if (recentFollowup) {
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
-        suppressed++;
-        continue;
-      }
-
-      const customer = await db("customers")
-        .where({ id: request.customer_id })
-        .first();
-      // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
-      if (customer && customer.has_left_google_review) {
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
-        suppressed++;
-        continue;
-      }
-      const contact = getServiceContactSmsRecipient(customer);
-      if (!contact.phone) {
-        // No consented SMS recipient — mark handled so this row can't sit
-        // in the 20-row follow-up batch every run and starve later
-        // customers (#2955 r4). Mirrors the scheduled-send suppression.
-        await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
-        suppressed++;
-        continue;
-      }
-
-      // Followup points straight at the GBP review form — they ignored the
-      // tokenized rate page once, so reduce friction the second time. The
-      // ask's stamped office rides along as the last-resort stored id so the
-      // Day-3 follow-up can never target a different profile than the ask it
-      // chases (codex #3285 r2).
-      const location = resolveReviewLocationId(customer || {}, {
-        storedLocationId: request.location_id || customer?.nearest_location_id || null,
-      });
-      const googleReviewUrl =
-        REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
-
-      const body = await renderSmsTemplate(
-        "review_request_followup",
-        {
-          first_name: firstNameFrom(contact.name) || customer.first_name || "",
-          google_review_url: googleReviewUrl,
-        },
-        {
-          workflow: "review_request_followup",
-          entity_type: "review_request",
-          entity_id: request.id,
-        },
-      );
-      if (!body) {
-        logger.warn(
-          `[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`,
-        );
-        continue;
-      }
-
+    for (const candidate of eligible) {
       try {
-        const result = await sendCustomerMessage({
-          to: contact.phone,
-          body,
-          channel: "sms",
-          audience: "customer",
-          purpose: "review_request",
-          customerId: customer.id,
-          identityTrustLevel: "phone_matches_customer",
-          entryPoint: "review_request_followup",
-          metadata: {
-            original_message_type: "review_followup",
-            review_request_id: request.id,
-          },
-        });
-        if (!result.sent) {
-          logger.warn(
-            `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
-          );
-          if (
-            result.blocked &&
-            result.code !== "CONSENT_LOOKUP_FAILED" &&
-            !result.retryable &&
-            !result.deferred
-          ) {
+        const held = await require("./review-ask-dispatch").dispatchReviewAsk(candidate.customer_id, async () => {
+          const request = await db("review_requests").where({ id: candidate.id, followup_sent: false }).first();
+          if (!request || !["sent", "opened"].includes(request.status) || request.rated_at
+            || (request.score != null && request.score < 8)) return;
+          // Dedup #1: another row in this same batch already triggered a followup
+          if (sentThisRun.has(request.customer_id)) {
             await db("review_requests").where({ id: request.id }).update({
               followup_sent: true,
               followup_sent_at: new Date(),
             });
             suppressed++;
+            return;
           }
-          continue;
-        }
 
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
+          // Dedup #2: a sibling row already sent a followup to this customer recently
+          const recentFollowup = await db("review_requests")
+            .where({ customer_id: request.customer_id, followup_sent: true })
+            .where("followup_sent_at", ">=", recentFollowupCutoff)
+            .first();
+          if (recentFollowup) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+            return;
+          }
+
+          const customer = await db("customers")
+            .where({ id: request.customer_id })
+            .first();
+          // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
+          if (!customer || customer.deleted_at || customer.has_left_google_review) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+            return;
+          }
+          const contact = getServiceContactSmsRecipient(customer);
+          if (!contact.phone) {
+            // No consented SMS recipient — mark handled so this row can't sit
+            // in the 20-row follow-up batch every run and starve later
+            // customers (#2955 r4). Mirrors the scheduled-send suppression.
+            await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
+            suppressed++;
+            return;
+          }
+
+          // Followup points straight at the GBP review form — they ignored the
+          // tokenized rate page once, so reduce friction the second time. The
+          // ask's stamped office rides along as the last-resort stored id so the
+          // Day-3 follow-up can never target a different profile than the ask it
+          // chases (codex #3285 r2).
+          const location = resolveReviewLocationId(customer || {}, {
+            storedLocationId: request.location_id || customer?.nearest_location_id || null,
+          });
+          const googleReviewUrl =
+            REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
+
+          const body = await renderSmsTemplate(
+            "review_request_followup",
+            {
+              first_name: firstNameFrom(contact.name) || customer.first_name || "",
+              google_review_url: googleReviewUrl,
+            },
+            {
+              workflow: "review_request_followup",
+              entity_type: "review_request",
+              entity_id: request.id,
+            },
+          );
+          if (!body) {
+            logger.warn(
+              `[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`,
+            );
+            return;
+          }
+
+          let result;
+          try {
+            result = await sendCustomerMessage({
+              to: contact.phone,
+              body,
+              channel: "sms",
+              audience: "customer",
+              purpose: "review_request",
+              customerId: customer.id,
+              identityTrustLevel: "phone_matches_customer",
+              entryPoint: "review_request_followup",
+              metadata: {
+                original_message_type: "review_followup",
+                review_request_id: request.id,
+              },
+            });
+          } catch (err) {
+            if (err?.providerOutcome?.sent !== true) throw err;
+            result = err.providerOutcome;
+          }
+          if (!result.sent) {
+            logger.warn(
+              `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
+            );
+            if (
+              result.blocked &&
+              result.code !== "CONSENT_LOOKUP_FAILED" &&
+              !result.retryable &&
+              !result.deferred
+            ) {
+              await db("review_requests").where({ id: request.id }).update({
+                followup_sent: true,
+                followup_sent_at: new Date(),
+              });
+              suppressed++;
+            }
+            return;
+          }
+
+          const deliveredAt = new Date();
+          await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
+            followup_sent: true,
+            followup_sent_at: deliveredAt,
+            followup_delivered_at: deliveredAt,
+          }), `follow-up delivery stamp (requestId=${request.id})`);
+          sentThisRun.add(request.customer_id);
+          sent++;
         });
-        sentThisRun.add(request.customer_id);
-        sent++;
+        if (held?.blocked) logger.info(`[review] Follow-up held (requestId=${candidate.id} code=${held.code})`);
       } catch (err) {
-        logger.error(`[review] Follow-up SMS failed: ${err.message}`);
+        logger.error(`[review] Follow-up dispatch failed: ${err.message}`);
       }
     }
     if (sent > 0 || suppressed > 0 || internalFollowups > 0) {

@@ -1,6 +1,8 @@
 // Cadence-engine behavior: start → advance → auto-stop on review → complete.
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: 'audit-1' }));
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
+const mockRenderSmsTemplate = jest.fn((...args) => jest.requireActual('../services/sms-template-renderer').renderSmsTemplate(...args));
+jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: (...args) => mockRenderSmsTemplate(...args) }));
 
 jest.mock('../models/db', () => jest.fn());
 // Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
@@ -149,6 +151,7 @@ function makeMock(initial = {}, opts = {}) {
 beforeEach(() => {
   mockSendCustomerMessage.mockClear();
   mockEmailSendTemplate.mockClear();
+  mockRenderSmsTemplate.mockReset().mockImplementation((...args) => jest.requireActual('../services/sms-template-renderer').renderSmsTemplate(...args));
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
@@ -965,7 +968,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
         // The runner's own last-ask lookup: review_requests, delivered asks,
         // bounded by delivery time (the cap-stats read has no such bound).
-        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(sms_sent_at, sent_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
+        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(sms_sent_at, sent_at, followup_delivered_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
       });
       db.mockImplementation(mock);
 
@@ -4589,5 +4592,79 @@ describe('direct outreach serialization', () => {
     expect(await first).toMatchObject({ ok: true, sent: true });
     expect(stampHeld).toBe(true);
     expect(global.__reviewLockHeld.has('review-send:direct-lock')).toBe(false);
+  });
+});
+
+
+describe('legacy follow-up delivery spacing', () => {
+  function setup({ ageHours = 80, manualAt = null, onUpdate, throwSelectWhen } = {}) {
+    const customer = { id: 'legacy-lock', first_name: 'Synthetic', phone: '+12025550101' };
+    const request = { id: 'legacy-row', customer_id: customer.id, status: 'sent', followup_sent: false,
+      sms_sent_at: new Date(Date.now() - ageHours * 3600000), score: null, rated_at: null };
+    const mock = makeMock({ customers: [customer], review_requests: [request], sms_log: manualAt ? [{
+      customer_id: customer.id, direction: 'outbound', status: 'sent', message_body: 'Please leave a review.', created_at: manualAt,
+    }] : [] }, { onUpdate, throwSelectWhen });
+    db.mockImplementation(mock);
+    mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
+    return { mock, request };
+  }
+
+  test.each([24, 71.99])('does not dispatch only %s hours after the original delivery', async ageHours => {
+    setup({ ageHours });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a recent staff ask holds an otherwise due follow-up', async () => {
+    setup({ manualAt: new Date(Date.now() - 3600000) });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('unavailable history leaves the follow-up for a later worker tick', async () => {
+    const { request } = setup({ throwSelectWhen: q => q.table === 'sms_log' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(request.followup_sent).toBe(false);
+  });
+
+  test.each([false, true])('accepted follow-up is stamped under lock, including provider audit throws (%s)', async throws => {
+    let stampedUnderLock = false;
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_delivered_at) stampedUnderLock = global.__reviewLockHeld.has('review-send:legacy-lock');
+    } });
+    if (throws) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true } }));
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+    expect(stampedUnderLock).toBe(true);
+    expect(request.followup_delivered_at).toBeInstanceOf(Date);
+    expect(request.sent_at).toBeUndefined(); // Do not clear an owed Both email leg.
+    const dispatch = jest.fn();
+    expect(await require('../services/review-ask-dispatch').dispatchReviewAsk(request.customer_id, dispatch))
+      .toMatchObject({ code: 'REVIEW_ASK_SPACING' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('another worker cannot send the follow-up during provider dispatch', async () => {
+    setup();
+    let entered, finish;
+    const started = new Promise(resolve => { entered = resolve; });
+    const wait = new Promise(resolve => { finish = resolve; });
+    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true }; });
+    const first = ReviewService.processFollowups();
+    try {
+      await started;
+      expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    } finally { finish(); }
+    expect(await first).toMatchObject({ sent: 1 });
+  });
+
+  test('suppression is not a delivered ask timestamp', async () => {
+    const { request } = setup();
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'PURPOSE_OPTED_OUT' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 1 });
+    expect(request.followup_sent_at).toBeInstanceOf(Date);
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await require('../services/review-ask-history').lastDeliveredAskAt(request.customer_id)).toEqual(request.sms_sent_at);
   });
 });

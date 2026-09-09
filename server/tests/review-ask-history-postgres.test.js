@@ -56,6 +56,15 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);
   });
 
+  test('only actual legacy follow-up delivery anchors history, not suppression', async () => {
+    const row = await request({ sms_sent_at: at, followup_sent: true, followup_sent_at: new Date(at.getTime() + 86400000) });
+    expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);
+    const deliveredAt = new Date(at.getTime() + 72 * 3600000);
+    await trx('review_requests').where({ id: row.id }).update({ followup_delivered_at: deliveredAt });
+    expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(deliveredAt);
+    expect(await history.deliveredAskRows(customerId, { since: deliveredAt })).toEqual([]);
+  });
+
   test('latest delivered manual ask excludes failed sends and acknowledgments', async () => {
     await request({ sms_sent_at: at });
     const manualAt = new Date(at.getTime() + 240000);

@@ -32,6 +32,7 @@ jest.mock('../services/twilio', () => ({
 // just runs the body.
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: async (_key, fn) => fn(),
+  wasLockSkipped: result => result?.skipped === true,
 }));
 
 const db = require('../models/db');
@@ -94,9 +95,13 @@ describe('review request follow-up flow', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+    jest.restoreAllMocks();
   });
 
   test('renders customer follow-up template with the current request id', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
     const updateQuery = chain();
     const reviewRequestQueries = [
       chain(), // deleted-customer follow-up close-out pre-pass
@@ -110,6 +115,7 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
     ];
@@ -159,6 +165,9 @@ describe('review request follow-up flow', () => {
   });
 
   test('marks terminal follow-up policy blocks as handled', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
     const updateQuery = chain();
     const reviewRequestQueries = [
       chain(), // deleted-customer follow-up close-out pre-pass
@@ -172,6 +181,7 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-optout', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
     ];
@@ -212,6 +222,9 @@ describe('review request follow-up flow', () => {
   });
 
   test('leaves transient follow-up consent lookup failures retryable', async () => {
+    const history = require('../services/review-ask-history');
+    jest.spyOn(history, 'lastDeliveredAskAt').mockResolvedValue(null);
+    jest.spyOn(history, 'lastManualAskAt').mockResolvedValue(null);
     const updateQuery = chain();
     const reviewRequestQueries = [
       chain(), // deleted-customer follow-up close-out pre-pass
@@ -225,6 +238,7 @@ describe('review request follow-up flow', () => {
           score: null,
         },
       ]),
+      chain({ first: jest.fn().mockResolvedValue({ id: 'rr-consent-retry', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
     ];
