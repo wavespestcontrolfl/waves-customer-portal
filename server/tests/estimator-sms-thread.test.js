@@ -280,20 +280,40 @@ describe('_private.threadQuoteSignal', () => {
     expect(_private.isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
     expect(_private.isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
     expect(_private.isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
+    expect(_private.isSolicitationPitch('I have more jobs and need extra estimates for pest control.')).toBe(false);
+    expect(_private.isSolicitationPitch('I manage more customers who need pest control estimates.')).toBe(false);
   });
 
-  test('homeowner quote asks that share vendor vocabulary still reach the classifier', async () => {
+  test.each([
+    'We can provide more lawn leads.',
+    'We have extra qualified pest leads.',
+    'Our network offers exclusive lawn jobs.',
+    'We provide unlimited estimates for contractors.',
+  ])('explicit lead-generation wording stands alone: %s', (body) => {
+    expect(_private.isSolicitationPitch(body)).toBe(true);
+  });
+
+  test('homeowner quote asks that share vendor vocabulary still reach the classifier and draft pipeline', async () => {
     const asks = [
       'Do you have any availability for a one-time service? I need a rate for a rat problem.',
       'How much do you charge for a monthly pest plan? No contract preferred.',
       'Can you give me a free estimate on lawn treatment for my new house?',
       'We manage a rental and need pest control for a rat problem, please let me know your price or quote first.',
       'I have termites at my new house. Would you like more details?',
+      'Can I get termite service with no upfront cost?',
+      'Can I get more estimates for my other rentals?',
+      'Could you provide extra estimates for pest control at my other properties?',
+      'I need pest control for more jobs at my rentals. Can you quote them?',
+      'I have extra lawn jobs at my rentals. How much would you charge?',
     ];
     for (const body of asks) {
-      await _private.threadQuoteSignal(body);
+      const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
+      expect(result.started).toBe(true);
+      await result.draftPromise;
     }
     expect(mockDispatch).toHaveBeenCalledTimes(asks.length);
+    expect(mockNotify).toHaveBeenCalledTimes(asks.length);
+    expect(mockRunDraftPipeline).toHaveBeenCalledTimes(asks.length);
     for (const call of mockDispatch.mock.calls) {
       expect(call[1].text).toContain('business-to-business pitch TO Waves');
     }
