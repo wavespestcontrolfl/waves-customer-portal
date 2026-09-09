@@ -1064,7 +1064,13 @@ function whereEstimateCustomerOwnership(query, customerId) {
 
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
-  const after = callEndedAt(call);
+  // Evidence counts from the end of the call — or, for a callback card the
+  // office has reviewed (claimed, snoozed, called, or REOPENED), from that
+  // review: the record that kept the promise before staff reopened it is
+  // not proof it was kept again.
+  const reviewed = commitment?.human_state === 'confirmed' && commitment?.reviewed_at ? new Date(commitment.reviewed_at) : null;
+  const ended = callEndedAt(call);
+  const after = ended && reviewed && reviewed.getTime() > ended.getTime() ? reviewed : ended;
   if (!started || Number.isNaN(started.getTime()) || !after) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
