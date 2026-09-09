@@ -67,6 +67,11 @@ function namesUnpublishedCause(text, findings) {
     // A mixed/negated name cannot establish positive evidence for prose.
     // Keep it internal until review supplies an unambiguous finding.
     if (/\b(?:no|not|none|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
+    // An unresolved differential ("Chinch bugs or drought stress", "chinch vs.
+    // drought", "chinch/drought", "Chinch bugs?") established neither cause; the
+    // prompt keeps inseparable causes as a differential, so the name must not
+    // authorize either one until review picks a single cause.
+    if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(finding.name || '')) continue;
     for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) {
       if (!['insect', 'pest', 'disease', 'infestation'].includes(term)) published.add(term);
     }

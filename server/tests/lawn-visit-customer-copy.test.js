@@ -58,13 +58,24 @@ describe('customer publication', () => {
     expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/confirmed/i);
   });
 
-  test.each(['has been confirmed', 'have been confirmed', 'is now confirmed', 'was clearly confirmed', 'has now been confirmed'])(
+  test.each(['has been confirmed', 'have been confirmed', 'is now confirmed', 'was clearly confirmed', 'has now been confirmed', 'has just been confirmed', 'is currently confirmed', 'was recently confirmed', 'has only just been confirmed'])(
     'cannot publish a compound passive claim that chinch bug activity %s', (claim) => {
       const text = `Chinch bug activity ${claim} along the edge.`;
       const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
       expect(copy.customerObservations(text, [evidence])).not.toMatch(/confirmed/i);
       expect(copy.customerObservations(text, [evidence])).toMatch(/most consistent with the visible pattern/);
       expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/confirmed/i);
+    },
+  );
+
+  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?'])(
+    'an unresolved differential named %s cannot authorize either cause', (name) => {
+      const evidence = { name, label: 'general lawn stress', confidence: 'high' };
+      expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.customerObservations('Drought stress is spreading along the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.safeConfirmationStep('Check for chinch bugs at the edge.', evidence)).toBe('');
+      const resolved = { name: 'Chinch bug activity', label: 'chinch bug activity', confidence: 'moderate' };
+      expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [resolved])).toMatch(/chinch/i);
     },
   );
 
