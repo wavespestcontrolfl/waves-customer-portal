@@ -76,7 +76,8 @@ function weekdayFrom(days) {
 }
 const DAY_DATE = weekdayFrom(10);
 const DAY = etDateString(DAY_DATE);
-const LATER = etDateString(weekdayFrom(40));
+const LATER_DATE = weekdayFrom(40);
+const LATER = etDateString(LATER_DATE);
 const TECH = '10000000-0000-4000-8000-000000000001';
 const OLD_TECH = '10000000-0000-4000-8000-000000000002';
 const CUSTOMER = '30000000-0000-4000-8000-000000000001';
@@ -269,7 +270,7 @@ describeDb('staff series/address arrival checks on PostgreSQL', () => {
   });
 
   test.each([
-    ['date', { scheduled_date: etDateString(addETDays(new Date(), 41)) }],
+    ['date', { scheduled_date: etDateString(addETDays(LATER_DATE, 1)) }], // always differs from LATER
     ['technician', { technician_id: null }],
   ])('a stale series %s plan returns 409 before assigning any occurrence', async (_field, change) => {
     mockBeforeSave = () => mockConn('scheduled_services').where({ id: CHILD }).update(change);
