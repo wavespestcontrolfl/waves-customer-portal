@@ -207,10 +207,38 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     }
     const photoData = photoValidation.photos;
 
+    // Under a SECONDARY saved-property selection (GATE_APP_PROPERTY_SCOPE)
+    // GET /schedule withholds the picker (it books the primary address), so
+    // the guard steps aside with it and the ticket files (codex #4207 r1h).
+    // Same fail-open posture as the eligibility check below.
+    let secondarySelection = false;
+    let requestProperty = null;
+    try {
+      const scope = await resolveSessionScope(req);
+      secondarySelection = isSecondarySelection(scope);
+      // The server-validated saved property this ticket is about (codex
+      // #4207 r1j): persisted on the row, part of the dedupe key, and shown
+      // to staff — a secondary-house ticket must name its house.
+      if (scope && scope.enabled && scope.multi && scope.property) {
+        const p = scope.property;
+        requestProperty = {
+          id: String(p.id),
+          isPrimary: p.is_primary === true,
+          label: p.label || null,
+          address: [p.address_line1, p.address_line2].filter(Boolean).join(' ')
+            + (p.city ? `, ${p.city}` : '') + (p.state || p.zip ? `, ${[p.state, p.zip].filter(Boolean).join(' ')}` : ''),
+        };
+      }
+    } catch (scopeErr) { logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`); }
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
-    const dupe = await db('service_requests')
-      .where({ customer_id: req.customer.id, category, subject: cleanSubject })
+    const dupeQuery = db('service_requests')
+      .where({ customer_id: req.customer.id, category, subject: cleanSubject });
+    // Same subject at a DIFFERENT saved property is a different ticket
+    // (only once a saved property is in play — single-home and gate-off
+    // sessions keep today's exact dedupe).
+    if (requestProperty) dupeQuery.whereRaw("COALESCE(metadata->>'propertyId', '') = ?", [requestProperty.id]);
+    const dupe = await dupeQuery
       .where('created_at', '>=', dupeWindow)
       .first();
     if (dupe) {
@@ -396,13 +424,6 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // one-time/lapsed) still file tickets — those genuinely are office calls.
     // Fail-open on lookup errors: a broken eligibility check must not block a
     // customer from reporting a problem.
-    // Under a SECONDARY saved-property selection (GATE_APP_PROPERTY_SCOPE)
-    // GET /schedule withholds the picker (it books the primary address), so
-    // the guard steps aside with it and the ticket files (codex #4207 r1h).
-    // Same fail-open posture as the eligibility check below.
-    let secondarySelection = false;
-    try { secondarySelection = isSecondarySelection(await resolveSessionScope(req)); }
-    catch (scopeErr) { logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`); }
     if ((category === 'pest_issue' || category === 'lawn_concern') && !secondarySelection) {
       try {
         const { reserviceStreamlineAccess } = require('../services/reservice-link');
@@ -533,6 +554,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         location_on_property: validLocation,
         photos: JSON.stringify(photoData),
         status: 'new',
+        ...(requestProperty ? { metadata: JSON.stringify({ propertyId: requestProperty.id, property: requestProperty }) } : {}),
       })
       .returning('*');
 
@@ -678,6 +700,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         title,
         `Category: ${categoryLabel}\n` +
           `Subject: ${cleanSubject}` +
+          (requestProperty ? `\nProperty: ${requestProperty.label ? `${requestProperty.label} — ` : ''}${requestProperty.address}${requestProperty.isPrimary ? '' : ' (not the primary address)'}` : '') +
           (locationLabel ? `\nLocation: ${locationLabel}` : '') +
           (photoCount > 0 ? `\n${photoCount} photo(s) attached` : '') +
           (cleanDescription ? `\n\n"${cleanDescription}"` : '') +
@@ -688,6 +711,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           metadata: {
             requestId: request.id,
             customerId: req.customer.id,
+            ...(requestProperty ? { propertyId: requestProperty.id, propertyAddress: requestProperty.address } : {}),
             category,
             urgency: validUrgency,
             photoCount,

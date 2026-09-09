@@ -41,6 +41,7 @@ const {
   assignVisitsToEntries,
   isSecondarySelection,
   resolveSessionScope,
+  sessionPropertyScopePayload,
 } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -223,6 +224,10 @@ router.get('/', async (req, res, next) => {
         upcoming: upcoming.map((s) => ({
           id: s.id,
           date: s.scheduled_date,
+          // Arrival windows stay: the Year-at-a-glance calendar prints them
+          // (a time of day is not a cross-house action).
+          windowStart: s.window_start,
+          windowEnd: s.window_end,
           serviceType: normalizeServiceType(s.service_type),
           status: s.status,
           isRecurring: s.is_recurring === true,
@@ -255,6 +260,11 @@ router.get('/', async (req, res, next) => {
     }
 
     res.json({
+      // The selection this read was actually scoped to (GATE_APP_PROPERTY_SCOPE):
+      // the client compares it with what it shows and re-reads the property
+      // list on a mismatch (a house retired mid-session, a gate flip) instead
+      // of acting on these visits under another house's label.
+      propertyScope: sessionPropertyScopePayload(req),
       hasCancellableWork: cancellable,
       reservice,
       // Streamline (owner ruling 2026-08-08): when true, the Request Service
@@ -782,7 +792,7 @@ router.get('/next', async (req, res, next) => {
       .first();
 
     if (!nextService) {
-      return res.json({ next: null });
+      return res.json({ propertyScope: allProperties ? undefined : sessionPropertyScopePayload(req), next: null });
     }
     if (allProperties) {
       // Coverage projection only — no reschedule/calendar bearer links.
@@ -791,6 +801,8 @@ router.get('/next', async (req, res, next) => {
         next: {
           id: nextService.id,
           date: nextService.scheduled_date,
+          windowStart: nextService.window_start,
+          windowEnd: nextService.window_end,
           serviceType: normalizeServiceType(nextService.service_type),
           status: nextService.status,
           isRecurring: nextService.is_recurring === true,
@@ -805,6 +817,7 @@ router.get('/next', async (req, res, next) => {
       : nextGroupedVerdict === true ? await groupedCalendarVerdict(nextService.visit_id) : null;
 
     res.json({
+      propertyScope: sessionPropertyScopePayload(req),
       next: {
         id: nextService.id,
         date: nextService.scheduled_date,

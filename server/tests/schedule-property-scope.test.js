@@ -116,12 +116,24 @@ describe('saved-property scope on the customer schedule routes', () => {
     }
   });
 
+  test('GET / and GET /next echo the selection the read was scoped to', async () => {
+    global.__SCOPE__ = MULTI_SECONDARY;
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    await withServer(async (base) => {
+      const list = await (await fetch(`${base}/schedule`)).json();
+      expect(list.propertyScope).toEqual({ enabled: true, propertyId: null }); // the fake auth stub sets no claim
+      const nextBody = await (await fetch(`${base}/schedule/next`)).json();
+      expect(nextBody.propertyScope).toEqual({ enabled: true, propertyId: null });
+    });
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
+  });
+
   test('GET /next: scoped to the selected secondary property', async () => {
     global.__SCOPE__ = MULTI_SECONDARY;
     await withServer(async (base) => {
       const res = await fetch(`${base}/schedule/next`);
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ next: null });
+      expect(await res.json()).toEqual({ propertyScope: { enabled: false, propertyId: null }, next: null });
       expect(propertyPredicates(visitsChainCalls())).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
     });
   });
@@ -168,8 +180,8 @@ describe('saved-property scope on the customer schedule routes', () => {
       expect(body.coverageOnly).toBe(true);
       expect(body.reservice).toBeNull();
       expect(body.overlayHandoff).toBe(false);
-      expect(Object.keys(body.upcoming[0]).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceDisplayName', 'serviceFamily', 'serviceType', 'status', 'waveguardQualifying']);
-      expect(JSON.stringify(body)).not.toMatch(/resched-tok|rescheduleUrl|calendarUrl|windowStart|technician|customerConfirmed/);
+      expect(Object.keys(body.upcoming[0]).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceDisplayName', 'serviceFamily', 'serviceType', 'status', 'waveguardQualifying', 'windowEnd', 'windowStart']);
+      expect(JSON.stringify(body)).not.toMatch(/resched-tok|rescheduleUrl|calendarUrl|technician|customerConfirmed/);
     });
     jest.clearAllMocks();
     await withServer(async (base) => {
@@ -177,7 +189,7 @@ describe('saved-property scope on the customer schedule routes', () => {
       const body = await res.json();
       expect(propertyPredicates(visitsChainCalls())).toEqual([]);
       expect(body.coverageOnly).toBe(true);
-      expect(Object.keys(body.next).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceType', 'status']);
+      expect(Object.keys(body.next).sort()).toEqual(['date', 'id', 'isCallback', 'isRecurring', 'serviceType', 'status', 'windowEnd', 'windowStart']);
       expect(JSON.stringify(body)).not.toMatch(/resched-tok|rescheduleUrl|calendarUrl/);
     });
   });

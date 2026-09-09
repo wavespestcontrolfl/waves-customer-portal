@@ -2617,10 +2617,18 @@ function SavedVisitDetails({ visits }) {
   </ul>;
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, onSavedScopeUnavailable }) {
+  // Saved-property scope: the entry this tab shows, for the scope-echo check.
+  const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
+  const dashboardSavedScope = properties.some((p) => p.key);
   const compact = useIsMobile(720);
   const nextRead = usePortalRead('next-visit', () => api.getNextService());
-  const nextService = nextRead.data?.next || null;
+  // A next visit scoped to a different house than Home shows is stale (the
+  // office retired the shown house, or the gate flipped): re-read the
+  // property list and withhold the card's actions until the label follows.
+  const nextScopeStale = scopeEchoMismatch(nextRead.data?.propertyScope, dashboardEntry, dashboardSavedScope);
+  useEffect(() => { if (nextScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [nextScopeStale, onSavedScopeUnavailable]);
+  const nextService = nextScopeStale ? null : (nextRead.data?.next || null);
   // The Add-to-Calendar button hides itself once the arrival window closes,
   // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
   // the deadline so the button disappears on its own (codex #3249 r4 P2).
@@ -4148,6 +4156,19 @@ function formatTime(t) {
 }
 
 // "Thu, Sep 10 · 9:00 AM – 11:00 AM" for an account-next row, or the empty copy.
+// Saved-property scope: does a scoped read's echoed selection (`propertyScope`
+// from /schedule and /schedule/next — what the SERVER honored) differ from the
+// entry this tab shows? Null from the server means the primary. A mismatch
+// means the office retired the shown house, or the gate flipped, while the
+// tab was open: the tab re-reads the property list and withholds actions on
+// these visits until the label follows (codex #4207 r1j).
+export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
+  if (!savedScope || !propertyScope || !propertyScope.enabled || !currentEntry) return false;
+  const honored = propertyScope.propertyId ? String(propertyScope.propertyId) : null;
+  if (honored) return honored !== String(currentEntry.propertyId || '');
+  return currentEntry.isPrimaryProperty !== true;
+}
+
 function nextVisitLabel(next) {
   if (!next) return 'No visit scheduled';
   const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
@@ -4299,7 +4320,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const cancelledAccount = customer?.cancelled === true;
   const scheduleRead = usePortalRead('schedule', () => api.getSchedule(90));
   const { loading, error: loadError } = scheduleRead;
-  const upcoming = scheduleRead.data?.upcoming || [];
+  // A read scoped to a different house than this tab shows is stale: re-read
+  // the property list and show nothing actionable until the label follows.
+  const scopeStale = scopeEchoMismatch(scheduleRead.data?.propertyScope, currentEntry, savedScope);
+  useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
+  const upcoming = scopeStale ? [] : (scheduleRead.data?.upcoming || []);
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
@@ -4904,9 +4929,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 : multiProperty ? `Nothing scheduled at ${currentLabel}` : 'Schedule status'}
             </div>
             <div style={{ marginTop: 5, fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {multiProperty
-                ? 'Pick a property below to see its visits, reminders and text settings.'
-                : 'Appointment timing, confirmation status, reminders, and reschedule options.'}
+              {scopeStale
+                ? 'Your property selection changed. Refreshing…'
+                : multiProperty
+                  ? 'Pick a property below to see its visits, reminders and text settings.'
+                  : 'Appointment timing, confirmation status, reminders, and reschedule options.'}
             </div>
           </div>
           {/* Requests create work — a cancelled account (C4) passes no
@@ -16287,7 +16314,7 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
