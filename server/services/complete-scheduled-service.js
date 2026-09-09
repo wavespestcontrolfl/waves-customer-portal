@@ -10403,7 +10403,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             identityTrustLevel: 'phone_matches_customer',
             // billing_mode_at_send: the owner autopay digest (#3607) classifies
             // the text against the lane that authorized it.
-            metadata: { original_message_type: 'payment_failed', service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
+            metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode },
           });
           paymentFailedNoticeSent = !!failResult.sent;
           // Send-window hold: the decline is deliberately independent of
@@ -10419,7 +10419,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // confirmed 'sent' drops it) — a morning double-link is coherent
           // copy; a night with no link is not.
           let paymentFailedNoticeDeferred = false;
-          if (!failResult.sent && failResult.code === 'QUIET_HOURS_HOLD' && failResult.deferred && failResult.nextAllowedAt) {
+          if (!failResult.sent && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'].includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
             try {
               const TWILIO_NUMBERS = require('../config/twilio-numbers');
               await db('sms_log').insert({
@@ -10433,6 +10433,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
                 message_type: 'payment_failed',
                 metadata: JSON.stringify({
                   entry_point: 'autopay_completion_decline_deferred',
+                  notificationEventKey: `payment-problem:service:${record.id}`,
                   service_record_id: record.id,
                   invoice_id: invoice.id,
                   pay_url: payUrl,

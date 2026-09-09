@@ -1,0 +1,5 @@
+.estimate-workflow-section,
+.estimate-builder .ui-control,
+.estimate-builder [data-ui-text-action] {
+  scroll-margin-block: 100px;
+}
