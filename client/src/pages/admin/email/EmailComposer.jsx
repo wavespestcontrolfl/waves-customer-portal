@@ -14,6 +14,8 @@ import { cn } from "../../../components/ui/cn";
 import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
+import EmailSendOutcome from "./EmailSendOutcome";
+
 export default function EmailComposer({ active, editor, onSent }) {
   const {
     composeForm,
@@ -36,7 +38,7 @@ export default function EmailComposer({ active, editor, onSent }) {
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
   const sendDisabled =
-    composeSending || !composeForm.to.trim() || !composeForm.body.trim();
+    composeSending || Boolean(editor.sendAttempts.compose) || !composeForm.to.trim() || !composeForm.body.trim();
 
   // Debounced customer lookup for the "To" field. Searches by name or
   // partial email via the customers list endpoint and keeps only matches
@@ -99,7 +101,7 @@ export default function EmailComposer({ active, editor, onSent }) {
       onClick={(event) => { event.stopPropagation(); close(); }}>
       <div onClick={(event) => event.stopPropagation()} role="dialog" ref={composeRef} aria-modal="true" aria-labelledby="email-compose-title"
         className={cn("flex w-full max-w-xl flex-col border-hairline border-zinc-200 bg-white text-ui-body text-ink-primary",
-          isMobile ? "h-full max-w-none" : "max-h-full rounded-md")}
+          isMobile ? "box-border h-full max-w-none" : "max-h-full rounded-md")}
         style={isMobile ? {
           paddingTop: "env(safe-area-inset-top, 0px)", paddingBottom: "env(safe-area-inset-bottom, 0px)",
           paddingLeft: "env(safe-area-inset-left, 0px)", paddingRight: "env(safe-area-inset-right, 0px)",
@@ -131,6 +133,7 @@ export default function EmailComposer({ active, editor, onSent }) {
           <Field id="email-compose-body" label="Message" required>
             <Textarea rows={8} value={composeForm.body} onChange={(event) => setComposeForm((form) => ({ ...form, body: event.target.value }))} />
           </Field>
+          {!composeSending && <EmailSendOutcome attempt={editor.sendAttempts.compose} onResolve={outcome => editor.reconcileSend("compose", outcome)} />}
           <ActionFeedback error={storageError}>{recoveryNotice}</ActionFeedback>
           <EmailQuickLinks active={visible} recipient={composeForm.to} disabled={composeSending}
             onInsert={(link) => setComposeForm((form) => ({ ...form, body: appendStaticLinkClause(form.body, link) }))} />

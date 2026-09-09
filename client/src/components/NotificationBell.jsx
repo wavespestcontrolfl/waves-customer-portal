@@ -406,7 +406,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // full-screen panel (no glass theme mounted on /admin).
           <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
-            top: isDark ? 'calc(56px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
+            // 52px matches AdminLayoutV2's mobile top bar (calc(52px + safe-area));
+            // 56 left a 4px strip of page showing between header and panel.
+            top: isDark ? 'calc(52px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
             right: isDark ? 0 : 10,
             bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',

@@ -69,6 +69,11 @@ const CANCELLED_READ_ROUTES = [
   ['GET', '/api/billing/autopay'],
   ['GET', '/api/schedule'],
   ['GET', '/api/schedule/next'],
+  // Saved-property twin of /next (GATE_APP_PROPERTY_SCOPE): the same visit
+  // data as /schedule, per property — read-only, so a cancelled session may
+  // read it (codex #4207 r1 P2). /auth/select-property stays out: a switch
+  // mints credentials, and the cancelled list is one entry anyway.
+  ['GET', '/api/schedule/properties-next'],
   ['GET', '/api/services'],
   ['GET', '/api/services/stats/summary'],
   ['GET', '/api/documents'],
