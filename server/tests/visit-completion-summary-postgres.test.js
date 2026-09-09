@@ -47,6 +47,34 @@ async function deliver() {
   return Summary.deliverVisitCompletionSummary(fixture.packetId, fixture.token);
 }
 
+// Emulates the canonical sender's locked handoff and the provider wrapper's
+// contract: a throw before dispatch is a retryable block, a throw from the
+// provider request itself is the (ambiguous) provider outcome.
+function handoffSender(provider = async () => ({ sent: true })) {
+  return async ({ withSmsHandoff }) => {
+    let outcome;
+    let dispatched = false;
+    let verdict;
+    try {
+      verdict = await withSmsHandoff(async () => { dispatched = true; outcome = await provider(); return { ok: true }; });
+    } catch (err) {
+      if (dispatched) return { sent: false, retryable: true, code: 'PROVIDER_UNAVAILABLE', providerHttpStatus: err.providerHttpStatus };
+      verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED', reason: err.message, retryable: true };
+    }
+    if (verdict.ok !== true) return { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
+    return outcome;
+  };
+}
+
+// The scheduled worker's locked handoff for a queued summary.
+function deferredHandoff(meta, dispatch = async () => ({ ok: true })) {
+  return require('../services/messaging/deferred-replay-registry').deferredSmsHandoff('visit_summary_deferred', meta)(dispatch);
+}
+
+function providerFailure(providerHttpStatus) {
+  return Object.assign(new Error('provider failure'), { providerHttpStatus });
+}
+
 postgres('visit summary recipient recovery', () => {
   beforeAll(async () => {
     const url = new URL(connection);
@@ -60,7 +88,7 @@ postgres('visit summary recipient recovery', () => {
   beforeEach(async () => {
     jest.restoreAllMocks();
     sendOne.mockReset().mockImplementation(async () => ({ messageId: randomUUID() }));
-    sendCustomerMessage.mockReset().mockImplementation(async ({ preDispatchCheck }) => ({ sent: (await preDispatchCheck()).ok }));
+    sendCustomerMessage.mockReset().mockImplementation(handoffSender());
     fixture = { customerId: randomUUID(), techId: randomUUID(), visitId: randomUUID(), packetId: randomUUID(),
       serviceIds: [randomUUID(), randomUUID()].sort(), recordIds: [randomUUID(), randomUUID()] };
     fixture.primaryEmail = `${fixture.customerId}@example.invalid`;
@@ -117,8 +145,8 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('sms_log').where({ customer_id: fixture.customerId })).toHaveLength(1);
     const replay = require('../services/messaging/deferred-replay-registry');
     expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: true });
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
     expect(await replay.finalizeDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
     expect(await replay.finalizeDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
     expect(await deliver()).toEqual({ state: 'delivered' });
@@ -136,9 +164,7 @@ postgres('visit summary recipient recovery', () => {
     require('../services/scheduler').initScheduledJobs();
     const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
     await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
-    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => ({
-      sent: (await preDispatchCheck()).ok, providerMessageId: 'fixture-scheduled-provider-id',
-    }));
+    sendCustomerMessage.mockImplementation(handoffSender(async () => ({ sent: true, providerMessageId: 'fixture-scheduled-provider-id' })));
     jest.spyOn(VisitGroups, 'finalizeVisitNotification').mockResolvedValueOnce({ ok: false });
     await tick();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
@@ -171,7 +197,7 @@ postgres('visit summary recipient recovery', () => {
     if (change === 'consent') await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
     if (change === 'revocation') await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
     const replay = require('../services/messaging/deferred-replay-registry');
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
     expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
       .toMatchObject({ status: 'suppressed' });
@@ -181,14 +207,13 @@ postgres('visit summary recipient recovery', () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     let providerCalls = 0;
-    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+    const sender = handoffSender(async () => { providerCalls += 1; return { sent: true }; });
+    sendCustomerMessage.mockImplementation(async (input) => {
       // The canonical sender already validated consent. The preference
-      // writer commits before the callback gets its row lock.
+      // writer commits before the handoff gets its row lock.
       await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, [toggle]: false,
         seasonal_tips: null, marketing_offers: null }).onConflict('customer_id').merge({ [toggle]: false });
-      const verdict = await preDispatchCheck();
-      if (verdict.ok) providerCalls += 1;
-      return { sent: verdict.ok, blocked: !verdict.ok, code: verdict.code };
+      return sender(input);
     });
     await deliver();
     expect(providerCalls).toBe(0);
@@ -206,7 +231,7 @@ postgres('visit summary recipient recovery', () => {
       .onConflict('customer_id').merge({ [toggle]: false });
     try {
       const replay = require('../services/messaging/deferred-replay-registry');
-      expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+      expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
       expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
     } finally {
       await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
@@ -228,14 +253,14 @@ postgres('visit summary recipient recovery', () => {
       return execute.call(this, connection, query);
     });
     const replay = require('../services/messaging/deferred-replay-registry');
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
     expect(revoked).toBe(true);
   });
 
   test('an ambiguous scheduled provider handoff cannot resend and reaches office review', async () => {
     const queued = await heldSummary();
     const replay = require('../services/messaging/deferred-replay-registry');
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
     expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: false });
     expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
     expect(await deliver()).toEqual({ state: 'delivery_review' });
@@ -245,21 +270,21 @@ postgres('visit summary recipient recovery', () => {
   test('a proven provider-boundary quiet-hours hold can retry its pending scheduled handoff', async () => {
     const queued = await heldSummary();
     const replay = require('../services/messaging/deferred-replay-registry');
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
     const effect = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
     const heldMeta = { ...queued.metadata, quiet_hours_hold_at: new Date(effect.claimed_at).toISOString() };
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: true });
+    expect(await deferredHandoff(heldMeta)).toMatchObject({ ok: true });
     // The retry re-claimed the effect after the hold stamp; make that gap
     // real rather than relying on the two claims landing >1 ms apart.
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(await mockPg('visit_effects').where({ id: effect.id }).first()).toMatchObject({ status: 'unknown_delivery' });
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: false });
+    expect(await deferredHandoff(heldMeta)).toMatchObject({ ok: false });
   });
 
   test.each([
-    ['a provider refusal (429) is retried by the actual scheduled worker', 429, 1],
-    ['an ambiguous provider timeout stays on office review', undefined, 0],
-  ])('%s', async (_label, providerHttpStatus, sendsAfterRetry) => {
+    ['a provider refusal (429) after the scheduled handoff is ambiguous and stays on office review', 429],
+    ['an ambiguous provider timeout on the scheduled handoff stays on office review', undefined],
+  ])('%s', async (_label, providerHttpStatus) => {
     const queued = await heldSummary();
     const cron = require('../utils/scheduled-cron');
     cron.schedule.mockClear();
@@ -270,28 +295,23 @@ postgres('visit summary recipient recovery', () => {
     require('../services/scheduler').initScheduledJobs();
     const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
     let providerCalls = 0;
-    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
-      const verdict = await preDispatchCheck();
-      if (!verdict.ok) return { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable };
+    sendCustomerMessage.mockImplementation(handoffSender(async () => {
       providerCalls += 1;
-      if (providerCalls === 1) return { sent: false, retryable: true, code: 'PROVIDER_UNAVAILABLE', providerHttpStatus };
+      if (providerCalls === 1) throw providerFailure(providerHttpStatus);
       return { sent: true, providerMessageId: 'fixture-scheduled-provider-id' };
-    });
+    }));
     await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
     await tick();
     expect(providerCalls).toBe(1);
     expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({ status: 'scheduled' });
+    // The provider may hold the text: the worker's own retry cannot re-claim it.
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
       .toMatchObject({ status: 'unknown_delivery' });
     await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
     await tick();
-    expect(providerCalls).toBe(1 + sendsAfterRetry);
-    if (sendsAfterRetry) {
-      expect(await deliver()).toEqual({ state: 'delivered' });
-    } else {
-      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
-        .toMatchObject({ status: 'unknown_delivery' });
-    }
+    expect(providerCalls).toBe(1);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
   });
 
   test('an initial consent lookup failure retries the requested SMS instead of suppressing it', async () => {
@@ -346,13 +366,10 @@ postgres('visit summary recipient recovery', () => {
       return execute.call(this, connection, query);
     });
     let providerCalls = 0;
-    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+    const sender = handoffSender(async () => { providerCalls += 1; return { sent: true, providerMessageId: 'fixture-scheduled-provider-id' }; });
+    sendCustomerMessage.mockImplementation(async (input) => {
       checkingFinal = true;
-      const verdict = await preDispatchCheck();
-      checkingFinal = false;
-      if (!verdict.ok) return { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable };
-      providerCalls += 1;
-      return { sent: true, providerMessageId: 'fixture-scheduled-provider-id' };
+      try { return await sender(input); } finally { checkingFinal = false; }
     });
     await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
     require('../services/logger').error.mockClear();
@@ -360,7 +377,7 @@ postgres('visit summary recipient recovery', () => {
     expect(providerCalls).toBe(0);
     expect(require('../services/logger').error.mock.calls).toEqual([]);
     expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({
-      status: 'scheduled', metadata: { provider_retry_code: 'DEFERRED_RECHECK_FAILED' },
+      status: 'scheduled', metadata: { provider_retry_code: 'SMS_HANDOFF_CHECK_FAILED' },
     });
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
       .toMatchObject({ status: 'pending' });
@@ -425,12 +442,19 @@ postgres('visit summary recipient recovery', () => {
 
   test('an old owner cannot dispatch a later recipient after aggregate recovery', async () => {
     let recoveredToken;
-    sendOne.mockImplementationOnce(async () => {
-      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' })
-        .update({ claimed_at: new Date(Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS - 1000) });
-      const member = await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first();
-      recoveredToken = (await VisitGroups.claimVisitNotification(member, 'completion_email')).token;
-      return { messageId: 'fixture-first-recipient' };
+    // Recovery cannot take the aggregate while a recipient's handoff holds
+    // it; it lands between the first recipient's commit and the second
+    // recipient's claim (its queued row is written before that claim).
+    const execute = mockPg.client.constructor.prototype._query;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function recoverBetweenRecipients(connection, query) {
+      if (!recoveredToken && query.sql.startsWith('insert into "email_messages"') && query.bindings.includes(fixture.primaryEmail)) {
+        recoveredToken = 'pending';
+        await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' })
+          .update({ claimed_at: new Date(Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS - 1000) });
+        const member = await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first();
+        recoveredToken = (await VisitGroups.claimVisitNotification(member, 'completion_email')).token;
+      }
+      return execute.call(this, connection, query);
     });
     expect(await deliver()).toEqual({ state: 'delivery_pending' });
     expect(recoveredToken).toBeTruthy();
@@ -532,9 +556,8 @@ postgres('visit summary recipient recovery', () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
-    sendCustomerMessage.mockImplementationOnce(async ({ preDispatchCheck }) => {
-      expect((await preDispatchCheck()).ok).toBe(true);
-      throw new Error('provider response unavailable');
+    sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
+      await withSmsHandoff(async () => { throw new Error('provider response unavailable'); });
     });
     expect(await deliver()).toEqual({ state: 'delivery_review' });
     expect(sendCustomerMessage.mock.calls[0][0].to).toBe('+12025550123');
@@ -569,7 +592,7 @@ postgres('visit summary recipient recovery', () => {
       return execute.call(this, connection, query);
     });
     const replay = require('../services/messaging/deferred-replay-registry');
-    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
     expect(raced).toBe(true);
   });
 
@@ -588,14 +611,12 @@ postgres('visit summary recipient recovery', () => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     jest.spyOn(VisitGroups, 'beginVisitNotificationDispatch').mockRejectedValueOnce(new Error('Synthetic claim read outage'));
-    // The canonical sender converts a thrown check into a non-retryable
-    // PRE_DISPATCH_CHECK_FAILED block; only an explicit verdict carries retryable.
-    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
-      let verdict;
-      try { verdict = await preDispatchCheck(); } catch (err) { verdict = { ok: false, code: 'PRE_DISPATCH_CHECK_FAILED', reason: err.message }; }
-      return verdict.ok ? { sent: true } : { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
-    });
+    // The provider wrapper converts a handoff that throws before dispatch
+    // into a retryable SMS_HANDOFF_CHECK_FAILED block.
+    let providerCalls = 0;
+    sendCustomerMessage.mockImplementation(handoffSender(async () => { providerCalls += 1; return { sent: true }; }));
     expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(providerCalls).toBe(0);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
       .toMatchObject({ status: 'failed' });
     expect(await deliver()).toEqual({ state: 'delivered' });
@@ -699,22 +720,59 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test.each([
-    ['a provider refusal (429) on the immediate SMS stays retryable', 429, 'failed', 'delivery_pending'],
-    ['an ambiguous provider failure on the immediate SMS stays on office review', undefined, 'unknown_delivery', 'delivery_review'],
-  ])('%s', async (_label, providerHttpStatus, effectStatus, state) => {
+    ['a provider refusal (429) after the immediate SMS handoff is ambiguous and stays on office review', 429],
+    ['a provider 5xx after the immediate SMS handoff is ambiguous and stays on office review', 503],
+    ['an ambiguous provider timeout on the immediate SMS stays on office review', undefined],
+  ])('%s', async (_label, providerHttpStatus) => {
     fixture.payload.items[0].body.sendCompletionSms = true;
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
-    sendCustomerMessage.mockImplementationOnce(async ({ preDispatchCheck }) => {
-      expect((await preDispatchCheck()).ok).toBe(true);
-      return { sent: false, retryable: true, code: 'PROVIDER_UNAVAILABLE', providerHttpStatus };
-    });
-    expect(await deliver()).toEqual({ state });
+    sendCustomerMessage.mockImplementationOnce(handoffSender(async () => { throw providerFailure(providerHttpStatus); }));
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
-      .toMatchObject({ status: effectStatus });
-    if (effectStatus === 'failed') {
-      expect(await deliver()).toEqual({ state: 'delivered' });
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      .toMatchObject({ status: 'unknown_delivery' });
+    // The recovery sweep never re-sends a text the provider may hold.
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a sender refusal inside the locked handoff leaves no dispatch mark behind', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    // The canonical sender's own rechecks (consent, suppression) run on the
+    // held rows and refuse before any provider request.
+    sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
+      const verdict = await withSmsHandoff(async () => ({ ok: false, code: 'SMS_OPTED_OUT' }));
+      expect(verdict).toEqual({ ok: false, code: 'SMS_OPTED_OUT' });
+      return { sent: false, blocked: true, code: verdict.code };
+    });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed', last_error: null });
+  });
+
+  test.each(['sms', 'email'])('a contact edit during the %s provider request waits for the handoff to commit', async (channel) => {
+    fixture.payload.items[0].body.sendCompletionSms = channel === 'sms';
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    let blockedCode = null;
+    const editDuringProviderRequest = async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('customers').where({ id: fixture.customerId })
+          .update(channel === 'sms' ? { service_contact_phone: '+12025550125' } : { service_contact_email: 'moved@example.invalid' });
+      }).catch((err) => { blockedCode = err.code; });
+    };
+    if (channel === 'sms') {
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { await editDuringProviderRequest(); return { sent: true }; }));
+    } else {
+      sendOne.mockImplementation(async () => { await editDuringProviderRequest(); return { messageId: randomUUID() }; });
     }
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(blockedCode).toBe('55P03');
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: `completion_${channel}` }).first())
+      .toMatchObject({ status: 'sent' });
+    // The held rows were released only after the accepted handoff committed.
+    expect(await mockPg('customers').where({ id: fixture.customerId }).first())
+      .toMatchObject(channel === 'sms' ? { service_contact_phone: '+12025550124' } : { service_contact_email: fixture.serviceEmail });
   });
 
   test.each([
@@ -768,7 +826,7 @@ postgres('visit summary recipient recovery', () => {
       }
       return execute.call(this, connection, query);
     });
-    expect(await Summary.beginDeferredSummarySms(queued.metadata)).toEqual({ ok: true, code: 'VISIT_SUMMARY_CLAIM_LOST' });
+    expect(await Summary.beginDeferredSummarySms(queued.metadata, async () => ({ ok: true }))).toEqual({ ok: true });
     expect(raced).toBe(true);
     expect(optOutCode).toBe('55P03');
     expect(await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).first())

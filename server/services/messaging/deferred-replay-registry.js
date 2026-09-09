@@ -16,8 +16,11 @@
  *                          bounded re-check (used when the state READ
  *                          failed — fail closed, never send unverified),
  *                          or { eligible:true }.
- *   preDispatch(claimMeta) — final claim fence inside the canonical sender,
- *                          after validation, before the provider handoff.
+ *   smsHandoff(claimMeta, dispatch) — the canonical sender's locked handoff:
+ *                          the entry re-authorizes and claims its dispatch,
+ *                          then runs `dispatch(trx)` while those rows are
+ *                          still held, so nothing can change under the
+ *                          provider request.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -234,7 +237,7 @@ const REGISTRY = {
 
   visit_summary_deferred: {
     recheck: (meta) => require('../visit-completion-summary').recheckDeferredSummarySms(meta),
-    preDispatch: (meta) => require('../visit-completion-summary').beginDeferredSummarySms(meta),
+    smsHandoff: (meta, dispatch) => require('../visit-completion-summary').beginDeferredSummarySms(meta, dispatch),
     finalize: (meta) => require('../visit-completion-summary').finalizeDeferredSummarySms(meta),
     onTerminal: (meta) => require('../visit-completion-summary').terminalDeferredSummarySms(meta),
     durableFinalize: true,
@@ -1171,14 +1174,13 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
-// Failed reads prove no handoff occurred and stay on the bounded retry rail.
-async function preDispatchDeferredReplay(entryPoint, claimMeta = {}) {
+// undefined = no locked handoff registered: the sender dispatches normally.
+// Errors propagate: the provider wrapper distinguishes a failed read before
+// the handoff (retryable, nothing left) from a failure after acceptance.
+function deferredSmsHandoff(entryPoint, claimMeta = {}) {
   const entry = entryFor(entryPoint);
-  try {
-    return entry?.preDispatch ? await entry.preDispatch(claimMeta) : { ok: true };
-  } catch {
-    return { ok: false, code: 'DEFERRED_RECHECK_FAILED', retryable: true };
-  }
+  if (!entry?.smsHandoff) return undefined;
+  return (dispatch) => entry.smsHandoff(claimMeta, dispatch);
 }
 
 // null = no finalize registered. { ok:false } rides the durable
@@ -1348,7 +1350,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
-  preDispatchDeferredReplay,
+  deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,
