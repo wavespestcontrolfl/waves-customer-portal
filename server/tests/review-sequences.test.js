@@ -1523,6 +1523,27 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([false, true])('the first request capture survives a later completion (concurrent writer: %s)', async (concurrent) => {
+    const first = { by: 'first-tech', at: '2030-01-01T16:00:00Z', source: 'completion_panel' };
+    const later = { by: 'later-tech', at: '2030-01-02T16:00:00Z', source: 'completion_panel' };
+    const mock = makeMock({
+      customers: [{ id: 'capture-once' }],
+      review_sequences: [{ id: 'capture-seq', customer_id: 'capture-once', status: 'active',
+        customer_requested: concurrent ? null : JSON.stringify(first) }],
+    }, {
+      onUpdate: (table, patch, state) => {
+        if (concurrent && table === 'review_sequences' && patch.customer_requested) {
+          state.rows.review_sequences[0].customer_requested = JSON.stringify(first);
+        }
+      },
+    });
+    db.mockImplementation(mock);
+    const result = await ReviewService.startReviewSequence({ customerId: 'capture-once', customerRequested: later });
+    expect(result).toMatchObject({ reason: 'already_active', requestRecorded: true });
+    expect(JSON.parse(mock.__state.rows.review_sequences[0].customer_requested)).toEqual(first);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('request capture retries enrollment when the active cadence settles before the update', async () => {
     const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
     const firstTouchAt = new Date(Date.now() + 3600000);
