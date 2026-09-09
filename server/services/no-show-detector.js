@@ -115,9 +115,10 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
     .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
     .modify((q) => { if (!admin && actorId) q.where('s.technician_id', actorId); })
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
-  const events = await loadPromiseEvents(conn, rows.map((r) => String(r.id)), { now });
+  const liveRows = rows.filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
+  const events = await loadPromiseEvents(conn, liveRows.map((r) => String(r.id)), { now });
   const promises = latestPromises(events, now);
-  const cards = rows.map((r) => {
+  const cards = liveRows.map((r) => {
     const alert = evaluateNoShow({ visit: r, promise: promises.get(String(r.id)), now });
     return alert ? { id: r.id, customer_id: r.customer_id, technician_id: r.technician_id, first_name: r.first_name,
       last_name: r.last_name, phone: r.phone, scheduled_date: r.scheduled_date, ...alert } : null;
@@ -128,41 +129,62 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
+  const dispatch = require('./dispatch-alerts');
+  const techNotices = require('./tech-visit-notifications');
   let alerted = 0;
-  const pushes = [];
   for (const card of rows) {
-    await conn.transaction(async (trx) => {
-      const visit = await trx('scheduled_services').where({ id: card.id }).forShare().first();
-      if (!enabled() || !visit) return;
+    const notice = await conn.transaction(async (trx) => {
+      const visit = await trx('scheduled_services').where({ id: card.id }).forUpdate().first();
+      if (!enabled() || !visit) return null;
       const promise = latestPromises(await loadPromiseEvents(trx, [String(card.id)], { now }), now).get(String(card.id));
       const live = evaluateNoShow({ visit, promise, now });
-      if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return;
-      const recipient = visit.technician_id || (await trx('technicians').where({ employment_status: 'active', field_dispatchable: true }).orderBy('created_at').first('id'))?.id;
-      const key = `tracking:${card.id}:${live.promised_window.start_at}:${live.stage}`;
-      const notice = await require('./tech-visit-notifications').recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
+      if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
+      const recipient = visit.technician_id ? (await trx('technicians').where({ id: visit.technician_id,
+        employment_status: 'active', field_dispatchable: true }).first('id'))?.id : null;
+      const type = recipient ? 'tech_late' : 'unassigned_overdue';
+      const key = `tracking:${card.id}:${live.promised_window.start_at}:${live.stage}:${type}`;
+      const notice = await techNotices.recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
         stage: live.stage, dedupeKey: `${key}:${recipient}`, message: live.message, payload: { ...live, visit_id: card.id } });
-      let adminNotice = null;
-      if (live.stage === 2) adminNotice = await require('./notification-service').notifyAdmin('alert', 'A promised arrival needs attention', live.message, {
-        dedupeKey: key, trx, link: '/admin/communications#tab=owed', bell: true,
-        metadata: { triggerKey: 'no_show_detector', scheduled_service_id: card.id, stage: live.stage, promise_start_at: live.promised_window.start_at },
-      });
-      if (notice || (adminNotice?.id && !adminNotice.deduped)) {
+      const office = live.stage === 2 || !recipient;
+      const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES).whereNull('resolved_at');
+      for (const alert of existing) {
+        if (!office || alert.payload?.tracking_key !== key) await dispatch.resolveAlert({ id: alert.id, trx });
+      }
+      let created = false;
+      if (office) {
+        const already = await trx('dispatch_alerts').where({ job_id: card.id, type }).whereRaw("payload->>'tracking_key' = ?", [key]).first('id');
+        if (!already) {
+          const result = await dispatch.createAlertOnce({ type, severity: live.stage === 2 ? 'critical' : 'warn',
+            techId: recipient, jobId: card.id, trx, payload: { source: 'no_show_detector', tracking_key: key, ...live,
+              scheduled_date: visit.scheduled_date, window_start: visit.window_start, window_end: visit.window_end } });
+          created = result.created;
+          if (created) await require('./notification-service').notifyAdmin('alert', 'A promised arrival needs attention', live.message, {
+            dedupeKey: `dispatch-alert:${result.row.id}`, trx, link: '/admin/communications#tab=owed', bell: true,
+            metadata: { dispatch_alert_id: result.row.id, scheduled_service_id: card.id, stage: live.stage },
+          });
+        }
+      }
+      if (notice || created) {
         await recordAuditEvent({ actor_type: 'system', action: 'missing_tracking_alerted', resource_type: 'scheduled_service', resource_id: card.id,
           metadata: { stage: live.stage, promise_start_at: live.promised_window.start_at, evidence: live.evidence }, critical: true, trx });
         alerted += 1;
       }
-      if (notice) pushes.push(notice);
+      return notice;
     });
+    // Deliver each committed notice before another row or cleanup can fail.
+    if (notice) await techNotices.pushTrackingNotice(notice);
   }
-  // Clear obsolete bells automatically. No extra admin acknowledgement is
-  // needed after an arrival, completion, cancellation, or communicated move.
-  await conn('notifications').whereRaw("metadata->>'triggerKey' = 'no_show_detector'").whereNull('read_at')
-    .modify((q) => {
-      const keys = rows.filter((r) => r.stage === 2).map((r) => `tracking:${r.id}:${r.promised_window.start_at}:2`);
-      if (keys.length) q.whereRaw("NOT (metadata->>'dedupeKey' = ANY(?::text[]))", [keys]);
-    })
-    .update({ read_at: now });
-  for (const notice of pushes) await require('./tech-visit-notifications').pushTrackingNotice(notice);
+  const active = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
+    .whereRaw("payload->>'source' = 'no_show_detector'").whereNull('resolved_at').select('id', 'job_id', 'payload');
+  for (const alert of active) await conn.transaction(async (trx) => {
+    if (!enabled()) return;
+    const visit = await trx('scheduled_services').where({ id: alert.job_id }).forUpdate().first();
+    const promise = latestPromises(await loadPromiseEvents(trx, [String(alert.job_id)], { now }), now).get(String(alert.job_id));
+    const live = evaluateNoShow({ visit, promise, now });
+    if (!live || live.stage !== alert.payload.stage || live.promised_window.start_at !== alert.payload.promised_window?.start_at) {
+      await dispatch.resolveAlert({ id: alert.id, trx });
+    }
+  });
   return { alerted, active: rows.length };
 }
 

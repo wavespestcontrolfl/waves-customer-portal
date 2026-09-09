@@ -9,6 +9,9 @@ jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
 }));
 
+jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false), sweep: jest.fn() }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(), recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}) }));
+
 const db = require('../models/db');
 const { createAlert } = require('../services/dispatch-alerts');
 const detector = require('../services/tech-late-detector');
@@ -16,6 +19,7 @@ const detector = require('../services/tech-late-detector');
 describe('tech-late detector tuning', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    require('../services/no-show-detector').enabled.mockReturnValue(false);
   });
 
   test('query waits until promised arrival due time plus grace and suppresses stale or already-acknowledged windows', async () => {
@@ -95,4 +99,23 @@ describe('tech-late detector tuning', () => {
     expect(detector._test.normalizeDateOnly('2026-05-05T00:00:00.000Z')).toBe('2026-05-05');
     expect(detector._test.normalizeDateOnly('2026-05-05')).toBe('2026-05-05');
   });
+  test('enabled tracking replaces both legacy scans and preserves skipped-job health', async () => {
+    const tracking = require('../services/no-show-detector');
+    const locks = require('../utils/cron-lock');
+    tracking.enabled.mockReturnValue(true);
+    tracking.sweep.mockResolvedValue({ alerted: 1 });
+    locks.runExclusive.mockImplementationOnce((_key, work) => work());
+    expect(await detector.runTechLateCheck()).toEqual({ alerted: 1 });
+    expect(tracking.sweep).toHaveBeenCalledWith(db);
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(await require('../services/unassigned-overdue-detector').runUnassignedOverdueCheck()).toMatchObject({ skipped: true });
+    expect(db.raw).not.toHaveBeenCalled();
+    locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
+    await expect(detector.runTechLateCheck()).rejects.toThrow('no_connection');
+    expect(locks.recordJobEnd).toHaveBeenCalledWith('no-show-detector', expect.any(Number), expect.any(Error));
+    locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    await detector.runTechLateCheck();
+    expect(locks.recordJobEnd).toHaveBeenCalledTimes(1);
+  });
+
 });

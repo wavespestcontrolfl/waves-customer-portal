@@ -23,22 +23,22 @@ function replay(input) {
     for (const item of input.visits) {
       if (!item.id || !item.initial?.status || !Array.isArray(item.events) || !Array.isArray(item.promises)) throw new Error('Each visit needs initial state, dated events, and promises');
       if (!item.promises.length) missingPromise += 1;
-      const times = new Set();
-      for (const p of item.promises) {
-        const at = new Date(p.start_at).getTime(), known = new Date(p.communicated_at).getTime();
-        if (!Number.isFinite(at) || !Number.isFinite(known)) continue;
-        for (const minutes of [threshold, 150]) times.add(Math.ceil(Math.max(known, at + minutes * 60000) / 300000) * 300000);
-      }
+      const events = item.events.map((event) => {
+        const at = new Date(event.at).getTime();
+        if (!Number.isFinite(at)) throw new Error('Every state change needs a valid timestamp');
+        return { ...event, at };
+      }).sort((a, b) => a.at - b.at);
+      const promises = item.promises.map((p) => ({ ...p, visit_id: item.id }));
+      const state = { id: item.id, ...item.initial };
+      let eventIndex = 0;
       const emitted = new Set();
-      for (const at of [...times].sort((a, b) => a - b)) {
-        if (at < from.getTime() || at > to.getTime()) continue;
+      for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
         const now = new Date(at);
-        const state = { id: item.id, ...item.initial };
-        for (const event of [...item.events].sort((a, b) => new Date(a.at) - new Date(b.at))) {
-          if (!Number.isFinite(new Date(event.at).getTime())) throw new Error('Every state change needs a valid timestamp');
-          if (new Date(event.at) <= now) Object.assign(state, event.patch);
+        while (eventIndex < events.length && events[eventIndex].at <= at) {
+          Object.assign(state, events[eventIndex].patch);
+          eventIndex += 1;
         }
-        const promise = latestPromises(item.promises.map((p) => ({ ...p, visit_id: item.id })), now).get(String(item.id));
+        const promise = latestPromises(promises, now).get(String(item.id));
         const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
         if (!alert) continue;
         const key = `${alert.promised_window.start_at}:${alert.stage}`;

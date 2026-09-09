@@ -185,6 +185,7 @@ const TYPE_RENDERERS = {
 
 export default function AlertCard({ alert, onResolve }) {
   const Body = TYPE_RENDERERS[alert.type] || GenericBody;
+  const tracking = alert.payload?.source === 'no_show_detector';
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState(null);
 
@@ -221,14 +222,14 @@ export default function AlertCard({ alert, onResolve }) {
             {alert.severity}
           </span>
           <span className="text-11 uppercase tracking-label font-medium text-ink-tertiary truncate">
-            {alert.type}
+            {tracking ? 'Missing tracking' : alert.type}
           </span>
         </div>
         <span className="text-11 text-ink-tertiary flex-shrink-0">
           {timeAgo(alert.created_at)}
         </span>
       </div>
-      <Body alert={alert} />
+      {tracking ? <div className="text-14 text-ink-primary">{alert.payload.message}</div> : <Body alert={alert} />}
       {onResolve && (
         <div className="mt-2 flex items-center justify-end gap-2">
           {resolveError && (

@@ -1444,16 +1444,6 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  cron.schedule('0 */5 * * * *', async () => {
-    if (!require('./no-show-detector').enabled()) return;
-    try {
-      const { runExclusive } = require('../utils/cron-lock');
-      await runExclusive('no-show-detector', () => require('./no-show-detector').sweep(require('../models/db')));
-    } catch (err) {
-      logger.error(`[no-show-detector] tick failed (${err.code || err.name || 'error'})`);
-    }
-  }, { timezone: 'America/New_York' });
-
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 20 7 * * *', async () => {
     try {

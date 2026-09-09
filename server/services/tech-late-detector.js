@@ -98,6 +98,21 @@ async function runTechLateCheck() {
 }
 
 async function runInner() {
+  // The same cron and dispatch-alert lifecycle use communication evidence
+  // under the new gate; there is no competing overdue scan while enabled.
+  const tracking = require('./no-show-detector');
+  if (tracking.enabled()) {
+    const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+    const result = await runExclusive('no-show-detector', () => tracking.sweep(db));
+    if (result?.skipped && result.reason !== 'lease_held') {
+      const error = new Error(`tracking tick skipped: ${result.reason || 'no_connection'}`);
+      const started = Date.now();
+      await recordJobStart('no-show-detector').catch(() => {});
+      await recordJobEnd('no-show-detector', started, error).catch(() => {});
+      throw error;
+    }
+    return result;
+  }
   let rows;
   try {
     const result = await db.raw(`
