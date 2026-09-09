@@ -3,8 +3,8 @@ const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 class PipelineManager {
-  async onEvent(customerId, eventType, eventData = {}) {
-    const customer = await db('customers').where({ id: customerId }).first();
+  async onEvent(customerId, eventType, eventData = {}, { database = db } = {}) {
+    const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) return;
 
     const stageMap = {
@@ -25,22 +25,24 @@ class PipelineManager {
     const newStage = stageMap[eventType];
 
     if (eventType === 'service_completed') {
-      await db('customers').where({ id: customerId }).update({
+      await database('customers').where({ id: customerId }).update({
         last_contact_date: new Date(), last_contact_type: 'service',
       });
     }
 
     if (newStage && newStage !== customer.pipeline_stage) {
-      await db('customers').where({ id: customerId }).update({
+      await database('customers').where({ id: customerId }).update({
         pipeline_stage: newStage, pipeline_stage_changed_at: new Date(),
       });
-      await db('customer_interactions').insert({
+      await database('customer_interactions').insert({
         customer_id: customerId, interaction_type: 'note',
         subject: `Pipeline: ${customer.pipeline_stage} → ${newStage}`,
         body: `Auto-moved to "${newStage}". Trigger: ${eventType}`,
         metadata: JSON.stringify(eventData),
       });
-      logger.info(`Pipeline: ${customer.first_name} ${customer.last_name} → ${newStage} (${eventType})`);
+      // A supplied transaction still belongs to its caller and can roll back.
+      // Its committed customer_interactions row is the durable audit trail.
+      if (database === db) logger.info(`Pipeline: customerId=${customerId} → ${newStage} (${eventType})`);
     }
   }
 

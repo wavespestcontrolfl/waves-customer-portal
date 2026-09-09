@@ -321,6 +321,7 @@ describe('trackAdminPageView', () => {
       ['/admin/inventory', 'products'],
       ['/admin/knowledge', 'articles'],
       ['/admin/service-library', 'catalog'],
+      ['/admin/timetracking', 'approvals'],
     ]) {
       __resetAdminUsageForTests();
       fetchMock.mockClear();

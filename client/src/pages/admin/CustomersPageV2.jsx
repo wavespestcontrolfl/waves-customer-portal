@@ -1656,7 +1656,7 @@ function CustomersOverlayPage({
   overlays,
 }) {
   return (
-    <div>
+    <UiSurface density="legacy">
       {children}
       {overlays}
       {selectedId && (
@@ -1668,7 +1668,7 @@ function CustomersOverlayPage({
           onClose={onClose}
         />
       )}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -2067,20 +2067,19 @@ export default function CustomersPageV2() {
           />
 
           {/* ======================= QUICK ADD (desktop modal / mobile sheet) ======================= */}
-          {!isMobile && (
+          {isMobile ? (
+            <MobileNewCustomerSheet
+              open={showAddModal}
+              onClose={closeAddCustomer}
+              initialValues={quickAddPreset}
+              onCreated={handleQuickAddCreated}
+            />
+          ) : (
             <QuickAddModalV2
               open={showAddModal}
               onClose={closeAddCustomer}
               initialValues={quickAddPreset}
               title="Add customer"
-              onCreated={handleQuickAddCreated}
-            />
-          )}
-          {isMobile && (
-            <MobileNewCustomerSheet
-              open={showAddModal}
-              onClose={closeAddCustomer}
-              initialValues={quickAddPreset}
               onCreated={handleQuickAddCreated}
             />
           )}

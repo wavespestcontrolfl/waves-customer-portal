@@ -206,6 +206,7 @@ function makeInner({ convertible = { id: 'lead-1' } } = {}) {
       whereNull: jest.fn(() => b),
       orWhere: jest.fn(() => b),
       whereNotIn: jest.fn(() => b),
+      forNoKeyUpdate: jest.fn(() => b),
       first: jest.fn(async () => (table === 'leads' ? convertible : null)),
       update: jest.fn(async (payload) => { writes.updates.push({ table, payload }); return 1; }),
       insert: jest.fn(async (payload) => { writes.inserts.push({ table, payload }); return [1]; }),

@@ -4019,8 +4019,9 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
-const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel'];
-const APP_OPTION = { value: 'push', label: 'App first' };
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel'];
+const APP_OPTION = { value: 'push', label: 'App' };
+const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
 const APPOINTMENT_CHANNEL_KEYS = [
   'appointmentConfirmationChannel',
   'serviceReminder72hChannel',
@@ -4097,7 +4098,7 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         {prefs.pushEnabled === false ? 'App pushes are off for your account. Your notification history stays available.'
           : connected ? 'Your account has a recently connected app.'
             : app.status?.registered ? 'Open the app to refresh its connection. After 72 hours, an allowed backup may be used.'
-              : 'A connected app is needed before choosing App first.'}
+              : 'A connected app is needed before choosing App.'}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
         {isNativeApp() && app.deviceState !== 'granted' && (
@@ -4107,15 +4108,15 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         )}
         <button type="button" data-glass-accent="" onClick={app.refresh} disabled={app.busy} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44 }}>Check connection</button>
         <button type="button" data-glass-accent="" disabled={saving || !app.ready} onClick={() => onSave(Object.fromEntries(APP_CHANNEL_KEYS.map((key) => [key, 'push'])))} style={{ ...PORTAL_SECONDARY_ACTION, minHeight: 44, opacity: app.ready ? 1 : 0.5 }}>
-          Use app for supported updates
+          Use App for supported updates
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App first for appointment updates, technician progress, service reports and receipts. If push is unavailable, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Reminder texts and emailed receipts continue</summary>
-        Appointment reminders and important billing notices keep their existing text copies. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
+        <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
+        Emailed receipt copies and important billing notices keep their current delivery methods. So do messages with attachments, review requests, conversations, security codes and marketing.
       </details>
       <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         {prefs.smsEnabled === false ? 'Text backup is currently off. ' : 'Text backup remains subject to your text preferences. '}
@@ -4765,8 +4766,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               You'll hear from us
             </div>
             {[
-              { enabled: prefs?.serviceReminder72h !== false, icon: 'clock', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
-              { enabled: prefs?.serviceReminder24h !== false, icon: 'bell', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { enabled: prefs?.serviceReminder72h !== false, icon: 'clock', label: `72-hour ${REMINDER_CHANNEL_LABELS[prefs?.serviceReminder72hChannel] || 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { enabled: prefs?.serviceReminder24h !== false, icon: 'bell', label: `24-hour ${REMINDER_CHANNEL_LABELS[prefs?.serviceReminder24hChannel] || 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
               { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
               { icon: 'document', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
             ].filter((step) => step.enabled !== false).map((step, i, steps) => (
@@ -7123,7 +7124,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 const channel = paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms';
                 const emailLeg = channel === 'email' || channel === 'both';
                 const textLeg = channel !== 'email' && !paymentSmsOff;
-                if (channel === 'push') return 'App first, with an allowed text backup. Existing emailed receipt copies continue.';
+                if (channel === 'push') return 'App, with an allowed text backup. Existing emailed receipt copies continue.';
                 if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
                 if (emailLeg) return 'Get an email when your payment processes.';
                 if (textLeg) return 'Get a text when your payment processes.';
