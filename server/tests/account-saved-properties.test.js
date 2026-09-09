@@ -28,6 +28,15 @@ function chain(rows) {
   return c;
 }
 
+// customer_properties "ever had a row?" probe: answers per customer_id from
+// global.__EVER__ ({ [customerId]: true }) — the retired-only vs never-had case.
+function everRowChain() {
+  const c = {}; let filter = {};
+  c.where = jest.fn((arg) => { if (typeof arg === 'object') filter = { ...filter, ...arg }; return c; });
+  c.first = jest.fn(async () => ((global.__EVER__ || {})[filter.customer_id] ? { id: 'old-row' } : undefined));
+  return c;
+}
+
 const PROFILES = [
   { id: 'cust-1', account_id: 'acct-1', profile_label: 'Primary', is_primary_profile: true, active: true, waveguard_tier: 'Bronze', address_line1: '1200 Palm Row Ct', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
   { id: 'cust-9', account_id: 'acct-1', profile_label: 'Rental - Sandbar Ln', is_primary_profile: false, active: true, waveguard_tier: null, address_line1: '9 Sandbar Ln', address_line2: null, city: 'Ellenton', state: 'FL', zip: '34222' },
@@ -45,8 +54,10 @@ describe('accountSavedProperties — the unified list', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     global.__PROPS__ = PROPS;
+    global.__EVER__ = {};
     db.mockImplementation((table) => {
       if (table === 'customers') return chain(PROFILES);
+      if (table === 'customer_properties') return everRowChain();
       throw new Error(`unexpected table ${table}`);
     });
   });
@@ -71,14 +82,32 @@ describe('accountSavedProperties — the unified list', () => {
     expect(selected).toEqual({ key: 'cust-1:prop-a', customerId: 'cust-1', propertyId: 'prop-a' });
   });
 
-  test('a cancelled (read-only) session lists only its own profile — no sibling switches it cannot take', async () => {
+  test('a cancelled (read-only) session lists only its own profile — no sibling switches, and NO lazy property creation', async () => {
     const cancelled = { ...PROFILES[0], active: false };
     const { properties, selected } = await accountSavedProperties({ customerId: 'cust-1', accountId: 'acct-1', propertyId: 'prop-b', customer: cancelled });
-    // The profiles query is never issued — db would throw on any other table, and 'customers' was not asked for.
+    // The profiles query is never issued.
     expect(db).not.toHaveBeenCalledWith('customers');
+    // Read-only session: the lazy primary writer is never invoked (codex #4199 r1 P2).
+    expect(customerProperties.ensurePrimaryProperty).not.toHaveBeenCalled();
     expect(properties.map((e) => e.key)).toEqual(['cust-1:prop-a', 'cust-1:prop-b', 'cust-1:prop-c']);
     expect(properties.every((e) => e.customerId === 'cust-1')).toBe(true);
     expect(selected).toEqual({ key: 'cust-1:prop-b', customerId: 'cust-1', propertyId: 'prop-b' });
+  });
+
+  test('a cancelled profile with NO property row still falls back to its own profile entry, without writing one', async () => {
+    const cancelled = { ...PROFILES[1], active: false };
+    const { properties, selected } = await accountSavedProperties({ customerId: 'cust-9', accountId: 'acct-1', propertyId: null, customer: cancelled });
+    expect(customerProperties.ensurePrimaryProperty).not.toHaveBeenCalled();
+    expect(properties).toHaveLength(1);
+    expect(properties[0]).toMatchObject({ key: 'cust-9:profile', customerId: 'cust-9', propertyId: null, address: { line1: '9 Sandbar Ln' } });
+    expect(selected).toEqual({ key: 'cust-9:profile', customerId: 'cust-9', propertyId: null });
+  });
+
+  test('an active profile whose property rows were all RETIRED is left out (codex #4199 r1 P2) — never a selectable mirrored address', async () => {
+    global.__EVER__ = { 'cust-9': true }; // rows exist, none active
+    const { properties } = await accountSavedProperties({ customerId: 'cust-1', accountId: 'acct-1', propertyId: null });
+    expect(properties.map((e) => e.key)).toEqual(['cust-1:prop-a', 'cust-1:prop-b', 'cust-1:prop-c']);
+    expect(properties.some((e) => e.customerId === 'cust-9')).toBe(false);
   });
 
   test('selected follows a validated claim; a claim that is not among the profile\'s entries falls back to the primary', async () => {

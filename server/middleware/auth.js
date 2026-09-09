@@ -527,10 +527,22 @@ async function authenticateCore(req, res, next, { allowInactive = false, allowCa
     req.propertyId = null;
     req.property = null;
     if (decoded.propertyId && require('../config/feature-gates').gateEnvValue('GATE_APP_PROPERTY_SCOPE')) {
-      const property = await db('customer_properties')
-        .where({ id: decoded.propertyId, customer_id: customer.id, active: true })
-        .first()
-        .catch(() => null);
+      let property;
+      try {
+        property = await db('customer_properties')
+          .where({ id: decoded.propertyId, customer_id: customer.id, active: true })
+          .first();
+      } catch (lookupErr) {
+        // Infrastructure failure, not "no such row" (codex #4199 r1 P2): a
+        // silent fall-back to the primary would answer the WRONG home's
+        // visits and texts. Retryable 503 — never the outer catch's 401,
+        // which the client reads as a dead session.
+        logger.warn(`[auth] property-claim lookup failed: ${lookupErr.message}`);
+        return res.status(503).json({
+          error: 'Property selection is temporarily unavailable. Please try again.',
+          code: 'PROPERTY_SCOPE_UNAVAILABLE',
+        });
+      }
       if (property) {
         req.propertyId = property.id;
         req.property = property;

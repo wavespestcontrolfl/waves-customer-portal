@@ -7,6 +7,7 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const jwt = require('jsonwebtoken');
 const config = require('../config');
@@ -78,6 +79,19 @@ describe('saved-property session claim', () => {
     expect(res.status).not.toHaveBeenCalled();
     expect(req.propertyId).toBeNull();
     expect(req.property).toBeNull();
+  });
+
+  test('gate on: a FAILED property lookup aborts with a retryable 503 — never a silent primary fallback, never a 401', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const failing = { where: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(new Error('connection reset')) };
+    db.mockReturnValueOnce(customerQuery()).mockReturnValueOnce(failing);
+
+    const { req, res, next } = await run(generateToken('cust-1', 'acct-1', 'fam-1', { propertyId: 'prop-2' }));
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({ error: 'Property selection is temporarily unavailable. Please try again.', code: 'PROPERTY_SCOPE_UNAVAILABLE' });
+    expect(req.propertyId).toBeNull();
   });
 
   test('gate off: the claim is ignored and the property table is never read', async () => {

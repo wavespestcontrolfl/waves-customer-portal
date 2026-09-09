@@ -61,7 +61,7 @@ async function resolvePrimaryProfileId(req, knex = db, { onError = 'fallback' } 
 // ---------------------------------------------------------------------------
 
 const PROFILE_COLUMNS = [
-  'id', 'account_id', 'profile_label', 'is_primary_profile', 'waveguard_tier',
+  'id', 'account_id', 'profile_label', 'is_primary_profile', 'active', 'waveguard_tier',
   'address_line1', 'address_line2', 'city', 'state', 'zip',
 ];
 
@@ -140,10 +140,21 @@ async function accountSavedProperties(req, knex = db) {
     // Same lazy primary the admin list makes (ensurePrimaryProperty): a
     // profile created by a path that skipped the property table still lists
     // its one address. Best-effort — a failure lists the profile itself.
-    await customerProperties.ensurePrimaryProperty(profile.id).catch(() => {});
+    // ACTIVE profiles only (codex #4199 r1 P2): a cancelled read-only
+    // session must not create a property row after cancellation.
+    if (profile.active === true) {
+      await customerProperties.ensurePrimaryProperty(profile.id).catch(() => {});
+    }
     const rows = await customerProperties.listProperties(profile.id).catch(() => []);
     if (!rows.length) {
-      entries.push(savedPropertyEntry(profile, null));
+      // No ACTIVE rows. A profile that has NEVER had a property row (no
+      // address to build one from) still lists once, keyed to the profile.
+      // A profile whose rows were all RETIRED by the office is left out
+      // (codex #4199 r1 P2): listing its mirrored address would make a
+      // deliberately retired address selectable again, and selecting it
+      // would resolve to a zero-property scope showing customer-wide visits.
+      const everHadRow = await knex('customer_properties').where({ customer_id: profile.id }).first('id');
+      if (!everHadRow) entries.push(savedPropertyEntry(profile, null));
       continue;
     }
     for (const row of rows) entries.push(savedPropertyEntry(profile, row));
