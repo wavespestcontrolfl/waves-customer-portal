@@ -132,7 +132,9 @@ than written per scenario as regexes:
   directions. Explicit refusals, explanatory offers and answers to unrelated questions remain
   allowed. Each time uses its nearest visit or contact subject;
   a leading time also checks the subject that follows it, including portal directions
-  across a comma. Conditional wording must govern the visit predicate itself.
+  across a comma. "It" and "which" can continue a preceding visit reference.
+  Conditional wording must govern the visit predicate itself; coordinated facts
+  within one "whether" clause remain uncertain until a clause break.
   Directions to check when a visit is scheduled are allowed, but public office hours or
   a portal direction cannot excuse an explicit appointment time, including a time
   set off by commas or described as listed in the portal. A refusal does not excuse
