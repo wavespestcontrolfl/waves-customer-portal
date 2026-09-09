@@ -8,12 +8,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Select, cn } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import AdminFollowThroughCards from "../../components/admin/AdminFollowThroughCards";
 
 const KIND_LABEL = {
   send_estimate: "Send estimate",
   send_appointment_confirmation: "Send appointment confirmation",
   callback: "Call back",
   send_report: "Send report",
+  send_reschedule_link: "Send reschedule link",
   send_paperwork: "Send paperwork",
   technician_follow_up: "Technician follow-up",
   schedule_visit: "Schedule visit",
@@ -67,6 +69,7 @@ export function dueLabel(row, now = Date.now()) {
 }
 
 export default function OwedTabV2() {
+  const [callbackCardsEnabled, setCallbackCardsEnabled] = useState(false);
   const [party, setParty] = useState("waves");
   const [showHints, setShowHints] = useState(true);
   const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, enabled: true, hasMore: false, nextOffset: null });
@@ -157,11 +160,12 @@ export default function OwedTabV2() {
     else window.location.hash = next;
   };
 
-  const rows = state.rows;
+  const rows = state.rows.filter((r) => !callbackCardsEnabled || r.kind !== 'callback' || r.party !== 'waves');
   const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length;
 
   return (
     <div className="space-y-3">
+      <AdminFollowThroughCards onCallbacksEnabled={setCallbackCardsEnabled} />
       <div className="flex flex-wrap items-center gap-2">
         <Select aria-label="Whose promises" value={party} onChange={(e) => setParty(e.target.value)} className="h-11 md:h-9">
           <option value="waves">Waves promised</option>
@@ -174,7 +178,7 @@ export default function OwedTabV2() {
         </label>
         <span className="text-13 md:text-12 text-ink-tertiary">
           {state.status === "ready" ? `${rows.length}${state.hasMore ? "+" : ""} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
-          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours, a callback after the day of the call, other promises after ${state.implicitDays} days` : ""}
+          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours${callbackCardsEnabled ? '' : ', a callback after the day of the call'}, other promises after ${state.implicitDays} days` : ""}
         </span>
         <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
       </div>

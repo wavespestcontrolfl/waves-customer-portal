@@ -55,6 +55,7 @@ import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
@@ -641,6 +642,9 @@ export default function TechHomePage({ section = 'today' }) {
           loading={loading} error={scheduleError} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
+          followThrough={<TechFollowThroughCards fieldWorkspace onQuickMove={(row) => setRainOutService(myServices.find((s) => s.id === row.id) || {
+            id: row.id, customer_name: [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Upcoming stop',
+          })} />}
           timekeeping={<>
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
@@ -706,6 +710,9 @@ export default function TechHomePage({ section = 'today' }) {
       <TechIntelligenceBar />
 
       <TechTimeTrackingCard nextStop={nextStop} />
+      <TechFollowThroughCards onQuickMove={(row) => setRainOutService(myServices.find((s) => s.id === row.id) || {
+        id: row.id, customer_name: [row.first_name, row.last_name].filter(Boolean).join(' ') || 'Upcoming stop',
+      })} />
 
       {scheduleError && (
         <div role="alert" style={{

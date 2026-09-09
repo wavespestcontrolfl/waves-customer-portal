@@ -13,6 +13,7 @@ import {
   Textarea,
   cn,
 } from "../../components/ui";
+import SmsAdditionalPropertyEvidence from "../../components/admin/SmsAdditionalPropertyEvidence";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
 
@@ -48,6 +49,7 @@ const REASON_LABELS = {
   low_confidence_address: "Low-confidence address",
   ambiguous_scheduling: "Ambiguous scheduling",
   reschedule_or_cancel: "Reschedule / cancel",
+  reschedule_link_promise: "Promised link needs attention",
   cancellation_request: "Cancellation request",
   caller_not_authorized: "Caller not authorized",
   hoa_common_area_requires_approval: "HOA common-area (needs approval)",
@@ -309,6 +311,15 @@ export function PropertyRoleEvidence({ payload }) {
   );
 }
 
+const LINK_REVIEW_COPY = {
+  ambiguous_visit: 'More than one appointment could match this call. Check the discussed visit before sending its link.',
+  delivery_failed: 'The text was not delivered. Check the number and the conversation.',
+  provider_outcome_unknown: 'Delivery is not confirmed. Check Messages before sending again.',
+  delivery_receipt_unavailable: 'Delivery is not confirmed. Check Messages before sending again.',
+  appointment_changed: 'The appointment changed while the link was waiting. Review the requested visit.',
+  visit_not_self_service: 'This visit needs a schedule review before its reschedule link can be used.',
+};
+
 function VerdictBadge({ verdict, wrongFields }) {
   if (!verdict) return null;
   if (verdict === "accept") return <Badge tone="strong">Accepted</Badge>;
@@ -377,7 +388,7 @@ export default function TriageInboxTabV2() {
           const wasResolved = (i) =>
             i.call_log_id === item.call_log_id
             && i.reason_code !== "email_bounce_reverify"
-            && i.reason_code !== "property_role_confirm";
+            && !["property_role_confirm", "reschedule_link_promise"].includes(i.reason_code) && !parsePayload(i.payload)?.reschedule_proposal;
           const removed = items.filter(wasResolved).length || 1;
           setItems((prev) => prev.filter((i) => !wasResolved(i)));
           setCounts((prev) => {
@@ -458,14 +469,14 @@ export default function TriageInboxTabV2() {
 
   // One-click apply for a property_role_confirm card — executes the parked
   // occupancy/primary-residence proposals server-side and resolves the card.
-  const applyPropertyRoles = (item) => {
+  const applyPropertyRoles = (item, extra = {}) => {
     setActioning(item.id);
     adminFetch(`/admin/triage/${item.id}/apply-property-roles`, {
       method: "POST",
       // Version binding: the server 409s if the card's proposals were
       // refreshed (force-reprocess) after this list render — the click
       // must apply exactly what was displayed.
-      body: JSON.stringify({ expected_updated_at: item.updated_at }),
+      body: JSON.stringify({ expected_updated_at: item.updated_at, ...extra }),
     })
       .then(() => {
         setActioning(null);
@@ -606,6 +617,10 @@ export default function TriageInboxTabV2() {
                 // click instead of an accept/deny verdict (the server rejects
                 // verdicts on them, same as bounce cards).
                 const isPropertyRoleCard = isTriage && item.reason_code === "property_role_confirm";
+                const isSmsPropertyCard = isPropertyRoleCard && !!item.sms_log_id;
+                const linkPromise = parsePayload(item.payload)?.reschedule_link_promise;
+                const proposedTime = parsePayload(item.payload)?.reschedule_proposal;
+                const isFollowThrough = !!(linkPromise || proposedTime);
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
                 // worker is about to write (the worker reopens a card closed
@@ -639,7 +654,7 @@ export default function TriageInboxTabV2() {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && (
+                          {!isPropertyRoleCard && !isFollowThrough && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -665,7 +680,7 @@ export default function TriageInboxTabV2() {
                               <XCircle size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Dismiss
                             </Button>
                           )}
-                          {isPropertyRoleCard ? (
+                          {isFollowThrough ? <a className="inline-flex min-h-11 items-center text-14 underline text-ink-secondary u-focus-ring" href={proposedTime ? "/admin/communications#tab=owed" : `/admin/customers?customerId=${encodeURIComponent(item.customer_id)}&tab=comms`}>{proposedTime ? "Open requested-time card" : "Open Messages"}</a> : isSmsPropertyCard ? null : isPropertyRoleCard ? (
                             <Button
                               size="sm"
                               variant="primary"
@@ -711,8 +726,10 @@ export default function TriageInboxTabV2() {
 
                     <p className="text-13 text-ink-secondary mt-2 whitespace-pre-wrap line-clamp-6">{synopsis}</p>
 
+                    {linkPromise && <p className="mt-3 text-14 text-ink-secondary">{LINK_REVIEW_COPY[linkPromise.reason] || "Review the call and the customer’s current appointment before sending a link."}</p>}
                     {isTriage && <ConfirmEvidence payload={item.payload} />}
                     {isPropertyRoleCard && <PropertyRoleEvidence payload={item.payload} />}
+                    {isSmsPropertyCard && <SmsAdditionalPropertyEvidence key={`${item.id}:${item.updated_at}`} item={item} busy={actioning === busyKey} active={isOpenView} onApply={applyPropertyRoles} />}
 
                     {item.resolution_note && (
                       <div className="text-12 text-ink-tertiary mt-2 italic">Note: {item.resolution_note}</div>

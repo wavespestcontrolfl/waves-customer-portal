@@ -30,6 +30,7 @@ let rows;
 let scheduleFails;
 let briefStatus;
 let fetchMock;
+let followThrough;
 
 function mount(path = '/tech', { enabled = true, role = 'technician' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
@@ -47,10 +48,12 @@ beforeEach(() => {
   rows = [row('one'), row('two', { status: 'en_route' }), row('other', { technicianId: 'other-tech' })];
   scheduleFails = false;
   briefStatus = 200;
+  followThrough = {};
   mocks.navigationBusy.mockClear();
   fetchMock = vi.fn(async (path, options = {}) => {
     let data = {};
     let status = 200;
+    if (path.includes('/call-recordings/follow-through')) data = followThrough;
     if (path.includes('/admin/schedule?')) {
       status = scheduleFails ? 503 : 200;
       data = scheduleFails ? { error: 'Route connection unavailable' } : { services: rows };
@@ -71,6 +74,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('Tech field workspace uses the existing route workflow', () => {
+  it('shows shared callback actions in the field workspace even when its route fails', async () => {
+    scheduleFails = true;
+    followThrough = { callbacks_enabled: true, callbacks: [{ id: 'callback-fixture', customer_first_name: 'Fixture',
+      description: 'Call about service access', due_at: '2099-01-01T17:00:00Z', updated_at: '2099-01-01T15:00:00Z' }] };
+    mount();
+    expect(await screen.findByText('Call about service access')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done', exact: true })).toBeInTheDocument();
+    expect(await screen.findByText('Route connection unavailable')).toBeInTheDocument();
+  });
+
   it('opens a selected stop and sends arrival and photos to that service, even when it is not first', async () => {
     mount('/tech?visit=row%3Atwo');
     expect(await screen.findByText('Property brief for two')).toBeInTheDocument();
