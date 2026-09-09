@@ -171,6 +171,10 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       ...payload,
       originalToMasked: maskPhone(to),
     });
+    if (stats?.suppressed || stats?.policySilenced) {
+      // An intentional preference/policy stop is not a delivery outage.
+      return { success: true, sid: 'internal-admin-notification-suppressed', suppressed: true };
+    }
     if (!internalAlertNotificationDelivered(stats)) {
       logger.warn(
         `[twilio] internal alert notification redirect did not deliver; suppressed owner/admin SMS fallback (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,

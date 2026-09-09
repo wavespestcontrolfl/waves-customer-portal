@@ -184,7 +184,11 @@
           ],
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "slot-gone",
@@ -375,7 +379,11 @@
           ],
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "second-booking-refused",
@@ -533,7 +541,11 @@
           ],
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "pricing-gate-on",
@@ -678,7 +690,11 @@
           },
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "pricing-gate-off",
@@ -808,7 +824,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "unknown-service",
@@ -919,7 +939,11 @@
           ],
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "eta-matched-attested",
@@ -1052,7 +1076,11 @@
           },
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "reservice-matched",
@@ -1180,7 +1208,11 @@
           "value": true,
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "reservice-duplicate",
@@ -1311,7 +1343,11 @@
           ],
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "spanish-capture",
@@ -1413,7 +1449,11 @@
           "value": "es",
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "spanish-pricing-gate-off",
@@ -1534,7 +1574,11 @@
           "value": "es",
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "angry-complaint",
@@ -1686,7 +1730,11 @@
           ],
           "severity": "quality"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "refund-demand",
@@ -1822,7 +1870,11 @@
           },
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "injection-in-turn",
@@ -1943,7 +1995,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "representative-request",
@@ -2057,7 +2113,11 @@
           ],
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "termite-no-diagnosis",
@@ -2183,7 +2243,11 @@
           ],
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "wrong-number",
@@ -2274,6 +2338,10 @@
         "capture_lead": {
           "lead_quality": "spam"
         }
+      },
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
       }
     },
     {
@@ -2365,6 +2433,10 @@
         "capture_lead": {
           "lead_quality": "spam"
         }
+      },
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
       }
     },
     {
@@ -2462,7 +2534,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "read-tool-timeout",
@@ -2603,7 +2679,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "write-tool-timeout",
@@ -2697,7 +2777,11 @@
           ],
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "office-closed-person-request",
@@ -2839,7 +2923,11 @@
           },
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "lookup-budget",
@@ -2981,7 +3069,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "read-back-grouping",
@@ -3081,7 +3173,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "barge-in-mid-sentence",
@@ -3178,7 +3274,11 @@
           ],
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "transfer-billing-problem",
@@ -3291,7 +3391,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "reconnect-resumed",
@@ -3409,7 +3513,7 @@
         "fixture_facts": [
           "Before the drop: Dana asked to schedule her quarterly visit, {{dow+7}} or {{dow+8}} preferred",
           "find_slots: S2-1 {{dow+7}} 9 AM, S2-2 {{dow+8}} 1 PM, S2-3 {{dow+9}} 10 AM",
-          "request_booking placed a PENDING request for Wednesday 1 PM"
+          "request_booking placed a PENDING request for {{dow+8}} 1 PM"
         ],
         "required_facts": [
           "{{day+8}} at 1 PM was requested; the office confirms"
@@ -3452,7 +3556,11 @@
           ],
           "severity": "major"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     },
     {
       "id": "second-model-failure",
@@ -3587,7 +3695,11 @@
           "value": true,
           "severity": "critical"
         }
-      ]
+      ],
+      "judge": {
+        "severity": "major",
+        "adjudicated": false
+      }
     }
   ]
 }

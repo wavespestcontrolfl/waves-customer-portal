@@ -1,6 +1,6 @@
 /**
  * Voice relay conversation eval — the harness (services/eval/voice-relay-replay)
- * and its deterministic grading.
+ * and its deterministic and optional judged grading.
  *
  * The harness runs the LIVE RelayConversation loop with the world around it
  * fixed by a fixture: every `expect` key, severity tiers, fixture lint,
@@ -183,6 +183,14 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'bad-expect-key', expect: [{ ...exp('tools_called_include', ['capture_lead']), adjudciated: true }] },
         { ...good, id: 'performed-outside', expect: [exp('tools_performed_include', ['request_booking'])] },
         { ...good, id: 'cross-effect', fixtures: { toolResponses: { request_booking: [{ text: 'x', capture: true }, { text: 'y', reservice: true, booking: true }] } } },
+        { ...good, id: 'judge-typo', judge: { severity: 'major', adjudciated: true } },
+        { ...good, id: 'judge-severity', judge: { severity: 'blocking' } },
+        { ...good, id: 'spec-typo', spec: { required_fact: ['x'] } },
+        { ...good, id: 'spec-transfer', spec: { transfer_required: 'true' } },
+        { ...good, id: 'spec-range', spec: { response_range: { min: 3, max: 1 } } },
+        { ...good, id: 'spec-words', spec: { max_words_per_agent_turn: 0 } },
+        { ...good, id: 'spec-fact-type', spec: { required_facts: [1] } },
+        { ...good, id: 'spec-ok', spec: { fixture_facts: ['f'], required_facts: ['r'], prohibited_facts: [], required_action: 'capture_lead', acceptable_actions: ['a'], transfer_required: false, ideal_move: 'i', response_range: { min: 1, max: 3 }, max_words_per_agent_turn: 60 }, judge: { severity: 'major', adjudicated: true } },
       ],
     };
     const errors = replay.lintFixture(fixture);
@@ -197,6 +205,15 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/mixed-cut: turns\[0\]: /);
     expect(joined).not.toMatch(/heard-turn:/);
     expect(joined).toMatch(/no-spec: spec is required/);
+    // The judge block and the spec are executable: a misspelt or mistyped field is refused, not ignored.
+    expect(joined).toMatch(/judge-typo: judge: "adjudciated" is not allowed/);
+    expect(joined).toMatch(/judge-severity: judge: "severity" must be one of/);
+    expect(joined).toMatch(/spec-typo: spec: "required_fact" is not allowed/);
+    expect(joined).toMatch(/spec-transfer: spec: "transfer_required" must be a boolean/);
+    expect(joined).toMatch(/spec-range: spec: "response_range.max" must be greater than or equal to/);
+    expect(joined).toMatch(/spec-words: spec: "max_words_per_agent_turn" must be a positive number|spec-words: spec: "max_words_per_agent_turn" must be greater than or equal to 1/);
+    expect(joined).toMatch(/spec-fact-type: spec: "required_facts\[0\]" must be a string/);
+    expect(joined).not.toMatch(/spec-ok:/);
     expect(joined).toMatch(/bad-tool: .*unknown tool "launch_missiles"/);
     expect(joined).toMatch(/no-sev: .*severity must be/);
     expect(joined).toMatch(/bad-regex: .*invalid regex/);
@@ -987,6 +1004,189 @@ describe('voice relay eval — severity aggregation', () => {
   });
 });
 
+describe('voice relay eval — the judge', () => {
+  const judge = require('../services/eval/voice-relay-judge');
+  const { _internals: { judgeChecks, scenarioStatus } } = require('../services/eval/voice-relay-replay');
+
+  test('parseVerdict tolerates an object, a JSON string, a fenced blob and prose, clamps tone, files unknown categories as other, derives pass', () => {
+    const base = { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'capture_lead', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4, rationale: 'fine' };
+    expect(judge.parseVerdict(base).pass).toBe(true);
+    expect(judge.parseVerdict(JSON.stringify(base)).pass).toBe(true);
+    expect(judge.parseVerdict(`Here you go:\n\`\`\`json\n${JSON.stringify(base)}\n\`\`\``).tone).toBe(4);
+    expect(judge.parseVerdict(`Verdict: ${JSON.stringify({ ...base, tone: 9 })} — done.`).tone).toBe(5);
+    // A "pass: true" beside a forbidden claim is a contradiction: pass is derived.
+    const contradiction = judge.parseVerdict({ ...base, forbidden_claims: [{ category: 'invented_price', quote: '$99' }, { category: 'made_up', quote: 'x' }] });
+    expect(contradiction.pass).toBe(false);
+    expect(contradiction.forbidden_claims.map((c) => c.category)).toEqual(['invented_price', 'other']);
+    expect(judge.parseVerdict({ ...base, pass: false }).pass).toBe(false);
+    expect(judge.parseVerdict({ ...base, action_ok: 'false' }).pass).toBe(false);
+    expect(judge.parseVerdict('not json at all')).toBeNull();
+    expect(judge.parseVerdict(null)).toBeNull();
+    expect(judge.parseVerdict([1, 2])).toBeNull();
+    // A reply that is not a complete verdict is no verdict at all: {} or a
+    // missing / mistyped required field reads as unjudged, never as graded.
+    expect(judge.parseVerdict({})).toBeNull();
+    for (const field of Object.keys(judge._internals.REQUIRED_FIELDS)) {
+      const missing = { ...base };
+      delete missing[field];
+      expect(judge.parseVerdict(missing)).toBeNull();
+    }
+    expect(judge.parseVerdict({ ...base, tone: 'calm' })).toBeNull();
+    expect(judge.parseVerdict({ ...base, forbidden_claims: 'none' })).toBeNull();
+    expect(judge.parseVerdict({ ...base, action_ok: 'yes' })).toBeNull();
+  });
+
+  test('buildJudgePrompt puts the spec and the transcript in the user turn and the rules in the system prompt', () => {
+    const { system, text } = judge.buildJudgePrompt({ required_facts: ['$129 per application'], prohibited_facts: ['a discount'], required_action: 'capture_lead', transfer_required: true, response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40 }, 'Caller: hi\nAgent: hello', { language: 'es', toolsAvailable: ['capture_lead'] });
+    expect(system).toMatch(/CLAIMS MUST TRACE/);
+    for (const cat of judge.FORBIDDEN_CLAIM_CATEGORIES) expect(system).toContain(cat);
+    expect(text).toMatch(/required_facts:\n {2}- \$129 per application/);
+    expect(text).toMatch(/GRADING NOTES — hidden truth the agent never saw/);
+    expect(text).toMatch(/CONTEXT THE AGENT WAS GIVEN/);
+    expect(system).toMatch(/GRADING NOTES are hidden truth/);
+    expect(text).toMatch(/transfer_required: true/);
+    expect(text).toMatch(/response_range: 1-2 sentences/);
+    expect(text).toMatch(/Spanish/);
+    expect(text).toMatch(/Caller: hi\nAgent: hello$/);
+    expect(text).toMatch(/\(none — unknown caller\)/);
+    expect(judge.judgePromptSha()).toMatch(/^[0-9a-f]{64}$/);
+    // The context the agent was given rides along as fixture facts: the clock
+    // state and the KNOWN CALLER block — otherwise the judge would flag a
+    // date the agent read from its own block as invented.
+    const ctx = judge.buildJudgePrompt({}, '[clock] The office opens today at 8 AM Eastern\nAgent: The office opens at eight.', { callerBlock: '<<<KNOWN CALLER DATA\nNext appointment: 2026-09-11\nEND KNOWN CALLER DATA>>>' }).text;
+    expect(ctx).toMatch(/\[clock\] The office opens today at 8 AM Eastern/);
+    expect(ctx).not.toMatch(/scheduled day off/);
+    expect(ctx).toMatch(/Next appointment: 2026-09-11/);
+    // The fingerprint covers everything static that shapes a verdict: the
+    // version, the system prompt, the schema and the user-turn template.
+    const sha = judge.judgePromptSha();
+    expect(sha).toMatch(/^[0-9a-f]{64}$/);
+    // Every conditional branch is rendered into it: the Spanish text, the
+    // transfer rule, the block / no-block wording, the
+    // tools line — a change to any of them moves the fingerprint.
+    const render = (opts) => judge.buildJudgePrompt({ fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'], ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40, ...opts.spec }, 'X', opts).text;
+    const parts = [judge.JUDGE_PROMPT_VERSION, judge._internals.SYSTEM_PROMPT, JSON.stringify(judge.JUDGE_SCHEMA)];
+    for (const language of ['en', 'es']) for (const transfer_required of [false, true]) for (const callerBlock of [null, 'BLOCK']) for (const dataTurn of [null, 'DATA']) for (const standingInstructions of [null, 'SYS']) for (const toolsAvailable of [[], ['T']]) parts.push(render({ language, toolsAvailable, callerBlock, dataTurn, standingInstructions, spec: { transfer_required } }));
+    const crypto = require('crypto');
+    expect(sha).toBe(crypto.createHash('sha256').update(parts.join('\n')).digest('hex'));
+    expect(parts.filter((x) => /Spanish/.test(x)).length).toBeGreaterThan(0);
+    expect(parts.filter((x) => /transfer_required: true/.test(x)).length).toBeGreaterThan(0);
+    expect(judge._internals.cartesian(judge._internals.TEMPLATE_AXES)).toHaveLength(64);
+    // The seeded recent-text data turn is agent-visible context, rendered where the judge traces claims.
+    const seeded = judge.buildJudgePrompt({}, 'X', { dataTurn: 'RECENT TEXTS: the caller asked about ants on Monday.' }).text;
+    expect(seeded).toMatch(/Recent-text data turn[^\n]*\n\s*RECENT TEXTS: the caller asked about ants on Monday\./);
+    expect(judge.buildJudgePrompt({}, 'X', {}).text).toMatch(/Recent-text data turn[^\n]*\n\s*\(none\)/);
+    // The standing instructions Sandy ran under are agent-visible context too:
+    // "we serve Manatee, Sarasota and Charlotte" traces to them, not to a tool.
+    const grounded = judge.buildJudgePrompt({}, 'Agent: We serve Sarasota County.', { standingInstructions: 'You are the phone assistant for Waves Pest Control (Manatee, Sarasota, and Charlotte counties).' }).text;
+    expect(grounded).toMatch(/Standing instructions the agent ran under[\s\S]*Manatee, Sarasota, and Charlotte/);
+    expect(judge.buildJudgePrompt({}, 'x').text).toMatch(/Standing instructions[\s\S]*\(not supplied/);
+    expect(judge.buildJudgePrompt({}, 'x').system).toMatch(/its standing\s+instructions/);
+  });
+
+  test('judgeTranscript dispatches the voiceJudge policy on its lane and stamps model, provider, fallback and prompt sha', async () => {
+    const MODELS = require('../config/models');
+    const verdict = { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'capture_lead', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5, rationale: 'clean' };
+    const dispatch = jest.fn(async () => ({ ok: true, json: verdict, text: JSON.stringify(verdict), model: 'judge-model-x', provider: 'anthropic', fallbackUsed: false }));
+    const out = await judge.judgeTranscript({ spec: {}, transcript: 'Caller: hi' }, { dispatch });
+    expect(dispatch).toHaveBeenCalledWith(MODELS.TEXT_POLICIES.voiceJudge, expect.objectContaining({ laneId: 'voice_relay_judge', jsonMode: true, jsonSchema: judge.JUDGE_SCHEMA, promptVersion: judge.JUDGE_PROMPT_VERSION }), expect.objectContaining({ validate: expect.any(Function) }));
+    // No explicit timeoutMs: an explicit budget would hand the whole remainder
+    // to the primary leg and starve the fallback (llm/call.js semantics).
+    expect(dispatch.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
+    // The validate hook fails a leg whose JSON is not a complete verdict, so
+    // the dispatcher tries the backup provider instead of returning it.
+    const { validate } = dispatch.mock.calls[0][2];
+    expect(validate({ json: verdict })).toBeNull();
+    expect(validate({ json: { pass: true } })).toBe('unparseable_verdict');
+    expect(validate({ text: 'not json' })).toBe('unparseable_verdict');
+    expect(out).toMatchObject({ ok: true, judge_model: 'judge-model-x', judge_provider: 'anthropic', judge_fallback: false, judge_prompt_sha: judge.judgePromptSha() });
+    expect(out.verdict.pass).toBe(true);
+
+    const fallback = jest.fn(async () => ({ ok: true, json: verdict, model: 'gpt-x', provider: 'openai', fallbackUsed: true }));
+    expect((await judge.judgeTranscript({ spec: {}, transcript: 'x' }, { dispatch: fallback })).judge_fallback).toBe(true);
+    expect(await judge.judgeTranscript({ spec: {}, transcript: 'x' }, { dispatch: async () => ({ ok: false, reason: 'all_providers_failed' }) })).toEqual({ ok: false, reason: 'all_providers_failed' });
+    expect(await judge.judgeTranscript({ spec: {}, transcript: 'x' }, { dispatch: async () => ({ ok: true, text: 'garbage', json: null }) })).toEqual({ ok: false, reason: 'unparseable_verdict' });
+    expect((await judge.judgeTranscript({ spec: {}, transcript: 'x' }, { dispatch: async () => { throw new Error('boom'); } })).reason).toMatch(/dispatch_error:boom/);
+  });
+
+  test('the voiceJudge policy is a pinned Claude leg with a cross-provider backup', () => {
+    const MODELS = require('../config/models');
+    expect(MODELS.TEXT_POLICIES.voiceJudge.primary).toEqual({ provider: 'anthropic', model: MODELS.VOICE_JUDGE });
+    expect(MODELS.TEXT_POLICIES.voiceJudge.fallback.provider).toBe('openai');
+    expect(MODELS.VOICE_JUDGE).toBe(process.env.MODEL_VOICE_JUDGE || MODELS.DEFAULTS.VOICE_JUDGE);
+  });
+
+  test('unsupported bee-removal coverage survives parsing and blocks the unknown-service scenario', async () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'unknown-service');
+    const quote = 'Yes, Waves offers bee removal.';
+    const dispatch = jest.fn(async () => ({ ok: true, fallbackUsed: false, json: {
+      pass: false, forbidden_claims: [{ category: 'invented_coverage', quote }],
+      required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'capture_lead',
+      action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5,
+      rationale: 'The catalog does not support bee removal.',
+    } }));
+    const judged = await judge.judgeTranscript({ spec: scenario.spec, transcript: `Agent: ${quote}` }, { dispatch });
+    const params = dispatch.mock.calls[0][1];
+    expect(params.jsonSchema.properties.forbidden_claims.items.properties.category.enum).toContain('invented_coverage');
+    expect(judge.buildJudgePrompt(scenario.spec).system).toMatch(/invented_coverage includes claiming Waves offers a service/);
+    expect(judged.verdict.forbidden_claims).toEqual([{ category: 'invented_coverage', quote }]);
+    const checks = judgeChecks(scenario, judged);
+    expect(checks.find((c) => c.check === 'judge:forbidden_claim:invented_coverage')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(scenarioStatus({ checks })).toBe('fail');
+  });
+
+  test('fallback findings stay advisory; pinned forbidden claims block while ordinary majors need adjudication', () => {
+    const scenario = { spec: { transfer_required: true }, judge: { severity: 'major', adjudicated: false } };
+    const verdict = { pass: false, forbidden_claims: [{ category: 'invented_price', quote: '$99' }], required_facts_missing: ['x'], prohibited_facts_stated: [], action_taken: 'nothing', action_ok: false, transfer_ok: false, empathy_ok: false, brevity_ok: true, tone: 2 };
+    const advisory = judgeChecks(scenario, { ok: true, judge_fallback: true, verdict });
+    expect(advisory.length).toBeGreaterThan(0);
+    expect(advisory.every((c) => c.status === 'advisory')).toBe(true);
+    expect(scenarioStatus({ checks: advisory })).toBe('pass');
+
+    const pinned = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict });
+    // A fail explained by a detail finding is counted once, on that finding's line.
+    expect(pinned.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'pass', detail: 'failed on the findings below' });
+    // A holistic "fail" with clean detail fields is still a failed verdict.
+    const holistic = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict: { ...verdict, pass: false, forbidden_claims: [], required_facts_missing: [], action_ok: true, transfer_ok: true, empathy_ok: true, tone: 4, rationale: 'rushed the caller off the line' } });
+    expect(holistic.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', detail: expect.stringContaining('rushed') });
+    expect(holistic.filter((c) => c.status === 'fail').map((c) => c.check)).toEqual(['judge:verdict']);
+    expect(pinned.find((c) => c.check === 'judge:forbidden_claim:invented_price')).toMatchObject({ status: 'fail', severity: 'critical', adjudicated: false });
+    expect(pinned.find((c) => c.check === 'judge:transfer').status).toBe('fail');
+    // Where no transfer is required, transfer_ok is not a detail finding: a verdict failing on it alone fails on the verdict line, and no transfer line is emitted.
+    const noTransfer = judgeChecks({ spec: { transfer_required: false }, judge: { severity: 'major', adjudicated: true } }, { ok: true, judge_fallback: false, verdict: { ...verdict, forbidden_claims: [], required_facts_missing: [], action_ok: true, transfer_ok: false, empathy_ok: true, tone: 4, rationale: 'no handoff' } });
+    expect(noTransfer.find((c) => c.check === 'judge:transfer')).toBeUndefined();
+    expect(noTransfer.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', detail: expect.stringContaining('no handoff') });
+    expect(scenarioStatus({ checks: noTransfer })).toBe('fail');
+    expect(pinned.find((c) => c.check === 'judge:empathy')).toMatchObject({ status: 'fail', severity: 'quality' });
+    expect(scenarioStatus({ checks: pinned })).toBe('fail');
+    const ordinaryVerdict = { ...verdict, forbidden_claims: [] };
+    const ordinary = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict: ordinaryVerdict });
+    expect(scenarioStatus({ checks: ordinary })).toBe('pass');
+    const adjudicated = judgeChecks({ ...scenario, judge: { severity: 'major', adjudicated: true } }, { ok: true, judge_fallback: false, verdict: ordinaryVerdict });
+    expect(scenarioStatus({ checks: adjudicated })).toBe('fail');
+
+    expect(judgeChecks(scenario, { ok: false, reason: 'no_key' })).toEqual([expect.objectContaining({ check: 'judge:verdict', status: 'skip' })]);
+    expect(judgeChecks(scenario, null)).toEqual([]);
+  });
+
+  test.each(judge.FORBIDDEN_CLAIM_CATEGORIES)('%s from the pinned judge fails the aggregate run, even with an unadjudicated quality setting', (category) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = { spec: {}, judge: { severity: 'quality', adjudicated: false } };
+    const verdict = { pass: false, forbidden_claims: [{ category, quote: 'synthetic forbidden claim' }], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 };
+    for (const fallback of [false, true]) {
+      const judged = { ok: true, judge_fallback: fallback, verdict };
+      const checks = judgeChecks(scenario, judged);
+      const status = scenarioStatus({ checks });
+      const summary = replay._internals.summarize([{ id: category, status, checks, judge: judged }], { judge: true });
+      expect(checks.find((c) => c.check === `judge:forbidden_claim:${category}`)).toMatchObject({ severity: 'critical', status: fallback ? 'advisory' : 'fail' });
+      expect(summary.failed).toBe(fallback ? 0 : 1);
+      expect(summary.criticalMisses).toBe(fallback ? 0 : 1);
+      expect(replay.isFailedVoiceRun({ summary })).toBe(!fallback);
+    }
+  });
+});
+
 describe('voice relay eval — the harness', () => {
   // The SDK double: a Messages CLASS so the harness can patch the shared
   // prototype the way it does against the real SDK.
@@ -1083,6 +1283,51 @@ describe('voice relay eval — the harness', () => {
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
+  test('the judge receives complete tool evidence while the record keeps the clipped display line', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const late = `${'Standard pest control pricing follows. '.repeat(20)}Quarterly is $129 per application.`; // the price sits past 600 characters
+    expect(late.length).toBeGreaterThan(700);
+    script.push(toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }), say('Quarterly is $129 per application.'));
+    const judgeFn = jest.fn(async ({ transcript }) => {
+      expect(transcript).toMatch(/\[tool\] get_pricing\(.*\) → Standard pest control pricing follows\. [\s\S]*Quarterly is \$129 per application\./);
+      expect(transcript).not.toContain('…');
+      return { ok: true, judge_fallback: false, judge_model: 'm', judge_prompt_sha: 'x', verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'none', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 } };
+    });
+    const s = scenario({ id: 'harness-evidence', allowedTools: ['get_pricing', 'capture_lead'], fixtures: { officeHours: 'unknown', toolResponses: { get_pricing: [{ when: { service: 'pest_control' }, text: late }] } }, turns: [{ caller: 'How much is quarterly for two thousand square feet?' }], expect: [] });
+    const result = await replay.runScenario(s, { judge: true, judgeFn });
+    expect(result.error).toBeUndefined();
+    expect(judgeFn).toHaveBeenCalledTimes(1);
+    expect(result.transcript).toMatch(/→ Standard pest control pricing follows\.[\s\S]*…$/m);
+    expect(result.transcript).not.toContain('Quarterly is $129 per application.\n');
+  });
+
+  test('a dedupe answer marked reservice: "existing" backs the directed follow-up it tells Sandy to promise, without a receipt or an effect', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === 'reservice-duplicate');
+    // Since 3a round 17 the ticket on file is evidence, not a write receipt.
+    expect(fixture.fixtures.toolResponses.request_reservice[0]).toMatchObject({ reservice: 'existing' });
+    expect(fixture.fixtures.toolResponses.request_reservice[0].receipt).toBeUndefined();
+    // The live duplicate branch: verified open ticket, nothing filed, "a team member will follow up".
+    script.push(toolUse('request_reservice', { lane: 'pest', issue: 'ants back in the kitchen' }), say('Yes — that request is already in with the office, and a Waves team member will follow up.'));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls[0]).toMatchObject({ name: 'request_reservice', ok: true, receipt: false, existing: true });
+    expect(result.checks.find((c) => c.check === 'commitment_requires_receipt')).toMatchObject({ status: 'pass', detail: expect.stringContaining('already on file') });
+    expect(result.status).toBe('pass');
+    // The effect latches were never touched: no capture, no re-service mark, so the session is still open after the goodbye.
+    expect(result.endSession).toBeNull();
+    // There is no bare receipt marker on any tool: a write the live tool never latched cannot back a promise.
+    for (const [name, id] of [['get_call_history', 'receipt-on-read'], ['capture_lead', 'receipt-on-write']]) {
+      const bad = { schemaVersion: 'voice-relay-scenarios.v1', scenarios: [{ ...fixture, id, fixtures: { ...fixture.fixtures, toolResponses: { ...fixture.fixtures.toolResponses, [name]: { text: 'x', receipt: true } } } }] };
+      expect(replay.lintFixture(bad).join('\n')).toMatch(new RegExp(`${id}: toolResponses.${name}: .*receipt" is not allowed`));
+    }
+    expect(replay._internals.applyToolSideEffects({ text: 'saved', receipt: true }, { input: {}, ctx: {}, scenario: fixture })).toMatchObject({ receipt: false });
+  });
+
   test('runs the live loop against fixture tools: capture latch ends the session, end() never runs, the db is never touched, gates are restored', async () => {
     process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true'; // must be restored after the run
     // One fresh registry per test (beforeEach resetModules); everything the
@@ -1099,10 +1344,24 @@ describe('voice relay eval — the harness', () => {
       toolUse('capture_lead', { first_name: 'Sam', last_name: 'Okafor', call_summary: 'ants in kitchen' }),
       say('Thanks, Sam — a Waves team member will follow up as soon as possible.'),
     );
+    const judgeFn = jest.fn(async ({ transcript, toolsAvailable, callerBlock, standingInstructions }) => {
+      expect(require('../services/agent-control/context').current()).toMatchObject({ workload: 'replay', laneId: 'voice_relay_judge' });
+      expect(transcript).not.toContain('[clock]');
+      expect(callerBlock).toBeNull();
+      // The frozen system prompt Sandy ran under reaches the judge as grounding, off the record's JSON.
+      expect(standingInstructions).toMatch(/phone assistant for Waves Pest Control/);
+      expect(transcript).toMatch(/^Caller: Hi, ants/);
+      expect(transcript).toMatch(/\[tool\] capture_lead\(.*"first_name":"Sam"/);
+      expect(transcript).toMatch(/Agent: Thanks, Sam/);
+      expect(toolsAvailable).toContain('capture_lead');
+      return { ok: true, judge_fallback: false, judge_model: 'm', judge_prompt_sha: 'x', verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'capture_lead', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 } };
+    });
 
-    const result = await replay.runScenario(scenario());
+    const result = await replay.runScenario(scenario(), { judge: true, judgeFn });
 
     expect(result.error).toBeUndefined();
+    expect(result.standingInstructions).toMatch(/phone assistant for Waves Pest Control/);
+    expect(JSON.stringify(result)).not.toContain('phone assistant for Waves Pest Control');
     expect(result.checks.filter((c) => c.status === 'fail')).toEqual([]);
     expect(result.status).toBe('pass');
     expect(result.modelRounds).toBe(2);
@@ -1112,7 +1371,8 @@ describe('voice relay eval — the harness', () => {
     // The second caller turn arrived after the agent ended the session: heard by nobody.
     expect(result.events.filter((e) => e.kind === 'caller')[1].ignored).toBe(true);
     expect(result.checks.filter((c) => c.status === 'fail')).toEqual([]);
-
+    expect(result.checks.find((c) => c.check === 'judge:action').status).toBe('pass');
+    expect(judgeFn).toHaveBeenCalledTimes(1);
     expect(endSpy).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
     expect(db.raw).not.toHaveBeenCalled();
@@ -1165,7 +1425,7 @@ describe('voice relay eval — the harness', () => {
     expect(result.error).toBeUndefined();
     expect(result.checks.filter((c) => c.status === 'fail')).toEqual([]);
     expect(result.status).toBe('pass');
-    expect(result).not.toHaveProperty('judge');
+    expect(result.judge).toBeNull();
     expect(result.toolsAvailable).toContain('get_today_eta');
     expect(result.toolCalls[0].text).toBe('Arrival window 1:00 PM to 3:00 PM Eastern.');
     expect(process.env.VOICE_RELAY_CONTEXT_ENABLED).toBeUndefined();
@@ -1640,7 +1900,7 @@ describe('voice relay eval — the harness', () => {
   test.each([
     ['read-tool-timeout', 'get_account_overview', {}, 3000, false],
     ['write-tool-timeout', 'capture_lead', { call_summary: 'Synthetic callback request' }, 8000, true],
-  ])('%s records the exact bounded results given to Sandy', async (id, name, input, timeoutMs, retry) => {
+  ])('%s records the exact bounded results given to Sandy and the judge', async (id, name, input, timeoutMs, retry) => {
     jest.useFakeTimers();
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
@@ -1654,8 +1914,8 @@ describe('voice relay eval — the harness', () => {
       modelResults = params.messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).filter((b) => b.type === 'tool_result').map((b) => b.content);
       return say('I do not have confirmation yet; a Waves team member will follow up to confirm.');
     });
-
-    const pending = replay.runScenario({ ...fixture, turns: [{ caller: 'Please check that request.' }] });
+    const judgeFn = jest.fn(async () => ({ ok: true, judge_fallback: false, verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 } }));
+    const pending = replay.runScenario({ ...fixture, turns: [{ caller: 'Please check that request.' }] }, { judge: true, judgeFn });
     await jest.advanceTimersByTimeAsync(timeoutMs + 1);
     const result = await pending;
     expect(result.error).toBeUndefined();
@@ -1673,7 +1933,7 @@ describe('voice relay eval — the harness', () => {
     expect(result.toolCalls.map((t) => t.text)).toEqual(modelResults);
     for (const tool of hung) {
       expect(tool).toMatchObject({ name, ok: false, receipt: false });
-      expect(result.transcript).toContain(tool.text);
+      expect(judgeFn.mock.calls[0][0].transcript).toContain(tool.text);
     }
     expect(modelResults[0]).toMatch(retry ? /do not have confirmation either way/ : /Could not look that up/);
     if (retry) expect(modelResults[1]).toMatch(/was NOT started again/);
@@ -1789,7 +2049,7 @@ describe('voice relay eval — the harness', () => {
     ['2026-10-05T07:50:00Z', { startMin: 480, endMin: 1020 }, 'The office opens today at 8:00 AM Eastern'],
     ['2026-10-05T22:00:00Z', { startMin: 480, endMin: 1020 }, 'The office opens again tomorrow at 8:00 AM Eastern'],
     ['2026-10-05T07:50:00Z', { startMin: 480, endMin: 1020, closedToday: true }, 'Today is a scheduled day off'],
-  ])('the transcript preserves the exact clock block supplied to Sandy at %s', async (now, officeHours, expected) => {
+  ])('the judge receives the exact clock block supplied to Sandy at %s', async (now, officeHours, expected) => {
     jest.useFakeTimers().setSystemTime(new Date(now));
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
@@ -1798,19 +2058,24 @@ describe('voice relay eval — the harness', () => {
       suppliedClock = params.messages.flatMap((m) => Array.isArray(m.content) ? m.content : []).find((b) => b.type === 'text' && b.text.includes('<<<CLOCK DATA')).text;
       return say('You can check the portal.');
     });
-
-    const result = await replay.runScenario(scenario({ gates: { context: true }, fixtures: { officeHours, toolResponses: {} }, turns: [{ caller: 'Is the office open?' }], expect: [] }));
+    const judgeFn = jest.fn(async (input) => {
+      // The judge may run much later; it must retain the earlier clock facts.
+      jest.setSystemTime(new Date('2026-10-06T20:00:00Z'));
+      expect(input).not.toHaveProperty('officeHours');
+      expect(input.transcript).toContain(`[clock] ${suppliedClock}`);
+      return { ok: false, reason: 'judge deliberately skipped' };
+    });
+    const result = await replay.runScenario(scenario({ gates: { context: true }, fixtures: { officeHours, toolResponses: {} }, turns: [{ caller: 'Is the office open?' }], expect: [] }), { judge: true, judgeFn });
     expect(result.error).toBeUndefined();
     expect(suppliedClock).toContain(expected);
     const clock = result.events.find((e) => e.kind === 'clock');
     expect(clock.text).toBe(suppliedClock);
-    expect(result.transcript).toContain(`[clock] ${suppliedClock}`);
     expect(clock.index).toBeLessThan(result.events.find((e) => e.kind === 'agent').index);
-
+    expect(judgeFn).toHaveBeenCalledTimes(1);
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
-  test('the transcript preserves the earlier call segment without grading it as new speech', async () => {
+  test('the judge sees the earlier call segment given to Sandy without grading it as new speech', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
     const segmentsText = 'Caller: My name is Rowan. I need quarterly pest control.\nAgent: Let me check.\n[tool] get_pricing → Quarterly pest control is $129 per application.\nAgent: Quarterly pest control is $129 per application.';
@@ -1819,20 +2084,24 @@ describe('voice relay eval — the harness', () => {
       suppliedResume = params.messages.find((m) => typeof m.content === 'string' && m.content.startsWith('[Earlier in this call')).content;
       return say('Yes, Rowan, we were discussing quarterly pest control at $129 per application.');
     });
-
+    const judgeFn = jest.fn(async ({ transcript }) => {
+      expect(transcript).toContain(`[earlier call segment]\n${segmentsText}\n[end earlier call segment]`);
+      expect(transcript.indexOf('[earlier call segment]')).toBeLessThan(transcript.indexOf('Caller: The line dropped'));
+      return { ok: true, judge_fallback: false, verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 } };
+    });
     const result = await replay.runScenario(scenario({
       gates: { context: false, recovery: true },
       fixtures: { officeHours: 'unknown', resume: { reconnects: 1, segmentsText }, toolResponses: {} },
       turns: [{ caller: 'The line dropped. Can we continue?' }], expect: [],
-    }));
+    }), { judge: true, judgeFn });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe('pass');
     expect(suppliedResume).toContain(segmentsText);
-    expect(result.transcript).toContain(`[earlier call segment]\n${segmentsText}\n[end earlier call segment]`);
     expect(result.events[0]).toMatchObject({ kind: 'resume', text: segmentsText, turn: 0 });
     expect(result.spoken).not.toContain('Let me check.');
     expect(result.toolCalls).toEqual([]);
-
+    expect(judgeFn).toHaveBeenCalledTimes(1);
+    expect(require('../services/eval/voice-relay-judge').buildJudgePrompt().system).toContain('Grade only new agent utterances outside that segment');
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
@@ -1899,6 +2168,49 @@ describe('voice relay eval — the harness', () => {
     // With fault injection requested and no model at all, the missing model is the finding — not an unused failure.
     const injected = await replay.runScenario(scenario({ id: 'harness-no-client-injected', fixtures: { officeHours: 'unknown', modelFailures: 2, toolResponses: {} }, turns: [{ caller: 'hi' }] }));
     expect(injected.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE' });
+  });
+
+  test('a judge that grades nothing makes the run inconclusive; a judge that misses some scenarios makes it unverified', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const fs = require('fs');
+    const os = require('os');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-eval-judge-'));
+    const fixturePath = path.join(dir, 'two.json');
+    fs.writeFileSync(fixturePath, JSON.stringify({ schemaVersion: replay.SCHEMA_VERSION, scenarios: [scenario({ id: 'one', turns: [{ caller: 'hi' }], expect: [] }), scenario({ id: 'two', turns: [{ caller: 'hi' }], expect: [] })] }));
+    script.push(say('Hello.'), say('Hello.'));
+    await expect(replay.runVoiceRelayReplay({ fixturePath, judge: true, judgeFn: async () => ({ ok: false, reason: 'all_providers_failed' }) })).rejects.toThrow(/judge graded no scenario — all_providers_failed/);
+    script.push(say('Hello.'), say('Hello.'));
+    let n = 0;
+    const verdict = { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'x', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 };
+    const run = await replay.runVoiceRelayReplay({ fixturePath, judge: true, judgeFn: async () => (n++ === 0 ? { ok: true, judge_fallback: false, verdict } : { ok: false, reason: 'unparseable_verdict' }) });
+    expect(run.summary).toMatchObject({ judged: 1, judgeErrors: 1, failed: 0 });
+    expect(run.failed).toBe(true);
+    expect(replay.isFailedVoiceRun(run)).toBe(true);
+  });
+
+  test('verdicts run in a bounded pool after the conversations, in order, and mapPool preserves order', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const { mapPool } = replay._internals;
+    let active = 0; let peak = 0;
+    const out = await mapPool([1, 2, 3, 4, 5, 6], 2, async (n) => { active += 1; peak = Math.max(peak, active); await new Promise((r) => setTimeout(r, 5)); active -= 1; return n * 10; });
+    expect(out).toEqual([10, 20, 30, 40, 50, 60]);
+    expect(peak).toBe(2);
+    const fs = require('fs');
+    const os = require('os');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-eval-pool-'));
+    const fixturePath = path.join(dir, 'three.json');
+    fs.writeFileSync(fixturePath, JSON.stringify({ schemaVersion: replay.SCHEMA_VERSION, scenarios: ['one', 'two', 'three'].map((id) => scenario({ id, turns: [{ caller: 'hi' }], expect: [] })) }));
+    script.push(say('Hello.'), say('Hello.'), say('Hello.'));
+    const seen = [];
+    const verdict = { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'x', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 };
+    const run = await replay.runVoiceRelayReplay({ fixturePath, judge: true, judgeFn: async ({ transcript }) => { seen.push(transcript); return { ok: true, judge_fallback: false, judge_model: 'm', verdict }; } });
+    expect(seen).toHaveLength(3); // every conversation finished before any verdict ran
+    expect(run.results.map((r) => r.id)).toEqual(['one', 'two', 'three']);
+    expect(run.summary).toMatchObject({ judged: 3, passed: 3 });
   });
 
   test('runVoiceRelayReplay lints the fixture first and is inconclusive when no scenario completes a model round', async () => {
