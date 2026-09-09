@@ -166,7 +166,7 @@ fi
 # Notification permission can be granted even when the signed app is missing
 # aps-environment. Configure every App target build configuration so a fresh
 # native project cannot silently depend on a manual Push Notifications step.
-python3 "$ROOT/scripts/mobile/ios_push.py" configure "$ROOT/client/ios/App"
+python3 "$ROOT/scripts/mobile/ios_push.py" configure "$ROOT/client/ios/App" --badge
 
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"

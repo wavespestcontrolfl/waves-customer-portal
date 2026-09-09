@@ -1159,6 +1159,11 @@ function mapCustomerListRow(c) {
     healthScore: c.health_score != null ? parseInt(c.health_score) : null,
     healthGrade: c.health_grade || null,
     cardsOnFile: parseInt(c.cards_on_file || 0),
+    // Active saved properties. Callers that don't select property_count
+    // (quick-add echoes, detail mappers) read 0 — never a guess of 1: a row
+    // may legitimately have no customer_properties row yet (pre-06-29
+    // customers whose sole-property anchor has not been written).
+    propertyCount: parseInt(c.property_count || 0),
   };
 }
 
@@ -2345,6 +2350,13 @@ router.get('/', async (req, res, next) => {
       db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
       db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
+      // ACTIVE saved properties (customer_properties) — the same rows the New
+      // Appointment service-address picker offers. The search dropdowns
+      // render a "N properties" chip from it so the office sees a
+      // multi-property customer BEFORE picking them, instead of discovering
+      // the second house only after the primary was booked (owner report
+      // 2026-09-08). Retired rows (active=false) are not counted.
+      db.raw("(SELECT COUNT(*) FROM customer_properties WHERE customer_properties.customer_id = customers.id AND customer_properties.active = TRUE) as property_count"),
       // Net of all paid payments minus refunds — the same definition the
       // customer-detail endpoint computes. customers.lifetime_revenue has NO
       // production writer (only demo seeds ever set it), so reading the
