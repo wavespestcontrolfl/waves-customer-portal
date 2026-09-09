@@ -1,0 +1,113 @@
+/** Resume confirmed visit delivery from its immutable comparison and step stamps. */
+const db = require('../models/db');
+const logger = require('./logger');
+const runs = require('./lawn-visit-runs');
+
+const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
+const stepIncomplete = (step) => Object.assign(new Error(`Lawn delivery step incomplete: ${step}`), { code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
+
+async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
+  const knex = deps.knex || db;
+  const LawnIntel = deps.LawnIntel || require('./lawn-intelligence');
+  const KnowledgeBridge = deps.KnowledgeBridge || require('./knowledge-bridge');
+  const staleAfterMs = deps.staleAfterMs ?? runs.PIPELINE_STALE_MS;
+  const heartbeatMs = deps.heartbeatMs ?? 30000;
+  if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs >= staleAfterMs) throw new TypeError('Delivery heartbeat must be shorter than its lease');
+  const claim = await runs.claimPipeline(assessmentId, knex, { staleAfterMs });
+  if (!claim) return { skipped: 'not_claimed', done: [], gaps: [] };
+  const owner = claim.pipeline_owner_token;
+  let lost = false;
+  let renewing = null;
+  const renew = () => runs.renewPipeline(assessmentId, owner, knex, { staleAfterMs });
+  const timer = setInterval(() => {
+    if (renewing || lost) return;
+    renewing = renew().then((ok) => { if (!ok) lost = true; })
+      .catch(() => { lost = true; }).finally(() => { renewing = null; });
+  }, heartbeatMs);
+  timer.unref?.();
+  const guard = async () => { if (lost || !(await renew())) throw ownershipLost(); };
+  const done = [];
+  try {
+    await guard();
+    // Weather may legitimately be unavailable. It is an idempotent enrichment,
+    // while the steps below require their own durable proof before proceeding.
+    await LawnIntel.attachWeather(assessmentId);
+    const actions = [
+      ['calibration', async (state) => {
+        const { aiScores, finalScores, technicianId } = state.calibration;
+        await LawnIntel.recordTechCalibration(assessmentId, aiScores, finalScores, { knex, strict: true, technicianId });
+      }],
+      ['recommendations', () => KnowledgeBridge.generateAssessmentRecommendations(assessmentId)],
+      ['health', async (state) => {
+        const result = await LawnIntel.emitHealthSignal(state.assessment.customer_id, { knex, strict: true });
+        if (!result) throw stepIncomplete('health');
+        if (!(await runs.markPipelineHealthComplete(assessmentId, owner, knex, { staleAfterMs }))) throw ownershipLost();
+      }],
+      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId)],
+      ['report', () => LawnIntel.generateServiceReport(assessmentId)],
+    ];
+    for (const [step, action] of actions) {
+      const state = await runs.deliveryState(assessmentId, knex);
+      if (!state.gaps.includes(step)) continue;
+      await guard();
+      await action(state);
+      if ((await runs.deliveryState(assessmentId, knex)).gaps.includes(step)) throw stepIncomplete(step);
+      done.push(step);
+    }
+    await guard();
+    const { assessment } = await runs.deliveryState(assessmentId, knex);
+    const tracked = await LawnIntel.trackAssessmentCompletion(assessment.service_date);
+    if (tracked?.error) throw stepIncomplete('tracking');
+    const completed = await runs.completePipeline(assessmentId, owner, knex, { staleAfterMs });
+    if (!completed.owned) throw ownershipLost();
+    if (completed.gaps.length) throw stepIncomplete('completion');
+    return { done, gaps: [] };
+  } finally {
+    clearInterval(timer);
+    if (renewing) await renewing;
+  }
+}
+
+async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = runs.PIPELINE_STALE_MS, deliver = deliverConfirmedAssessment } = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Delivery recovery limit must be from 1 to 100');
+  let candidates;
+  try {
+    candidates = await knex('lawn_assessment_runs as run')
+      .join('lawn_assessments as assessment', 'assessment.id', 'run.assessment_id')
+      .where('assessment.confirmed_by_tech', true).whereNull('run.pipeline_completed_at')
+      .whereRaw("assessment.confirmed_at < clock_timestamp() - interval '2 minutes'")
+      .where((q) => q.whereNull('run.pipeline_claimed_at')
+        .orWhereRaw("run.pipeline_claimed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]))
+      .orderBy('assessment.confirmed_at', 'asc').limit(limit).select('run.assessment_id');
+  } catch (err) {
+    if (err?.code === '42P01' || err?.code === '42703') return { candidates: 0, resumed: 0, failed: 0, skipped: 'schema_unavailable' };
+    throw err;
+  }
+  let resumed = 0;
+  let failed = 0;
+  for (const { assessment_id: assessmentId } of candidates) {
+    try {
+      const result = await deliver({ assessmentId }, { knex, staleAfterMs });
+      if (!result.skipped) resumed += 1;
+    } catch (err) {
+      failed += 1;
+      logger.error('[lawn-visit-delivery] recovery failed', { assessmentId, code: err?.code || 'DELIVERY_FAILED' });
+    }
+  }
+  return { candidates: candidates.length, resumed, failed };
+}
+
+// Request recovery follows persisted runs, including after the feature is
+// turned off. Its registration is independent of the cron master gate.
+function scheduleRecovery(cron, { sweep = sweepAbandonedDeliveries } = {}) {
+  return cron.schedule('*/10 * * * *', async () => {
+    try {
+      const result = await sweep();
+      if (result.candidates) logger.info('[lawn-visit-delivery] recovery sweep', result);
+    } catch (err) {
+      logger.error('[lawn-visit-delivery] recovery sweep failed', { code: err?.code || 'DELIVERY_FAILED' });
+    }
+  }, { timezone: 'America/New_York' });
+}
+
+module.exports = { deliverConfirmedAssessment, sweepAbandonedDeliveries, scheduleRecovery };

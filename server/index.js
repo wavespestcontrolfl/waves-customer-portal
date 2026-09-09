@@ -1355,6 +1355,13 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
       }
     }
 
+    // Finish request-path lawn delivery after a process exit, even with the
+    // visit gate or cron master off. Persisted runs and renewable ownership
+    // select the work; the service verifies each step's own completion state.
+    if (config.nodeEnv !== 'test') {
+      require('./services/lawn-visit-delivery').scheduleRecovery(require('./utils/scheduled-cron'));
+    }
+
     // Weekly: recompute all assessment analytics (product efficacy, protocol
     // performance, benchmarks, contradictions). Sunday 4 AM ET via node-cron —
     // the old setInterval(7 days) reset on every boot, and Railway redeploys

@@ -236,17 +236,18 @@ const LawnIntelligence = {
   },
 
   // ── 10. Lawn health → customer health bridge ────────────────
-  async emitHealthSignal(customerId) {
+  async emitHealthSignal(customerId, { knex = db, strict = false } = {}) {
+    let result = null;
     try {
       const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
       const assessments = propertyHistoryEnabled
-        ? (await require('./lawn-assessment-history').latestForCustomer(customerId, { limit: 4 }, db)).reverse()
-        : await db('lawn_assessments')
+        ? (await require('./lawn-assessment-history').latestForCustomer(customerId, { limit: 4 }, knex)).reverse()
+        : await knex('lawn_assessments')
         .where({ customer_id: customerId, confirmed_by_tech: true })
         .orderBy('service_date', 'desc')
         .limit(4);
 
-      if (assessments.length < 2) return null;
+      if (assessments.length < 2) return strict ? { skipped: 'insufficient_history' } : null;
 
       const calcOverall = (a) => a.overall_score || Math.round(
         (a.turf_density + a.weed_suppression + a.fungus_control + (a.color_health || 0) + (a.thatch_level || 0)) / 5
@@ -258,50 +259,50 @@ const LawnIntelligence = {
       const declining = trend.every((s, i) => i === 0 || s <= trend[i - 1]) && (trend[0] - trend[trend.length - 1]) > 5;
       const improving = trend.every((s, i) => i === 0 || s >= trend[i - 1]) && (trend[0] - trend[trend.length - 1]) > 10;
 
-      // Emit signals to customer_signals if table exists
-      try {
-        if (declining) {
-          const existing = await db('customer_signals')
-            .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
-            .first();
-          if (!existing) {
-            await db('customer_signals').insert({
-              customer_id: customerId,
-              signal_type: 'LAWN_SCORE_DECLINING',
-              signal_value: JSON.stringify({ scores: trend, delta: trend[0] - trend[trend.length - 1] }),
-              severity: trend[0] - trend[trend.length - 1] > 15 ? 'warning' : 'info',
-              detected_at: new Date(),
-            });
-          }
-        }
+      result = { declining, improving, latest, trend };
 
-        if (improving && latest >= 75) {
-          const existing = await db('customer_signals')
-            .where({ customer_id: customerId, signal_type: 'LAWN_TRANSFORMATION', resolved: false })
-            .first();
-          if (!existing) {
-            await db('customer_signals').insert({
-              customer_id: customerId,
-              signal_type: 'LAWN_TRANSFORMATION',
-              signal_value: JSON.stringify({ scores: trend, latest }),
-              severity: 'info',
-              detected_at: new Date(),
-            });
-          }
+      // Legacy callers retain the computed trend when signal persistence fails.
+      if (declining) {
+        const existing = await knex('customer_signals')
+          .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
+          .first();
+        if (!existing) {
+          await knex('customer_signals').insert({
+            customer_id: customerId,
+            signal_type: 'LAWN_SCORE_DECLINING',
+            signal_value: JSON.stringify({ scores: trend, delta: trend[0] - trend[trend.length - 1] }),
+            severity: trend[0] - trend[trend.length - 1] > 15 ? 'warning' : 'info',
+            detected_at: new Date(),
+          });
         }
+      }
 
-        // Resolve stale signals
-        if (!declining) {
-          await db('customer_signals')
-            .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
-            .update({ resolved: true, resolved_at: new Date() });
+      if (improving && latest >= 75) {
+        const existing = await knex('customer_signals')
+          .where({ customer_id: customerId, signal_type: 'LAWN_TRANSFORMATION', resolved: false })
+          .first();
+        if (!existing) {
+          await knex('customer_signals').insert({
+            customer_id: customerId,
+            signal_type: 'LAWN_TRANSFORMATION',
+            signal_value: JSON.stringify({ scores: trend, latest }),
+            severity: 'info',
+            detected_at: new Date(),
+          });
         }
-      } catch { /* customer_signals table may not exist */ }
+      }
 
-      return { declining, improving, latest, trend };
+      // Resolve stale signals
+      if (!declining) {
+        await knex('customer_signals')
+          .where({ customer_id: customerId, signal_type: 'LAWN_SCORE_DECLINING', resolved: false })
+          .update({ resolved: true, resolved_at: new Date() });
+      }
+      return result;
     } catch (err) {
+      if (strict) throw err;
       logger.error(`[lawn-intel] emitHealthSignal failed: ${err.message}`);
-      return null;
+      return result;
     }
   },
 
@@ -317,10 +318,11 @@ const LawnIntelligence = {
   },
 
   // ── 12. Tech calibration scoring ────────────────────────────
-  async recordTechCalibration(assessmentId, aiScores, techScores) {
+  async recordTechCalibration(assessmentId, aiScores, techScores, { knex = db, strict = false, technicianId } = {}) {
     try {
-      const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
-      if (!assessment || !assessment.technician_id) return null;
+      const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first();
+      const techId = technicianId || assessment?.technician_id;
+      if (!assessment || !techId) return strict ? { skipped: 'no_technician' } : null;
 
       // stress_damage is the consolidated score the tech actually corrects on the
       // completion screen now (fungus/thatch are AI-only and unchanged), so it must
@@ -328,32 +330,26 @@ const LawnIntelligence = {
       // reads as zero delta.
       const fields = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
       const deltas = [];
-      const row = { assessment_id: assessmentId, technician_id: assessment.technician_id };
+      const row = { assessment_id: assessmentId, technician_id: techId };
+      let higher = 0, lower = 0;
 
       for (const f of fields) {
-        const aiKey = f;
-        row[`ai_${f}`] = aiScores[aiKey] ?? null;
-        row[`tech_${f}`] = techScores[aiKey] ?? null;
-        if (aiScores[aiKey] != null && techScores[aiKey] != null) {
-          deltas.push(Math.abs(aiScores[aiKey] - techScores[aiKey]));
-        }
+        row[`ai_${f}`] = aiScores[f] ?? null;
+        row[`tech_${f}`] = techScores[f] ?? null;
+        if (aiScores[f] == null || techScores[f] == null) continue;
+        const delta = techScores[f] - aiScores[f];
+        deltas.push(Math.abs(delta));
+        higher += Number(delta > 0);
+        lower += Number(delta < 0);
       }
 
       row.avg_delta = deltas.length ? Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length * 10) / 10 : 0;
-
-      // Determine bias direction
-      let higher = 0, lower = 0;
-      for (const f of fields) {
-        if (techScores[f] != null && aiScores[f] != null) {
-          if (techScores[f] > aiScores[f]) higher++;
-          else if (techScores[f] < aiScores[f]) lower++;
-        }
-      }
       row.bias_direction = higher > lower ? 'higher' : lower > higher ? 'lower' : 'mixed';
 
-      await db('tech_calibration').insert(row);
+      await knex('tech_calibration').insert(row);
       return row;
     } catch (err) {
+      if (strict) throw err;
       logger.error(`[lawn-intel] recordTechCalibration failed: ${err.message}`);
       return null;
     }

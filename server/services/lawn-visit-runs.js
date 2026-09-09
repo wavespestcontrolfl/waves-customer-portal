@@ -318,6 +318,54 @@ async function releasePipeline(assessmentId, ownerToken, knex, { staleAfterMs = 
   return rows.length === 1;
 }
 
+function calibrationForRun(assessment, run) {
+  const snapshot = parseObject(run?.reconciliation)?.confirmation;
+  const technicianId = snapshot?.technician_id || assessment?.technician_id;
+  if (snapshot?.calibration_eligible !== true || !technicianId) return null;
+  return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
+}
+
+function completedRecommendations(value) {
+  const parsed = parseObject(value);
+  return !!parsed && ((typeof parsed.summary === 'string' && parsed.summary.trim().length > 0)
+    || (Array.isArray(parsed.recommendations) && parsed.recommendations.length > 0));
+}
+
+// Customer steps retain their canonical stamps. Only health needs a new
+// success stamp; calibration is proven by its persisted comparison row.
+async function deliveryState(assessmentId, knex) {
+  const assessment = await knex('lawn_assessments').where({ id: assessmentId }).first();
+  const run = await loadRun(assessmentId, knex);
+  if (!assessment?.confirmed_by_tech || !run) return { assessment, run, gaps: ['assessment'], calibration: null };
+  const calibration = calibrationForRun(assessment, run);
+  const gaps = [];
+  if (calibration && !(await knex('tech_calibration').where({ assessment_id: assessmentId }).first('id'))) gaps.push('calibration');
+  if (!completedRecommendations(assessment.recommendations)) gaps.push('recommendations');
+  if (!run.pipeline_health_completed_at) gaps.push('health');
+  if (!assessment.service_id && !assessment.notification_sent) gaps.push('notification');
+  if (!(assessment.report_auto_generated === true || assessment.report_id)) gaps.push('report');
+  return { assessment, run, gaps, calibration };
+}
+
+async function markPipelineHealthComplete(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_health_completed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
+async function completePipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  return knex.transaction(async (trx) => {
+    await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first('id');
+    const owned = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs).forUpdate().first('id');
+    if (!owned) return { owned: false, gaps: [] };
+    const { gaps } = await deliveryState(assessmentId, trx);
+    if (gaps.length) return { owned: true, gaps };
+    const rows = await ownedPipelineQuery(assessmentId, ownerToken, trx, staleAfterMs)
+      .update({ pipeline_completed_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') }).returning('id');
+    return { owned: rows.length === 1, gaps };
+  });
+}
+
 // Eligibility to compare a reconstructed prompt with the original input
 // hash, not proof that the photos or current rubric still match that hash.
 function replayContextForRun(run) {
@@ -335,4 +383,5 @@ function replayContextForRun(run) {
 module.exports = {
   billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun,
   reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline,
+  calibrationForRun, deliveryState, markPipelineHealthComplete, completePipeline,
 };
