@@ -30,6 +30,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const express = require('express');
 const db = require('../models/db');
+db.raw = jest.fn((sql) => ({ sql }));
 const AccountMembershipEmail = require('../services/account-membership-email');
 const requestsRouter = require('../routes/admin-requests');
 
@@ -96,6 +97,32 @@ describe('admin requests routes', () => {
       expect(res.status).toBe(200);
       expect(body.requests).toEqual([{ id: 'req-1', status: 'new', subject: 'Ants in kitchen' }]);
       expect(body.total).toBe(1);
+    });
+  });
+
+  test('surfaces the saved property a portal ticket was filed under and keeps raw metadata internal', async () => {
+    const property = { id: '7', isPrimary: false, label: 'Lake house', address: '12 Shore Ln, Parrish, FL 34219' };
+    setDb({
+      service_requests: [
+        makeChain({ rows: [
+          { id: 'req-1', status: 'new', subject: 'Ants in kitchen', metadata: { propertyId: '7', property } },
+          { id: 'req-2', status: 'new', subject: 'Ants in kitchen', metadata: null },
+          { id: 'req-3', status: 'new', subject: 'Wasps', metadata: JSON.stringify({ property: { id: 8, isPrimary: true, address: '1 Main St' } }) },
+        ] }),
+        makeChain({ first: { count: '3' } }),
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/requests`, { headers: { Authorization: 'Bearer tech' } });
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.requests).toEqual([
+        { id: 'req-1', status: 'new', subject: 'Ants in kitchen', property },
+        { id: 'req-2', status: 'new', subject: 'Ants in kitchen' },
+        { id: 'req-3', status: 'new', subject: 'Wasps', property: { id: '8', isPrimary: true, label: null, address: '1 Main St' } },
+      ]);
+      expect(body.requests.some((r) => 'metadata' in r)).toBe(false);
     });
   });
 
