@@ -141,6 +141,10 @@ function normalizeExtractionV2(extraction) {
     ...extraction,
     caller: normalizeCaller(extraction.caller),
     property: normalizeProperty(extraction.property),
+    ...(extraction.scheduling ? { scheduling: {
+      ...extraction.scheduling,
+      proposed_start_at: cleanText(extraction.scheduling.proposed_start_at),
+    } } : {}),
     ...(extraction.secondary_contact !== undefined
       ? { secondary_contact: normalizeSecondaryContact(extraction.secondary_contact) }
       : {}),

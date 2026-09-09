@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
@@ -45,7 +46,10 @@ function scopeAdminFeedToRole(query, role) {
   );
 }
 
-async function customerPreferenceEnabled(customerId, preferenceKey) {
+// `scheduledServiceId` (app property scope, PR 3): the five appointment keys
+// follow the visit's NON-primary saved property (enforced under
+// GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
+async function customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId = null } = {}) {
   if (!preferenceKey) return true;
   if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
     logger.error(`[notifications] Unknown customer preference key: ${preferenceKey}`);
@@ -53,9 +57,16 @@ async function customerPreferenceEnabled(customerId, preferenceKey) {
   }
 
   try {
-    const prefs = await db('notification_prefs')
+    const PropertyTexts = require('./property-notification-prefs');
+    // Only the five appointment keys are property-owned; the resolver needs
+    // the whole toggle set of the customer row to compare against.
+    const propertyOwned = !!scheduledServiceId && PropertyTexts.APPOINTMENT_TOGGLES.includes(preferenceKey);
+    let prefs = await db('notification_prefs')
       .where({ customer_id: customerId })
-      .first(preferenceKey);
+      .first(...(propertyOwned ? [...new Set([...PropertyTexts.PROPERTY_PREF_COLUMNS, preferenceKey])] : [preferenceKey]));
+    if (propertyOwned) {
+      prefs = await PropertyTexts.prefsForVisit(prefs, customerId, scheduledServiceId, 'bell');
+    }
     return !prefs || prefs[preferenceKey] !== false;
   } catch (err) {
     // Preference lookup uncertainty must not become an unwanted native push.
@@ -286,11 +297,46 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOpts } = opts;
+    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOptsRaw } = opts;
 
-    if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
+    // The visit this notification is about (same sources as the deep-link
+    // qualifier below): its saved property may own the toggle.
+    const preferenceVisitId = createOptsRaw.appointmentId
+      || (createOptsRaw.metadata && typeof createOptsRaw.metadata === 'object'
+        ? (createOptsRaw.metadata.appointmentId || createOptsRaw.metadata.scheduledServiceId) : null)
+      || null;
+    if (!(await customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId: preferenceVisitId }))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
     }
+
+    // Saved-property destination (GATE_APP_PROPERTY_SCOPE, uncapped codex r1t
+    // + r1u P1). The visit this notification is about: createOpts.appointmentId,
+    // or the emitters' metadata.appointmentId / metadata.scheduledServiceId
+    // (the en-route and completed bells). A notification ABOUT A VISIT stores
+    // a profile-qualified link — plus the house when the visit is stamped
+    // (resolved by the push sink's resolver) — so the same reminder opened
+    // from the bell lands where the push does: an unstamped visit belongs to
+    // the profile's PRIMARY, which the app's profile-only rule selects. Gate
+    // off: nothing is qualified or forwarded — today's link and payload,
+    // byte for byte. No visit, no house: untouched.
+    const PushService = require('./push-notifications');
+    const scopeOn = require('./account-properties').appPropertyScopeEnabled();
+    const metadataRaw = createOptsRaw.metadata || {};
+    const visitId = scopeOn
+      ? (createOptsRaw.appointmentId || metadataRaw.appointmentId || metadataRaw.scheduledServiceId || null)
+      : null;
+    // Nothing to resolve for a notification about no visit and no house (a
+    // receipt, a document): no lookup at all.
+    const notifiedPropertyId = scopeOn && (visitId || createOptsRaw.propertyId)
+      ? await PushService.resolveNotificationPropertyId(customerId, { propertyId: createOptsRaw.propertyId, appointmentId: visitId })
+      : null;
+    const createOpts = scopeOn && (visitId || notifiedPropertyId)
+      ? {
+        ...createOptsRaw,
+        ...(visitId ? { appointmentId: visitId } : {}),
+        ...(createOptsRaw.link ? { link: qualifyNotificationLink(createOptsRaw.link, customerId, notifiedPropertyId) } : {}),
+      }
+      : createOptsRaw;
 
     const metadata = {
       ...createOpts.metadata,
@@ -337,7 +383,6 @@ const NotificationService = {
     if (!push || (deduped && !awaitPush)) return { ...notification, deduped, push: null };
     let pushQueued = false;
     try {
-      const PushService = require('./push-notifications');
       const dispatch = PushService.sendToCustomer(customerId, {
         title,
         body: body || '',
@@ -346,6 +391,10 @@ const NotificationService = {
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
         ...(pushOptions.ephemeral ? { ephemeral: true } : {}),
+        // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the visit or
+        // the house this notification is about, for the push sink's link.
+        ...(createOpts.appointmentId ? { appointmentId: createOpts.appointmentId } : {}),
+        ...(createOpts.propertyId ? { propertyId: createOpts.propertyId } : {}),
       }, { ...pushOptions, ...(dedupeKey ? { notificationId: notification.id } : {}) });
       pushQueued = true;
       // Scheduled advisories can record provider acceptance separately from
@@ -359,6 +408,7 @@ const NotificationService = {
           failed: outcome.failed,
           expired: outcome.expired,
           skipped: outcome.skipped,
+          ...(outcome.retryable ? { retryable: outcome.retryable, retryAfterMs: outcome.retryAfterMs } : {}),
           ...(outcome.reason ? { reason: outcome.reason } : {}),
           ...(outcome.deduped ? { deduped: true } : {}),
         } };
@@ -465,19 +515,20 @@ const NotificationService = {
     return q.update({ read_at: new Date() });
   },
 
-  // A voicemail landed for a call the missed-call lane already rang for
-  // (the recording callback can persist after the 2-minute missed-call
-  // claim): the voicemail bell supersedes — retire the missed-call bell so
-  // the owner never holds two contradictory alerts for one call. System
-  // writer (no role scoping): every admin copy of that bell is retired.
-  async supersedeMissedCallAdmin({ callLogId, callSid } = {}) {
+  // Retire superseded call alerts without crossing triggers: voicemail
+  // supersedes a missed call; a booking supersedes a repeat-caller alert.
+  // System writer (no role scoping): every admin copy is retired.
+  async supersedeMissedCallAdmin({ callLogId, callSid, triggerKey = 'customer_missed_call' } = {}) {
     if (!callLogId && callSid) {
       const row = await db('call_log').where('twilio_call_sid', callSid).first('id');
       callLogId = row?.id || null;
     }
     if (!callLogId) return 0;
+    // Both triggers share the category; the caller must name which event
+    // became obsolete so voicemail and booking cannot retire each other's bell.
     return db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
+      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
       .whereNull('read_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
       .update({ read_at: new Date() });

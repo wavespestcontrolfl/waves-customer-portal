@@ -4,31 +4,18 @@
 .c360-workspace { display: grid; grid-template-columns: minmax(0, 1fr); height: 100%; min-height: 0; overflow: hidden; border: 1px solid #e4e4e7; border-radius: 8px; background: #fff; color: #18181b; }
 .c360-workspace-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .c360-workspace-toolbar { display: flex; align-items: center; flex-shrink: 0; gap: 8px; min-height: 53px; padding: 4px 18px; border-bottom: 1px solid #e4e4e7; }
-.c360-workspace .c360-icon-button { padding: 0; width: 40px; min-width: 40px; height: 44px; flex-shrink: 0; }
-.c360-directory-trigger { gap: 7px; padding: 0 4px; height: 44px; font-size: 14px; text-transform: none; letter-spacing: 0; }
 .c360-embedded { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
 .c360-embedded > .c360-panel { container: customer360 / inline-size; position: relative; width: 100%; max-width: none; min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; scroll-padding-top: 65px; }
 .c360-embedded > .c360-panel > * { flex-shrink: 0; }
-.c360-embedded :is(.text-10, .text-11, .text-12, .text-13, .u-label) { font-size: 14px; line-height: 1.55; }
-.c360-embedded :is(input, textarea, select) { min-width: 0; font-size: 16px; }
-.c360-embedded button:not([role="switch"]) { min-height: 40px; }
-.c360-embedded .u-label { letter-spacing: 0; text-transform: none; }
 .c360-workspace-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px 24px; padding: 24px 28px; }
 .c360-workspace-identity { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
 .c360-workspace-name { min-width: 0; flex: 1; }
-.c360-workspace-name h1 { font-size: 29px; line-height: 1.25; font-weight: 500; letter-spacing: -1px; overflow-wrap: anywhere; }
 .c360-workspace-name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .c360-workspace-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; font-size: 14px; color: #71717a; }
-.c360-workspace-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.c360-workspace-actions > :is(a, button) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px; padding: 0 16px; font-size: 14px; text-transform: none; letter-spacing: 0; text-decoration: none; border: 1px solid #d4d4d8; border-radius: 5px; }
 .c360-workspace-actions .c360-more-action { position: relative; }
-.c360-workspace-action-menu { position: absolute; z-index: 30; top: calc(100% + 5px); right: 0; width: 230px; padding: 5px; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; }
-.c360-workspace-action-menu :is(a, button) { display: flex; align-items: center; width: 100%; padding: 10px; min-height: 44px; border: 0; text-align: left; font-size: 14px; color: #27272a; background: #fff; text-decoration: none; }
-.c360-workspace-action-menu :is(a, button):hover { background: #f4f4f5; }
 .c360-workspace-contact { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 24px; color: #52525b; font-size: 14px; line-height: 1.6; }
 .c360-workspace-contact > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .c360-workspace-contact > div > span { overflow-wrap: anywhere; }
-.c360-workspace-contact :is(button, a) { gap: 7px; flex-shrink: 0; }
 .c360-additional-contacts { grid-column: 1 / -1; font-size: 14px; color: #71717a; }
 .c360-additional-contacts summary { cursor: pointer; padding: 4px 0; }
 .c360-additional-contacts > div { display: flex; gap: 8px; flex-wrap: wrap; padding: 6px 0; }
@@ -38,25 +25,15 @@
 /* Already inset by the admin shell; the sticky strip also carries safe-area
    padding so it remains clear in Safari's expanded/standalone viewport. */
 .c360-section-navigation { position: sticky; top: 0; z-index: 20; display: flex; flex-shrink: 0; min-width: 0; padding-top: env(safe-area-inset-top, 0px); border-bottom: 1px solid #e4e4e7; background: #fff; }
-.c360-section-strip { min-width: 0; flex: 1; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
-.c360-section-list { gap: 26px; width: max-content; min-width: 100%; padding: 0 26px; border: 0; }
-.c360-embedded .c360-section-tab { appearance: none; height: 54px; margin: 0; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 16px; text-transform: none; letter-spacing: 0; white-space: nowrap; }
-.c360-section-tab[aria-selected="true"] { border-bottom-color: #27272a; }
-.c360-section-arrow { padding: 0; width: 36px; height: auto; min-height: 50px; flex-shrink: 0; border-radius: 0; }
-.c360-section-arrow:first-child { border-right: 1px solid #e4e4e7; }
-.c360-section-arrow:last-child { border-left: 1px solid #e4e4e7; }
-.c360-section-arrow + .c360-section-strip .c360-section-list { padding-left: 12px; padding-right: 12px; }
 .c360-embedded .c360-tab-content { padding: 26px 28px; flex: 1 0 auto; }
 .c360-embedded .c360-overview-content { display: flex; flex-direction: column; }
 .c360-embedded .c360-overview-billing { padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
-.c360-embedded .c360-overview-billing .grid-cols-2 { grid-template-columns: 1fr; }
-.c360-embedded .c360-overview-billing .flex { flex-wrap: wrap; }
 .c360-embedded .c360-property-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .c360-embedded .c360-billing-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.c360-embedded .c360-tab-content > div > .u-label { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
+.c360-embedded .c360-section-heading { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
 .c360-activity { min-width: 0; }
 .c360-activity-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; }
-.c360-activity-toolbar > select { width: auto; max-width: 64%; height: 38px; padding: 0 5px; border: 0; background: #fff; color: #52525b; font-size: 14px; }
+.c360-activity-filter { width: auto; max-width: 64%; }
 .c360-activity-list { padding: 0 12px; }
 .c360-activity-event { border-bottom: 1px solid #e4e4e7; }
 .c360-activity-event:last-child { border: 0; }
@@ -72,9 +49,9 @@
 /* The Waves sidebar consumes part of tablet widths. Size contract forms by
    their available content width, so Safari's date inputs remain usable. */
 @container customer360 (max-width: 700px) {
-  .c360-contracts-content .grid { grid-template-columns: minmax(0, 1fr); }
-  .c360-contracts-content .grid > * { min-width: 0; grid-column: auto; }
-  .c360-contracts-content > div > .flex:first-child { flex-wrap: wrap; }
+  .c360-contract-grid { grid-template-columns: minmax(0, 1fr); }
+  .c360-contract-grid > * { min-width: 0; grid-column: auto; }
+  .c360-contract-form-header { flex-wrap: wrap; }
 }
 @media (max-width: 1439px) and (min-width: 1280px) {
   .c360-workspace-header { padding-left: 22px; padding-right: 22px; }
@@ -89,22 +66,18 @@
   .c360-workspace-toolbar > span { display: none; }
   .c360-workspace-header { grid-template-columns: minmax(0, 1fr); padding: 22px 17px; gap: 16px; }
   .c360-workspace-identity { gap: 11px; }
-  .c360-workspace-name h1 { font-size: 25px; }
   .c360-workspace-name-row { gap: 7px; }
   .c360-workspace-meta { gap: 8px; line-height: 1.5; }
   .c360-workspace-actions { display: flex; gap: 7px; }
-  .c360-workspace-actions > :is(a, button) { padding: 7px 11px; min-height: 44px; font-size: 14px; }
   .c360-workspace-actions .c360-more-action { margin-left: 0; }
-  .c360-workspace-actions .c360-more-action > button { width: 32px; min-width: 32px; }
   .c360-workspace-contact { flex-direction: column; gap: 10px; }
   .c360-workspace-contact > div { align-items: flex-start; width: 100%; }
   .c360-workspace-contact > div > span { padding-top: 10px; }
   .c360-embedded .c360-alerts { padding: 12px 17px; }
-  .c360-section-list { gap: 23px; padding: 0 17px; }
   .c360-embedded .c360-tab-content { padding: 22px 16px; }
   .c360-embedded .c360-property-grid { grid-template-columns: 1fr; }
   .c360-activity-toolbar { gap: 5px; padding: 9px; }
-  .c360-activity-toolbar > select { font-size: 16px; max-width: 63%; }
+  .c360-activity-filter { max-width: 63%; }
   .c360-activity-list { padding: 0 9px; }
   .c360-activity-event > summary { gap: 8px; }
   .c360-activity-date { max-width: 66px; }
@@ -115,8 +88,6 @@
 .c360-search-field > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #71717a; pointer-events: none; }
 .c360-activity-search { flex: 1 1 180px; }
 .c360-invoices-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
-.c360-outline-link { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 7px 12px; border: 1px solid #d4d4d8; border-radius: 5px; background: #fff; color: #27272a; font-size: 14px; text-decoration: none; }
-.c360-outline-link:hover { background: #fafafa; }
 .c360-invoice-reference { display: inline-block; padding: 7px 0; color: #27272a; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
 .c360-embedded .c360-payment-method-default { flex-shrink: 0; min-height: 26px; height: auto; padding: 2px 8px; font-size: 14px; line-height: 1.5; letter-spacing: 0; text-transform: none; white-space: nowrap; background: #fff; color: #52525b; border: 1px solid #d4d4d8; border-radius: 4px; }
 .c360-estimate-card { padding: 20px; }
@@ -126,11 +97,6 @@
 .c360-estimate-totals dt { font-size: 14px; color: #71717a; }
 .c360-estimate-totals dd { margin: 6px 0 0; font-size: 18px; font-weight: 500; color: #27272a; }
 
-/* Flat writing tools share the outline rhythm of the account actions. */
-.c360-embedded #sms-compose-v2 .sms-writing-tool { appearance: none; -webkit-appearance: none; border: 1px solid #d4d4d8; border-radius: 6px; box-shadow: none; }
-.c360-embedded #sms-compose-v2 select { min-height: 44px; padding: 8px 32px 8px 10px; border: 1px solid #d4d4d8; border-radius: 5px; }
-
-/* Default action style for this workspace and future additions. */
 .c360-estimate-applications { margin: 0 0 20px; }
 .c360-estimate-applications dl { margin: 0; }
 .c360-estimate-applications dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid #f4f4f5; font-size: 14px; }
@@ -150,17 +116,16 @@
 .c360-contract-section-body { padding: 20px; }
 .c360-contract-section-body > div { margin-top: 0; margin-bottom: 0; }
 .c360-contract-section-body > div > .overflow-x-auto { margin-bottom: 0; }
-.c360-contract-section-body > .rounded-sm { border: 0; }
-.c360-contract-section-body > .rounded-sm > .flex:first-child { flex-direction: column; align-items: stretch; padding: 0 0 18px; }
-.c360-contract-section-body > .rounded-sm > .flex:first-child > .flex { justify-content: flex-start; }
-.c360-contract-section-body > .rounded-sm > .flex:first-child > button { align-self: flex-start; }
-.c360-contract-section-body > .rounded-sm > .flex:first-child > div:first-child { display: none; }
-.c360-contracts-content :is(input:not([type="checkbox"]), select) { min-height: 44px; font-size: 16px; }
+.c360-contract-form { border: 0; }
+.c360-contract-form-header { flex-direction: column; align-items: stretch; padding: 0 0 18px; }
+.c360-contract-form-header .c360-contract-form-actions { justify-content: flex-start; }
+.c360-contract-form-header > button.c360-contract-form-actions { align-self: flex-start; }
+.c360-contract-form-duplicate-title { display: none; }
 @container customer360 (max-width: 700px) {
   .c360-contract-section > summary { padding: 16px; }
   .c360-contract-section-body { padding: 16px; }
-  .c360-contract-section-body > .rounded-sm > .grid { padding-left: 0; padding-right: 0; }
-  .c360-contract-section-body > .grid { grid-template-columns: minmax(0, 1fr); }
+  .c360-contract-form > .c360-contract-grid { padding-left: 0; padding-right: 0; }
+  .c360-contract-section-body > .c360-contract-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 .c360-contract-records { display: grid; gap: 14px; }
@@ -186,19 +151,12 @@
 .c360-details-content { margin-bottom: 28px; }
 .c360-contracts-content { margin-top: 28px; }
 .c360-directory-page { color: #18181b; }
-.c360-directory-page :is(.text-10, .text-11, .text-12, .text-13, .u-label) { font-size: 14px; }
-.c360-directory-page :is(input, select) { min-height: 44px; font-size: 16px; }
-.customer-directory-table > .overflow-x-auto { overflow: visible; }
-.customer-directory-table table { table-layout: fixed; background: #fff; font-size: 14px; }
-.customer-directory-table th { height: 48px; font-size: 14px; text-transform: none; letter-spacing: 0; border-left: 0; border-right: 0; border-top: 0; }
 .customer-directory-table th:nth-child(1) { width: 20%; }
 .customer-directory-table th:nth-child(2) { width: 24%; }
 .customer-directory-table th:nth-child(3) { width: 20%; }
 .customer-directory-table th:nth-child(4) { width: 13%; }
 .customer-directory-table th:nth-child(5) { width: 17%; }
 .customer-directory-table th:last-child { width: 48px; }
-.customer-directory-table tr { border-left: 0; border-right: 0; border-top: 0; }
-.customer-directory-table td { padding: 20px 12px; vertical-align: top; line-height: 1.6; overflow-wrap: anywhere; }
 .customer-directory-identity > span { display: block; margin-top: 5px; color: #71717a; }
 .c360-directory-page .customer-directory-table button.customer-directory-name { display: block; padding: 0; border: 0; background: transparent; text-align: left; color: #18181b; font-size: 16px; font-weight: 500; min-height: 24px; line-height: 1.6; }
 .customer-directory-name:hover, .customer-directory-property a:hover { text-decoration: underline; text-underline-offset: 3px; }
@@ -211,40 +169,18 @@
 .customer-directory-actions summary { display: grid; place-items: center; width: 40px; min-height: 44px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; cursor: pointer; list-style: none; }
 .customer-directory-actions summary::-webkit-details-marker { display: none; }
 .customer-directory-actions summary:focus-visible { outline: 2px solid #52525b; outline-offset: 2px; }
-.customer-directory-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 25; min-width: 200px; padding: 5px; border: 1px solid #d4d4d8; border-radius: 6px; background: #fff; box-shadow: 0 4px 12px #18181b0d; }
-.customer-directory-menu :is(button, a) { display: flex; justify-content: flex-start; align-items: center; gap: 9px; width: 100%; box-sizing: border-box; min-height: 44px; padding: 8px 10px; border: 0; text-align: left; color: #27272a; text-decoration: none; background: #fff; border-radius: 4px; font-size: 14px; }
-.customer-directory-menu :is(button, a):hover { background: #f4f4f5; }
-.customer-directory-menu button.text-alert-fg { color: #c8312f; }
 .customer-directory-editor > td { padding: 16px; }
 @media (max-width: 1100px) {
-  .customer-directory-table :is(table, tbody) { display: block; width: 100%; }
-  .customer-directory-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .customer-directory-table .customer-directory-record { position: relative; display: grid; grid-template-columns: 1fr; padding: 16px; gap: 10px; }
-  .customer-directory-table td { display: block; padding: 0; }
+  .customer-directory-table .customer-directory-record { position: relative; }
   .customer-directory-identity { padding-right: 48px !important; }
   .c360-directory-page .customer-directory-table button.customer-directory-name { min-height: 44px; }
-  .customer-directory-table td[data-label] { display: grid; grid-template-columns: 116px minmax(0, 1fr); column-gap: 12px; }
-  .customer-directory-table td[data-label]::before { content: attr(data-label); color: #71717a; }
   .customer-directory-attention > span { grid-column: 2; }
   .customer-directory-actions { position: absolute; top: 16px; right: 16px; }
-  .customer-directory-table .customer-directory-editor { display: block; }
+  .customer-directory-table .customer-directory-editor { display: block; padding: 0; }
   .customer-directory-table .customer-directory-editor > td { padding: 0 16px 16px; }
 }
 @media (min-width: 768px) and (max-width: 1100px) {
   .c360-workspace-header { grid-template-columns: minmax(0, 1fr); }
-}
-
-.c360-directory-page > div:first-child > .overflow-hidden { border: 0; border-radius: 0; background: transparent; }
-.c360-directory-page > div:first-child > .overflow-hidden > div:first-child { border: 0; padding: 8px 0 18px; }
-.c360-directory-page nav[aria-label="Customers section"] { display: inline-flex; gap: 3px; max-width: 100%; padding: 4px; border: 1px solid #e4e4e7; border-radius: 7px; background: #fafafa; }
-.c360-directory-page nav[aria-label="Customers section"] button { flex: 0 0 auto; gap: 6px; height: 40px; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; background: transparent; font-size: 14px; text-transform: none; letter-spacing: 0; white-space: nowrap; }
-.c360-directory-page nav[aria-label="Customers section"] button[aria-current="page"] { border-color: #e4e4e7; background: #fff; }
-.c360-directory-page nav[aria-label="Customers section"] button > svg { display: block; flex-shrink: 0; }
-.customer-directory-tools input { height: 44px; font-size: 16px; }
-.customer-directory-tools > button { min-height: 44px; font-size: 14px; text-transform: none; letter-spacing: 0; }
-@media (max-width: 767px) {
-  .c360-directory-page nav[aria-label="Customers section"] { display: flex; width: 100%; gap: 2px; }
-  .c360-directory-page nav[aria-label="Customers section"] button { flex: 1 0 auto; justify-content: center; gap: 5px; height: 44px; padding: 0 7px; }
 }
 
 /* Operational summary follows the office's next-action order. */
@@ -265,9 +201,7 @@
 .c360-summary-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 16px; }
 .c360-summary-excerpt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .c360-message-sheet .c360-conversation { font-size: 15px; }
-.c360-message-sheet :is(.text-10, .text-11, .text-12, .text-13) { font-size: 14px; }
 .c360-message-sheet #sms-compose-v2 { margin-top: 14px; }
-.c360-message-sheet #sms-compose-v2 select { font-size: 16px; }
 .c360-service-records { margin-top: 24px; padding: 16px 0; border-top: 1px solid #e4e4e7; }
 .c360-service-records > summary { font-size: 16px; font-weight: 500; cursor: pointer; margin-bottom: 16px; }
 .c360-unread-count { background: #fff; color: #18181b; }
@@ -283,22 +217,18 @@
 }
 @media (max-width: 767px) {
   .c360-workspace-header { gap: 10px; padding: 14px 16px; }
-  .c360-workspace-name h1 { font-size: 23px; }
-  .c360-workspace-meta { font-size: 13px; margin-top: 4px; }
+  .c360-workspace-meta { margin-top: 4px; }
   .c360-workspace-meta > span:not(:first-child) { display: none; }
   .c360-workspace-actions { gap: 6px; }
   .c360-workspace-contact { flex-direction: row; gap: 10px; }
   .c360-workspace-contact > div { width: auto; }
   .c360-workspace-contact > div > span { display: none; }
-  .c360-workspace-contact :is(a,button) { border: 0; padding: 4px; min-height: 38px; font-size: 14px; }
+  .c360-contact-action.ui-control { border: 0; padding: 4px; }
   .c360-sticky-identity { padding: 8px 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .c360-operational-summary > section { padding: 18px 0; }
   .c360-operational-summary h3 { font-size: 21px; }
 }
-
-.c360-workspace-actions > a { color: #27272a; background: #fff; }
 .c360-operational-summary a { color: #27272a; }
-.c360-embedded button:not([role="tab"]), .c360-message-sheet button { text-transform: none; letter-spacing: 0; }
 
 @media (max-width: 767px) {
   .c360-workspace-header { position: relative; }
@@ -309,7 +239,3 @@
 .c360-service-records { scroll-margin-top: 100px; }
 
 .c360-embedded > .c360-panel { overflow-anchor: none; }
-
-.c360-directory-page nav[aria-label="Customers section"] button { color: #71717a; transition: none; }
-.c360-directory-page nav[aria-label="Customers section"] button[aria-current="page"] { color: #18181b; }
-.c360-embedded .c360-section-tab { transition: none; }

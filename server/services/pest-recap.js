@@ -348,7 +348,14 @@ async function submitRecap({
   // path. Nothing below mutates state before that lock, so a retry
   // restarts cleanly.
   const recapTransaction = async (trx) => {
-    // 0a. Visit-group stop lock FIRST (codex #3590 r13): the in-transaction
+    // Customer → stop → service matches grouping, packet closeout and
+    // customer dedupe. Taking the customer snapshot after the stop lock
+    // lets a concurrent packet hold the customer while waiting for this stop.
+    const snapshotCustomerRow = await trx('customers')
+      .where({ id: svc.customer_id })
+      .forShare()
+      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+    // 0a. Visit-group stop lock BEFORE THE SERVICE (codex #3590 r13): the in-transaction
     //     dissolve below needs the stop advisory lock, and every other
     //     visit writer takes stop → row. Taking it before the row lock keeps
     //     that order. Best-effort against a mocked knex; on PG a failure
@@ -361,14 +368,6 @@ async function submitRecap({
       if (vgErr && vgErr.code === 'VISIT_STOP_MOVED') throw vgErr;
       visitGroups = null;
     }
-    // 0a. Customer FOR SHARE BEFORE the visit lock — the customer → visit
-    //     order customer-dedupe's executeMerge uses, so a merge racing a
-    //     recap cannot form a lock cycle (codex P1 #3742 r4). Feeds the
-    //     report identity snapshot built after the record lookup below.
-    const snapshotCustomerRow = await trx('customers')
-      .where({ id: svc.customer_id })
-      .forShare()
-      .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
     // 0. Lock the service row — serializes concurrent recap submissions.
     const locked = await trx('scheduled_services')
       .where({ id: serviceId })
@@ -381,6 +380,13 @@ async function submitRecap({
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
     recapPriorCompleted = lockedStatus === COMPLETED_STATUS;
+    if (locked?.visit_id) {
+      const allowed = await require('./visit-groups').ensureLegacyCompletable(serviceId, trx);
+      if (!allowed.ok) {
+        rejectReason = 'visit_grouped';
+        return;
+      }
+    }
 
     // 0b. Reject a recap on a cancelled/skipped visit before writing any
     //     artifact. Returning here aborts the transaction body with nothing
@@ -1148,7 +1154,7 @@ async function submitRecap({
     // only matches never-converted leads.
     try {
       const { convertLeadFromEvent } = require('./lead-estimate-link');
-      await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+      await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id, booking: svc });
     } catch (leadErr) {
       logger.warn(`[pest-recap] lead conversion failed for customer=${svc.customer_id}: ${leadErr.message}`);
     }

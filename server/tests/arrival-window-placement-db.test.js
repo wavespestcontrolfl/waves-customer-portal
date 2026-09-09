@@ -159,6 +159,28 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     } finally { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; }
   });
 
+  test('fixed-block conflicts include the full persisted combined span and retain database row fields', async () => {
+    const mix = { version: 2, allocatedServiceIds: [NORTH, SOUTH] };
+    await mockConn('scheduled_services').whereIn('id', [NORTH, SOUTH]).update({
+      window_start: '09:00', reservation_service_mix: mix,
+    });
+    await mockConn('scheduled_services').where({ id: NORTH }).update({ window_end: '09:30', estimated_duration_minutes: 30 });
+    await mockConn('scheduled_services').where({ id: SOUTH }).update({ window_end: '09:40', estimated_duration_minutes: 40 });
+    await mockConn('scheduled_services').where({ id: TARGET }).update({ reservation_service_mix: mix });
+    const conflicts = await findConflictingVisits({
+      db: mockConn, date: DAY, windowStart: '09:50', windowEnd: '10:00',
+    });
+    expect(conflicts.map(row => row.id).sort()).toEqual([NORTH, SOUTH].sort());
+    for (const row of conflicts) {
+      expect(row.reservation_service_mix).toEqual(mix);
+      expect(row).not.toHaveProperty('startMin');
+      expect(row).not.toHaveProperty('endMin');
+    }
+    expect(await findConflictingVisits({
+      db: mockConn, date: DAY, windowStart: '10:10', windowEnd: '10:40',
+    })).toEqual([]);
+  });
+
   test('a divergent stamp without stored pins uses the same trusted geocode in hints, live checks and saves', async () => {
     await mockConn('customers').where({ id: CUSTOMER }).update({
       address_line1: '200 Fixture Primary Street', city: 'Bradenton', state: 'FL', zip: '34201',

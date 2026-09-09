@@ -461,6 +461,21 @@ describe('publishReviewReply', () => {
     mockAccountFacts.mockReset().mockResolvedValue(null);
   });
 
+  test('the local-only write rechecks its guard after locking the review row', async () => {
+    const configured = mockGbp.configured;
+    mockGbp.configured = false;
+    try {
+      const guard = jest.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce('The approved review identity changed.');
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Synthetic reply', actor: { type: 'ib' }, guard }))
+        .rejects.toMatchObject({ code: CODES.STALE });
+      expect(guard).toHaveBeenCalledTimes(2);
+      expect(state.rows[0].review_reply).toBeNull();
+      expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    } finally { mockGbp.configured = configured; }
+  });
+
   test('a live owner reply whose local record fails surfaces reconcile_failed, never already_replied (codex r74)', async () => {
     const draft = 'Hi Dana, glad to keep looking after your Venice home.';
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft };

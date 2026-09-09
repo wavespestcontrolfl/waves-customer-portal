@@ -121,8 +121,11 @@ function looksLikeEmail(value) {
 // phone — matters when the notice routes to a distinct service contact; the
 // owner's phone being reachable doesn't reach the person the appointment
 // notifies. Best-effort — DB misses fail open per leg but never throw.
-async function hasTextReachableApptRecipient(customer) {
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+// `prefsRow` (app property scope, PR 3): the row the send actually used —
+// the visit-resolved one — so the recipient set judged here is the one the
+// reminder notified, never the customer row's answer under enforcement.
+async function hasTextReachableApptRecipient(customer, prefsRow = undefined) {
+  const prefs = prefsRow !== undefined ? prefsRow : await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   // sms_enabled=false blocks every SMS to this customer at send time, so a
   // past delivery can't make them text-reachable today.
   if (prefs?.sms_enabled === false) return false;
@@ -181,7 +184,7 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
     // appointment actually notifies AND their current eligibility, so an old
     // delivery to an opted-out number (or to the owner when the notice routes
     // to a service contact) doesn't swallow a real alert.
-    if (customer && await hasTextReachableApptRecipient(customer)) {
+    if (customer && await hasTextReachableApptRecipient(customer, await visitPrefsRow(customerId, scheduledServiceId))) {
       logger.info(`[appt-remind] Suppressed no-channel alert for customer ${customerId} (${kind}) — recent delivered SMS to an appointment recipient proves text-reachable`);
       return;
     }
@@ -213,10 +216,10 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
   }
 }
 
-// Normalize a stored channel preference. Anything but 'email' / 'both' (incl.
-// null / legacy rows) means SMS-first.
-function apptChannel(value) {
-  if (value === 'push' && require('../config/feature-gates').gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return 'push';
+// Reminder readers retain App provenance for consented rollback backups.
+// Other notification families keep their existing gate-off normalization.
+function apptChannel(value, { preserveAppChoice = false } = {}) {
+  if (value === 'push' && (preserveAppChoice || require('../config/feature-gates').gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS'))) return 'push';
   return value === 'email' || value === 'both' ? value : 'sms';
 }
 
@@ -258,7 +261,7 @@ async function isOneTimeVisit(scheduledServiceId) {
 }
 
 async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavailable = false, explicitChoice = false, emailEnabled = true } = {}) {
-  const ch = apptChannel(prefChannel);
+  const ch = apptChannel(prefChannel, { preserveAppChoice: true });
   if (ch !== 'sms') return ch;
   // Fail closed on an unreadable prefs row (pre-push hook P1): the 'sms'
   // in hand is a fail-open default, not a stored choice, and the email leg
@@ -287,12 +290,13 @@ async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavail
 // behavior the window exists to stop. Pure-email reminders are untouched;
 // 'both' holds the whole notice so one deferral covers both legs.
 function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
-  if (apptChannel(channel) === 'email') return false;
+  const ch = apptChannel(channel, { preserveAppChoice: true });
+  if (ch === 'email') return false;
   // SMS opt-out: the SMS leg can never send, so holding "for the window"
   // would only starve the email fallback (and for a pre-8AM visit, kill
   // the notice entirely) — proceed and let deliverAppointmentNotice's
   // normal opt-out block route to email immediately.
-  if (smsEnabled === false && apptChannel(channel) !== 'push') return false;
+  if (smsEnabled === false && ch !== 'push') return false;
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('smsSendWindow')) return false;
   const { isWithinSendWindowET } = require('./messaging/send-window');
@@ -304,13 +308,13 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
 // bare call can log a successful hand-off while no notification exists —
 // silently losing the only durable record of the obligation. One retry,
 // then a loud error naming the lost manual action.
-async function handOffToOffice(title, message) {
+async function handOffToOffice(title, message, options = {}) {
   // bell: true — lifecycle-critical manual-send obligations always ring
   // (codex on-merge r2: GATE_ADMIN_BELL_POLICY would otherwise silence an
   // unallowlisted 'comms' bell with a truthy suppressed sentinel and the
   // only durable record of the obligation would be discarded). Success
   // requires a PERSISTED id, never a sentinel.
-  const notify = () => require('./notification-service').notifyAdmin('comms', title, message, { bell: true });
+  const notify = () => require('./notification-service').notifyAdmin('comms', title, message, { ...options, bell: true });
   try {
     let res = await notify();
     if (!res || !res.id) res = await notify();
@@ -356,9 +360,18 @@ async function moveHoldActive(scheduledServiceId) {
 // `emailIdempotencyKey` (grouped reminders): the visit-scoped key the
 // claim owner sends under — see visitReminderEmailKey. Null keeps the
 // per-service key.
-async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null }) {
+async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', rescheduleUrl = null, cardHoldNote = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
   try {
     if (!customerId) return { ok: false, reason: 'no_customer' };
+    // App backups, including the terminal quiet-hour email, share one
+    // current-consent check before the transactional email provider.
+    if (requestedChannel === 'push') {
+      const prefs = await getReminderPrefs(customerId, { scheduledServiceId }).catch(() => ({ unavailable: true }));
+      if (prefs.unavailable) return { ok: false, held: true, reason: 'preferences_unavailable' };
+      const categoryEnabled = kind === '72h' ? prefs.serviceReminder72h
+        : kind === '24h' ? prefs.serviceReminder24h : prefs.appointmentConfirmation;
+      if (!prefs.emailEnabled || !categoryEnabled) return { ok: false, skipped: true, reason: 'preference_disabled' };
+    }
     // Callers that already minted the reschedule link for their SMS leg pass
     // it through; paths that reach email directly (undelivered-SMS fallback,
     // booking's channel-aware confirmation) mint it here so the email's
@@ -395,9 +408,24 @@ async function sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId
 // `smsOutcome` (optional): the caller's out-param — a grouped-move hold at
 // the email handoff is recorded there as MOVE_HOLD so the notice defers
 // (row unmarked, visit claim released) instead of reading as suppressed.
-async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null }) {
+async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId = null, apptTime = null, serviceLabel = 'service', cardHoldNote = null, smsOutcome = null, emailIdempotencyKey = null, requestedChannel = 'sms' }) {
   if (!customerId) return false;
-  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
+  const res = await sendAppointmentNoticeEmail({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel });
+  if (res?.reason === 'preferences_unavailable') {
+    if (smsOutcome) {
+      smsOutcome.retryable = true;
+      smsOutcome.blockedCode = 'REMINDER_PREFERENCES_HOLD';
+    } else {
+      // The status callback has no open reminder claim to retry. Preserve
+      // its owed fallback on the existing durable office exception rail.
+      await handOffToOffice(
+        'Appointment fallback needs a consent check',
+        `App and backup text delivery failed for the ${kind} notice. Verify current email consent and appointment details before sending its email fallback${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
+        { link: `/admin/customers/${customerId}`, dedupeKey: `appointment-app-fallback:${emailIdempotencyKey || `${customerId}:${scheduledServiceId}:${kind}:${apptTime ? new Date(apptTime).getTime() : 'unknown'}`}`, metadata: { customerId, scheduledServiceId, kind, reason: 'reminder_preferences_unavailable' } },
+      );
+    }
+    return false;
+  }
   if (res?.ok) {
     logger.info(`[appt-remind] ${kind} email fallback sent for customer ${customerId} (SMS undeliverable)`);
     return true;
@@ -468,12 +496,12 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     if (smsOutcome) smsOutcome.blockedCode = 'MOVE_HOLD';
     return false;
   }
-  const ch = apptChannel(channel);
+  const ch = apptChannel(channel, { preserveAppChoice: kind === '72h' || kind === '24h' });
   const emailArgs = { kind, customerId, scheduledServiceId, apptTime, serviceLabel, rescheduleUrl, cardHoldNote, emailIdempotencyKey };
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
-    && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome.blockedCode);
+    && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(smsOutcome.blockedCode);
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -583,7 +611,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
     // A successful fallback email IS a real delivery (GH codex r2 P1):
     // callers that ledger the visit effect must see it, or a failed
     // finalize would skip the durable close and a sibling could resend.
-    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome });
+    const fallbackOk = await deliverAppointmentEmailFallback({ ...emailArgs, smsOutcome, requestedChannel: ch });
     if (fallbackOk && smsOutcome) smsOutcome.fallbackEmailOk = true;
   }
   return smsOk;
@@ -707,7 +735,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // before: their sends re-check the opt-out at the validator.
   let prefsKnown = false;
   try {
-    const prefs = await getReminderPrefs(customerId);
+    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
     channel = prefs.confirmationChannel;
     confirmationOn = prefs.appointmentConfirmation;
     prefsKnown = !prefs.unavailable;
@@ -735,6 +763,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
     if (!(await visitStillLive())) return false;
     return deliverAppointmentEmailFallback({
       kind: 'confirmation',
+      requestedChannel: channel,
       customerId,
       scheduledServiceId,
       apptTime: resolvedApptTime,
@@ -1465,6 +1494,15 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   if (!appSelected && await isLandline(customerId, phone)) {
     return false;
   }
+  // The canonical sender resolves App again and may fall back to SMS. Run
+  // the appointment landline guard on that actual SMS leg, even when the
+  // optional proactive lookup gate is off or the channel changed mid-send.
+  const dispatchCheck = appSelected ? async ({ channel } = {}) => {
+    if (channel === 'sms' && await isLandline(customerId, phone)) {
+      return { ok: false, code: 'NON_MOBILE_SMS_RECIPIENT', reason: 'Appointment recipient cannot receive SMS' };
+    }
+    return typeof preDispatchCheck === 'function' ? preDispatchCheck() : { ok: true };
+  } : preDispatchCheck;
 
   // (The grouped-move hold for appointment notices is enforced inside
   // sendCustomerMessage itself — the canonical path every SMS leg passes,
@@ -1500,7 +1538,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // Optional caller-supplied final recheck at the provider handoff —
     // race-sensitive senders (the admin reschedule notice) abort here if
     // the appointment moved or went terminal while validators ran.
-    ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
+    ...(typeof dispatchCheck === 'function' ? { preDispatchCheck: dispatchCheck } : {}),
   });
   } catch (sendErr) {
     // Only a throw AFTER the provider handoff began is dispatch-uncertain
@@ -1540,7 +1578,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // (like retryable/providerAccepted): a later opted-out contact's block
     // must not erase the evidence that an eligible contact was held at the
     // boundary — the callers' defer-don't-close decision reads this code.
-    sendOutcome.blockedCode = ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(sendOutcome.blockedCode)
+    sendOutcome.blockedCode = ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sendOutcome.blockedCode)
       ? sendOutcome.blockedCode
       : (result.code || null);
     // NON-sticky per-call evidence for safeSendAppointment's fan-out loop:
@@ -1565,6 +1603,26 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
 }
 
 async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
+  // An UNREADABLE preferences row (a failed notification_prefs read, or a
+  // saved property whose toggles could not be read under
+  // GATE_APP_PROPERTY_TEXTS) is a RETRYABLE non-send, never a definitive
+  // one: the direct cancellation / series / reschedule callers classify on
+  // `sendOutcome.retryable` and must not finalize their durable claims as
+  // suppressed on a transient miss (GitHub codex #4299 r3 P1). Fail closed
+  // here — no service-contact fan-out on unknown settings either.
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true) {
+    if (sendOptions.sendOutcome && typeof sendOptions.sendOutcome === 'object') {
+      sendOptions.sendOutcome.retryable = true;
+      sendOptions.sendOutcome.lastCode = 'PREFERENCES_UNAVAILABLE';
+      // A RECOGNIZED hold code: deliverAppointmentNotice keys its "leave the
+      // row unmarked, no email fallback" path on blockedCode (GitHub codex
+      // #4299 r6 P1) — an unreadable row must never fall through to an
+      // email that re-resolves without the property's reminder toggle.
+      sendOptions.sendOutcome.blockedCode = 'REMINDER_PREFERENCES_HOLD';
+    }
+    logger.warn(`[appt-remind] notification preferences unreadable for customer ${customer?.id || 'unknown'} — ${messageType} held for retry`);
+    return false;
+  }
   const contacts = getAppointmentContacts(customer, prefs);
   if (!contacts.length) {
     logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
@@ -1603,6 +1661,11 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     : {};
   const heldContacts = [];
   const moveHeldRoles = [];
+  // Only the holder can use App. Resolve that leg before accepting any
+  // contact text, so a pending push can leave the whole reminder open.
+  const primaryPhone = lastTenDigits(customer.phone);
+  allowedContacts = [...allowedContacts].sort((a, b) =>
+    Number(lastTenDigits(b.phone) === primaryPhone) - Number(lastTenDigits(a.phone) === primaryPhone));
   for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
@@ -1614,7 +1677,19 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     sharedOutcome.lastCode = null;
     sharedOutcome.lastDeferred = false;
     sharedOutcome.lastNextAllowedAt = null;
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null, sharedOutcome, sendOptions.operatorInitiated === true);
+    const checkBeforeSend = sendOptions.expectedChannel === 'push' && lastTenDigits(contact.phone) === primaryPhone
+      ? async () => {
+        const current = await getReminderPrefs(customer.id);
+        const channel = purpose === 'appointment_reminder_72h' ? current.reminder72hChannel : current.reminder24hChannel;
+        if (current.unavailable || channel !== 'push') {
+          return { ok: false, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel must be reloaded by the next scan' };
+        }
+        return sendOptions.preDispatchCheck ? sendOptions.preDispatchCheck() : { ok: true };
+      } : sendOptions.preDispatchCheck || null;
+    const contactMeta = sendOptions.expectedChannel === 'push'
+      ? { ...metaExtra, requestedChannel: 'push' } : metaExtra;
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, contactMeta, checkBeforeSend, sharedOutcome, sendOptions.operatorInitiated === true);
+    if (!sent && ['PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(sharedOutcome.lastCode)) break;
     if (!sent && sharedOutcome.lastCode === 'QUIET_HOURS_HOLD'
       && sharedOutcome.lastDeferred && sharedOutcome.lastNextAllowedAt) {
       heldContacts.push({ contact, body, nextAllowedAt: sharedOutcome.lastNextAllowedAt });
@@ -1843,8 +1918,36 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
   return channelPrefs;
 }
 
-async function getReminderPrefs(customerId) {
+// `scheduledServiceId` (app property scope, PR 3): the visit the toggles are
+// for. A visit stamped with a NON-primary saved property resolves its five
+// appointment toggles + notify-primary from that property (ruling R1
+// defaults) — enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged
+// otherwise; the channels below stay the customer's. Omitted = customer row.
+// A property lookup that FAILS under enforcement reads as `unavailable`
+// (held), never as the customer row's answer.
+// The customer's notification_prefs row as it applies to ONE visit: the raw
+// row, or (non-primary saved property, app property scope PR 3) the row with
+// the six appointment columns resolved from that property. A failed READ, and
+// a property lookup that fails under enforcement, both answer the
+// PREFS_UNAVAILABLE sentinel — held, never the customer row's answer. Shared
+// by getReminderPrefs and the direct reschedule / cancellation / no-show /
+// series-cancellation notices, whose recipient list (appointment_notify_
+// primary) must follow the property too (GitHub codex r0 P1).
+async function visitPrefsRow(customerId, scheduledServiceId = null) {
   const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
+  // Sentinel read inline: partial test doubles of customer-contact carry
+  // PREFS_UNAVAILABLE but not the prefsUnavailable() helper.
+  if (prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true || !scheduledServiceId) return prefs;
+  try {
+    return await require('./property-notification-prefs').prefsForVisit(prefs, customerId, scheduledServiceId, 'reminders');
+  } catch (err) {
+    logger.warn(`[appt-remind] property toggles unreadable for visit ${scheduledServiceId}: ${err.message}`);
+    return PREFS_UNAVAILABLE;
+  }
+}
+
+async function getReminderPrefs(customerId, { scheduledServiceId = null } = {}) {
+  const prefs = await visitPrefsRow(customerId, scheduledServiceId);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
@@ -1872,13 +1975,13 @@ async function getReminderPrefs(customerId) {
     serviceReminder72h: prefs?.service_reminder_72h !== false,
     serviceReminder24h: prefs?.service_reminder_24h !== false,
     confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
-    reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel),
+    reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel, { preserveAppChoice: true }),
     // Explicit delivery-method choice (Codex #3588 P1): stamped by the
     // notifications route on any customer write of the 72h channel. Read
     // from the same owner-resolved row as the channel itself so a secondary
     // profile honors the account owner's choice.
     reminder72hChannelExplicit: channelPrefs?.service_reminder_72h_channel_explicit === true,
-    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel),
+    reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel, { preserveAppChoice: true }),
   };
 }
 
@@ -1954,7 +2057,15 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
   }
 
   try {
-    const prefs = await getReminderPrefs(customerId);
+    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+    // Unreadable (a failed read, or the visit's saved property unreadable
+    // under enforcement): the toggles below are fail-open defaults, not
+    // choices — return WITHOUT marking so the sweep re-delivers, instead of
+    // texting/emailing on a guess and closing the row (GitHub codex r4 P1).
+    if (prefs.unavailable) {
+      logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} held: notification preferences unreadable — row left unmarked for retry`);
+      return false;
+    }
     if (!prefs.appointmentConfirmation) {
       await db('appointment_reminders')
         .where({ id: record.id })
@@ -2977,7 +3088,15 @@ const AppointmentReminders = {
         // inside the upper bound as due, while leaving the 24h reminder to own
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
-          const prefs = await getReminderPrefs(r.customer_id);
+          const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
+          // Unreadable (a failed read, or the visit's saved property unreadable
+          // under enforcement): every value below is a fail-open default —
+          // hold this tier now, row unmarked, next tick re-decides (GitHub
+          // codex #4299 r6 P1).
+          if (prefs.unavailable) {
+            logger.warn(`[appt-remind] 72h reminder for ${r.scheduled_service_id} held: notification preferences unreadable`);
+            continue;
+          }
           // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST
           // (one-time visits only; never past an unreadable prefs row or an
           // explicit Text choice) — see resolve72hChannel for the contract.
@@ -3132,14 +3251,14 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptCopy72), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
+              }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined, notificationEventKey: ownsVisit72 ? claim72.dedupeKey : undefined }, { sendOutcome: smsOutcome72, expectedChannel: channel72 }),
             }));
             if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
             // out at 8:00 AM, still days ahead of the visit.
-            if (!reached72 && (smsOutcome72.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome72.blockedCode === 'MOVE_HOLD')) {
+            if (!reached72 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(smsOutcome72.blockedCode)) {
               // Release the visit claim as retryable (effect → failed) so
               // the next tick reclaims immediately instead of waiting out
               // the lease; the row itself stays unmarked, as today.
@@ -3203,7 +3322,11 @@ const AppointmentReminders = {
 
         // ── 24-hour reminder ──
         if (!r.reminder_24h_sent && hoursUntil > 0 && hoursUntil <= 24.25) {
-          const prefs = await getReminderPrefs(r.customer_id);
+          const prefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
+          if (prefs.unavailable) {
+            logger.warn(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held: notification preferences unreadable`);
+            continue;
+          }
           const channel24 = prefs.reminder24hChannel;
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
@@ -3258,7 +3381,7 @@ const AppointmentReminders = {
             // deliver it now so closing the row drops one leg, not both.
             // Best-effort + idempotent per occurrence; an email failure
             // still closes (same as the SMS-only skip, where nothing sends).
-            if (apptChannel(channel24) === 'both') {
+            if (['both', 'push'].includes(channel24)) {
               // Grouped stop: the email leg is a customer send too — one
               // per visit via the same reminder_24h claim.
               const vgNight = svcVisitId ? require('./visit-groups') : null;
@@ -3292,23 +3415,32 @@ const AppointmentReminders = {
                   logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
                   continue;
                 }
-                const emailRes = await withReminderSendFence(r, '24h', () => sendAppointmentNoticeEmail({
-                  kind: '24h',
-                  customerId: r.customer_id,
-                  scheduledServiceId: r.scheduled_service_id,
-                  apptTime: nightCopy ? nightCopy.apptTime : apptTime,
-                  serviceLabel: nightLabel,
-                  cardHoldNote: nightCopy ? nightCopy.holdNote : null,
-                  emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
-                })) ?? { held: true };
-                // A move-hold at the email handoff is a DEFERRAL (GH codex
-                // r2 P1): finalizing it terminally would mark the whole
+                const emailRes = await withReminderSendFence(r, '24h', async () => {
+                  if (channel24 === 'push') {
+                    const currentPrefs = await getReminderPrefs(r.customer_id, { scheduledServiceId: r.scheduled_service_id });
+                    if (currentPrefs.unavailable || currentPrefs.reminder24hChannel !== 'push') {
+                      return { held: true, reason: 'preferences_changed' };
+                    }
+                  }
+                  return sendAppointmentNoticeEmail({
+                    kind: '24h',
+                    requestedChannel: channel24,
+                    customerId: r.customer_id,
+                    scheduledServiceId: r.scheduled_service_id,
+                    apptTime: nightCopy ? nightCopy.apptTime : apptTime,
+                    serviceLabel: nightLabel,
+                    cardHoldNote: nightCopy ? nightCopy.holdNote : null,
+                    emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
+                  });
+                }) ?? { held: true };
+                // A move or preference hold at the email handoff is a
+                // deferral: finalizing it terminally would mark the whole
                 // visit's only deliverable leg taken. Release the claim as
                 // retryable, leave the row unmarked, let the post-move
                 // scan re-decide.
                 if (emailRes?.held) {
                   if (ownsNight) await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
-                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held by a grouped move — claim released, row left unmarked`);
+                  logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held at delivery (${emailRes.reason || 'move_hold'}) — claim released, row left unmarked`);
                   continue;
                 }
                 if (ownsNight) {
@@ -3413,7 +3545,7 @@ const AppointmentReminders = {
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptCopy24), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
-              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
+              }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined, notificationEventKey: ownsVisit24 ? claim24.dedupeKey : undefined }, { sendOutcome: smsOutcome24, expectedChannel: channel24 }),
               smsOutcome: smsOutcome24,
             }));
             if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
@@ -3423,7 +3555,7 @@ const AppointmentReminders = {
             // owner's ruling (defer when the window reopens before the
             // visit day, otherwise skip+close), which this mid-flight
             // point must not re-implement.
-            if (!reached24 && (smsOutcome24.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome24.blockedCode === 'MOVE_HOLD')) {
+            if (!reached24 && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT', 'REMINDER_PREFERENCES_HOLD'].includes(smsOutcome24.blockedCode)) {
               // Release the visit claim as retryable — see the 72h twin.
               if (ownsVisit24) await vg24.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), claim24.token, { dedupeKey: claim24.dedupeKey });
               logger.info(`[appt-remind] 24h reminder for ${r.scheduled_service_id} held at the send-window boundary — deferred to the next scan's window ruling`);
@@ -3661,7 +3793,7 @@ const AppointmentReminders = {
         }
       }
 
-      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey });
+      await deliverAppointmentEmailFallback({ kind, customerId, scheduledServiceId, apptTime, serviceLabel, cardHoldNote, emailIdempotencyKey, requestedChannel: audit.metadata?.requestedChannel });
     } catch (err) {
       logger.error(`[appt-remind] handleUndeliveredSms failed: ${err.message}`);
     }
@@ -3941,7 +4073,7 @@ const AppointmentReminders = {
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
-          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+          const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
           const day = formatDay(newApptTime);
           const date = formatDate(newApptTime);
           const time = formatTime(newApptTime);
@@ -4425,7 +4557,7 @@ const AppointmentReminders = {
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
-          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+          const prefs = await visitPrefsRow(record.customer_id, scheduledServiceId);
           const apptTime = new Date(record.appointment_time);
           const day = formatDay(apptTime);
           const date = formatDate(apptTime);
@@ -4579,7 +4711,7 @@ const AppointmentReminders = {
       const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
       if (!customer) return null;
 
-      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+      const prefs = await visitPrefsRow(svc.customer_id, scheduledServiceId);
 
       // scheduled_date is a DATE, window_start a TIME — compose into the
       // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
@@ -4601,7 +4733,8 @@ const AppointmentReminders = {
         when = `on ${formatDay(dayDate)}, ${formatDate(dayDate)}`;
       }
 
-      await safeSendAppointment(customer, prefs || {}, async (contact) => {
+      const noShowOutcome = {};
+      const noShowSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
         const customerFirst = firstNameFrom(contact.name) || customer?.first_name || 'there';
         return renderTemplate('appointment_no_show', {
           first_name: customerFirst,
@@ -4626,8 +4759,25 @@ const AppointmentReminders = {
         // held-delivery rail with it — none is carried speculatively
         // (codex r25).
         operatorInitiated: options.operatorInitiated === true,
+        sendOutcome: noShowOutcome,
       });
-      logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+      if (noShowSent) {
+        logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
+      } else if (noShowOutcome.retryable === true) {
+        // No retry rail carries a no-show notice (the dispatcher's one click
+        // is the send): say so loudly and bell the office rather than log
+        // "sent" over a hold (in-session review on f9945dc89).
+        logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: notification preferences unreadable — office to follow up`);
+        try {
+          await require('./notification-service').notifyAdmin('appointment', 'No-show notice not sent',
+            `The no-show text for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `no-show-notice-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } });
+        } catch (bellErr) {
+          logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+        }
+      } else {
+        logger.warn(`[appt-remind] No-show notice not sent for ${scheduledServiceId} (no eligible recipient, opted out, or blocked)`);
+      }
 
       // Email twin (appointment.no_show template) — second channel like the
       // other appointment notices. Best-effort: an email failure never
@@ -4637,7 +4787,7 @@ const AppointmentReminders = {
       // is always truthful.
       try {
         const AppointmentEmail = require('./appointment-email');
-        await AppointmentEmail.sendAppointmentNoShowEmail({
+        const noShowEmail = await AppointmentEmail.sendAppointmentNoShowEmail({
           customerId: svc.customer_id,
           scheduledServiceId,
           serviceLabel: svc.service_type,
@@ -4646,6 +4796,15 @@ const AppointmentReminders = {
           feeOutcome: options.feeOutcome
             || (options.feeCharged === true ? 'charged' : 'none'),
         });
+        // A HELD email (preferences unreadable at the provider handoff) has
+        // no retry rail here either — bell the office (GitHub codex r4 P1).
+        if (noShowEmail?.held) {
+          logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
+          await require('./notification-service').notifyAdmin('appointment', 'No-show email not sent',
+            `The no-show email for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `no-show-email-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } })
+            .catch((bellErr) => logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`));
+        }
       } catch (e) {
         logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
       }
@@ -5217,7 +5376,7 @@ const AppointmentReminders = {
 
       const { customer } = await getCustomerAndTech(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
       if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
+        const prefs = await visitPrefsRow(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
         Object.assign(seriesSendOutcome, {});
@@ -5399,6 +5558,7 @@ AppointmentReminders._test = {
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,
   getReminderPrefs,
+  visitPrefsRow,
   liveReminderServiceLabel,
   buildMergedServiceLabel,
   appendHeldEstimateAcceptLine,
@@ -5425,5 +5585,9 @@ AppointmentReminders.buildServiceLabel = buildServiceLabel;
 AppointmentReminders.scheduledServiceApptTime = scheduledServiceApptTime;
 // Same composition for callers that already hold the row (joined reads).
 AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
+
+// The visit-aware prefs row for the call-booking confirmation email and the
+// deferred-replay recheck (app property scope, PR 3).
+AppointmentReminders.visitPrefsRow = visitPrefsRow;
 
 module.exports = AppointmentReminders;

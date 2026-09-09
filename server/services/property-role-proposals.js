@@ -1038,6 +1038,9 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       await trx('customer_properties')
         .where({ id: newPrimary.id })
         .update({ is_primary: true, updated_at: new Date() });
+      // The primary never carries per-property appointment toggles (app
+      // property scope, PR 3): drop the promoted house's row.
+      await require('./property-notification-prefs').clearPrimaryPropertyPrefs(newPrimary.id, trx);
       await trx('customer_properties')
         .where({ id: newPrimary.id, occupancy_type: 'unknown' })
         .update({ occupancy_type: 'owner_occupied', updated_at: new Date() });
