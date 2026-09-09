@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody } from '../ui/Sheet';
 import { cn } from '../ui/cn';
+import { Badge } from '../ui/Badge';
 import PrepGuideForm, { PREP_GUIDE_LINKS } from './PrepGuideForm';
 
 // The composers' Quick Links picker: one searchable sheet over links and prep
@@ -244,13 +245,13 @@ export default function InsertLinkSheet({
                       </span>
                     </span>
                     {busy ? (
-                      <span className="shrink-0 text-11 uppercase tracking-label font-bold text-ink-secondary bg-zinc-100 rounded-xs px-1.5 py-0.5">
+                      <Badge tone="neutral" className="shrink-0">
                         Adding…
-                      </span>
+                      </Badge>
                     ) : link.dynamic ? (
-                      <span className="shrink-0 text-11 uppercase tracking-label font-bold text-waves-blue-dark bg-waves-blue-light rounded-xs px-1.5 py-0.5">
+                      <Badge tone="strong" className="shrink-0">
                         This customer
-                      </span>
+                      </Badge>
                     ) : null}
                   </button>
                   {chooserOpen && (
