@@ -388,6 +388,17 @@ describe("Email draft and navigation preservation", () => {
     expect(await screen.findByText("AI classification:")).toBeInTheDocument();
   });
 
+  it("exposes the selected row as expanded and links it to its conversation", async () => {
+    mount();
+    expect(await screen.findByText(a.subject)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { expanded: true })).not.toBeInTheDocument();
+    const reply = await open(a);
+    const row = screen.getByRole("button", { expanded: true });
+    expect(row).toHaveTextContent(a.subject);
+    expect(row).toHaveAttribute("aria-controls", `email-conversation-${a.id}`);
+    expect(document.getElementById(`email-conversation-${a.id}`)).toContainElement(reply);
+  });
+
   it.each(["Archive", "Trash"].flatMap((action) => [a.id, b.id].map((id) => [action, id])))("a late %s keeps the current SMS route and message context (%s)", async (action, id) => {
     const view = mount(); await open(a);
     let finish;
