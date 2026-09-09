@@ -26,7 +26,7 @@ import {
 import { adminFetch } from "../../lib/adminFetch";
 
 const money = (n) =>
-  `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  n == null ? "—" : `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const termLabel = (v) => ({ net15: "Net 15", net30: "Net 30" }[v] || v);
 
 export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
@@ -44,6 +44,7 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
         const r = await adminFetch("/admin/payers/ar-aging");
         const d = await r.json().catch(() => null);
         if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+        if (!Array.isArray(d?.payers)) throw new Error("Could not load payer aging.");
         if (alive) setAr(d || null);
       } catch (e) {
         if (alive) {
@@ -84,7 +85,7 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
               Retry
             </Button>
           </p>
-        ) : !ar || ar.statement_count === 0 ? (
+        ) : ar?.statement_count === 0 ? (
           <p className="text-13 text-zinc-400 py-4">
             No outstanding payer statements. Balances appear here once NET-terms
             statements are sent.

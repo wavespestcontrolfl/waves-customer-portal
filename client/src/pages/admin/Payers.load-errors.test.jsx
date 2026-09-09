@@ -67,7 +67,7 @@ describe('payer surfaces on a failed load', () => {
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async () => {
       calls += 1;
-      return calls === 1 ? failing() : { ok: true, json: async () => ({ statement_count: 0 }) };
+      return calls === 1 ? failing() : { ok: true, json: async () => ({ statement_count: 0, payers: [] }) };
     }));
     render(<PayerArAgingDialog onClose={() => {}} onSelectPayer={() => {}} />);
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');

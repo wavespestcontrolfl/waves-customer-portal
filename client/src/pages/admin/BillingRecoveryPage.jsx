@@ -138,7 +138,7 @@ function VisitRow({ visit, busy, onBill, onFree, confirmBill }) {
           <div className="text-12 text-amber-700 mt-0.5">Completed by status only — no service record yet</div>
         )}
       </TD>
-      <TD nums>{formatMoney(visit.price)}</TD>
+      <TD nums>{visit.price == null ? "—" : formatMoney(visit.price)}</TD>
       <TD align="right">
         <div className="flex gap-2 justify-end">
           {statusOnly ? (
@@ -241,7 +241,8 @@ export default function BillingRecoveryPage() {
     }
   }, [freeFor, freeReason, freeNote, load]);
 
-  const summary = data?.summary;
+  const summary = !loading && !error ? data?.summary : null;
+  const visibleAging = !loading && !error ? aging : null;
   const agingBuckets = aging?.aging || {};
 
   return (
@@ -266,15 +267,15 @@ export default function BillingRecoveryPage() {
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <StatCard label="Uninvoiced (leak)" value={formatMoney(summary?.leak_dollars)} sub={`${summary?.leak_visits || 0} visits · ${summary?.leak_customers || 0} customers`} />
-        <StatCard label="Needs review" value={formatMoney(summary?.review_dollars)} sub={`${summary?.review_visits || 0} recurring visits`} />
-        <StatCard label="AR outstanding" value={formatMoney(aging?.total_outstanding)} sub={`${aging?.invoice_count || 0} invoices`} />
-        <StatCard label="AR overdue" value={formatMoney(aging?.total_overdue)} alert={(aging?.total_overdue || 0) > 0} />
+        <StatCard label="Uninvoiced (leak)" value={summary?.leak_dollars == null ? "—" : formatMoney(summary.leak_dollars)} sub={`${summary?.leak_visits ?? "—"} visits · ${summary?.leak_customers ?? "—"} customers`} />
+        <StatCard label="Needs review" value={summary?.review_dollars == null ? "—" : formatMoney(summary.review_dollars)} sub={`${summary?.review_visits ?? "—"} recurring visits`} />
+        <StatCard label="AR outstanding" value={visibleAging?.total_outstanding == null ? "—" : formatMoney(visibleAging.total_outstanding)} sub={`${visibleAging?.invoice_count ?? "—"} invoices`} />
+        <StatCard label="AR overdue" value={visibleAging?.total_overdue == null ? "—" : formatMoney(visibleAging.total_overdue)} alert={visibleAging?.total_overdue > 0} />
       </div>
 
       {loading ? (
         <div className="text-13 text-zinc-500 py-10 text-center">Loading…</div>
-      ) : (
+      ) : !error && (
         <>
           <Card className="mb-6">
             <CardHeader><CardTitle>Uninvoiced completed visits</CardTitle></CardHeader>
@@ -317,10 +318,10 @@ export default function BillingRecoveryPage() {
             <CardHeader><CardTitle>Accounts receivable aging</CardTitle></CardHeader>
             <CardBody>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
-                <StatCard label="Current" value={formatMoney(agingBuckets.current)} />
-                <StatCard label="1–30 days" value={formatMoney(agingBuckets.days_30)} />
-                <StatCard label="31–60 days" value={formatMoney(agingBuckets.days_60)} />
-                <StatCard label="61–90+ days" value={formatMoney(agingBuckets.days_90_plus)} alert={(agingBuckets.days_90_plus || 0) > 0} />
+                <StatCard label="Current" value={agingBuckets.current == null ? "—" : formatMoney(agingBuckets.current)} />
+                <StatCard label="1–30 days" value={agingBuckets.days_30 == null ? "—" : formatMoney(agingBuckets.days_30)} />
+                <StatCard label="31–60 days" value={agingBuckets.days_60 == null ? "—" : formatMoney(agingBuckets.days_60)} />
+                <StatCard label="61–90+ days" value={agingBuckets.days_90_plus == null ? "—" : formatMoney(agingBuckets.days_90_plus)} alert={(agingBuckets.days_90_plus || 0) > 0} />
               </div>
               {aging?.top_balances?.length ? (
                 <Table>
@@ -331,7 +332,7 @@ export default function BillingRecoveryPage() {
                         <TD>{b.customer}</TD>
                         <TD><Badge tone={String(b.status).toLowerCase() === "overdue" ? "alert" : "neutral"}>{b.status}</Badge></TD>
                         <TD className="text-zinc-500">{formatDateOnly(b.due_date)}</TD>
-                        <TD nums>{formatMoney(b.amount)}</TD>
+                        <TD nums>{b.amount == null ? "—" : formatMoney(b.amount)}</TD>
                       </TR>
                     ))}
                   </TBody>

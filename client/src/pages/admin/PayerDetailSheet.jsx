@@ -29,7 +29,7 @@ import {
 import { adminFetch } from "../../lib/adminFetch";
 
 const money = (n) =>
-  `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  n == null ? "—" : `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 // DATE columns (period_start/end, due_date, service_date) arrive as 'YYYY-MM-DD'
 // (or a midnight-UTC ISO) — render in UTC so a date never shifts a day.
@@ -113,6 +113,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
       const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
       const d = await r.json().catch(() => null);
       if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+      if (!d?.summary) throw new Error("Could not load this payer's balance.");
       setAr(d);
       setArError("");
     } catch (e) {
@@ -146,7 +147,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
               {payer.ap_email || "no AP email"} · {termLabel(payer.payment_terms)}
             </p>
           </div>
-          {ar?.summary && (
+          {ar?.summary && !arLoading && !arError && (
             <div className="text-right shrink-0">
               <div className="text-11 text-zinc-500 uppercase tracking-label">Outstanding</div>
               <div className="text-16 font-medium text-zinc-900">{money(ar.summary.outstanding_total)}</div>
@@ -485,7 +486,8 @@ function DunningControls({ base, sequence, busy, act }) {
 }
 
 function ArSummary({ summary }) {
-  if (!summary || summary.statement_count === 0) {
+  if (!summary) return <p role="alert" className="text-13 text-alert-fg py-2">Payer aging is unavailable.</p>;
+  if (summary.statement_count === 0) {
     return <p className="text-13 text-zinc-400 py-2">No outstanding balance.</p>;
   }
   const buckets = summary.buckets || {};
