@@ -265,6 +265,15 @@ describe('codex round 1', () => {
     expect(statesNewAddress(said("I'm in Sarasota, same place", { city: 'Sarasota' }), lake)).toBe(false);
   });
 
+  test('raw words naming another street override a structured street that happens to match the file (r5 P1)', () => {
+    const palm = { hasAddress: true, addressLine1: '1234 Sample Palm Dr', addressLine2: null, addressCity: 'Parrish', addressZip: '34219' };
+    const both = (raw_text) => v2({ property: { service_address: { street_line_1: '1234 Sample Palm Drive', raw_text } } });
+    expect(statesNewAddress(both('9876 Other Grove Circle, Parrish'), palm)).toBe(true);
+    expect(statesNewAddress(both('1236 Sample Palm Drive'), palm)).toBe(true);
+    expect(statesNewAddress(both('1234 sample palm drive, same as always'), palm)).toBe(false);
+    expect(statesNewAddress(both('yes, same place'), palm)).toBe(false);
+  });
+
   test('the shadow bridge applies the same relationship rule as routing (P2)', () => {
     const base = { addressValidation: { status: 'validated_accept' }, extracted: { first_name: 'Ann', last_name: 'Lee' }, v2TriageFlags: ['caller_not_authorized'] };
     expect(deriveCallReviewBridge({ ...base }).needsConfirmation).not.toContain('caller_not_authorized');

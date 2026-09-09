@@ -103,8 +103,11 @@ async function ringRepeatCallerIfNeeded(callSid) {
           trx.raw("EXISTS (SELECT 1 FROM scheduled_services s WHERE s.source_call_log_id = call_log.id AND s.status IN ('pending', 'confirmed', 'en_route', 'on_site', 'completed')) AS booked"));
       const p = repeatCallerPlan(rows);
       if (!p) return null;
-      // A stale lease on THIS call means a previous owner died mid-delivery.
-      p.reclaimed = Boolean(rows.find((r) => String(r.id) === String(call.id))?.repeat_caller_claim);
+      // Any lease still present in the window is stale (a live one returned
+      // null above): a previous owner — of THIS call or an earlier one in
+      // the window — died mid-delivery (codex r5 P2).
+      p.reclaimed = rows.some((r) => r.repeat_caller_claim);
+      p.windowIds = rows.map((r) => r.id);
       const claimed = await trx('call_log')
         .where({ id: call.id })
         .whereRaw("COALESCE(metadata->>'repeat_caller_alerted_at','') = ''")
@@ -118,14 +121,14 @@ async function ringRepeatCallerIfNeeded(callSid) {
     const fenced = () => db('call_log').where({ id: call.id }).whereRaw("metadata->>'repeat_caller_claim' = ?", [token]);
     const settle = () => fenced().update({ metadata: db.raw("(metadata - 'repeat_caller_claim') || jsonb_build_object('repeat_caller_alerted_at', ?::text)", [new Date().toISOString()]) });
     // Reclaimed a stale lease: the previous owner may have died AFTER the
-    // bell row was written. A repeat_caller notification for this call means
-    // it delivered — settle instead of ringing twice (codex r4 P2; a
-    // push-only delivery leaves no row and its re-send is coalesced by the
-    // per-call push tag).
+    // bell row was written. A repeat_caller notification for ANY call in
+    // this window means the window delivered — settle instead of ringing
+    // twice (codex r4 / r5 P2; a push-only delivery leaves no row and its
+    // re-send is coalesced by the per-call push tag).
     if (plan.reclaimed) {
       const prior = await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' })
         .whereRaw("metadata->>'triggerKey' = 'repeat_caller'")
-        .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(call.id)]).first('id');
+        .whereRaw("metadata->'payload'->>'callLogId' = ANY(?)", [plan.windowIds.map(String)]).first('id');
       if (prior) { await settle().catch(() => {}); return false; }
     }
     let stats = null;

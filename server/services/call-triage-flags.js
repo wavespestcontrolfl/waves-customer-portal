@@ -1598,34 +1598,33 @@ function restatesOnFileAddress(sa, knownCustomer) {
   if (rawUnit && !onFileUnit) return false;
   if (rawUnit && unitKey(rawUnit) !== unitKey(onFileUnit)) return false;
 
-  if (street) return streetCompareKey(street) === onFileKey;
-  if (raw && /\d{2,}/.test(raw)) {
-    // The parser could not split a numbered address: accept only when the
-    // spoken text carries the on-file house number AND every word of the
-    // on-file street name, each as a whole token (codex r3 P1: a substring
-    // test let an on-file "W Lake Dr" accept any raw street containing a
-    // "w"). A raw remark with no number ("I'm in Parrish") is judged on the
-    // locality components below.
-    const rawTokens = new Set(String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean));
-    return !!onFileHouse && onFileNameTokens.length > 0
-      && rawTokens.has(onFileHouse) && onFileNameTokens.every((t) => rawTokens.has(t));
-  }
-  // A bare community name locates nothing we can compare.
-  if (community && !city && !zip) return false;
-  // Raw text that names a STREET without a house number ("Oak Avenue,
-  // Sarasota") is new-address evidence too (codex r4 P1): unless it carries
-  // every word of the on-file street name it fails closed, even when the
-  // city or ZIP beside it agreed. A remark with no street words ("I'm in
-  // Parrish", "same place") is judged on the locality components alone.
+  // Raw text is judged BEFORE the structured street can answer (codex r3
+  // P1, r5 P1): the extractor may fill street_line_1 with the on-file
+  // street while the caller's actual words name another one. Raw text that
+  // names a street — a digit, or a suffix word after a name-like word ("Oak
+  // Avenue" does, "same place" / "on the road" do not) — restates the file
+  // only when every word of the on-file street name appears as a whole
+  // token (codex r3 P1: a substring test let an on-file "W Lake Dr" accept
+  // any raw street containing a "w") AND, when it carries a house number,
+  // that number is the on-file one. A remark with no street words ("I'm in
+  // Parrish") is judged on the locality components below.
   if (raw) {
     const rawList = String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean);
     const rawTokens = new Set(rawList);
-    // A suffix word names a street only after a name-like word: "Oak
-    // Avenue" does, "same place" / "on the road" do not.
     const namesAStreet = /\d/.test(raw)
       || rawList.some((t, i) => i > 0 && STREET_SUFFIX_WORDS.has(t) && !STREET_PHRASE_STOPWORDS.has(rawList[i - 1]));
-    if (namesAStreet && !(onFileNameTokens.length > 0 && onFileNameTokens.every((t) => rawTokens.has(t)))) return false;
+    if (namesAStreet) {
+      const nameAgrees = onFileNameTokens.length > 0 && onFileNameTokens.every((t) => rawTokens.has(t));
+      const houseAgrees = !/\d{2,}/.test(raw) || (!!onFileHouse && rawTokens.has(onFileHouse));
+      if (!nameAgrees || !houseAgrees) return false;
+      // A numbered raw address that agrees on both is the on-file street,
+      // whatever the parser managed to split out of it.
+      if (/\d{2,}/.test(raw) && !street) return true;
+    }
   }
+  if (street) return streetCompareKey(street) === onFileKey;
+  // A bare community name locates nothing we can compare.
+  if (community && !city && !zip) return false;
   // City and/or ZIP only, and both agreed above.
   return !!(city || zip);
 }
