@@ -322,6 +322,10 @@ describe('_private.threadQuoteSignal', () => {
       'Do you offer exclusive rates for new customers?',
       'Can I get unlimited estimates for my rental properties?',
       'Do qualified customers get a discount on pest control?',
+      'We have qualified pest customers at our rentals. Can you quote service?',
+      'Do you provide qualified pest customers with a discount?',
+      'We provide housing; can qualified pest customers get estimates?',
+      'We provide exclusive housing for customers and need pest control.',
       'We manage several rentals and can fill your schedule; please quote pest control',
       'We provide housing; can you send pest control estimates for contractors staying here? Would you like more details?',
       'Can you fill your calendar with our rental pest services? I can send more details?',
@@ -565,6 +569,10 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     'We provide unlimited estimates for contractors.',
     'We can grow your business with booked pest jobs',
     'We have unlimited pest jobs available in your area',
+    'We provide qualified pest customers in your area',
+    'I offer exclusive lawn care customers in your area',
+    'Our network provides unlimited new customers',
+    'We can offer qualified local customers',
   ])('a vendor pitch on an active clarify/intake thread is a terminal veto: %s', async (triggerBody) => {
     const result = await startSmsThreadDraft({
       phone: PHONE,
