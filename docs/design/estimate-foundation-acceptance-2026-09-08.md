@@ -14,6 +14,8 @@ The owner accepted the rendered Customer 360 foundation and asked to continue th
 
 The record above describes the original local acceptance. The reviewed sequence is now #4167 (state reset), #4173 (fields) and #4176 (review/send controls), based on current main and the shared components. The PR-preparation source `13a48ce13b190805027e845bdebf9988ee338174` passed 40 focused tests, the production build and the full actual-route browser checks below. The original full-suite count remains evidence for its original source, not the newer PR head. Final-head CI is tracked on each PR.
 
+The published runner also seeds a reopened estimate with manual and service-specific discounts, verifies the manual discount controls clear for the next customer, and checks all customer-specific discount fields in that customer's saved payload. It records and allowlists exact read and write method/path pairs, including fixture customer and estimate IDs, and asserts the intended pointer mode at every geometry width. Reports identify the checked source; private candidate overlays remain separate from committed-runner evidence.
+
 ## Shared presentation and workflow ownership
 
 The builder opts into comfortable density: 44px controls, 14px labels/actions, and 16px field text. Its 129 locally rendered fields now use `Field`; the existing estimate bindings use shared `Input`, `Select`, and `Checkbox`. Raw text fields, customer search, address autocomplete, discount presets, and notes also use the shared controls. Address autocomplete retains its native ref. The obsolete field wrapper, checkbox drawing, input class string, custom select caret, and broad font repair are removed.
