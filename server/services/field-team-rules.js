@@ -1,6 +1,17 @@
 const Joi = require('joi');
 const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 
+// Keep this legacy definition fixed: already-retained revision 2b rules did
+// not carry a formula snapshot. New rules persist their own formula inputs.
+const VERSION_FORMULAS = {
+  'field-team-rev-2b': {
+    production_bps: { technician_i: 600, technician_ii: 800 }, commission_bps: 500,
+    outcome_curves: {
+      rework: { maximum: 20000, zeroFailureRate: 0.06, fullFailureRate: 0.02 },
+      handoff: { maximum: 10000, zeroFailureRate: 0.10, fullFailureRate: 0.02 },
+    }, interpolation: 'linear simulation',
+  },
+};
 const PROGRAM = {
   version: 'field-team-rev-2b',
   mode: 'simulation',
@@ -12,9 +23,13 @@ const PROGRAM = {
     { key: 'service_manager', title: 'Service Manager', hourlyCents: null, annualBaseCents: 6500000, targetIncentiveCents: 2500000, productionBps: null },
     { key: 'general_manager', title: 'General Manager', hourlyCents: null, annualBaseCents: 8500000, targetIncentiveCents: 3500000, productionBps: null },
   ],
-  commissionBps: 500,
-  outcome: { reworkMaxCents: 20000, handoffMaxCents: 10000, interpolation: 'linear simulation' },
 };
+function ruleDefinition(data) {
+  return { ...data, program_version: PROGRAM.version, formula: structuredClone(VERSION_FORMULAS[PROGRAM.version]) };
+}
+function formulaForRule(rule) {
+  return rule?.formula || VERSION_FORMULAS[rule?.program_version] || null;
+}
 const ROLE_KEYS = PROGRAM.roles.map(role => role.key);
 const REPAIR_REASONS = ['none', 'technician_omission', 'office_change', 'customer_change', 'software_issue', 'unresolved'];
 const REWORK_OUTCOMES = ['unobserved', 'no_return', 'technician_execution', 'protocol', 'scheduling', 'customer', 'other', 'unresolved'];
@@ -114,8 +129,8 @@ function production({ roleKey, rule, serviceKey, allocation, ordinal, participan
   if (problem) return { ...result, reason: problem[1] };
   const serviceRule = rule.service_rules.find(item => item.service_key === serviceKey);
   if (!serviceRule || serviceRule.credit_type !== allocation.credit_type) return { ...result, reason: 'This service key and credit type are not included in the simulation definition.' };
-  const rate = PROGRAM.roles.find(role => role.key === roleKey)?.productionBps;
-  if (rate == null) return { ...result, reason: 'Production incentives are modeled for Technician I and II only.' };
+  const rate = formulaForRule(rule)?.production_bps[roleKey];
+  if (rate == null) return { ...result, reason: 'A production rate is not defined for this role and effective rule.' };
   // Specialty compensation needs a separate pre-assignment amount; do not
   // silently apply the routine 6/8% rate to its accepted selling price.
   if (allocation.credit_type === 'specialty') return { ...result, reason: 'A separately defined specialty incentive amount is required.' };
@@ -127,16 +142,13 @@ function production({ roleKey, rule, serviceKey, allocation, ordinal, participan
   };
 }
 
-const OUTCOME_CURVES = {
-  rework: { maximum: PROGRAM.outcome.reworkMaxCents, zeroFailureRate: 0.06, fullFailureRate: 0.02 },
-  handoff: { maximum: PROGRAM.outcome.handoffMaxCents, zeroFailureRate: 0.10, fullFailureRate: 0.02 },
-};
-
 function outcomeBonus(kind, evidence, rule, asOfDate) {
+  const formula = formulaForRule(rule);
+  const curve = formula?.outcome_curves[kind];
   const minimum = rule?.[`${kind}_minimum`];
   const base = { status: 'definition_needed', amount_cents: null, total: evidence.length, observed: 0, unresolved: 0, immature: 0, excluded: 0, missing_window: 0, failures: 0, rate: null, minimum: minimum ?? null,
-    formula: { ...OUTCOME_CURVES[kind], interpolation: PROGRAM.outcome.interpolation } };
-  if (minimum == null) return { ...base, reason: 'Set the observation definition and minimum sample for this simulation.' };
+    formula: { ...curve, interpolation: formula?.interpolation } };
+  if ([minimum, curve].some(value => value == null)) return { ...base, reason: 'Set the formula, observation definition and minimum sample for this simulation.' };
   const rework = kind === 'rework';
   for (const row of evidence) {
     const facts = row.facts;
@@ -144,12 +156,14 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
     const window = serviceRule?.rework_window_days;
     const mature = window == null ? null : etDateString(addETDays(parseETDateTime(`${row.service_date}T12:00`), window));
     const reviewedDate = row.created_at ? etDateString(new Date(row.created_at)) : '';
+    const returnOutcome = !['no_return', 'unobserved', 'unresolved'].includes(facts.rework_outcome);
+    const linkedReturn = [facts.return_service_id, facts.same_issue_confirmed, facts.return_service_date, facts.return_service_date >= row.service_date].every(Boolean);
     // First matching reason owns the observation; excluded work and missing
     // evidence can never increment the observed denominator.
     const checks = [
-      [facts.exclusion !== 'none', 'excluded'],
       [!row.service_key, 'unresolved'],
       [facts.provenance !== 'verified', 'unresolved'],
+      [facts.exclusion !== 'none', 'excluded'],
       [!serviceRule, 'excluded'],
       ...(rework ? [
         [window == null, 'missing_window'],
@@ -157,6 +171,7 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
         // A premature no-return review does not cover the rest of its window.
         [facts.rework_outcome === 'no_return' && reviewedDate < mature, 'unresolved'],
         [['unobserved', 'unresolved'].includes(facts.rework_outcome), 'unresolved'],
+        [returnOutcome && !linkedReturn, 'unresolved'],
         [facts.return_service_date > mature, 'unresolved'],
       ] : [
         [facts.complete_at_cutoff == null, 'unresolved'],
@@ -166,8 +181,8 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
     ];
     const state = checks.find(([blocked]) => blocked)?.[1] || 'observed';
     base[state] += 1;
-    const failed = rework ? facts.rework_outcome === 'technician_execution'
-      : !facts.complete_at_cutoff || facts.repair_reason === 'technician_omission';
+    const failed = { rework: facts.rework_outcome === 'technician_execution',
+      handoff: [!facts.complete_at_cutoff, facts.repair_reason === 'technician_omission'].some(Boolean) }[kind];
     if (state === 'observed' && failed) base.failures += 1;
   }
   const blocked = [
@@ -178,19 +193,19 @@ function outcomeBonus(kind, evidence, rule, asOfDate) {
   ].find(([condition]) => condition);
   if (blocked) return { ...base, status: blocked[1], reason: blocked[2] };
   const failureRate = base.failures / base.observed;
-  const curve = OUTCOME_CURVES[kind];
   const fraction = (curve.zeroFailureRate - failureRate) / (curve.zeroFailureRate - curve.fullFailureRate);
   return { ...base, status: 'simulated', rate: rework ? failureRate : 1 - failureRate,
     amount_cents: Math.round(curve.maximum * Math.max(0, Math.min(1, fraction))), reason: 'Linear simulation between the revision 2b endpoints.' };
 }
 
 function commission(facts, rule, asOfDate) {
-  const potential = Math.round(Math.max(0, facts.accepted_net_cents - facts.baseline_cents) * PROGRAM.commissionBps / 10000);
+  const rate = formulaForRule(rule)?.commission_bps;
+  const potential = rate == null ? null : Math.round(Math.max(0, facts.accepted_net_cents - facts.baseline_cents) * rate / 10000);
   const share = rule?.activation_share_bps;
   const due = facts.activation_date ? etDateString(addETDays(parseETDateTime(`${facts.activation_date}T12:00`), 90)) : null;
   const result = { status: 'definition_needed', potential_cents: potential, amount_cents: null, activation_cents: null, retention_cents: null, retention_due: due,
-    rate_bps: PROGRAM.commissionBps, activation_share_bps: share ?? null };
-  if (share == null) return { ...result, reason: 'The activation / 90-day split has not been defined.' };
+    rate_bps: rate ?? null, activation_share_bps: share ?? null };
+  if ([share, rate].some(value => value == null)) return { ...result, reason: 'The commission formula or activation / 90-day split has not been defined.' };
   const activated = !!facts.activation_date && facts.activation_date <= asOfDate && !!facts.payment_reference;
   const retained = activated && due <= asOfDate && facts.retained_at_90 === true && !!facts.retention_reference;
   const activation = Math.round(potential * share / 10000);
@@ -204,4 +219,4 @@ function assessmentResult(data) {
   return { status: missing ? 'development_needed' : 'qualified_for_consideration', management, position_available: management ? data.position_available : null };
 }
 
-module.exports = { PROGRAM, ROLE_KEYS, REPAIR_REASONS, REWORK_OUTCOMES, EXCLUSIONS, schemas, uuid, day, month, validate, reject, dateOnly, allocatedCents, splitCents, production, outcomeBonus, commission, assessmentResult };
+module.exports = { PROGRAM, ROLE_KEYS, REPAIR_REASONS, REWORK_OUTCOMES, EXCLUSIONS, schemas, uuid, day, month, validate, reject, dateOnly, ruleDefinition, allocatedCents, splitCents, production, outcomeBonus, commission, assessmentResult };
