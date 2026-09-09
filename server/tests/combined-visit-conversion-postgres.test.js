@@ -89,6 +89,45 @@ postgres('combined capacity conversion on the migrated application schema', () =
     if (mockPg) await mockPg.destroy();
   });
 
+  test.each([1, 2])('version-2 conversion preserves %i program allowances after capacity shutdown', async count => {
+    const trx = await mockPg.transaction();
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      const selected = lines.slice(0, count);
+      const durations = [30, 40].slice(0, count);
+      // The task-private database may contain schema without catalog seeds.
+      // These rows live only in this test's rolled-back transaction.
+      for (const line of selected) {
+        if (!await trx('services').where({ service_key: line.catalog }).first('id')) {
+          await trx('services').insert({ id: randomUUID(), service_key: line.catalog, name: line.name,
+            category: line.service, billing_type: 'recurring', is_active: true, default_duration_minutes: 60 });
+        }
+      }
+      const f = await fixture(trx, selected);
+      const mix = count > 1 ? capacityForServices(selected, durations) : null;
+      await trx('scheduled_services').where({ id: f.anchor.id }).update({ customer_id: f.customerId,
+        reservation_expires_at: null, reservation_policy_version: 2, reservation_service_mix: mix,
+        estimated_duration_minutes: durations.reduce((a, b) => a + b, 0), window_end: count === 1 ? '09:30' : '10:10' });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
+        .whereNull('recurring_parent_id');
+      expect(parents).toHaveLength(count);
+      for (const [index, line] of selected.entries()) {
+        const catalog = await trx('services').where({ service_key: line.catalog }).first('id');
+        const parent = parents.find(row => row.service_id === catalog.id);
+        expect(parent).toMatchObject({ reservation_policy_version: 2, estimated_duration_minutes: durations[index] });
+        const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id });
+        expect(children).toHaveLength(line.visitsPerYear - 1);
+        expect(children.every(row => row.estimated_duration_minutes === durations[index])).toBe(true);
+      }
+    } finally {
+      await trx.rollback();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
   test.each([
     ['two services', lines.slice(0, 2)],
     ...[['monthly', 12], ['bimonthly', 6]].map(([pattern, visits]) => [

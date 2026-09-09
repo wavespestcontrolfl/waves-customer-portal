@@ -129,7 +129,9 @@ the selection, technician and full occupancy under existing locks, then converts
 a version-1 hold into sequential 60-minute member windows, or a version-2 hold
 into catalog-sized member windows sharing the arrival anchor, with independent
 cadences. Missing or unmatched members abort the transaction. A stamped hold
-retains its capacity policy when the creation gate turns off. Shared-arrival
+retains its capacity policy when the creation gate turns off. Recurring follow-ups
+inherit each version-2 parent’s accepted work allowance, including allocated
+companion parents, even after shutdown. Shared-arrival
 reminder consumers use the persisted allocation, including with grouping off
 or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and

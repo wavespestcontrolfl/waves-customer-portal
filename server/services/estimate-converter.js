@@ -3174,6 +3174,9 @@ function visitsPerYearForRecurringService(svc = {}) {
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
+  // A certified version-2 parent retains its accepted allowance even after
+  // gate shutdown; companion parents carry their own allocated duration.
+  if (parentRow.reservation_policy_version === 2) return firstPositiveNumber(parentRow.estimated_duration_minutes);
   // Combined synthetic lines carry the catalog row's duration explicitly
   // (e.g. Pest + Termite Bait at 75min) — that beats the pest-quarterly
   // default so combined follow-ups inherit the right visit length.
@@ -5667,6 +5670,7 @@ const EstimateConverter = {
             if (combinedCapacity && sameTrip) {
               Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length, unit.catalogServiceKey));
               standaloneRow.service_key_snapshot = unit.catalogServiceKey;
+              if (combinedCapacity.version === 2) standaloneRow.reservation_policy_version = 2;
             }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already

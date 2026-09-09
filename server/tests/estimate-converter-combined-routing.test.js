@@ -585,6 +585,23 @@ describe('combined-name downstream keys', () => {
     expect(serviceKeyFor({ service_type: 'Termite Bait Station System' })).toBe('termite_bait');
   });
 
+  test.each([30, 40, 90])('version-2 follow-ups retain the accepted %i-minute allowance after gate shutdown', duration => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      const parent = { id: 'held-parent', customer_id: 'fixture', scheduled_date: '2027-05-20',
+        service_type: 'Quarterly Pest Control', estimated_duration_minutes: duration, reservation_policy_version: 2 };
+      const resolved = durationMinutesForRecurringService({ service: 'pest_control' }, 'quarterly', parent);
+      const rows = buildRecurringFollowUpRows(parent, { pattern: 'quarterly', durationMinutes: resolved });
+      expect(rows).toHaveLength(3);
+      expect(rows.every(row => row.estimated_duration_minutes === duration)).toBe(true);
+      expect(durationMinutesForRecurringService({ service: 'pest_control', estimatedDurationMinutes: 20 }, 'quarterly', parent)).toBe(duration);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
   test('explicit duration on a combined synthetic line beats the pest-quarterly default', () => {
     expect(durationMinutesForRecurringService(
       { name: 'Quarterly Pest + Termite Bait Station Service', estimatedDurationMinutes: 75 },
