@@ -1,20 +1,15 @@
-/**
- * Hosts whose links go BARE (scheme-less) in SMS — owner directive
- * 2026-08-01: dropping "https://" saves 8 characters per link and SMS
- * clients autolink a bare domain they recognize. Deliberately scoped to
- * hosts we own; every third-party link keeps its scheme (an unfamiliar
- * bare host may not render tappable).
- *
- * Single source of truth: the SMS template renderer
- * (routes/admin-sms-templates.js stripPortalUrlScheme) strips schemes with
- * this list, and comms-lint exempts the same hosts from its bare-host
- * rule — importing from here is what keeps the renderer and the lint from
- * ever disagreeing about which side of the rule a host is on.
- */
-const SCHEMELESS_SMS_HOSTS = [
-  'portal.wavespestcontrol.com',
-  'waves-customer-portal-production.up.railway.app',
-];
+// Owner directive: omit the leading https:// from every SMS link. This is
+// display formatting only; URL builders, redirects, email, and provider
+// callback/media URLs retain their original schemes.
+function stripSmsUrlScheme(body) {
+  if (typeof body !== 'string') return body;
+  // Consume the entire URL, including an already-bare URL, so a second
+  // pass cannot strip a nested https:// inside a signed query or path.
+  return body.replace(
+    /(?:https?:\/\/|(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]+(?=[:/?#]))[^\s<>"']*/giu,
+    (url) => url.replace(/^https:\/\//i, ''),
+  );
+}
 
 // Textual link checks miss hosts hidden behind encodings that a URL parser
 // (or a tapping thumb) canonicalizes back to the real hostname: `bit%2ely`,
@@ -47,4 +42,4 @@ function normalizeForLinkCheck(raw) {
   return out;
 }
 
-module.exports = { SCHEMELESS_SMS_HOSTS, normalizeForLinkCheck };
+module.exports = { stripSmsUrlScheme, normalizeForLinkCheck };

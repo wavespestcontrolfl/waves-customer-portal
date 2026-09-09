@@ -953,7 +953,7 @@ const InvoiceService = {
    * Create an invoice — optionally linked to a service record.
    * If serviceRecordId is provided, pulls products, photos, tech info automatically.
    */
-  async create(createArgs) {
+  async create(createArgs, packetWrite = null) {
     // `let` (not const): create() reassigns some of these below (e.g. taxRate for
     // a tax-exempt payer), matching the original mutable function-parameter shape.
     let {
@@ -1012,6 +1012,18 @@ const InvoiceService = {
       frozenPayerId = undefined,
     } = createArgs;
 
+    // Only the packet coordinator passes the second argument. Never accept
+    // shared ownership from route line items or other customer-supplied fields.
+    if (packetWrite && (!database?.isTransaction || !packetWrite.packetId)) {
+      throw new Error('Visit invoice creation requires its owning transaction');
+    }
+    let linkedScheduledServiceId = scheduledServiceId;
+    if (!linkedScheduledServiceId && serviceRecordId) {
+      const linkedRecord = await database('service_records')
+        .where({ id: serviceRecordId, customer_id: customerId }).first('scheduled_service_id');
+      linkedScheduledServiceId = linkedRecord?.scheduled_service_id || null;
+    }
+
     // Phase 2 atomicity: a NET-terms accrual (statement get/create + invoice
     // insert + rollup) must be atomic, so run the whole create in one transaction
     // when no caller transaction was supplied. But ONLY for an actual accrual —
@@ -1023,14 +1035,9 @@ const InvoiceService = {
     // savepoints each insert, so the collision retry still works inside the txn.
     if (!skipAccrual && database === db && require("../config/feature-gates").isEnabled("payerStatements")) {
       const PayerSvc = require("./payer");
-      let preSsId = scheduledServiceId;
-      if (!preSsId && serviceRecordId) {
-        const srLink = await db("service_records").where({ id: serviceRecordId, customer_id: customerId }).first("scheduled_service_id").catch(() => null);
-        if (srLink?.scheduled_service_id) preSsId = srLink.scheduled_service_id;
-      }
-      const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: preSsId, throwOnError: true });
+      const pre = await PayerSvc.resolveForInvoice({ database: db, customerId, scheduledServiceId: linkedScheduledServiceId, throwOnError: true });
       if (pre.payerId && ["net15", "net30"].includes(pre.paymentTerms)) {
-        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
     }
 
@@ -1045,31 +1052,28 @@ const InvoiceService = {
     // (the best-effort tax/discount catches then abort with it — accepted
     // for linked money writes; plain unlinked creates keep the
     // untransacted path).
-    if (!createArgs._setupFeeLocksHandled) {
-      const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
-      if (scheduledServiceId || stampedEstimateIdInNotes) {
-        const takeLocks = async (conn) => {
-          if (scheduledServiceId) {
-            const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
-            await acquireScheduledInvoiceMintLock(conn, scheduledServiceId);
-          }
-          if (stampedEstimateIdInNotes) {
-            await conn.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
-          }
-        };
-        if (database && database.isTransaction) {
-          await takeLocks(database);
-        } else if (typeof (database || db).transaction === 'function') {
-          const baseDb = database || db;
-          return baseDb.transaction(async (trx) => {
-            await takeLocks(trx);
-            return InvoiceService.create({ ...createArgs, _setupFeeLocksHandled: true, database: trx });
-          });
+    const stampedEstimateIdInNotes = (String(notes || "").match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
+    if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
+      if (database && database.isTransaction) {
+        if (linkedScheduledServiceId) {
+          const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
+          await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
         }
-        // else: a harness db without transaction support — locks are
-        // unavailable there by construction; production knex always
-        // provides transaction().
+        if (stampedEstimateIdInNotes) {
+          await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
+        }
+      } else if (typeof (database || db).transaction === 'function') {
+        // Resolve the record link again INSIDE the transaction, before any
+        // mint lock. A pre-transaction link never selects the guarded member.
+        return (database || db).transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
+      // Harness databases may omit transaction(); production knex does not.
+    }
+    if (linkedScheduledServiceId) {
+      const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');
+      await assertScheduledInvoiceNotPacketOwned(database, linkedScheduledServiceId, packetWrite?.packetId);
+    } else if (packetWrite) {
+      throw new Error('Visit invoice requires a billed member');
     }
     const customer = await database("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
@@ -1089,16 +1093,8 @@ const InvoiceService = {
     // override on the appointment is honored — resolveForInvoice keys per-job
     // Bill-To routing off the scheduled service, and without this the invoice
     // would fall back to the customer default (or self-pay) and bill the wrong
-    // party. Only the payer lookup uses the derived id; the row's own
+    // party. Reuse the same link resolved for the mint lock above; the row's own
     // scheduled_service_id linkage below is unchanged.
-    let payerScheduledServiceId = scheduledServiceId;
-    if (!payerScheduledServiceId && serviceRecordId) {
-      const srLink = await database("service_records")
-        .where({ id: serviceRecordId, customer_id: customerId })
-        .first("scheduled_service_id")
-        .catch(() => null);
-      if (srLink?.scheduled_service_id) payerScheduledServiceId = srLink.scheduled_service_id;
-    }
     const {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
@@ -1109,7 +1105,7 @@ const InvoiceService = {
       database,
       customerId,
       customer,
-      scheduledServiceId: payerScheduledServiceId,
+      scheduledServiceId: linkedScheduledServiceId,
       // Fail closed under the statements gate: if payer resolution is uncertain,
       // a NET-terms job must NOT silently fall back to self-pay and create an
       // individually-collectible invoice instead of accruing. (Default fail-soft
@@ -1142,7 +1138,7 @@ const InvoiceService = {
       // transaction) — re-enter create() in one so accrual stays atomic. (The
       // re-entry's database is the trx, so its own preflight won't re-wrap.)
       if (database === db) {
-        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }));
+        return db.transaction((trx) => InvoiceService.create({ ...createArgs, database: trx }, packetWrite));
       }
       try {
         const stmt = await PayerStatements.getOrCreateOpenStatement({
@@ -1669,6 +1665,7 @@ const InvoiceService = {
           ...(scheduledServiceId
             ? { scheduled_service_id: scheduledServiceId }
             : {}),
+          ...(packetWrite ? { visit_completion_packet_id: packetWrite.packetId } : {}),
           ...(resolvedPayerId ? { payer_id: resolvedPayerId } : {}),
           ...(resolvedPoNumber ? { po_number: resolvedPoNumber } : {}),
           ...(batchKey ? { batch_key: batchKey } : {}),
@@ -1676,6 +1673,13 @@ const InvoiceService = {
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
+          // The record link identifies a billed member; its treatment is not
+          // the whole visit. Keep packet invoice copy neutral after tax used
+          // the validated service basis. Each report owns its treatment detail.
+          ...(packetWrite ? {
+            service_type: 'Combined service visit', tech_notes: null,
+            products_applied: JSON.stringify([]), service_photos: JSON.stringify([]),
+          } : {}),
         });
         break;
       } catch (err) {
@@ -3605,6 +3609,9 @@ const InvoiceService = {
         "waveguard_tier",
         // Saved-card state rides along so a deep-linked invoice row keeps
         // its card badge and Charge-card action (Codex PR #3476 r20 P2).
+        // customers has NO card_on_file column — it is the default
+        // payment_methods row, computed exactly as the list query does
+        // (a bare column read 500'd every admin invoice detail in prod).
         db.raw(`(
           SELECT json_build_object('brand', card_brand, 'last_four', last_four)
           FROM payment_methods
@@ -5005,6 +5012,63 @@ const InvoiceService = {
       logger.warn(`[invoice] unvoid committed but setup-fee alert reconcile failed for invoice ${invoice.id}: ${err.message}`);
     }
     return invoice;
+  },
+
+  /**
+   * Close an invoice whose existing discounts/deposit/account-credit allocation
+   * leave exactly nothing due. Uses the non-cash prepaid state and keeps its
+   * existing allocations for the canonical void/reversal paths. No new credit,
+   * payment row, provider call or receipt is created by this transition.
+   */
+  async settleZeroBalance(id, database = db) {
+    const run = async (trx) => {
+      const invoice = await trx("invoices").where({ id }).forUpdate().first();
+      if (!invoice) return { settled: false, reason: "not_found", invoice: null };
+      const skip = (reason) => ({ settled: false, reason, invoice });
+      if (!require("./invoice-helpers").isInvoiceCollectibleStatus(invoice.status)) return skip("already_settled");
+      const totalCents = Math.round(Number(invoice.total) * 100);
+      const creditCents = Math.round(Number(invoice.credit_applied || 0) * 100);
+      const validAmounts = [totalCents, creditCents].every((cents) => Number.isSafeInteger(cents) && cents >= 0);
+      if (invoice.total == null || !validAmounts || creditCents > totalCents) return skip("invalid_balance");
+      if (totalCents !== creditCents) return skip("balance_due");
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
+      if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
+        invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
+        return skip("existing_payment_work");
+      }
+      const payment = await trx("payments").whereIn("status", ["paid", "processing"])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
+      const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
+      if (payment || plan) return skip("existing_payment_work");
+      const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
+        .first("id", "status", "touch_claimed_at");
+      if (sequence?.status === "stopped") return skip("collection_stopped");
+      // fireStep claims under this same invoice lock, then renders/sends
+      // outside its transaction. Let that existing ten-minute lease finish.
+      if (new Date(sequence?.touch_claimed_at).getTime() > Date.now() - 10 * 60 * 1000) {
+        return { ...skip("followup_in_flight"), retryable: true };
+      }
+      await trx("customers").where({ id: invoice.customer_id }).forUpdate().first("id");
+      if (await require("./invoice-helpers").visitRefusesSettlement(trx, invoice.scheduled_service_id)) {
+        return skip("visit_never_ran");
+      }
+      const [settled] = await trx("invoices").where({ id }).update({
+        status: "prepaid", prepaid_prev_status: invoice.status,
+        prepaid_at: trx.fn.now(), prepaid_by: "system:zero_balance",
+        paid_at: trx.fn.now(), updated_at: trx.fn.now(),
+      }).returning("*");
+      if (sequence) await trx("invoice_followup_sequences").where({ id: sequence.id }).update({
+        status: "completed", next_touch_at: null, touch_claimed_at: null, updated_at: trx.fn.now(),
+      });
+      await require("./audit-log").recordAuditEvent({
+        actor_type: "system", action: "invoice.zero_balance_settled",
+        resource_type: "invoice", resource_id: id,
+        metadata: { previous_status: invoice.status, total_cents: totalCents, credit_applied_cents: creditCents },
+        critical: true, trx,
+      });
+      return { settled: true, reason: null, invoice: settled };
+    };
+    return database.isTransaction ? run(database) : database.transaction(run);
   },
 
   /**

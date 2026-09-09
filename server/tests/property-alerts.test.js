@@ -12,6 +12,11 @@ jest.mock('../services/notification-service', () => ({
   notifyCustomer: jest.fn(async () => ({ id: 'note-1' })),
 }));
 
+jest.mock('../services/irrigation-app-plan', () => ({ appPlanEnabled: jest.fn(() => false), loadCustomerWateringPlan: jest.fn() }));
+jest.mock('../services/irrigation-weekly-email', () => ({ findEligibleCustomers: jest.fn() }));
+const { appPlanEnabled, loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
+const { findEligibleCustomers } = require('../services/irrigation-weekly-email');
+
 const { getAreaRainfall } = require('../services/lawn-water-area');
 const NotificationService = require('../services/notification-service');
 const {
@@ -76,6 +81,7 @@ beforeEach(() => {
   getAreaRainfall.mockImplementation(async () => null);
   NotificationService.notifyCustomer.mockImplementation(async () => ({ id: 'note-1' }));
   delete process.env.GATE_PROPERTY_ALERTS;
+  appPlanEnabled.mockReturnValue(false);
 });
 
 describe('rain rule', () => {
@@ -347,5 +353,116 @@ describe('route contract', () => {
     const on = await (await fetch(`${onBase}/api/property-alerts/`)).json();
     expect(on.available).toBe(true);
     expect(on.alerts).toHaveLength(1);
+  });
+});
+
+
+describe('saved weekly watering plan delivery', () => {
+  const MONDAY = new Date('2026-09-07T14:05:00Z');
+  const PLAN = {
+    weekEnding: '2026-09-06', sentAt: null, availableAt: '2026-09-07T11:00:00.000Z', validThrough: '2026-09-13',
+    notificationEligible: true,
+    title: 'This week: about 30 minutes per turf zone',
+    notificationBody: 'If the forecast rain arrives, skip this week. Otherwise, use your assigned day.',
+  };
+  const tables = {
+    lawn_water_areas: [{ id: 'area-1', rain_adjustment_factor: 1 }],
+    'customers as c': [{ id: 'cust-1', lawn_water_area_id: 'area-1' }],
+    'service_records as sr': [], customer_alerts: [],
+  };
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(MONDAY);
+    process.env.GATE_PROPERTY_ALERTS = 'true';
+    appPlanEnabled.mockReturnValue(true);
+    findEligibleCustomers.mockResolvedValue([{ id: 'cust-1' }]);
+    loadCustomerWateringPlan.mockResolvedValue(PLAN);
+    getAreaRainfall.mockResolvedValue(3);
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('Monday sends the saved conditional copy once, ahead of the competing rain rule, and records provider outcomes', async () => {
+    const push = { queued: true, subscriptions: 2, accepted: 1, failed: 1, expired: 0, skipped: 0 };
+    NotificationService.notifyCustomer.mockResolvedValue({ id: 'note-1', push });
+    const knex = knexFor(tables);
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex })).delivered).toBe(1);
+    expect(NotificationService.notifyCustomer).toHaveBeenCalledTimes(1);
+    const args = NotificationService.notifyCustomer.mock.calls[0];
+    expect(args.slice(0, 4)).toEqual(['cust-1', 'lawn_health', PLAN.title, PLAN.notificationBody]);
+    expect(args[4]).toMatchObject({ link: '/?tab=property&wateringPlanCustomer=cust-1', awaitPush: true,
+      preferenceKey: 'weather_alerts', dedupeKey: 'irrigation_weekly_plan:2026-09-06', pushOptions: { ephemeral: true } });
+    expect(await args[4].pushOptions.shouldContinue()).toBe(true);
+    expect(JSON.parse(knex.__inserts[0].row.payload).delivery).toEqual({ notificationId: 'note-1', push });
+    // Re-check just before the next provider leg; changed settings or a gate
+    // flip stops delivery even though the durable bell already exists.
+    loadCustomerWateringPlan.mockResolvedValue(null);
+    expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+    loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, availableAt: '2026-09-07T11:01:00.000Z' });
+    expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+    loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, notificationEligible: false });
+    expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+    loadCustomerWateringPlan.mockResolvedValue(PLAN);
+    appPlanEnabled.mockReturnValue(false);
+    expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+  });
+
+  test.each([false, undefined])('missing or unconfirmed portal numbers skip the notification and consume no cap (%s)', async (notificationEligible) => {
+    loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, notificationEligible });
+    const knex = knexFor(tables);
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex })).delivered).toBe(0);
+    // Keep the saved plan's priority so the legacy rain rule cannot replace
+    // a withheld weekly plan with an unsolicited irrigation instruction.
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+    expect(knex.__inserts).toHaveLength(0);
+  });
+
+  test('Tuesday keeps the plan authoritative without sending it late or sending a contradictory rain alert', async () => {
+    const now = new Date('2026-09-08T14:05:00Z');
+    const summary = await runPropertyAlertsSweep({ now, knex: knexFor(tables) });
+    expect(summary.delivered).toBe(0);
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['quiet hours', { quiet_hours_start: '09:00', quiet_hours_end: '11:00' }],
+    ['weather opt-out', { weather_alerts: false }],
+  ])('%s consumes no bell or weekly cap', async (_label, prefs) => {
+    const knex = knexFor({ ...tables, notification_prefs: [prefs] });
+    const summary = await runPropertyAlertsSweep({ now: MONDAY, knex });
+    expect(summary.delivered).toBe(0);
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+    expect(knex.__inserts).toHaveLength(0);
+  });
+
+  test('an unavailable plan stops between candidate selection and bell creation', async () => {
+    loadCustomerWateringPlan.mockResolvedValueOnce(PLAN).mockResolvedValue(null);
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).delivered).toBe(0);
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a failed plan reader suppresses the legacy irrigation alert', async () => {
+    loadCustomerWateringPlan.mockRejectedValue(new Error('snapshot unavailable'));
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).delivered).toBe(0);
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
+  test('a recent advisory still enforces the shared seven-day cap', async () => {
+    const knex = knexFor({ ...tables, customer_alerts: [{ customer_id: 'cust-1', dedupe_key: 'other',
+      rule_key: 'rain_skip_irrigation', fired_at: '2026-09-06T14:05:00Z' }] });
+    const summary = await runPropertyAlertsSweep({ now: MONDAY, knex });
+    expect(summary.capped).toBe(1);
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+  });
+
+  test('last Monday running a few seconds later does not suppress this entire week', async () => {
+    const knex = knexFor({ ...tables, customer_alerts: [{ customer_id: 'cust-1', dedupe_key: 'irrigation_weekly_plan:2026-08-30',
+      rule_key: 'irrigation_weekly_plan', fired_at: '2026-08-31T14:05:09Z' }] });
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex })).delivered).toBe(1);
+  });
+
+  test('the app gate off retains the established rain rule', async () => {
+    appPlanEnabled.mockReturnValue(false);
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex: knexFor(tables) })).delivered).toBe(1);
+    expect(findEligibleCustomers).not.toHaveBeenCalled();
+    expect(NotificationService.notifyCustomer.mock.calls[0][4].dedupeKey).toMatch(/^rain_skip_irrigation:/);
   });
 });

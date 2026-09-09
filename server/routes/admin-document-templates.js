@@ -37,6 +37,7 @@ function clampLimit(value, fallback = 100) {
 
 function templateQuery(conn = db) {
   return conn('document_templates as dt')
+    .whereNot('dt.audience', 'staff')
     .leftJoin('document_template_versions as active_version', 'dt.active_version_id', 'active_version.id')
     .select(
       'dt.*',
@@ -215,6 +216,7 @@ router.post('/', async (req, res, next) => {
 router.put('/:key', async (req, res, next) => {
   try {
     const existing = await db('document_templates')
+      .whereNot('audience', 'staff')
       .where({ template_key: req.params.key })
       .first('id', 'category', 'document_type', 'requires_signature');
     if (!existing) return res.status(404).json({ error: 'Document template not found' });
@@ -300,7 +302,12 @@ router.post('/versions/:id/publish', async (req, res, next) => {
       const template = await trx('document_templates')
         .where({ id: version.template_id })
         .forUpdate()
-        .first('id', 'active_version_id', 'status');
+        .first('id', 'active_version_id', 'status', 'audience');
+      if (template?.audience === 'staff') {
+        const error = new Error('Document template version not found');
+        error.status = 404;
+        throw error;
+      }
       // Idempotent re-publish of the already-active version is a no-op:
       // published_at is the ROLLOUT moment (the termite reconciliation
       // reads it as its lower bound), so advancing it without an actual
@@ -331,7 +338,10 @@ router.post('/versions/:id/publish', async (req, res, next) => {
     // new one.
     const freshVersion = await db('document_template_versions').where({ id: version.id }).first();
     res.json({ template: serializeTemplate(loaded.template, loaded.activeVersion), version: serializeVersion(freshVersion || version) });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 router.post('/:key/preview', async (req, res, next) => {

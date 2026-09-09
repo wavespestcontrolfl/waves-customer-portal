@@ -221,6 +221,20 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
     });
   });
 
+  test('a blocked route optimizer preview creates no confirmation card', async () => {
+    mockExecuteTool.mockResolvedValue({ blocked: true, message: 'No services found for this date.' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'blocked-route', name: 'optimize_all_routes', input: { date: '2099-01-01' } }],
+      [{ type: 'text', text: 'No route was changed.' }],
+    ]);
+    await withServer(async baseUrl => {
+      const response = await postQuery(baseUrl, { prompt: 'Optimize the route', context: 'schedule' });
+      expect(response.status).toBe(200);
+      expect(response.body.pendingActions || []).toHaveLength(0);
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+    });
+  });
+
   test('legacy bare write (update_customer) is never executed from the loop — proposal synthesized', async () => {
     // W0B r8: update_customer proposals resolve the target to a name for
     // the card — the pin resolver must return a row or the proposal refuses.
@@ -564,6 +578,22 @@ describe('/confirm-action commit path', () => {
       const params = mockExecuteTool.mock.calls[0][1];
       expect(params).toEqual({ customer_id: 'c1', updates: { city: 'Venice' } });
       expect(params.confirmed).toBeUndefined();
+    });
+  });
+
+  test('a blocked committed action returns unsuccessful while preserving its actual result', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'update_customer', params: { customer_id: 'synthetic-customer', updates: { city: 'Test City' } } },
+    });
+    const result = { blocked: true, message: 'The requested update is unavailable.' };
+    mockExecuteTool.mockResolvedValue(result);
+    await withServer(async baseUrl => {
+      const response = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(await response.json()).toMatchObject({ success: false, result });
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result);
     });
   });
 

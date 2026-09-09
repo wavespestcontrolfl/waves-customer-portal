@@ -86,8 +86,8 @@ mocked provider response is not evidence of end-to-end capability.
 - The existing IB retention tick removes expired task recovery data after the
   30-day window, including while the platform gate is off. A live runner lease
   postpones deletion; separate actor-bound action receipts remain available for
-  reconciliation. The existing workspace `uuid` library handles browsers without
-  native `crypto.randomUUID`; both composers share the same identity helper.
+  reconciliation. The shared identity helper uses Web Crypto, including
+  `getRandomValues` for UUID v4 generation without native `crypto.randomUUID`.
 - Navigation and Clear invalidate late UI updates. Saved tasks remain recoverable;
   closing or clearing a chat does not cancel already-confirmed operations.
   The phone sheet uses existing visual viewport variables and puts History/New
@@ -131,6 +131,15 @@ sites and fingerprint history remain recorded. No email parity is implied.
 The `bd735bc42` main integration adds the completion pricing source reader;
 its exact upstream fingerprint is recorded as unmapped. No scheduling parity is
 claimed by importing this already-merged portal action.
+
+The desktop query site's reviewed fingerprint was refreshed in place when the
+request identity became retained across a dropped response (the call now
+serializes the request once and reuses its key until the server answers).
+Same exception, same reason: transport is not a domain capability and no
+action gained coverage. Refreshed again when settle became identity-bound
+(the call spreads a captured identity instead of calling begin inline, so a
+stale response cannot clear a newer request key); same exception, same
+reason, no action gained coverage.
 
 The `f2e61b677` integration imports the upstream Pipeline estimate lifecycle,
 reviewed send dialog and customer SMS consolidation. Seventeen additional sites
@@ -259,8 +268,8 @@ delivery remain unverified. Earlier regression evidence is retained below.
   passed with no JS errors or overflow. Artifacts: `.local/ib-uuid-*`. The latest
   client run passes 20 tests (17 bar, two identity, one hook); all six scheduler
   registration tests and the production build pass after current-main integration.
-  Client-only native CI initially failed to resolve the server-owned UUID package;
-  the client now declares the same existing UUID dependency for isolated installs.
+  Client-only native CI initially failed to resolve the server-owned UUID package.
+  The identity helper now uses Web Crypto directly, with no client UUID dependency.
 - Local preview: `http://127.0.0.1:5292/admin/customers` while the QA harness runs;
   this is not a deployed preview. The synthetic session is local-only.
 - Live-model/provider evaluation has not run. No provider credentials are loaded
@@ -310,3 +319,31 @@ covering single/bulk proof validation and actual query → discovery → move
 proposal refusal. The route test asserts `target_clarification_required`, no
 approval row, and an unchanged hold. Focused DB runs exclude unrelated cases
 whose prior evidence remains recorded above.
+
+Read validation now runs for every platform read, including tasks with no
+resolved customer. A misspelled current name or model-selected unlinked call
+cannot expose an unrelated record. A phone at the start of an explicit
+conversation/history lookup may establish one fresh read target; ambiguous or
+substituted phones refuse, and that lookup never grants authority to write.
+
+The affected route/target PostgreSQL suites pass all 60 cases (36 route and
+24 target cases); the unchanged parent recovery suite passes 14. The route
+proof covers token and phone canonicalization for all three flexible estimate
+actions, then inserts a newer phone-matched estimate before confirmation and
+verifies the original estimate changes once while the newer row stays untouched.
+Server unit/contract checks pass 252 cases; four affected client suites pass
+38 cases. The production build, brand, domain and coverage checks pass. The
+controlled browser evidence above remains applicable to the unchanged UI.
+
+The latest parent integration includes the focused selection correction #4094
+and converted-lead email ownership checks. Route regressions now prove that a
+stale selected customer cannot replace an unmatched name, authorize an incomplete
+named cohort, or shrink a complete cohort. A duplicate normalized phone also
+refuses conversation access without granting write authority.
+
+Review status: #4019's unmatched-name finding is addressed by unconditional
+platform read validation and the route acceptance tests. The client UUID
+dependency is removed; the existing shared identity helper uses Web Crypto and
+retains its fallback for browsers without `crypto.randomUUID`. Fallback tests
+verify cryptographic randomness, UUID v4 formatting, distinct request keys,
+actor isolation and unavailable storage. Final-head remote review remains required.

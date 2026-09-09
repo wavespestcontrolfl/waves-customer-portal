@@ -66,6 +66,28 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     expect(result.sid).toBe('SM_ok');
   });
 
+  test('direct SMS callers strip external links without changing provider callback URLs', async () => {
+    const body = 'Review: https://g.page/r/demo/review';
+    const result = await TwilioService.sendSMS(TO, body, {
+      messageType: 'manual', fromNumber: FROM,
+    });
+    expect(result.success).toBe(true);
+    expect(mockTwilioCreate.mock.calls[0][0]).toMatchObject({
+      body: 'Review: g.page/r/demo/review',
+      statusCallback: expect.stringMatching(/^https:\/\//),
+    });
+  });
+
+  test('MMS captions and media fetch URLs preserve their HTTPS schemes', async () => {
+    const body = 'Photo: https://example.com/photo';
+    await TwilioService.sendSMS(TO, body, {
+      messageType: 'manual', fromNumber: FROM, mediaUrls: ['https://example.com/photo.jpg'],
+    });
+    expect(mockTwilioCreate.mock.calls[0][0]).toMatchObject({
+      body, mediaUrl: ['https://example.com/photo.jpg'],
+    });
+  });
+
   test('a blocked check stops the send before messages.create and carries the deferral fields', async () => {
     const result = await TwilioService.sendSMS(TO, 'Reminder body', {
       messageType: 'manual',

@@ -454,6 +454,7 @@ async function sendServiceReportV1Email(recordId, {
   // to the report page, which fetches its own data, so without a pin the file
   // can contain a different assessment than the one that was sealed.
   pinnedLawnAssessmentId = null,
+  propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
 } = {}) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'SendGrid not configured' };
@@ -491,7 +492,7 @@ async function sendServiceReportV1Email(recordId, {
   // because data.lawnAssessment.assessmentId is what the fence receives as the
   // render's answer, a correctly-pinned attachment would be deferred as a
   // mismatch. One pin, one answer, both surfaces.
-  const data = await buildReportV1Data(service, reportToken, undefined, { pinnedLawnAssessmentId });
+  const data = await buildReportV1Data(service, reportToken, undefined, { pinnedLawnAssessmentId, propertyHistoryEnabled });
   data.dynamicContext = await buildServiceReportDynamicContext({
     recordId,
     mode: 'static',
@@ -520,11 +521,13 @@ async function sendServiceReportV1Email(recordId, {
   const inspectionCreditNote = creditVerdict.note;
 
   let pdf = null;
+  let renderedLawnHistoryIdentity;
   try {
     const result = await getOrRenderServiceReportPdf(recordId, {
-      token: reportToken, forceFresh: forceFreshPdf, pinnedLawnAssessmentId,
+      token: reportToken, forceFresh: forceFreshPdf, pinnedLawnAssessmentId, propertyHistoryEnabled,
     });
     pdf = result.pdf;
+    renderedLawnHistoryIdentity = result.pinnedLawnHistoryIdentity;
     if (result.storageFailed) {
       await enqueuePdfRenderRetry({
         serviceRecordId: recordId,
@@ -586,6 +589,7 @@ async function sendServiceReportV1Email(recordId, {
     // about to receive, so the render's own answer is passed back to it.
     const stillSafe = await verifyBeforeSend({
       renderedAssessmentId: data?.lawnAssessment?.assessmentId || null,
+      ...(propertyHistoryEnabled ? { renderedLawnHistoryIdentity } : {}),
     });
     if (!stillSafe) {
       return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };

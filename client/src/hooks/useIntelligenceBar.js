@@ -16,7 +16,7 @@ import {
   toggleFavorite as toggleFavoriteStorage,
 } from '../utils/ibStorage';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
-import { ibRequestIdentity, ibSessionId } from '../utils/ibSession';
+import { createRequestIdentity, definitiveFailure, ibSessionId } from '../utils/ibSession';
 import { retainTaskReceipt } from '../utils/ibTaskReceipts';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -72,6 +72,8 @@ export function useIntelligenceBar({
   const submittingRef = useRef(false);
   const sessionIdRef = useRef(null);
   if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
+  const identityRef = useRef(null);
+  if (!identityRef.current) identityRef.current = createRequestIdentity(sessionIdRef.current);
 
   const buildPageDataRef = useRef(buildPageData);
   const onAfterSubmitRef = useRef(onAfterSubmit);
@@ -138,7 +140,7 @@ export function useIntelligenceBar({
   const onActionResolved = useCallback((action, decision, body) => {
     if (actionEpoch !== epochRef.current) return;
     setPendingActions(previous => previous.map(item => item.id === action.id ? { ...item, receipt: body,
-      resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));
+      resolvedStatus: decision === 'cancel' && (body.cancelled || body.outcome === 'canceled') ? 'cancelled' : undefined } : item));
     setActiveTask(task => retainTaskReceipt(task, action, decision, body));
     if (decision === 'confirm' && body?.success) onAfterSubmitRef.current?.({
       toolCalls: [{ name: action.tool }], confirmedAction: true, result: body.result,
@@ -211,7 +213,7 @@ export function useIntelligenceBar({
 
     setRecentPrompts(addRecent(context, q));
 
-    const body = { prompt: q, conversationHistory, ...ibRequestIdentity(sessionIdRef.current) };
+    const body = { prompt: q, conversationHistory };
     if (context) body.context = context;
     if (attachments.length) {
       body.images = attachments.map(({ mediaType, data }) => ({ mediaType, data }));
@@ -228,11 +230,18 @@ export function useIntelligenceBar({
     // loading flag is released — no new submit can start while it is held.
     const isStale = () => epoch !== epochRef.current || (getRequestKeyRef.current && requestKey !== getRequestKeyRef.current());
 
+    // The request key outlives a dropped response: the same request
+    // resubmitted replays the saved task instead of running it again.
+    const identity = identityRef.current.begin(JSON.stringify(body));
+    Object.assign(body, identity);
+    let answered = false;
     try {
       const data = await adminFetch('/admin/intelligence-bar/query', {
         method: 'POST',
         body: JSON.stringify(body),
       });
+      identityRef.current.settle(identity);
+      answered = true;
 
       if (isStale()) {
         if (epoch === epochRef.current) { submittingRef.current = false; setLoading(false); }
@@ -243,6 +252,12 @@ export function useIntelligenceBar({
 
       if (onAfterSubmitRef.current) onAfterSubmitRef.current(data);
     } catch (err) {
+      // Only a definitive 4xx answer settles the identity; a server failure
+      // keeps the key so the retry replays the saved task (see ibSession).
+      if (definitiveFailure(err)) {
+        identityRef.current.settle(identity);
+        answered = true;
+      }
       if (isStale()) {
         if (epoch === epochRef.current) { submittingRef.current = false; setLoading(false); }
         return;
@@ -252,8 +267,12 @@ export function useIntelligenceBar({
 
     submittingRef.current = false;
     setLoading(false);
-    setPrompt('');
-    resetAttachments();
+    // A failed request keeps its prompt and attachments so a retry is the
+    // same request; only an answered one clears the composer.
+    if (answered) {
+      setPrompt('');
+      resetAttachments();
+    }
   }, [prompt, loading, conversationHistory, context, attachments, resetAttachments, applyResponse]);
 
   const clear = useCallback(() => {

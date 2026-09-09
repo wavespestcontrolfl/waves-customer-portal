@@ -2,7 +2,7 @@
 // Monochrome V2 of CSRPanel. Strict 1:1 on data and behavior
 // (same POST /api/dispatch/csr/slots, same scenarios/filters, same slots render).
 import { useState, useEffect } from 'react';
-import { Card, CardBody, cn } from '../ui';
+import { Button, Card, CardBody, cn } from '../ui';
 
 const authHeader = () => ({ Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}`, 'Content-Type': 'application/json' });
 
@@ -26,20 +26,26 @@ export default function CSRPanelV2() {
   const [slots, setSlots] = useState([]);
   const [factors, setFactors] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   async function loadSlots(s = scenario) {
     setLoading(true);
+    setError(false);
     try {
       const res = await fetch('/api/dispatch/csr/slots', {
         method: 'POST',
         headers: authHeader(),
         body: JSON.stringify({ scenario: s, serviceType: service, zip: zip.split(' ')[0] }),
       });
+      // A 401/500 body is not a slot list — say so instead of the empty state.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setSlots(data.slots || []);
       setFactors(data.slots?.[0]?.score_factors || []);
     } catch {
       setSlots([]);
+      setFactors([]);
+      setError(true);
     }
     setLoading(false);
   }
@@ -99,6 +105,11 @@ export default function CSRPanelV2() {
         <div className="u-label text-ink-secondary mb-3">Recommended windows</div>
         {loading ? (
           <div className="text-13 text-ink-secondary py-8 text-center">Finding best slots…</div>
+        ) : error ? (
+          <div className="py-8 text-center">
+            <div role="alert" className="text-13 text-alert-fg mb-3">Failed to load slots</div>
+            <Button variant="secondary" onClick={() => loadSlots()}>Retry</Button>
+          </div>
         ) : (
           <div className="flex flex-col gap-3 mb-5">
             {slots.map((slot, i) => (

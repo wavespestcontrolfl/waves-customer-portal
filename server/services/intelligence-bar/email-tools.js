@@ -94,6 +94,7 @@ Use for: "reply to Henderson via text instead", "SMS them about their appointmen
       properties: {
         email_id: { type: 'string', description: 'Email this is in response to' },
         customer_name: { type: 'string' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Canonical customer id. The proposal pins the resolved recipient here; a name never substitutes for it.' },
         message: { type: 'string', description: 'SMS body (keep under 160 chars)' },
       },
       required: ['message'],
@@ -216,20 +217,38 @@ async function getInboxSummary({ days = 1 }) {
   }
 }
 
+function emailOwnershipRows() {
+  // Converted leads keep their email links. Missing/deleted leads and conflicting
+  // direct/lead owners are unavailable, never anonymous replies in an owned thread.
+  const rows = db('emails as scope_email').leftJoin('leads as scope_lead', 'scope_email.lead_id', 'scope_lead.id')
+    .select('scope_email.id', 'scope_email.gmail_thread_id')
+    .select(db.raw('COALESCE(scope_email.customer_id, scope_lead.customer_id) AS customer_id'))
+    .select(db.raw(`(scope_email.lead_id IS NOT NULL AND (scope_lead.id IS NULL OR scope_lead.deleted_at IS NOT NULL
+      OR (scope_email.customer_id IS NOT NULL AND scope_lead.customer_id IS NOT NULL
+        AND scope_email.customer_id <> scope_lead.customer_id))) AS invalid_owner`));
+  return db.from(rows.as('email_ownership'));
+}
+
 function scopeEmailCandidates(query, customerIds) {
   if (!customerIds.length) return query;
   // A name in a sender/subject is only a search filter. Linked task rows
   // and unlinked replies in exclusively owned threads establish scope.
-  const ownedThreads = db('emails').whereIn('customer_id', customerIds).whereNotNull('gmail_thread_id').select('gmail_thread_id');
-  const foreignThreads = db('emails').whereNotNull('customer_id').whereNotIn('customer_id', customerIds)
+  const ownedThreads = emailOwnershipRows().whereIn('customer_id', customerIds).where('invalid_owner', false)
     .whereNotNull('gmail_thread_id').select('gmail_thread_id');
-  return query.where(function () {
+  const foreignThreads = emailOwnershipRows().where(function () {
+    this.where('invalid_owner', true).orWhere(function () {
+      this.whereNotNull('customer_id').whereNotIn('customer_id', customerIds);
+    });
+  })
+    .whereNotNull('gmail_thread_id').select('gmail_thread_id');
+  const allowed = emailOwnershipRows().where('invalid_owner', false).where(function () {
     this.whereIn('customer_id', customerIds).orWhere(function () {
       this.whereNull('customer_id').whereIn('gmail_thread_id', ownedThreads);
     });
   }).where(function () {
     this.whereNull('gmail_thread_id').orWhereNotIn('gmail_thread_id', foreignThreads);
-  });
+  }).select('id');
+  return query.whereIn('id', allowed);
 }
 
 async function searchEmails({ search, from, category, days_back = 30, has_attachment, is_unread, limit = 20 }, customerIds = []) {
@@ -275,10 +294,13 @@ async function searchEmails({ search, from, category, days_back = 30, has_attach
   }
 }
 
-function emailReadTargetFailure(messages, customerIds = []) {
+async function emailReadTargetFailure(messages, customerIds = []) {
   if (!customerIds.length) return null;
-  const linked = messages.map(message => message.customer_id).filter(Boolean);
-  if (!linked.some(id => customerIds.includes(id)) || linked.some(id => !customerIds.includes(id))) {
+  const ids = [...new Set(messages.map(message => message.id))];
+  const ownership = await emailOwnershipRows().whereIn('id', ids).select('id', 'customer_id', 'invalid_owner');
+  const linked = ownership.map(message => message.customer_id).filter(Boolean);
+  if (ownership.length !== ids.length || ownership.some(message => message.invalid_owner)
+    || !linked.some(id => customerIds.includes(id)) || linked.some(id => !customerIds.includes(id))) {
     return { error: 'This email thread is not linked exclusively to the selected task customer. Select the intended thread or correct its customer link.', code: 'target_clarification_required' };
   }
   return null;
@@ -304,7 +326,7 @@ async function getEmailThread({ thread_id, from_name, from_email, subject_search
       .orderBy('received_at', 'asc')
       .select('id', 'from_name', 'from_address', 'to_address', 'subject',
         'body_text', 'received_at', 'classification', 'has_attachments', 'customer_id');
-    const targetFailure = emailReadTargetFailure(messages, customerIds);
+    const targetFailure = await emailReadTargetFailure(messages, customerIds);
     if (targetFailure) return targetFailure;
 
     // Get attachments
@@ -343,8 +365,8 @@ async function draftEmailReply(emailId, threadId, fromName, instructions, custom
     const thread = await db('emails')
       .where('gmail_thread_id', email.gmail_thread_id)
       .orderBy('received_at', 'asc')
-      .select('from_name', 'from_address', 'subject', 'body_text', 'received_at', 'customer_id');
-    const targetFailure = emailReadTargetFailure([email, ...thread], customerIds);
+      .select('id', 'from_name', 'from_address', 'subject', 'body_text', 'received_at', 'customer_id');
+    const targetFailure = await emailReadTargetFailure([email, ...thread], customerIds);
     if (targetFailure) return targetFailure;
 
     // Load customer context if matched

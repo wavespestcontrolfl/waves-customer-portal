@@ -68,6 +68,39 @@ describe('pending-actions service', () => {
     expect(stepKey('send_sms', one)).not.toBe(stepKey('send_sms', { ...two, message: 'Different message' }));
   });
 
+  const uuid = 'aabbccdd-1111-4222-8333-aabbccddeeff';
+  test.each(['id', 'email_id', 'review_id', 'appointment_id', 'property_id', 'request_id', 'estimate_id',
+    'estimateId', 'estimate_identifier', 'product_id', 'customer_id', 'customerId', 'lead_id', 'technician_id'])
+  ('UUID selector %s has one semantic key across case', key => {
+    expect(stepKey('fixture', { [key]: uuid.toUpperCase() })).toBe(stepKey('fixture', { [key]: uuid }));
+  });
+
+  test.each(['customer_ids', 'lead_ids', 'service_ids'])('UUID collection %s normalizes before deduplication and ordering', key => {
+    const other = '11223344-1111-4222-8333-aabbccddeeff';
+    expect(stepKey('fixture', { [key]: [uuid.toUpperCase(), other, uuid] }))
+      .toBe(stepKey('fixture', { [key]: [other.toUpperCase(), uuid] }));
+  });
+
+  test('nested and preview product identity normalize without changing payloads, opaque IDs or ordered arrays', () => {
+    expect(stepKey('fixture', { inventoryReview: [{ productId: uuid.toUpperCase() }] }))
+      .toBe(stepKey('fixture', { inventoryReview: [{ productId: uuid }] }));
+    expect(stepKey('create_restock_request', { quantity: 2 }, { product: { id: uuid.toUpperCase() }, unit: 'bottle' }))
+      .toBe(stepKey('create_restock_request', { quantity: 2 }, { product: { id: uuid }, unit: 'bottle' }));
+    for (const key of ['message', 'body', 'notes', 'idempotency_key']) {
+      expect(stepKey('fixture', { [key]: uuid.toUpperCase() })).not.toBe(stepKey('fixture', { [key]: uuid }));
+    }
+    expect(stepKey('fixture', { email_id: 'OpaqueID' })).not.toBe(stepKey('fixture', { email_id: 'opaqueid' }));
+    expect(stepKey('fixture', { stops: [{ id: uuid }, { id: 'other' }] }))
+      .not.toBe(stepKey('fixture', { stops: [{ id: 'other' }, { id: uuid }] }));
+    const input = { at: new Date('2020-01-02T03:04:05Z'), inventoryReview: [{ productId: uuid.toUpperCase() }] };
+    const before = JSON.stringify(input);
+    expect(stepKey('fixture', input)).toBe(stepKey('fixture', JSON.parse(before)));
+    expect(stepKey('fixture', input)).not.toBe(stepKey('fixture', { ...input, at: new Date('2020-01-03T03:04:05Z') }));
+    expect(JSON.stringify(input)).toBe(before);
+    expect(stepKey('fixture', { product_id: uuid, quantity: 1 })).not.toBe(stepKey('fixture', { product_id: uuid, quantity: 2 }));
+    expect(stepKey('fixture', { product_id: uuid })).not.toBe(stepKey('other_action', { product_id: uuid }));
+  });
+
   test('createPendingAction stores hash, actor, and a future expiry', async () => {
     const inserted = insertBuilder({ id: 'pa-1', tool_name: 'send_sms' });
     db.mockImplementation(() => inserted);

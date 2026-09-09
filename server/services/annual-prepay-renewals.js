@@ -25,6 +25,28 @@ const NOTICE_CLAIM_TTL_MS = 15 * 60 * 1000;
 // cleanup filters on this so it never clears an independent cash/Zelle/etc.
 // prepayment made through the regular schedule prepay route.
 const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
+
+// A callback is never a SOLD visit. The persisted flag is authoritative for
+// rows the scheduler auto-flagged, but a re-service COMPLETED before the
+// auto-flag shipped keeps is_callback=false (the 20260618000002 backfill
+// flagged non-terminal rows only), so the runtime classifier (re-service.js:
+// catalog key or "re-service" label) is consulted too — the same pair the
+// backfill and the completion path use (GH Codex #4105 r3 P1).
+const { isReService, RE_SERVICE_SERVICE_KEYS } = require('./re-service');
+function isCallbackRow(row) {
+  return row?.is_callback === true
+    || isReService({ serviceKey: row?.service_key_snapshot, serviceType: row?.service_type });
+}
+// SQL twin of isCallbackRow for the detach UPDATE (mirrors the backfill
+// migration's reServiceMatch). Column presence is checked by the caller.
+function whereCallbackRow(cols) {
+  return function callbackWhere() {
+    this.where('is_callback', true)
+      .orWhereRaw('service_type ILIKE ?', ['%re-service%'])
+      .orWhereRaw('service_type ILIKE ?', ['%reservice%']);
+    if (cols.service_key_snapshot) this.orWhereIn('service_key_snapshot', Array.from(RE_SERVICE_SERVICE_KEYS));
+  };
+}
 const INVOICE_CANCELLED_STATUSES = new Set(['void', 'cancelled', 'canceled', 'refunded']);
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
@@ -483,9 +505,17 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     .orderBy(['scheduled_date', 'window_start', 'id'])
     .select('*');
 
+  // A callback / re-service is never a SOLD visit: it is free by definition
+  // and completion never bills it, but its service_type reads as the covered
+  // family ("Pest Control Re-Service" → the same coverage key as "Quarterly
+  // Pest Control Service"), so text matching adopted one into the slice and
+  // pushed the customer's real fourth quarterly visit out of coverage
+  // (2026-09-07, prod). Excluded up front, in every mode — a callback must
+  // neither consume a sold slot nor count toward the seeder's existing rows.
+  const nonCallbackRows = rows.filter((row) => !isCallbackRow(row));
   const filtered = includeTerminalStatuses
-    ? rows
-    : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
+    ? nonCallbackRows
+    : nonCallbackRows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
   const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
   let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
@@ -1092,7 +1122,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // must carry the recurring identity or already belong to this term,
   // or a genuine one-time palm appointment on the same day would be
   // swallowed into prepaid coverage.
-  const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
+  // A callback is excluded here exactly as in coverageRowsForTerm (GH Codex
+  // #4105 P1): a same-day callback adopted under the lock would skip the
+  // insert while every later attach/stamp pass filters it back out — the
+  // paid term would stay one visit short on every refresh.
+  const adoptableCoverageRow = (row) => !isCallbackRow(row)
+    && serviceMatchesCoverage(row, coverageServiceType)
     && !rowLinkedToAnotherTerm(term, row)
     && (!coverageIsPalm || (() => {
       // Same ID-FIRST classification as coverage matching (codex r27
@@ -2376,6 +2411,50 @@ async function finishDisputeRecoveryForTerm(term, conn = db) {
 // transaction (e.g. prepaid reversal) pass `{ throwOnError: true }` so a
 // transient DB failure rolls the whole unit of work back instead of silently
 // leaving future visits stamped prepaid.
+// A callback never belongs to a term (coverageRowsForTerm excludes it), but
+// before that exclusion a callback inside the window could be adopted into
+// the selection: linked to the term and — if still pending — stamped
+// prepaid. Dropping it from the selection alone leaves that legacy link and
+// stamp behind: five allocations on a four-visit term, inflated
+// prepaid-series totals, and resolveCallbackBilling reading a free callback
+// as prepaid (GH Codex #4105 r2 P1). Every refresh clears both, in EVERY
+// status — a callback's annual-prepay stamp is never billing truth, unlike a
+// sold visit's completed stamp. An out-of-band cash/Zelle stamp on a callback
+// is not ours to touch: keep the stamp, drop only the link. Best-effort,
+// like attachScheduledServices — a miss self-heals on the next refresh.
+async function detachCallbacksFromTerm(term, conn = db) {
+  if (!term?.id) return 0;
+  const cols = await scheduledServiceColumns();
+  if (!cols.annual_prepay_term_id || !cols.is_callback || !cols.service_type) return 0;
+  try {
+    const now = new Date();
+    if (cols.prepaid_amount && cols.prepaid_method) {
+      const stampClear = { prepaid_amount: null, prepaid_method: null };
+      if (cols.prepaid_at) stampClear.prepaid_at = null;
+      if (cols.prepaid_note) stampClear.prepaid_note = null;
+      if (cols.updated_at) stampClear.updated_at = now;
+      await conn('scheduled_services')
+        .where({ annual_prepay_term_id: term.id, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
+        .where(whereCallbackRow(cols))
+        .update(stampClear);
+    }
+    const unlink = { annual_prepay_term_id: null };
+    if (cols.updated_at) unlink.updated_at = now;
+    const unlinked = await conn('scheduled_services')
+      .where({ annual_prepay_term_id: term.id })
+      .where(whereCallbackRow(cols))
+      .update(unlink);
+    const count = Array.isArray(unlinked) ? unlinked.length : Number(unlinked) || 0;
+    if (count > 0) {
+      logger.info(`[annual-prepay] term ${term.id}: detached ${count} callback visit(s) from coverage`);
+    }
+    return count;
+  } catch (err) {
+    logger.warn(`[annual-prepay] callback detach skipped for term ${term.id}: ${err.message}`);
+    return 0;
+  }
+}
+
 async function clearPrepaidStampsForTerm(termId, conn = db, { throwOnError = false } = {}) {
   if (!termId) return 0;
   const cols = await scheduledServiceColumns();
@@ -2578,6 +2657,14 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   // beyond the original end would never be linked or stamped prepaid and
   // completion would invoice the customer again for visits they prepaid.
   let windowEnd = termEnd;
+  // Every refreshed term that could ever have attached or stamped, not only
+  // ACTIVE ones (GH Codex #4105 r4 P1): a renewed / switch_plan /
+  // decided-lapse term can still be paid coverage (coveredTermsAsOf), and
+  // its legacy callback stamp would otherwise stay. A payment_pending term
+  // has never attached or stamped — nothing to detach, so it is skipped.
+  if (term.status !== PAYMENT_PENDING_STATUS) {
+    await detachCallbacksFromTerm(term, conn);
+  }
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
@@ -2935,6 +3022,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         if (coveredToday) {
           await stampAnnualPrepayBillingMode(decidedTerm.customer_id, conn, decidedTerm.id);
           const normalized = { ...decidedTerm, term_start: termStart, term_end: termEnd };
+          // Same cleanup refreshTermSnapshot runs — this path stamps
+          // directly, so it must detach legacy callbacks first (r4 P1).
+          await detachCallbacksFromTerm(normalized, conn);
           await applyPrepaidCoverageForTerm(normalized, conn);
           await reconcilePendingWindowCompletions(normalized, conn);
         }
@@ -3286,6 +3376,8 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     if (term.dispute_suspended_at) {
       try {
         const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+        // Direct stamping path — detach legacy callbacks first (r4 P1).
+        await detachCallbacksFromTerm(normalized, conn);
         await applyPrepaidCoverageForTerm(normalized, conn);
         await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
         const recovery = await finishDisputeRecoveryForTerm(term, conn);
@@ -5555,6 +5647,7 @@ module.exports = {
     normalizeCoverageVisitCount,
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
+    detachCallbacksFromTerm,
     resetCachesForTests,
   },
 };

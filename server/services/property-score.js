@@ -97,7 +97,10 @@ async function lawnComponent(customerId, knex, activeLines) {
   const base = { key: 'lawn', label: 'Lawn' };
   // created_at tie-break: same-day confirmed assessments are allowed and
   // UUID ids carry no chronology.
-  const rows = await knex('lawn_assessments')
+  const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
+  const rows = propertyHistoryEnabled
+    ? (await require('./lawn-assessment-history').latestForCustomer(customerId, { limit: 2 }, knex).catch(() => [])).reverse()
+    : await knex('lawn_assessments')
     .where({ customer_id: customerId, confirmed_by_tech: true })
     .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
@@ -114,7 +117,7 @@ async function lawnComponent(customerId, knex, activeLines) {
       previousScore,
       delta,
       reason: movementReason(delta),
-      asOf: dateOnlyString(rows[0].service_date),
+      asOf: dateOnlyString(rows[0].visit_date || rows[0].service_date),
     };
   }
   // Pending only on ACTIVE recurring lawn coverage — hasCustomerLawnCare

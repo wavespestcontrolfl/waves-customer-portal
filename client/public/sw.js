@@ -198,7 +198,7 @@ self.addEventListener('push', event => {
     }
   } catch { /* default to the app root */ }
   event.waitUntil(
-    self.registration.showNotification(data.title || 'Waves Pest Control', {
+    self.registration.showNotification(data.title || 'Waves', {
       body: data.body || '', icon: '/waves-logo.png', badge: '/waves-logo.png',
       tag: data.tag || 'waves', data: { url: destination },
       actions: data.actions || [],

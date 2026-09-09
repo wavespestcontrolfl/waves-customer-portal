@@ -45,6 +45,7 @@ function formatPropertyAddress(p) {
 export default function CustomerPropertiesPanelV2({
   customerId,
   contactRole,
+  primaryAddress = null,
   canEdit = false,
   // Any value the parent changes when the profile address is saved (the PUT
   // path syncs the primary customer_properties row) — the panel refetches so
@@ -231,7 +232,7 @@ export default function CustomerPropertiesPanelV2({
       <CardBody className="p-4">
         <div className="flex items-center justify-between gap-2 mb-2">
           <div className="u-label text-ink-secondary">
-            Service addresses ({properties.length})
+            Service addresses{properties.length > 0 ? ` (${properties.length})` : ""}
           </div>
           {canEdit && !adding && (
             <Button variant="secondary" size="sm" onClick={() => { selectedAddressRef.current = null; setAdding(true); }}>
@@ -348,7 +349,7 @@ export default function CustomerPropertiesPanelV2({
               </div>
             ))}
             {properties.length === 0 && (
-              <div className="text-12 text-ink-secondary py-2">No properties on file.</div>
+              <div className="text-12 text-ink-secondary py-2">{primaryAddress?.line1 ? `Primary address: ${[primaryAddress.line1, primaryAddress.line2, primaryAddress.city, primaryAddress.state, primaryAddress.zip].filter(Boolean).join(", ")}. No additional service addresses recorded.` : "No service address on file."}</div>
             )}
           </div>
         )}
