@@ -222,7 +222,7 @@ async function confirmLockedRun(args, customerId, trx) {
         ...parseObject(run.reconciliation),
         confirmation: {
           final_scores: decision.finalScores, ai_scores: decision.aiScores,
-          calibration_eligible: !!adjustedScores && decision.calibrationEligible,
+          calibration_eligible: decision.calibrationEligible,
           technician_id: technicianId,
         },
       }),

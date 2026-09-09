@@ -73,6 +73,14 @@ const SCORING = {
     },
   );
 
+  test('confirmation without a new score payload still captures the stored comparison', async () => {
+    const { assessment } = await seed({ ...COMPLETE, turf_density: 64 });
+    const result = await save(assessment.id);
+    expect(result.run.reconciliation.confirmation).toMatchObject({
+      ai_scores: COMPLETE, final_scores: { ...COMPLETE, turf_density: 64 }, calibration_eligible: true,
+    });
+  });
+
   test('follow-up review withdraws prose in the row and adjusted snapshot before final confirmation', async () => {
     const { assessment } = await seed();
     const first = await save(assessment.id, { review: { addedDetails: [{ text: 'Nutsedge confirmed at the front edge' }] } });
