@@ -2,7 +2,7 @@
  * Shared, pure vendor-pitch detector for inbound SMS.
  * Explicit vendor markers stand alone. Ambiguous pricing, capacity, or
  * detail wording needs two distinct categories, including an outreach clue.
- * A missed deterministic match remains eligible for the caller's model.
+ * Ambiguous messages remain eligible for the caller's normal handling.
  */
 
 const SOLICITATION_MARKERS = [
@@ -21,6 +21,9 @@ const SOLICITATION_MARKERS = [
   // Even "exclusive rates for new customers" or "unlimited estimates"
   // needs a separate outreach clue before it can establish a pitch.
   { key: 'additional_work', strong: false, re: /\b(?:handle|open\s+to)\s+(?:\d+(?:\s*[-–]\s*\d+)?\s+)?(?:more|extra)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b|\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}(?:jobs?|customers?|estimates?)\b/i },
+  // Explicit sender-side offers to contractors are outreach; a customer
+  // asking whether WE offer estimates for their contractors is not.
+  { key: 'contractor_offer', strong: false, outreach: true, re: /\b(?:we|our\s+(?:network|team|company))\s+(?:provide|offer)s?\b[^.!?]{0,80}\b(?:jobs?|customers?|estimates?|leads?)\s+for\s+(?:local\s+)?contractors?\b/i },
   // "$" is not a word character, so the boundary sits inside the
   // alternation rather than in front of it (codex r2).
   { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },

@@ -559,10 +559,13 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('a vendor pitch on an active clarify/intake thread is a TERMINAL veto (skipIntentGate), before triage loads', async () => {
+  test.each([
+    'We can bring you exclusive pest control leads daily with no upfront cost.',
+    'We provide unlimited estimates for contractors.',
+  ])('a vendor pitch on an active clarify/intake thread is a terminal veto: %s', async (triggerBody) => {
     const result = await startSmsThreadDraft({
       phone: PHONE,
-      triggerBody: 'We can bring you exclusive pest control leads daily with no upfront cost.',
+      triggerBody,
       skipIntentGate: true,
     });
     expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
