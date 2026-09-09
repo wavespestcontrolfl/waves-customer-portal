@@ -17,8 +17,8 @@
  *      legacy AI scores and agronomic context only, as JSON on STDOUT (the
  *      operator redirects it). No names, addresses, phones, notes or photo
  *      bytes ever enter the fixture. Context is rebuilt the way the live route
- *      builds it: the canonical grass-context loader and the property-scoped
- *      history resolver.
+ *      builds it: the canonical grass-context loaders, the prior summary on
+ *      the route's GATE_LAWN_PROPERTY_HISTORY branch (the fixture records it).
  *        railway run --service Postgres node ops/agents/lawn-visit-assessment-eval.js \
  *          --export --ids <id>,<id> --sample 20 > /tmp/lawn-visit-eval-fixture.json
  *
@@ -50,6 +50,15 @@ const path = require('path');
 const REPO = path.resolve(__dirname, '..', '..');
 const SCORE_COLUMNS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
 
+// A count flag: a finite positive whole number, or the script stops before
+// any export or paid call — `--sample -1` / `--limit -1` sliced almost the
+// whole population and `--repeat Infinity` never ended (Codex #4153 r4).
+const positiveInt = (flag) => (raw) => {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) { console.error(`${flag} needs a positive whole number, got ${JSON.stringify(raw ?? null)}`); process.exit(2); }
+  return n;
+};
+
 // One row per flag: the args key, whether it takes a value, and how that
 // value is read. Boolean flags take none.
 const ARG_SPECS = {
@@ -59,11 +68,11 @@ const ARG_SPECS = {
   '--force-fallback': { key: 'forceFallback' },
   '--run': { key: 'run', value: true, parse: (v) => v },
   '--ids': { key: 'ids', value: true, parse: (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean) },
-  '--sample': { key: 'sample', value: true, parse: Number },
-  '--limit': { key: 'limit', value: true, parse: Number },
+  '--sample': { key: 'sample', value: true, parse: positiveInt('--sample') },
+  '--limit': { key: 'limit', value: true, parse: positiveInt('--limit') },
   '--thinking': { key: 'thinking', value: true, parse: (v) => String(v || '').toUpperCase() },
-  '--repeat': { key: 'repeat', value: true, parse: (v) => Math.max(1, Number(v) || 1) },
-  '--concurrency': { key: 'concurrency', value: true, parse: (v) => Math.max(1, Number(v) || 1) },
+  '--repeat': { key: 'repeat', value: true, parse: positiveInt('--repeat') },
+  '--concurrency': { key: 'concurrency', value: true, parse: positiveInt('--concurrency') },
 };
 
 function parseArgs(argv) {
@@ -87,10 +96,14 @@ async function exportFixture(args) {
   const evalLib = require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'));
   // The same loaders the live route uses, so the replay context is the
   // context the assessment actually received: active-profile grass with the
-  // legacy customers.lawn_type fallback, and the property- and reset-scoped
-  // previous visit (never another lawn's summary).
-  const { loadCustomerGrassContext, loadIrrigationContext } = require(path.join(REPO, 'server/services/lawn-grass-context'));
-  const history = require(path.join(REPO, 'server/services/lawn-assessment-history'));
+  // legacy customers.lawn_type fallback, and the previous visit's summary on
+  // the SAME gate branch the route takes — property- and reset-scoped with
+  // GATE_LAWN_PROPERTY_HISTORY on (never another lawn's summary), the legacy
+  // customer-wide lookup off. The gate is read the way the route reads it,
+  // so set it on the `railway run` command line to export the other
+  // configuration; the fixture records which branch it took.
+  const { loadCustomerGrassContext, loadIrrigationContext, loadPriorSummary } = require(path.join(REPO, 'server/services/lawn-grass-context'));
+  const propertyHistoryEnabled = require(path.join(REPO, 'server/config/feature-gates')).gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
   const knex = knexFactory({ client: 'pg', connection: { connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } }, pool: { min: 0, max: 2 } });
   try {
     // Confirmed rows with at least one stored photo — the population the eval draws from.
@@ -119,18 +132,18 @@ async function exportFixture(args) {
       const [irrigation, customer, prior] = await Promise.all([
         loadIrrigationContext(row.customer_id, grassCtx, knex),
         knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
-        history.historyBeforeVisit({ customerId: row.customer_id, scheduledService, throughVisitDate: visitDate }, knex).catch((err) => { console.error(`warning: prior-visit history failed for ${row.id}: ${err.message}`); return { previous: null }; }),
+        loadPriorSummary({ customerId: row.customer_id, serviceId: row.service_id, scheduledService, visitDate, propertyHistoryEnabled }, knex).catch((err) => { console.error(`warning: prior-visit summary failed for ${row.id}: ${err.message}`); return null; }),
       ]);
       cases.push(evalLib.fixtureCase(row, byAssessment.get(row.id) || [], {
         grassType: grassCtx.grassTypeLabel || null,
         irrigation,
         // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
-        priorSummary: prior?.previous?.ai_summary || null,
+        priorSummary: prior,
         customerNames: [customer?.first_name, customer?.last_name],
       }));
     }
-    const fixture = { generatedAt: new Date().toISOString(), population: all.length, cases };
-    console.error(`exported ${cases.length} case(s) of ${all.length} confirmed assessments with photos · photos ${cases.reduce((n, c) => n + c.photos.length, 0)} · zone-labeled ${cases.reduce((n, c) => n + c.photos.filter((p) => p.zone).length, 0)}`);
+    const fixture = { generatedAt: new Date().toISOString(), propertyHistory: propertyHistoryEnabled, population: all.length, cases };
+    console.error(`exported ${cases.length} case(s) of ${all.length} confirmed assessments with photos · prior summary ${propertyHistoryEnabled ? 'property-scoped (GATE_LAWN_PROPERTY_HISTORY on)' : 'legacy customer-wide (GATE_LAWN_PROPERTY_HISTORY off)'} · photos ${cases.reduce((n, c) => n + c.photos.length, 0)} · zone-labeled ${cases.reduce((n, c) => n + c.photos.filter((p) => p.zone).length, 0)}`);
     process.stdout.write(`${JSON.stringify(fixture, null, 2)}\n`);
   } finally {
     await knex.destroy();
@@ -192,12 +205,16 @@ async function runReplay(args) {
   if (skipped.length) console.log(`\nskipped: ${skipped.map((s) => `${String(s.assessmentId).slice(0, 8)} (${s.reason})`).join(', ')}`);
 }
 
-(async () => {
-  const args = parseArgs(process.argv);
-  if (args.export) await exportFixture(args);
-  else if (args.run) await runReplay(args);
-  else { console.error('nothing to do: pass --export … or --run <fixture.json> (see the header for both recipes)'); process.exit(2); }
-})().catch((err) => {
-  console.error(`eval failed: ${err.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  (async () => {
+    const args = parseArgs(process.argv);
+    if (args.export) await exportFixture(args);
+    else if (args.run) await runReplay(args);
+    else { console.error('nothing to do: pass --export … or --run <fixture.json> (see the header for both recipes)'); process.exit(2); }
+  })().catch((err) => {
+    console.error(`eval failed: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { _internals: { parseArgs, ARG_SPECS } };

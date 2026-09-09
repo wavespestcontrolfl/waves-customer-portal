@@ -131,6 +131,40 @@ async function loadIrrigationContext(customerId, grassCtx, knex = db) {
   return parts.length ? parts.join(', ') : null;
 }
 
+/**
+ * The PREVIOUS visit's summary for the vision context — one loader for the
+ * live /assess route and the eval exporter, so a replay sees the summary the
+ * assessment received under the configuration being evaluated (Codex #4153
+ * r4: the exporter always took the property-scoped branch). Strictly a service
+ * SCHEDULED before this one: lawn_assessments.service_date is the assessment
+ * RUN date (out of schedule order on backfills), so the lookup is bounded by
+ * the linked scheduled_services.scheduled_date (service_date only for rows
+ * with no service_id) and never this same service, so a later/same-visit
+ * summary cannot leak in and bias the new score.
+ *   property history ON  → the property- and reset-scoped previous visit
+ *                          (lawn-assessment-history.historyBeforeVisit)
+ *   property history OFF → the legacy customer-wide lookup
+ * Null when there is none.
+ */
+async function loadPriorSummary({ customerId, serviceId = null, scheduledService = null, visitDate, propertyHistoryEnabled }, knex = db) {
+  if (propertyHistoryEnabled) {
+    const scoped = await require('./lawn-assessment-history').historyBeforeVisit({ customerId, scheduledService, throughVisitDate: visitDate }, knex);
+    return scoped?.previous?.ai_summary ? String(scoped.previous.ai_summary) : null;
+  }
+  const prior = await knex('lawn_assessments as la')
+    .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+    .where('la.customer_id', customerId)
+    .whereNotNull('la.ai_summary')
+    .andWhere(function () {
+      this.where('ss.scheduled_date', '<', visitDate)
+        .orWhere(function () { this.whereNull('la.service_id').andWhere('la.service_date', '<', visitDate); });
+    })
+    .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('la.service_id').orWhereNot('la.service_id', serviceId); }); })
+    .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
+    .first('la.ai_summary');
+  return prior?.ai_summary ? String(prior.ai_summary) : null;
+}
+
 module.exports = {
   GRASS_TYPE_LABELS,
   grassTypeLabel,
@@ -139,4 +173,5 @@ module.exports = {
   resolveTrackKey,
   loadCustomerGrassContext,
   loadIrrigationContext,
+  loadPriorSummary,
 };

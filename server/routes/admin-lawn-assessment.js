@@ -17,7 +17,7 @@ const LawnIntel = require('../services/lawn-intelligence');
 const { withConcurrency, mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { seasonAwareAdjustment } = require('../services/service-report/lawn-seasonality');
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
-const { loadCustomerGrassContext, loadIrrigationContext } = require('../services/lawn-grass-context');
+const { loadCustomerGrassContext, loadIrrigationContext, loadPriorSummary } = require('../services/lawn-grass-context');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
 
 let PhotoService;
@@ -511,27 +511,11 @@ router.post('/assess', async (req, res, next) => {
       if (irrigation) visionContext.irrigation = irrigation;
     } catch (err) { logger.warn(`[lawn-assessment] irrigation context lookup failed: ${err.message}`); }
     try {
-      // The PREVIOUS visit's summary — strictly a service SCHEDULED before this one.
-      // lawn_assessments.service_date is the assessment RUN date (can be out of
-      // schedule order on backfills), so bound by the linked scheduled_services
-      // .scheduled_date (falling back to service_date only for rows with no
-      // service_id), and never this same service, so a later/same-visit summary
-      // can't leak in and bias the new score.
-      const scopedPrior = propertyHistoryEnabled
-        ? await require('../services/lawn-assessment-history').historyBeforeVisit({ customerId, scheduledService, throughVisitDate: visitServiceDateStr }, db)
-        : null;
-      const prior = propertyHistoryEnabled ? scopedPrior.previous : await db('lawn_assessments as la')
-        .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
-        .where('la.customer_id', customerId)
-        .whereNotNull('la.ai_summary')
-        .andWhere(function () {
-          this.where('ss.scheduled_date', '<', visitServiceDateStr)
-            .orWhere(function () { this.whereNull('la.service_id').andWhere('la.service_date', '<', visitServiceDateStr); });
-        })
-        .modify((q) => { if (serviceId) q.andWhere(function () { this.whereNull('la.service_id').orWhereNot('la.service_id', serviceId); }); })
-        .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
-        .first('la.ai_summary');
-      if (prior?.ai_summary) visionContext.priorSummary = String(prior.ai_summary);
+      // The PREVIOUS visit's summary — the property-scoped one with property
+      // history on, the legacy customer-wide one off (loadPriorSummary: the
+      // eval exporter replays the same branch).
+      const priorSummary = await loadPriorSummary({ customerId, serviceId, scheduledService, visitDate: visitServiceDateStr, propertyHistoryEnabled }, db);
+      if (priorSummary) visionContext.priorSummary = priorSummary;
     } catch (err) { logger.warn(`[lawn-assessment] prior-summary context lookup failed: ${err.message}`); }
 
     // The products this visit's protocol calls for, plus their label

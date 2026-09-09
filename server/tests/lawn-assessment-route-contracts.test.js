@@ -128,6 +128,10 @@ describe('lawn assessment route contracts', () => {
       expect(assess).toMatch(/if \(!visitAssessmentEnabled && !validResults\.length\)/);
       // Irrigation context comes from the one loader the eval exporter replays (lawn-grass-context.loadIrrigationContext).
       expect(assess).toMatch(/const irrigation = await loadIrrigationContext\(customerId, grassCtx, db\);/);
+      // The prior summary too: one loader carries both gate branches, so the exporter replays the branch the route took.
+      expect(assess).toMatch(/const priorSummary = await loadPriorSummary\(\{ customerId, serviceId, scheduledService, visitDate: visitServiceDateStr, propertyHistoryEnabled \}, db\);/);
+      expect(assess).not.toMatch(/historyBeforeVisit\(/);
+      expect(assess).not.toMatch(/whereNotNull\('la\.ai_summary'\)/);
       expect(assess).not.toMatch(/first\('irrigation_type', 'irrigation_inches_per_week'\)/);
       // An answer that rates every photo poor takes the same retake hold as the legacy quality gate — before any row is written.
       expect(assess).toMatch(/\(\{ qualityResults, resultByPhotoIndex, allPoor \} = visitAssessment\.photoRowInputs\(visitAnalysis\)\);\s*(?:\/\/[^\n]*\n\s*)*if \(allPoor\) return allPhotosFailed\(qualityResults\);/);

@@ -166,6 +166,36 @@ describe('scoring', () => {
   });
 });
 
+describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const scriptPath = path.join(__dirname, '../../ops/agents/lawn-visit-assessment-eval.js');
+  const { _internals: { parseArgs } } = require(scriptPath);
+
+  test('count flags are finite positive whole numbers or the script stops before any export or paid call', () => {
+    const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(parseArgs(['node', 'x', '--run', 'f.json', '--sample', '3', '--limit', '5', '--repeat', '2', '--concurrency', '4'])).toMatchObject({ run: 'f.json', sample: 3, limit: 5, repeat: 2, concurrency: 4 });
+      for (const [flag, value] of [['--sample', '-1'], ['--limit', '0'], ['--repeat', 'Infinity'], ['--concurrency', '1.5'], ['--sample', 'ten'], ['--repeat', undefined]]) {
+        expect(() => parseArgs(['node', 'x', '--run', 'f.json', flag, ...(value === undefined ? [] : [value])])).toThrow('exit 2');
+        expect(error).toHaveBeenLastCalledWith(expect.stringContaining(`${flag} needs a positive whole number`));
+      }
+      expect(exit).toHaveBeenCalledTimes(6);
+    } finally { exit.mockRestore(); error.mockRestore(); }
+  });
+
+  test('the export takes the prior summary on the route\'s GATE_LAWN_PROPERTY_HISTORY branch and records it in the fixture', () => {
+    const src = fs.readFileSync(scriptPath, 'utf8');
+    expect(src).toMatch(/const propertyHistoryEnabled = require\(path\.join\(REPO, 'server\/config\/feature-gates'\)\)\.gateEnvValue\('GATE_LAWN_PROPERTY_HISTORY'\);/);
+    expect(src).toMatch(/loadPriorSummary\(\{ customerId: row\.customer_id, serviceId: row\.service_id, scheduledService, visitDate, propertyHistoryEnabled \}, knex\)/);
+    expect(src).not.toMatch(/historyBeforeVisit\(/);
+    expect(src).toMatch(/propertyHistory: propertyHistoryEnabled, population: all\.length, cases \}/);
+    // The script is a module for tests and a program for operators.
+    expect(src).toMatch(/if \(require\.main === module\) \{/);
+  });
+});
+
 describe('runner', () => {
   const cases = [
     evalLib.fixtureCase(row({ id: 'a1' }), photos, {}),

@@ -4,6 +4,7 @@ const {
   normalizeGrassType,
   irrigationTypeHasSystem,
   loadIrrigationContext,
+  loadPriorSummary,
   resolveTrackKey,
   loadCustomerGrassContext,
 } = require('../services/lawn-grass-context');
@@ -152,5 +153,44 @@ describe('lawn-grass-context', () => {
     const ctx = await loadCustomerGrassContext('cust-3', knex);
     expect(ctx.grassType).toBe('bahia');
     expect(ctx.propertySqft).toBe(3000); // falls back to customers when profile has no lawn_sqft
+  });
+
+  describe('loadPriorSummary — one loader, the route\'s gate branch', () => {
+    const history = require('../services/lawn-assessment-history');
+    const visit = { customerId: 'c1', serviceId: 's9', scheduledService: { id: 's9' }, visitDate: '2026-09-08' };
+
+    test('property history ON: the property- and reset-scoped previous visit (historyBeforeVisit), as a string or null', async () => {
+      const spy = jest.spyOn(history, 'historyBeforeVisit').mockResolvedValue({ previous: { ai_summary: 'scoped summary' } });
+      try {
+        const knex = jest.fn();
+        expect(await loadPriorSummary({ ...visit, propertyHistoryEnabled: true }, knex)).toBe('scoped summary');
+        expect(spy).toHaveBeenCalledWith({ customerId: 'c1', scheduledService: { id: 's9' }, throughVisitDate: '2026-09-08' }, knex);
+        expect(knex).not.toHaveBeenCalled(); // never the legacy query
+        spy.mockResolvedValue({ previous: null });
+        expect(await loadPriorSummary({ ...visit, propertyHistoryEnabled: true }, knex)).toBeNull();
+      } finally { spy.mockRestore(); }
+    });
+
+    test('property history OFF: the legacy customer-wide lookup — a service scheduled before this visit, never this service', async () => {
+      const spy = jest.spyOn(history, 'historyBeforeVisit');
+      try {
+        const knex = require('knex')({ client: 'pg' });
+        let captured;
+        const recording = (table) => {
+          const q = knex(table);
+          const first = q.first.bind(q);
+          q.first = (...cols) => { captured = first(...cols).toString(); return Promise.resolve({ ai_summary: 'legacy summary' }); };
+          return q;
+        };
+        expect(await loadPriorSummary({ ...visit, propertyHistoryEnabled: false }, recording)).toBe('legacy summary');
+        expect(spy).not.toHaveBeenCalled();
+        expect(captured).toBe('select "la"."ai_summary" from "lawn_assessments" as "la" left join "scheduled_services" as "ss" on "la"."service_id" = "ss"."id" where "la"."customer_id" = \'c1\' and "la"."ai_summary" is not null and ("ss"."scheduled_date" < \'2026-09-08\' or ("la"."service_id" is null and "la"."service_date" < \'2026-09-08\')) and ("la"."service_id" is null or not "la"."service_id" = \'s9\') order by COALESCE(ss.scheduled_date, la.service_date) DESC limit 1');
+        // No service id: no same-service exclusion.
+        await loadPriorSummary({ ...visit, serviceId: null, propertyHistoryEnabled: false }, recording);
+        expect(captured).not.toContain('not "la"."service_id"');
+        const none = (table) => Object.assign(knex(table), { first: async () => undefined });
+        expect(await loadPriorSummary({ ...visit, propertyHistoryEnabled: false }, none)).toBeNull();
+      } finally { spy.mockRestore(); }
+    });
   });
 });
