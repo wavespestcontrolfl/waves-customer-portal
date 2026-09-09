@@ -1277,19 +1277,20 @@ describe('voice relay eval — the harness', () => {
     expect(result.transcript).not.toContain('Quarterly is $129 per application.\n');
   });
 
-  test('a dedupe answer marked receipt: true backs the follow-up it tells Sandy to promise, without an effect', async () => {
+  test('a dedupe answer marked reservice: "existing" backs the directed follow-up it tells Sandy to promise, without a receipt or an effect', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
     replay.installHarness();
     const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === 'reservice-duplicate');
-    expect(fixture.fixtures.toolResponses.request_reservice[0]).toMatchObject({ receipt: true });
-    expect(fixture.fixtures.toolResponses.request_reservice[0].reservice).toBeUndefined();
+    // Since 3a round 17 the ticket on file is evidence, not a write receipt.
+    expect(fixture.fixtures.toolResponses.request_reservice[0]).toMatchObject({ reservice: 'existing' });
+    expect(fixture.fixtures.toolResponses.request_reservice[0].receipt).toBeUndefined();
     // The live duplicate branch: verified open ticket, nothing filed, "a team member will follow up".
     script.push(toolUse('request_reservice', { lane: 'pest', issue: 'ants back in the kitchen' }), say('Yes — that request is already in with the office, and a Waves team member will follow up.'));
     const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
     expect(result.error).toBeUndefined();
-    expect(result.toolCalls[0]).toMatchObject({ name: 'request_reservice', ok: true, receipt: true });
-    expect(result.checks.find((c) => c.check === 'commitment_requires_receipt')).toMatchObject({ status: 'pass' });
+    expect(result.toolCalls[0]).toMatchObject({ name: 'request_reservice', ok: true, receipt: false, existing: true });
+    expect(result.checks.find((c) => c.check === 'commitment_requires_receipt')).toMatchObject({ status: 'pass', detail: expect.stringContaining('already on file') });
     expect(result.status).toBe('pass');
     // The effect latches were never touched: no capture, no re-service mark, so the session is still open after the goodbye.
     expect(result.endSession).toBeNull();
