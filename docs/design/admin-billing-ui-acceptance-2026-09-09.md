@@ -92,3 +92,11 @@ existing UI foundation. Reminder-status read failures now show retry feedback
 alongside the statement-authorized controls. A synthetic regression confirms a
 sent statement can still submit its unchanged reminder endpoint/payload after
 the read fails; it failed before the correction and passes afterward.
+
+## Separate functional precursor
+
+PR #4325 now owns unavailable-versus-zero billing metric semantics and malformed
+payer read handling. The visual PR is stacked on that functional correction.
+The visual integration also clears an old Bill failure when the visit window
+changes or another recovery action begins. Both regression scenarios fail before
+the correction and pass afterward; reminder and metric regressions remain covered.

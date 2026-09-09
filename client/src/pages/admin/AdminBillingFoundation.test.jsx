@@ -63,6 +63,28 @@ describe("Admin billing failure and draft boundaries", () => {
     expect(JSON.parse(write[1].body)).toEqual({ display_name: "Example payer", company_name: "", ap_email: "", ap_phone: "", billing_address_line1: "", billing_city: "", billing_state: "", billing_zip: "", payment_terms: "net30", requires_po: false, tax_exempt: false, tax_exempt_cert: "", notes: "Keep this draft", active: true });
   });
 
+  it.each(["change window", "mark free"])("clears a previous Bill failure when the operator chooses to %s", async (nextAction) => {
+    const fetch = vi.fn(async (url, options) => {
+      if (options?.method === "POST") return url.endsWith("/bill") ? response({ error: "Invoice failed" }, 503) : response({ ok: true });
+      if (url.includes("/leaks?")) return response({ summary: {}, leaks: [{ scheduled_service_id: "visit-a", customer: "Avery Example", price: 120, billable: true }] });
+      if (url.endsWith("/aging")) return response({ aging: {}, top_balances: [] });
+      return response({ accounts: [], count: 0, atRisk: 0 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<BillingRecoveryPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Bill", exact: true }));
+    await screen.findByText("Invoice failed");
+    if (nextAction === "change window") {
+      fireEvent.change(screen.getByLabelText("Visit window"), { target: { value: "60" } });
+      await screen.findByRole("button", { name: "Bill", exact: true });
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Mark free", exact: true }));
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Mark free", exact: true }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    }
+    expect(screen.queryByText("Invoice failed")).not.toBeInTheDocument();
+  });
+
   it("starts a new free-visit draft when opening another visit after cancelling", async () => {
     vi.stubGlobal("fetch", vi.fn(async (url) => {
       if (url.includes("/leaks?")) return response({ summary: {}, leaks: [

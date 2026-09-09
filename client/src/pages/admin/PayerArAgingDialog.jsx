@@ -196,7 +196,7 @@ function Stat({ label, value, alert }) {
   return (
     <div>
       <div className="text-ui-caption text-ink-secondary font-medium">{label}</div>
-      <div className={`text-18 leading-[1.35] font-medium u-nums ${alert ? "text-alert-fg" : "text-zinc-900"}`}>{value ?? "—"}</div>
+      <div className={`text-18 leading-[1.35] font-medium u-nums ${alert ? "text-alert-fg" : "text-zinc-900"}`}>{value}</div>
     </div>
   );
 }
