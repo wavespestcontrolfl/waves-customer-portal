@@ -54,6 +54,9 @@ const QUOTE_FORM_CHANNELS = new Set(['form', 'website_quote']);
 const IGNORED_TEXT_TYPES = new Set(['reschedule_reply']);
 const VISIT_IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const VISIT_IN_PROGRESS_WINDOW_MS = 3 * 60 * 60 * 1000;
+// The customer-facing arrival texts — phone-keyed, so they cover a call row
+// with no linked customer and a visit row with no en_route_at/arrived_at stamp.
+const ARRIVAL_TEXT_TYPES = ['tech_en_route', 'tech_arrived'];
 // Same set context-aggregator uses to keep junk calls out of customer context.
 const NON_CONTACT_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
 const LOOKBACK_MS = 48 * 60 * 60 * 1000;
@@ -157,8 +160,10 @@ async function latestQuoteFormLead({ customerId, phoneLast10, before, since }) {
 
 /**
  * Is a technician en route to / on site at this customer right now (or was,
- * inside the last 3h before `before`)? Live rows carry the status; the
- * en_route_at / arrived_at stamps make the check replayable on history.
+ * inside the last 3h before `before`)? Three signals, any one suffices: a
+ * live en_route/on_site visit dated today; an en_route_at / arrived_at stamp
+ * inside the window; or an en-route / arrived TEXT we sent that number inside
+ * the window (phone-keyed — covers unlinked call rows and unstamped visits).
  */
 async function visitInProgress({ customerId, phone = null, before = new Date() } = {}) {
   const phoneLast10 = last10(phone);
@@ -191,7 +196,16 @@ async function visitInProgress({ customerId, phone = null, before = new Date() }
         .orWhereBetween('ss.arrived_at', [since, at]);
     })
     .first('ss.id');
-  return !!row;
+  if (row) return true;
+  if (!phoneLast10) return false;
+  const arrivalText = await db('sms_log')
+    .where('direction', 'outbound')
+    .whereIn('message_type', ARRIVAL_TEXT_TYPES)
+    .where('created_at', '>=', since)
+    .where('created_at', '<', at)
+    .whereRaw("right(regexp_replace(to_phone, '\\D', '', 'g'), 10) = ?", [phoneLast10])
+    .first('id');
+  return !!arrivalText;
 }
 
 // Our own quote-form auto-bridge to this person inside the last 48h: the

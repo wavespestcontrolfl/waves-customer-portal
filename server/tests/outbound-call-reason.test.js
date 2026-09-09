@@ -46,7 +46,7 @@ function installDb(byTable = {}) {
     b.orderBy = jest.fn(() => b);
     b.limit = jest.fn(() => b);
     const rowsFor = () => {
-      const isQuoteBridge = q.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound');
+      const isQuoteBridge = table === 'call_log' && q.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound');
       if (isQuoteBridge) return state.byTable.quote_bridges || [];
       return state.byTable[table] || [];
     };
@@ -275,6 +275,20 @@ describe('resolveOutboundCallReason', () => {
     await expect(visitInProgress({ customerId: 'cust-1', before: T0 })).resolves.toBe(false);
     await expect(visitInProgress({ customerId: null, phone: null, before: T0 })).resolves.toBe(false);
     expect(state.queries).toHaveLength(1);
+  });
+
+  test('visitInProgress: an en-route / arrived text WE sent that number inside 3h counts (no customer link, no visit stamp needed)', async () => {
+    installDb({ sms_log: [{ id: 'sms-arrived' }] });
+    await expect(visitInProgress({ customerId: null, phone: PHONE, before: T0 })).resolves.toBe(true);
+    const q = state.queries.find((x) => x.table === 'sms_log');
+    expect(q.wheres).toEqual(expect.arrayContaining([
+      ['direction', 'outbound'],
+      ['IN', 'message_type', ['tech_en_route', 'tech_arrived']],
+      ['created_at', '>=', new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS)],
+      ['created_at', '<', T0],
+    ]));
+    expect(q.raws[0][0]).toContain('to_phone');
+    expect(q.raws[0][1]).toEqual(['9415550101']);
   });
 
   test('visitInProgress with no linked customer matches the dialed number to a customer record', async () => {
