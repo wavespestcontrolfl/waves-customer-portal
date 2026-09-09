@@ -57,7 +57,7 @@ export function EmailSummary({ stats, digest }) {
         { label: "Vendor", value: stats.vendor }, { label: "Total", value: stats.total },
       ].map((item) => <div key={item.label} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
         <dt className="text-ui-caption text-ink-secondary">{item.label}</dt>
-        <dd className="u-nums m-0 mt-1 text-18 leading-[1.35] font-medium">{item.value ?? "—"}</dd>
+        <dd className="u-nums m-0 mt-1 text-18 leading-[1.35] font-medium">{item.value}</dd>
       </div>)}
     </dl>}
   </div>;
