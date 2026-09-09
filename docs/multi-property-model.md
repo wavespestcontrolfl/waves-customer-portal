@@ -244,3 +244,21 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
 - **Deferred** — ruling R2 (on-location contacts per property) is its own
   PR; per-house Property-tab details remain Phase C.
 
+### PR 4 of 4 — history and lawn health by saved property
+
+- **Completed visits and reports** (Visits → Completed) read `GET /services`
+  with `propertyScoped=1` under the saved-property scope: a stamped visit
+  lists under its house, an unstamped (pre-linkage) visit under the primary
+  — the same predicate and `propertyScope` echo Home's Last Visit uses; a
+  page echoed under another house is withheld and the property list
+  re-read. The card's disclosure names the rule.
+- **Lawn health** (`GET /lawn-health/:customerId` and `/history`) hands the
+  session's selected saved property to the per-property history reader
+  (#4039, behind `GATE_LAWN_PROPERTY_HISTORY`, the owner's flip) and echoes
+  `propertyScope`; Home shows the lawn teaser under a secondary house only
+  when that echo names it. Gate off = the reader's own default, no echo.
+- **Requests** already carry their house since PR 2 (`metadata.property`,
+  shown in staff triage); no `service_requests.property_id` column was added.
+- **Property tab** under a non-primary house shows the read-only primary
+  details notice since PR 2 (ruling R3).
+

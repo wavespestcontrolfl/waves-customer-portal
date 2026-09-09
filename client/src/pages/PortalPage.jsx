@@ -626,6 +626,10 @@ function useLawnHealth(customerId) {
     if (!customerId) return;
     api.getLawnHealth(customerId)
       .then(d => setData({
+        // The selection the read was scoped to (app property scope, PR 4):
+        // Home shows the lawn teaser under a secondary house only when the
+        // server says the lawn data is that house's.
+        propertyScope: d.propertyScope || null,
         scores: d.scores,
         initialScores: d.initialScores,
         hasLawnCare: d.hasLawnCare,
@@ -2722,6 +2726,13 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
   const lawnHealth = useLawnHealth(customer.id);
+  // Under a NON-primary selection the lawn read is customer-keyed unless the
+  // server resolved it to the shown house (GATE_LAWN_PROPERTY_HISTORY +
+  // the session property — app property scope, PR 4): its echo must name
+  // this entry, exactly like the next/last reads.
+  const lawnScopedToShownHouse = !!(dashboardEntry?.propertyId && lawnHealth.propertyScope?.enabled
+    && !scopeEchoMismatch(lawnHealth.propertyScope, dashboardEntry, dashboardSavedScope, dashboardSelectionNamed)
+    && String(lawnHealth.propertyScope.propertyId || '') === String(dashboardEntry.propertyId));
   // Unified Property Score (GATE_PROPERTY_SCORE) — null until the gate is on
   // and the load succeeds, so the card costs nothing while dark.
   const propertyScore = usePropertyScore();
@@ -3049,7 +3060,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
           <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
-            Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.
+            {lawnScopedToShownHouse
+              ? 'Your protection score and local alerts are shown for your primary address. Switch to that property to see them.'
+              : 'Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.'}
           </div>
         </section>
       ) : (
@@ -3366,7 +3379,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           stays visible without the full card. The pre-assessment state
           (mowing height + "tracking will start soon") moved with it. */}
       {/* Lawn health is read by CUSTOMER (useLawnHealth(customer.id)) — the primary's turf; withheld under a secondary with the score and alerts (uncapped codex r1u P1). */}
-      {!dashboardSecondarySelection && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+      {(!dashboardSecondarySelection || lawnScopedToShownHouse) && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
         const lawnScore = Math.round(lawnHealth.scores.overallScore);
         const lawnInitial = Math.round(lawnHealth.initialScores.overallScore);
         return (
@@ -3492,11 +3505,19 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
 // =========================================================================
 // SERVICES TAB
 // =========================================================================
-function ServicesTab() {
+function ServicesTab({ currentEntry = null, savedScope = false, selectedProperty = null, activePropertyId = null, onSavedScopeUnavailable = null }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
-  const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
+  // Saved-property scope (app property scope, PR 4): completed visits and
+  // reports follow the selected house — stamped visits under their house,
+  // unstamped (pre-linkage) visits under the primary — via the same
+  // `propertyScoped` read Home's Last Visit uses; the server echoes the
+  // selection it honored and a mismatch (the shown house retired, or the
+  // gate flipped) withholds the list and re-reads the property list.
+  const historyRead = usePortalRead(`service-history:${savedScope ? activePropertyId || 'primary' : 'profile'}`, () => api.getServices({ limit: 100, ...(savedScope ? { propertyScoped: 1 } : {}) }));
+  const scopeStale = scopeEchoMismatch(historyRead.data?.propertyScope, currentEntry, savedScope, selectedProperty?.propertyId || null);
+  useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
@@ -3525,7 +3546,7 @@ function ServicesTab() {
     const d = historyRead.data;
     moreSequence.current += 1;
     setLoadingMore(false);
-    setServices(d.services || []);
+    setServices(scopeStale ? [] : (d.services || []));
     setServicesOffset(d.nextOffset ?? (d.services || []).length);
     setTotalServices(Number.isFinite(d.total) ? d.total : null);
     return () => { moreSequence.current += 1; };
@@ -3537,9 +3558,15 @@ function ServicesTab() {
     if (loadingMore) return;
     setLoadingMore(true);
     const attempt = ++moreSequence.current;
-    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
+    api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset, ...(savedScope ? { propertyScoped: 1 } : {}) })
       .then(d => {
         if (moreSequence.current !== attempt) return;
+        // A page served under another house than this list shows is not
+        // this house's: drop it and re-read the property list.
+        if (scopeEchoMismatch(d.propertyScope, currentEntry, savedScope, selectedProperty?.propertyId || null)) {
+          if (onSavedScopeUnavailable) onSavedScopeUnavailable();
+          return;
+        }
         // The offset runs against a live newest-first query — a visit
         // completed between pages shifts the boundary and re-sends the last
         // row of the previous page. Dedupe by id so it can't render twice,
@@ -15587,11 +15614,17 @@ function VisitsTab({ customer, properties = [], activePropertyId, selectedProper
               P2): a profile whose other houses were retired still lists their
               visits and reports here, under the remaining house's address. */}
           {properties.some((p) => p.key) && (
-            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-profile-wide-notice">
-              Completed visits and reports are listed for this whole profile, including any property that is no longer active.
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, padding: '0 4px' }} data-testid="completed-property-scope-notice">
+              Completed visits and reports for this property. Visits from before your properties were saved are listed under your primary residence.
             </div>
           )}
-          <ServicesTab />
+          <ServicesTab
+            currentEntry={properties.find((p) => p.id === activePropertyId) || null}
+            savedScope={properties.some((p) => p.key)}
+            selectedProperty={selectedProperty}
+            activePropertyId={activePropertyId}
+            onSavedScopeUnavailable={onSavedScopeUnavailable}
+          />
         </>
       )}
     </div>

@@ -137,8 +137,17 @@ router.get('/:customerId', async (req, res, next) => {
 
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     const historyReader = propertyHistoryEnabled ? require('../services/lawn-assessment-history') : null;
+    // App property scope (PR 4): the SESSION's selected saved property is the
+    // house whose lawn this dashboard describes — passed into the
+    // per-property history reader (#4039, behind GATE_LAWN_PROPERTY_HISTORY).
+    // No selection / single home = the reader's own default (sole or
+    // primary), exactly as before. Echoed as `propertyScope` so Home can
+    // drop a read served under another house than it shows.
+    const { resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+    const scope = await resolveSessionScope(req);
+    const sessionPropertyId = scope?.enabled && scope.scoped && scope.property ? scope.property.id : undefined;
     const eligibleVisitIds = historyReader
-      ? await historyReader.eligibleVisitIds(await historyReader.visitEligibility({ customerId }, db), db)
+      ? await historyReader.eligibleVisitIds(await historyReader.visitEligibility({ customerId, propertyId: sessionPropertyId }, db), db)
       : undefined;
 
     // Mowing height-of-cut (independent of a vision assessment) — latest reading
@@ -150,7 +159,7 @@ router.get('/:customerId', async (req, res, next) => {
 
     // Get all confirmed assessments
     const assessments = propertyHistoryEnabled
-      ? (await historyReader.latestForCustomer(customerId, {}, db)).map((row) => ({ ...row, service_date: row.visit_date }))
+      ? (await historyReader.latestForCustomer(customerId, { propertyId: sessionPropertyId }, db)).map((row) => ({ ...row, service_date: row.visit_date }))
       : await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
       .orderBy('service_date', 'asc');
@@ -161,6 +170,7 @@ router.get('/:customerId', async (req, res, next) => {
         .orderBy('service_date', 'asc');
 
       return res.json({
+        ...(scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {}),
         hasLawnCare: pending.length > 0 || await hasCustomerLawnCare(customerId),
         hasPendingAssessment: pending.length > 0 && !pending[0].confirmed_by_tech,
         scores: null,
@@ -287,6 +297,7 @@ router.get('/:customerId', async (req, res, next) => {
     } catch { /* ignore */ }
 
     res.json({
+      ...(scope?.enabled ? { propertyScope: resolvedScopePayload(scope) } : {}),
       hasLawnCare: true,
       scores: formatScore(latest),
       initialScores: formatScore(initial),
@@ -319,7 +330,10 @@ router.get('/:customerId/history', async (req, res, next) => {
     }
 
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
-    const assessments = propertyHistoryEnabled ? await require('../services/lawn-assessment-history').latestForCustomer(customerId, {}, db) : await db('lawn_assessments')
+    // Same session property as the dashboard read (app property scope, PR 4).
+    const historyScope = await require('../services/account-properties').resolveSessionScope(req);
+    const historyPropertyId = historyScope?.enabled && historyScope.scoped && historyScope.property ? historyScope.property.id : undefined;
+    const assessments = propertyHistoryEnabled ? await require('../services/lawn-assessment-history').latestForCustomer(customerId, { propertyId: historyPropertyId }, db) : await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
       .orderBy('service_date', 'asc');
 

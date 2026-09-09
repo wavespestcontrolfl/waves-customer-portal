@@ -99,4 +99,12 @@ describe('Home under a saved-property selection', () => {
     expect(await screen.findByText('Property Alerts')).toBeInTheDocument();
     expect(screen.queryByTestId('home-primary-facts-notice')).not.toBeInTheDocument();
   });
+  // App property scope (PR 4): the lawn teaser shows under a SECONDARY house
+  // only when the server resolved the lawn read to that house (echo).
+  it('shows the lawn teaser under a secondary house when the lawn read echoes it', async () => {
+    api.getLawnHealth.mockResolvedValue({ hasLawnCare: true, scores: { overallScore: 80 }, initialScores: { overallScore: 60 }, photos: [], trend: [], propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
+    render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    expect(await screen.findByTestId('home-primary-facts-notice')).toHaveTextContent('Your protection score and local alerts');
+    await waitFor(() => expect(api.getLawnHealth).toHaveBeenCalled());
+  });
 });
