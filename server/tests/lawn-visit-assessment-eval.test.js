@@ -6,6 +6,8 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => { const db = () => ({}); db.raw = () => ({}); db.schema = {}; return db; });
 jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/llm/call'), dispatchWithFallback: jest.fn() }));
+jest.mock('knex', () => jest.fn());
+jest.mock('../services/photos', () => ({ getPhotoBase64: jest.fn() }));
 
 const evalLib = require('../services/eval/lawn-visit-assessment-eval');
 
@@ -50,6 +52,10 @@ describe('fixture export shape', () => {
     expect(evalLib.scrubPriorSummary('  ', ['x'])).toBeNull();
     expect(evalLib.scrubPriorSummary(null)).toBeNull();
     expect(evalLib.scrubPriorSummary('Fine lawn.', [null, 'A'])).toBe('Fine lawn.');
+    // PII only: product names and confirmed language are agronomic evidence the live call received — they stay.
+    expect(evalLib.scrubPriorSummary('Confirmed chinch bugs; Celsius applied. Call 941-555-0100 or see https://x.test at 12 Private Way.', ['Jane']))
+      .toBe('Confirmed chinch bugs; Celsius applied. Call or see at the property');
+    expect(evalLib.scrubPii('mail me@x.test today')).toBe('mail today');
     // A summary that repeats an access credential is omitted whole — the scrubber does not know codes.
     for (const text of ['Lawn improved; gate code 4471 for the side gate.', 'The lockbox is 2288, treat the back first.']) expect(evalLib.scrubPriorSummary(text, ['Jane'])).toBeNull();
     expect(evalLib.fixtureCase(row(), [], { priorSummary: 'Use gate code 4471.' }).context.priorSummary).toBeNull();
@@ -214,6 +220,10 @@ describe('scoring', () => {
     expect(omittedSummary.contextOmitted).toEqual({ runs: 1, byField: { grassType: 1, irrigation: 1 } });
     expect(evalLib.renderMarkdown(omittedSummary)).toMatch(/context omitted \(not provably visit-time\) in 1 run\(s\): grassType ×1, irrigation ×1/);
     expect(evalLib.renderMarkdown(summary)).toMatch(/no context omitted/);
+    // Provenance is on every report: the prompt version and digest, and the fixture's property-history branch.
+    expect(evalLib.renderMarkdown(summary, [], { promptVersion: 'lawn-visit-v1', promptDigest: 'abcdef0123456789', propertyHistory: false })).toMatch(/\nprompt lawn-visit-v1 · digest abcdef0123456789 · fixture property history off\n/);
+    expect(evalLib.provenanceLine({})).toBe('prompt unknown · digest unknown · fixture property history unknown');
+    expect(evalLib.provenanceLine({ promptVersion: 'v', promptDigest: 'd', propertyHistory: true })).toBe('prompt v · digest d · fixture property history on');
     expect(summary.mae.vsConfirmed.color_health).toEqual({ mae: 0, bias: 0, n: 1 }); // a2 color 8 → 80 = confirmed 80; a1 undeterminable
     expect(summary.undeterminableRate.color_health).toBe(0.5);
     expect(summary.causeNamedBelowModerate).toBe(2);
@@ -238,7 +248,7 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
   const fs = require('fs');
   const path = require('path');
   const scriptPath = path.join(__dirname, '../../ops/agents/lawn-visit-assessment-eval.js');
-  const { _internals: { parseArgs } } = require(scriptPath);
+  const { _internals: { parseArgs, exportFixture, runReplay } } = require(scriptPath);
 
   test('count flags are finite positive whole numbers or the script stops before any export or paid call', () => {
     const exit = jest.spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`exit ${code}`); });
@@ -271,41 +281,90 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     } finally { exit.mockRestore(); error.mockRestore(); }
   });
 
-  test('the export takes the prior summary on the route\'s GATE_LAWN_PROPERTY_HISTORY branch and records it in the fixture', () => {
+  test.each([true, false])('legacy export reports missing prompt context and excludes new-pipeline rows when the run table exists: %s', async (hasRunTable) => {
+    const db = jest.requireActual('knex')({ client: 'pg' });
+    const queries = [];
+    // Compile real Knex queries while supplying synthetic rows; no database
+    // connection or current customer/profile/completion data is available.
+    jest.spyOn(db.client, 'runner').mockImplementation((builder) => ({
+      run: async () => {
+        const compiled = [].concat(builder.toSQL());
+        queries.push(...compiled);
+        const sql = compiled[0].sql;
+        if (sql.includes('information_schema.tables')) return hasRunTable;
+        if (sql.includes('from "lawn_assessments" as "la"')) return [row({ created_at: '2026-09-01T13:00:00Z' })];
+        if (sql.includes('from "lawn_assessment_photos"')) return photos;
+        throw new Error(`Unexpected export query: ${sql}`);
+      },
+    }));
+    require('knex').mockReturnValue(db);
+    const env = process.env;
+    process.env = { ...env, DATABASE_PUBLIC_URL: 'postgresql://localhost/unused_eval_test', GATE_LAWN_PROPERTY_HISTORY: String(hasRunTable) };
+    const write = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await exportFixture(parseArgs(['node', 'eval', '--export', '--all']));
+      const fixture = JSON.parse(write.mock.calls[0][0]);
+      expect(fixture).toMatchObject({ propertyHistory: hasRunTable, population: 1, cases: [{ assessmentId: 'a1', context: {
+        grassType: null, irrigation: null, turfHeightIn: null, priorSummary: null,
+        omitted: [
+          { field: 'grassType', reason: 'legacy_assessment_has_no_prompt_snapshot' },
+          { field: 'irrigation', reason: 'legacy_assessment_has_no_prompt_snapshot' },
+          { field: 'turfHeightIn', reason: 'legacy_assessment_has_no_prompt_snapshot' },
+          { field: 'priorSummary', reason: 'legacy_assessment_has_no_prompt_snapshot' },
+        ],
+      } }] });
+      expect(fixture.cases[0].photos.map((photo) => photo.s3Key)).toEqual(['k1', 'k2']);
+      expect(evalLib.contextFor(fixture.cases[0])).toEqual({ region: 'Southwest Florida', month: 8, season: 'peak' });
+      const population = queries.find((query) => query.sql.includes('from "lawn_assessments" as "la"'));
+      expect(population.sql).toContain('not exists (select 1 from "lawn_assessment_photos"');
+      expect(population.bindings).toEqual([true, 'pending/%', 'pending/%']);
+      expect(population.sql.includes('not exists (select 1 from "lawn_assessment_runs" as "r"')).toBe(hasRunTable);
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('context omitted (not provably visit-time) in 1 of 1 case(s)'));
+      const { summary } = await evalLib.runEval(fixture.cases, {
+        analyzeVisit: async () => analysis(),
+        loadPhoto: async () => ({ data: 'test-photo', mimeType: 'image/jpeg' }),
+      });
+      expect(summary.contextOmitted).toEqual({ runs: 1, byField: { grassType: 1, irrigation: 1, turfHeightIn: 1, priorSummary: 1 } });
+      expect(evalLib.renderMarkdown(summary)).toContain('grassType ×1, irrigation ×1, turfHeightIn ×1, priorSummary ×1');
+    } finally {
+      process.env = env;
+      write.mockRestore(); error.mockRestore();
+      await db.destroy();
+    }
+  });
+
+  test.each([true, false, undefined])('both report formats retain fixture history %s and the full prompt digest', async (propertyHistory) => {
+    const config = require('../config');
+    const visit = require('../services/lawn-visit-assessment');
+    const bucket = config.s3.bucket;
+    config.s3.bucket = 'eval-test';
+    const env = process.env;
+    process.env = { ...env, GATE_LAWN_PROPERTY_HISTORY: String(!propertyHistory) };
+    const readFile = fs.readFileSync;
+    const read = jest.spyOn(fs, 'readFileSync').mockImplementation((filename, ...args) => (
+      filename === 'eval-fixture.json' ? JSON.stringify({ propertyHistory, cases: [evalLib.fixtureCase(row(), photos)] }) : readFile(filename, ...args)
+    ));
+    const run = jest.spyOn(evalLib, 'runEval').mockResolvedValue({ results: [], skipped: [], summary: evalLib.summarize([]) });
+    const write = jest.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const error = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await runReplay(parseArgs(['node', 'eval', '--run', 'eval-fixture.json', '--json']));
+      expect(JSON.parse(write.mock.calls[0][0])).toMatchObject({
+        promptVersion: visit.PROMPT_VERSION, promptDigest: visit.PROMPT_DIGEST, propertyHistory: propertyHistory ?? null,
+      });
+      await runReplay(parseArgs(['node', 'eval', '--run', 'eval-fixture.json']));
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(`prompt ${visit.PROMPT_VERSION} · digest ${visit.PROMPT_DIGEST} · fixture property history ${propertyHistory === undefined ? 'unknown' : propertyHistory ? 'on' : 'off'}`));
+    } finally {
+      config.s3.bucket = bucket;
+      process.env = env;
+      read.mockRestore(); run.mockRestore(); write.mockRestore(); log.mockRestore(); error.mockRestore();
+    }
+  });
+
+  test('the CLI clears ledger gates after config loads and checks them around replay imports', () => {
     const src = fs.readFileSync(scriptPath, 'utf8');
-    expect(src).toMatch(/const propertyHistoryEnabled = require\(path\.join\(REPO, 'server\/config\/feature-gates'\)\)\.gateEnvValue\('GATE_LAWN_PROPERTY_HISTORY'\);/);
-    expect(src).toMatch(/loadPriorSummary\(\{ customerId: row\.customer_id, serviceId: row\.service_id, scheduledService, visitDate, propertyHistoryEnabled \}, knex\)/);
-    expect(src).not.toMatch(/historyBeforeVisit\(/);
-    expect(src).toMatch(/propertyHistory: propertyHistoryEnabled, population: all\.length, cases \}/);
-    // The legacy benchmark population never includes a run-backed row (its composite_scores are the new pipeline's own).
-    expect(src).toMatch(/const hasRunTable = await knex\.schema\.hasTable\('lawn_assessment_runs'\);/);
-    expect(src).toMatch(/\.modify\(\(q\) => \{ if \(hasRunTable\) q\.whereNotExists\(function \(\) \{ this\.select\(1\)\.from\('lawn_assessment_runs as r'\)\.whereRaw\('r\.assessment_id = la\.id'\); \}\); \}\)/);
-    // The visit's gauge reading rides along: the assessment's service record (back-link, else the scheduled service's latest record) → turf_height_readings.
-    expect(src).toMatch(/turfHeightIn: turfHeight,/);
-    // A visit with a failed upload is out of the population (a partial replay is not comparable to full-set scores).
-    expect(src).toMatch(/\.whereNotExists\(function \(\) \{ this\.select\(1\)\.from\('lawn_assessment_photos as p'\)\.whereRaw\('p\.assessment_id = la\.id'\)\.andWhere\('p\.s3_key', 'like', 'pending\/%'\); \}\)/);
-    // The grass type is what the route could have known at the visit: a profile untouched since before the assessment,
-    // else customers.lawn_type (never written by /assess) — never the profile /assess captured from this assessment's own read.
-    expect(src).toMatch(/loadVisitTurfHeight\(row, knex\),\s*loadVisitGrassType\(row, knex\),\s*\]\);/);
-    expect(src).toMatch(/grassType: grass\.value,\s*irrigation: irrigation\.value,/);
-    // Provenance is proven by the ledger, not by the profile's updated_at (touched by every grass capture): the profile
-    // must have EXISTED before the assessment, and irrigation is out when any assessment at or after this one recorded it.
-    // Provenance: a profile-derived field is supplied only when the profile was UNTOUCHED since before the assessment
-    // (every writer — grass capture, field checks, admin edit — bumps updated_at); customers.lawn_type likewise on the
-    // customer row; the prior summary only when its holder row is untouched since (regeneration bumps it). Every
-    // unproven field is omitted AND recorded in the fixture (context.omitted) — never silently absent.
-    expect(src).toMatch(/if \(!profile\.updated_at \|\| !\(new Date\(profile\.updated_at\) < assessedAt\)\) return \{ profile: null, reason: 'profile_touched_since_visit' \};/);
-    expect(src).toMatch(/if \(!assessedAt \|\| !customer\.updated_at \|\| !\(new Date\(customer\.updated_at\) < assessedAt\)\) return omitted\('grassType', 'customer_row_touched_since_visit'\);/);
-    expect(src).toMatch(/\.where\(\{ customer_id: row\.customer_id, ai_summary: summary \}\)\.whereNot\(\{ id: row\.id \}\)\.orderBy\('updated_at', 'desc'\)\.first\('updated_at'\)/);
-    expect(src).toMatch(/omitted: \[grass, irrigation, priorProvenance\]\.filter\(\(entry\) => entry\.omitted\)\.map\(\(entry\) => \(\{ field: entry\.field, reason: entry\.omitted \}\)\),/);
-    expect(src).toMatch(/context omitted \(not provably visit-time\) in/);
-    expect(src).not.toMatch(/profile\.created_at/);
-    expect(src).toMatch(/'la\.photos'/);
-    expect(src).toMatch(/'la\.created_at'/);
-    expect(src).not.toMatch(/grassType: grassCtx\.grassTypeLabel/);
-    // Irrigation follows the same provenance rule (its sources are the turf profile a confirm's field checks write).
-    expect(src).toMatch(/loadVisitIrrigation\(row, knex\),\s*knex\('customers'\)/);
-    expect(src).not.toMatch(/loadIrrigationContext\(/);
     // The read-only promise: dotenv (server/config) loads BEFORE the ledger gates are cleared, and the gates are verified
     // before and after every import the replay uses.
     const run = src.slice(src.indexOf('async function runReplay('), src.indexOf('const fixture = JSON.parse('));
@@ -313,8 +372,6 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     expect(run.indexOf("assertNoLedgerWrites(gates, 'before imports')")).toBeLessThan(run.indexOf("require(path.join(REPO, 'server/config/models'))"));
     expect(run.indexOf("assertNoLedgerWrites(gates, 'after imports')")).toBeGreaterThan(run.indexOf("require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'))"));
     expect(src).toMatch(/const LEDGER_GATES = \['GATE_LLM_DISPATCH_METRICS', 'GATE_LLM_CALL_LEDGER', 'GATE_LLM_CALL_TRACES'\];/);
-    expect(src).toMatch(/knex\('turf_height_readings'\)\.where\(\{ service_record_id: serviceRecordId \}\)\.first\('manual_height_in'\)/);
-    expect(src).toMatch(/knex\('service_records'\)\.where\(\{ scheduled_service_id: row\.service_id \}\)\.orderBy\('created_at', 'desc'\)\.first\('id'\)/);
     // The script is a module for tests and a program for operators.
     expect(src).toMatch(/if \(require\.main === module\) \{/);
   });

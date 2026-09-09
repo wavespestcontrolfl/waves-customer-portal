@@ -27,7 +27,7 @@
 
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores, contextHash } = require('../lawn-visit-assessment');
-const { scrubCustomerText, SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
+const { SUMMARY_CAUSE_RE, CUSTOMER_TEXT_URL, CUSTOMER_TEXT_EMAIL, CUSTOMER_TEXT_PHONE, STREET_ADDRESS } = require('../lawn-diagnostic-report');
 const { containsReportAccessCode } = require('../service-report/technician-report-copy');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
@@ -120,10 +120,9 @@ function fixtureCase(row, photos = [], context = {}) {
         ...(Array.isArray(context.omitted) ? context.omitted : []),
         ...(context.priorSummary && nameCollidesWithVocabulary(context.priorSummary, context.customerNames) ? [{ field: 'priorSummary', reason: 'customer_name_is_lawn_vocabulary' }] : []),
       ],
-      // The gauge reading the visit's completion recorded (turf_height_readings
-      // via the assessment's service record), in the same 0.5–8 in range the
-      // route accepts — the prompt uses it to tell scalping from other stress,
-      // so a replay without it is not the production call (Codex #4153 r7).
+      // Only a captured analysis-time reading can reproduce the prompt.
+      // Legacy exports omit it; completion readings may have changed since
+      // Analyze. Retain the route's accepted 0.5–8 in range for supplied context.
       turfHeightIn: turfHeightInRange(context.turfHeightIn),
       priorSummary: scrubPriorSummary(context.priorSummary, context.customerNames),
     },
@@ -136,12 +135,12 @@ function turfHeightInRange(value) {
 
 // The previous visit's ai_summary was written by a model that was given the
 // customer's full name (knowledge-bridge), so the fixture copy goes through
-// the customer egress scrubber (phones, emails, URLs, street addresses,
-// brands) and then loses every customer-name token the exporter knows —
+// PII removal (phones, emails, URLs, street addresses), preserving products
+// and diagnoses, then loses every known customer-name token —
 // the stored first and last name, each in full AND word by word, with and
 // without diacritics, so a summary that says only "Mary" of a "Mary Jane",
 // or "Jose" of a "José", is scrubbed too (Codex #4153 r5) — before it is
-// clipped. Word boundaries are Unicode-aware (JS `\b` knows ASCII letters
+// replayed. Word boundaries are Unicode-aware (JS `\b` knows ASCII letters
 // only, so "José" never matched at the end of a word). Null when nothing
 // is left.
 const NAME_TOKEN_MIN_LENGTH = 2; // an initial is not a name
@@ -170,10 +169,24 @@ function nameCollidesWithVocabulary(text, customerNames = []) {
     return (LAWN_VOCABULARY.has(lower) || SUMMARY_CAUSE_RE.test(lower)) && new RegExp(`(?<![\\p{L}\\p{N}])${lower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu').test(summary);
   });
 }
+// PII only — the report lane's scrubCustomerText also softens confirmed
+// language and replaces product names, which would hand the replay weaker
+// agronomic evidence than the live call received (Codex #4153 r15): here
+// only URLs, emails, phones and street addresses go, then the customer's
+// name tokens and any access code.
+function scrubPii(text) {
+  return String(text)
+    .replace(CUSTOMER_TEXT_URL, '')
+    .replace(CUSTOMER_TEXT_EMAIL, '')
+    .replace(CUSTOMER_TEXT_PHONE, '')
+    .replace(STREET_ADDRESS, 'the property')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 function scrubPriorSummary(text, customerNames = []) {
   if (!text) return null;
   if (nameCollidesWithVocabulary(text, customerNames)) return null;
-  let out = scrubCustomerText(String(text));
+  let out = scrubPii(text);
   for (const token of customerNameTokens(customerNames)) {
     out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'), 'the customer');
   }
@@ -424,8 +437,17 @@ function contextOmissions(results) {
 const omittedNote = (summary) => (summary.contextOmitted?.runs
   ? `context omitted (not provably visit-time) in ${summary.contextOmitted.runs} run(s): ${Object.entries(summary.contextOmitted.byField).map(([field, n]) => `${field} ×${n}`).join(', ')}`
   : 'no context omitted');
-function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval' } = {}) {
-  const lines = [`## ${title}`, ''];
+// Every report names what it ran: the prompt version AND digest (a shared
+// rubric block can change without a version bump) and the fixture's
+// property-history branch, so gate-on and gate-off runs, and runs across a
+// silent prompt change, stay distinguishable after the output is redirected
+// (Codex #4153 r15).
+function provenanceLine({ promptVersion, promptDigest, propertyHistory } = {}) {
+  const history = propertyHistory === true ? 'on' : propertyHistory === false ? 'off' : 'unknown';
+  return `prompt ${promptVersion || 'unknown'} · digest ${promptDigest || 'unknown'} · fixture property history ${history}`;
+}
+function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval', promptVersion, promptDigest, propertyHistory } = {}) {
+  const lines = [`## ${title}`, '', provenanceLine({ promptVersion, promptDigest, propertyHistory })];
   lines.push(`runs ${summary.runs} · cases ${summary.cases} · unavailable ${summary.unavailable} (${fmtRate(summary.unavailableRate)}) · findings/run ${summary.findingsPerRun ?? 'n/a'} · cause named below moderate: ${summary.causeNamedBelowModerate}`);
   lines.push(`latency p50 ${summary.latencyMs.p50 ?? 'n/a'} ms · p95 ${summary.latencyMs.p95 ?? 'n/a'} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${summary.costUsd.total ?? 'n/a'} ($${summary.costUsd.perRun ?? 'n/a'} per run, ${summary.costUsd.priced} priced${unpricedNote(summary)})`);
   lines.push(`answered by: ${Object.entries(summary.byProvider).map(([k, v]) => `${k} ×${v}`).join(', ') || 'n/a'}`);
@@ -499,6 +521,8 @@ module.exports = {
   contextFor,
   costUsd,
   scrubPriorSummary,
+  scrubPii,
+  provenanceLine,
   nameCollidesWithVocabulary,
   contextOmissions,
   billedLegs,

@@ -16,9 +16,9 @@
  *   1. EXPORT (prod Postgres, read-only) — ids, dates, photo keys, confirmed +
  *      legacy AI scores and agronomic context only, as JSON on STDOUT (the
  *      operator redirects it). No names, addresses, phones, notes or photo
- *      bytes ever enter the fixture. Context is rebuilt the way the live route
- *      builds it: the canonical grass-context loaders, the prior summary on
- *      the route's GATE_LAWN_PROPERTY_HISTORY branch (the fixture records it).
+ *      bytes ever enter the fixture. Legacy rows have no prompt snapshot or
+ *      pre-call timestamp: mutable context is omitted and reported. The
+ *      fixture records the export's GATE_LAWN_PROPERTY_HISTORY setting.
  *        railway run --service Postgres node ops/agents/lawn-visit-assessment-eval.js \
  *          --export --ids <id>,<id> --sample 20 > /tmp/lawn-visit-eval-fixture.json
  *
@@ -110,15 +110,6 @@ async function exportFixture(args) {
   if (!args.ids.length && !args.sample && !args.all) { console.error('--export needs --ids, --sample N or --all'); process.exit(2); }
   const knexFactory = require('knex');
   const evalLib = require(path.join(REPO, 'server/services/eval/lawn-visit-assessment-eval'));
-  // The same loaders the live route uses, so the replay context is the
-  // context the assessment actually received: active-profile grass with the
-  // legacy customers.lawn_type fallback, and the previous visit's summary on
-  // the SAME gate branch the route takes — property- and reset-scoped with
-  // GATE_LAWN_PROPERTY_HISTORY on (never another lawn's summary), the legacy
-  // customer-wide lookup off. The gate is read the way the route reads it,
-  // so set it on the `railway run` command line to export the other
-  // configuration; the fixture records which branch it took.
-  const { loadPriorSummary } = require(path.join(REPO, 'server/services/lawn-grass-context'));
   const propertyHistoryEnabled = require(path.join(REPO, 'server/config/feature-gates')).gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
   const knex = knexFactory({ client: 'pg', connection: { connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } }, pool: { min: 0, max: 2 } });
   try {
@@ -129,7 +120,6 @@ async function exportFixture(args) {
     // against the legacy two-model baseline (Codex #4153 r7). A database
     // without the run table yet has no such rows.
     const hasRunTable = await knex.schema.hasTable('lawn_assessment_runs');
-    const hasServiceRecordColumn = await knex.schema.hasColumn('lawn_assessments', 'service_record_id');
     const rows = await knex('lawn_assessments as la')
       .leftJoin('scheduled_services as ss', 'ss.id', 'la.service_id')
       .where('la.confirmed_by_tech', true)
@@ -138,7 +128,7 @@ async function exportFixture(args) {
       // set: a partial replay is not comparable, so the case is out.
       .whereNotExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'like', 'pending/%'); })
       .modify((q) => { if (hasRunTable) q.whereNotExists(function () { this.select(1).from('lawn_assessment_runs as r').whereRaw('r.assessment_id = la.id'); }); })
-      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.created_at', 'la.photos', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date', ...(hasServiceRecordColumn ? ['la.service_record_id'] : []))
+      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.created_at', 'la.photos', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date')
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC, la.created_at DESC');
     // Selection is the library's tested mechanism: the explicit ids plus the
     // deterministic sample, or the whole population with --all.
@@ -148,110 +138,25 @@ async function exportFixture(args) {
     if (missing.length) console.error(`warning: ${missing.length} requested id(s) are not confirmed assessments with stored photos and were skipped`);
     const cases = [];
     for (const row of rows.filter((r) => chosen.has(r.id))) {
-      const visitDate = evalLib.dateString(row.scheduled_date) || evalLib.dateString(row.service_date);
-      const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
       // Each case's photos load with the case — one small query per exported row.
-      const [photos, irrigation, customer, prior, turfHeight, grass] = await Promise.all([
-        knex('lawn_assessment_photos').where({ assessment_id: row.id }).orderBy('photo_order').select('id', 's3_key', 'mime_type', 'photo_order', 'zone'),
-        loadVisitIrrigation(row, knex),
-        knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
-        loadPriorSummary({ customerId: row.customer_id, serviceId: row.service_id, scheduledService, visitDate, propertyHistoryEnabled }, knex).catch((err) => { console.error(`warning: prior-visit summary failed for ${row.id}: ${err.message}`); return null; }),
-        loadVisitTurfHeight(row, knex),
-        loadVisitGrassType(row, knex),
-      ]);
-      const priorProvenance = await visitTimePriorSummary(row, prior, knex);
+      const photos = await knex('lawn_assessment_photos').where({ assessment_id: row.id }).orderBy('photo_order').select('id', 's3_key', 'mime_type', 'photo_order', 'zone');
+      // The legacy population has neither a prompt snapshot nor a pre-call
+      // timestamp. created_at is AFTER analysis; subtracting a guessed call
+      // duration cannot prove that a current profile/customer/summary value
+      // was read by the original model. Completion turf readings are editable
+      // after Analyze too. Omit these fields instead of replaying later data.
       cases.push(evalLib.fixtureCase(row, photos, {
-        grassType: grass.value,
-        irrigation: irrigation.value,
-        turfHeightIn: turfHeight,
-        // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
-        priorSummary: priorProvenance.value,
-        customerNames: [customer?.first_name, customer?.last_name],
-        // Every field the ledger could not prove visit-time, with why (the fixture and the report carry it).
-        omitted: [grass, irrigation, priorProvenance].filter((entry) => entry.omitted).map((entry) => ({ field: entry.field, reason: entry.omitted })),
+        omitted: ['grassType', 'irrigation', 'turfHeightIn', 'priorSummary'].map((field) => ({ field, reason: 'legacy_assessment_has_no_prompt_snapshot' })),
       }));
     }
     const fixture = { generatedAt: new Date().toISOString(), propertyHistory: propertyHistoryEnabled, population: all.length, cases };
     const omittedCases = cases.filter((c) => c.context.omitted.length).length;
     console.error(`context omitted (not provably visit-time) in ${omittedCases} of ${cases.length} case(s)${omittedCases ? `: ${Object.entries(cases.flatMap((c) => c.context.omitted).reduce((acc, o) => ({ ...acc, [o.field]: (acc[o.field] || 0) + 1 }), {})).map(([f, n]) => `${f} ×${n}`).join(', ')}` : ''}`);
-    console.error(`exported ${cases.length} case(s) of ${all.length} confirmed assessments with photos · prior summary ${propertyHistoryEnabled ? 'property-scoped (GATE_LAWN_PROPERTY_HISTORY on)' : 'legacy customer-wide (GATE_LAWN_PROPERTY_HISTORY off)'} · photos ${cases.reduce((n, c) => n + c.photos.length, 0)} · zone-labeled ${cases.reduce((n, c) => n + c.photos.filter((p) => p.zone).length, 0)}`);
+    console.error(`exported ${cases.length} case(s) of ${all.length} confirmed assessments with photos · export property history ${propertyHistoryEnabled ? 'on' : 'off'} · photos ${cases.reduce((n, c) => n + c.photos.length, 0)} · zone-labeled ${cases.reduce((n, c) => n + c.photos.filter((p) => p.zone).length, 0)}`);
     process.stdout.write(`${JSON.stringify(fixture, null, 2)}\n`);
   } finally {
     await knex.destroy();
   }
-}
-
-// ── Visit-time provenance ─────────────────────────────────────────────
-// No legacy assessment stored the context its call received, so the export
-// supplies a profile-derived field ONLY where the ledger PROVES it unchanged
-// since the visit, and otherwise omits it and says so ({ value: null,
-// omitted: <reason> } → the fixture's context.omitted, the run report's
-// count). The provable condition for customer_turf_profiles is "untouched
-// since before the assessment": every writer of the row — the /assess grass
-// capture (this assessment's own included: a pre-existing-but-blank grass
-// filled by this very call is outcome, Codex #4153 r14), a confirm's field
-// checks, an admin edit (admin-customer-turf-profile.js writes no ledger
-// row) — bumps updated_at, so updated_at < la.created_at is exactly "no
-// writer since". The same-assessment touch therefore omits (recorded), never
-// silently biases. customers.lawn_type is proven the same way on
-// customers.updated_at (Codex #4153 r8, r11, r13, r14).
-function proven(field, value) { return { field, value, omitted: null }; }
-function omitted(field, reason) { return { field, value: null, omitted: reason }; }
-async function visitTimeProfile(row, knex) {
-  const assessedAt = row.created_at ? new Date(row.created_at) : null;
-  if (!assessedAt) return { profile: null, reason: 'assessment_has_no_created_at' };
-  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('grass_type', 'irrigation_type', 'irrigation_inches_per_week', 'updated_at').catch(() => null);
-  if (!profile) return { profile: null, reason: 'no_profile' };
-  if (!profile.updated_at || !(new Date(profile.updated_at) < assessedAt)) return { profile: null, reason: 'profile_touched_since_visit' };
-  return { profile, reason: null };
-}
-async function loadVisitGrassType(row, knex) {
-  const { grassTypeLabel, normalizeGrassType } = require(path.join(REPO, 'server/services/lawn-grass-context'));
-  const { profile, reason } = await visitTimeProfile(row, knex);
-  if (profile?.grass_type) return proven('grassType', grassTypeLabel(profile.grass_type));
-  const customer = await knex('customers').where({ id: row.customer_id }).first('lawn_type', 'updated_at');
-  const lawnType = normalizeGrassType(customer?.lawn_type);
-  if (!lawnType) return omitted('grassType', reason || 'profile_has_no_grass');
-  const assessedAt = row.created_at ? new Date(row.created_at) : null;
-  if (!assessedAt || !customer.updated_at || !(new Date(customer.updated_at) < assessedAt)) return omitted('grassType', 'customer_row_touched_since_visit');
-  return proven('grassType', grassTypeLabel(lawnType));
-}
-// Formatted as lawn-grass-context's loadIrrigationContext formats it.
-async function loadVisitIrrigation(row, knex) {
-  const { profile, reason } = await visitTimeProfile(row, knex);
-  if (!profile) return omitted('irrigation', reason);
-  const parts = [];
-  if (profile.irrigation_type) parts.push(String(profile.irrigation_type).replace(/_/g, ' '));
-  if (profile.irrigation_inches_per_week != null) parts.push(`${profile.irrigation_inches_per_week} in/wk`);
-  return parts.length ? proven('irrigation', parts.join(', ')) : omitted('irrigation', 'profile_has_no_irrigation');
-}
-// The previous visit's ai_summary as the live call received it: Knowledge
-// Bridge overwrites ai_summary (and bumps updated_at) when a predecessor's
-// recommendations are regenerated, so the summary is visit-time only when
-// the row that holds it has not been touched since before this assessment
-// (Codex #4153 r14).
-async function visitTimePriorSummary(row, summary, knex) {
-  if (!summary) return omitted('priorSummary', 'no_prior_summary');
-  const assessedAt = row.created_at ? new Date(row.created_at) : null;
-  const holder = await knex('lawn_assessments').where({ customer_id: row.customer_id, ai_summary: summary }).whereNot({ id: row.id }).orderBy('updated_at', 'desc').first('updated_at');
-  if (!assessedAt || !holder?.updated_at || !(new Date(holder.updated_at) < assessedAt)) return omitted('priorSummary', 'predecessor_touched_since_visit');
-  return proven('priorSummary', summary);
-}
-
-// The gauge reading the visit's completion recorded: turf_height_readings
-// keys on the service record (one per completion), reached through the
-// assessment's own back-link or, for a row completed before the back-link
-// existed, the scheduled service's latest record. Null when the visit
-// recorded none — the route's visionContext omits the line the same way.
-async function loadVisitTurfHeight(row, knex) {
-  let serviceRecordId = row.service_record_id || null;
-  if (!serviceRecordId && row.service_id) {
-    const record = await knex('service_records').where({ scheduled_service_id: row.service_id }).orderBy('created_at', 'desc').first('id');
-    serviceRecordId = record?.id || null;
-  }
-  if (!serviceRecordId) return null;
-  const reading = await knex('turf_height_readings').where({ service_record_id: serviceRecordId }).first('manual_height_in').catch(() => null);
-  return reading?.manual_height_in ?? null;
 }
 
 // ── Phase 2: run ──────────────────────────────────────────────────────
@@ -308,15 +213,17 @@ async function runReplay(args) {
   }, { repeat: args.repeat, concurrency: args.concurrency, thinkingLevel: args.thinking });
 
   const title = `Lawn visit assessment eval — ${visit.PROMPT_VERSION}${variant}`;
+  // Every output format carries the fixture's property-history branch and the prompt digest (see renderMarkdown).
+  const propertyHistory = typeof fixture.propertyHistory === 'boolean' ? fixture.propertyHistory : null;
   if (args.json) {
     process.stdout.write(`${JSON.stringify({
-      generatedAt: new Date().toISOString(), promptVersion: visit.PROMPT_VERSION, promptDigest: visit.PROMPT_DIGEST,
+      generatedAt: new Date().toISOString(), promptVersion: visit.PROMPT_VERSION, promptDigest: visit.PROMPT_DIGEST, propertyHistory,
       policy, options: { thinking: args.thinking, forceFallback: args.forceFallback, repeat: args.repeat, concurrency: args.concurrency },
       summary, skipped, results,
     }, null, 2)}\n`);
     return;
   }
-  console.log(evalLib.renderMarkdown(summary, results, { title }));
+  console.log(evalLib.renderMarkdown(summary, results, { title, promptVersion: visit.PROMPT_VERSION, promptDigest: visit.PROMPT_DIGEST, propertyHistory }));
   if (skipped.length) console.log(`\nskipped: ${skipped.map((s) => `${String(s.assessmentId).slice(0, 8)} (${s.reason})`).join(', ')}`);
 }
 
@@ -332,4 +239,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { _internals: { parseArgs, ARG_SPECS } };
+module.exports = { _internals: { parseArgs, ARG_SPECS, exportFixture, runReplay } };
