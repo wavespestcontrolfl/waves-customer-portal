@@ -224,8 +224,10 @@ router.post('/', async (req, res, next) => {
       // (codex #3285 r3). No actionable fallback in that window; the queued
       // text carries the link.
       const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
+      // A review-history/spacing refusal also withholds both link fallbacks.
+      const askHeld = asked.outcome === 'blocked' && String(asked.code || '').startsWith('REVIEW_');
       let reviewLink = asked.reviewUrl || null;
-      if (!reviewLink && !askQueued && asked.outcome !== 'already_reviewed') {
+      if (!reviewLink && !askQueued && !askHeld && asked.outcome !== 'already_reviewed') {
         // BOTH fallbacks skip the queued window (codex #3285 r4): an older
         // delivered token is just as actionable as the bare URL — the click
         // couldn't consume the pending row and processScheduled would still

@@ -9,7 +9,7 @@ jest.mock('../models/db', () => { const fn = jest.fn(); fn.raw = jest.fn((s) => 
 jest.mock('../services/photos', () => ({ getPhotosForService: jest.fn(async () => []), photoUrl: jest.fn(() => null) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
-jest.mock('../services/review-request', () => ({}));
+jest.mock('../services/review-request', () => ({ sendGatedAsk: jest.fn(), livePortalReviewUrlFor: jest.fn() }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };
@@ -152,5 +152,29 @@ describe('GET /satisfaction/pending — the prompt follows the selected house', 
       expect(res.status).toBe(200);
       expect(recordChains().flatMap(propertyPredicates)).toEqual([]);
     }
+  });
+});
+
+
+describe('POST /satisfaction — review hold fallbacks', () => {
+  test.each(['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'])('%s preserves the rating without returning a review CTA', async (code) => {
+    global.__SCOPE__ = OFF;
+    const review = require('../services/review-request');
+    review.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', code });
+    review.livePortalReviewUrlFor.mockResolvedValue(null);
+    const insert = jest.fn(async () => []);
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return chain([{ id: 'rec-1', service_type: 'Pest Control' }]);
+      if (table === 'satisfaction_responses') {
+        const c = chain([]); c.first = jest.fn(async () => null); c.insert = insert; return c;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const res = await fetch(`${base}/satisfaction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceRecordId: 'rec-1', rating: 9 }) });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, action: 'review', reviewLink: null });
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ rating: 9 }));
+    expect(review.sendGatedAsk).toHaveBeenCalled();
+    expect(review.livePortalReviewUrlFor).not.toHaveBeenCalled();
   });
 });
