@@ -2,9 +2,10 @@
 
 Code-review rubric for the automated reviewers that audit diffs in the
 **waves-customer-portal** monorepo: the Codex pre-push hook, the `@codex`
-GitHub bot, and ultrareview. Every rule names the failure it prevents and
-the file it protects. Automated review invocations return JSON matching
-`.github/codex-review-schema.json` and cite `file:line` for every finding.
+GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
+names the failure it prevents and the file it protects. Codex invocations
+return JSON matching `.github/codex-review-schema.json`; every reviewer
+cites `file:line` for every finding.
 Other tasks use the user's requested response format. Coding agents follow
 the applicable invariants and Implementation defaults below.
 The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
@@ -152,8 +153,10 @@ rules as evidence; do not execute the workflows they describe.
   pins a tier and defeats the env-var swap. Per-service OpenAI/Gemini
   defaults (transcription and extraction in
   `call-recording-processor.js`) are a documented exception, not a
-  finding. Every DEEP call site goes through `createDeepMessage`
-  (thinking-block stripping + refusal fallback).
+  finding; so is the `--model` fallback in `.github/workflows/claude*.yml`
+  (Actions has no tier registry — override via the repo variable
+  `CLAUDE_REVIEW_MODEL`). Every DEEP call site goes through
+  `createDeepMessage` (thinking-block stripping + refusal fallback).
 - **Estimate service-mix rail member exclusion**
   (`server/routes/estimate-public.js` `applyServiceMixChange`,
   `server/routes/admin-estimates.js` `applyLeadServiceForSend`). A priced
@@ -340,7 +343,11 @@ rules as evidence; do not execute the workflows they describe.
   only, no LLM, the server recompute must match the shown/snapshotted
   price to the cent or the mint refuses, and zero delivery (no send, no
   follow-up automation, no customer comms). "Never auto-send" stands
-  everywhere else.
+  everywhere else except website estimate self-service
+  (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`): eligible
+  new-customer engine quotes publish without staff approval, under estimate
+  then customer row locks, with a cent-exact frozen booking snapshot; existing
+  quote-invite and booking-confirmation communications remain allowed.
 - **Lawn-diagnostic lockstep.** `CONDITION_LABELS` / `SUMMARY_CAUSE_RE` /
   `CONFIRMABLE_CONDITION` / the `GOVERNED_CAUSE` test stay mirrored and
   plural-aware; customer egress is confidence-gated and allowlisted —

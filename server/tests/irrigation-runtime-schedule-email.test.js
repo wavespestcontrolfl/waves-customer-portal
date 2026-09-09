@@ -18,7 +18,7 @@ jest.mock('../models/db', () => {
   mockDb.raw = jest.fn((expr) => expr);
   return mockDb;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => true) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const EmailTemplates = require('../services/email-template-library');

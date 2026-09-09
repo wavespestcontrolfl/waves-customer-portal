@@ -244,7 +244,7 @@ describe('waveguard approval engine', () => {
   });
 
   test('strict mode throws on a failed read instead of reading it as "nothing to block" (job-card hook P1)', async () => {
-    const failing = () => ({ catch: (fn) => Promise.resolve().then(() => fn(new Error('db down'))) });
+    const failing = () => Promise.reject(new Error('db down'));
     const knex = (table) => {
       if (table === 'products_catalog') return { whereIn: () => failing() };
       return { where: () => ({ first: () => failing() }) };

@@ -1,4 +1,4 @@
-// The number on the global Messages icon: conversations with an inbound text
+// The global Messages icon or a customer's Message action: conversations with an inbound text
 // nobody has read (GET /admin/communications/unread-count — the inbox's own
 // per-thread rule, counted server-side). Refreshes on the same bounded
 // cadence the notification bell uses, when the tab becomes visible again,
@@ -11,17 +11,21 @@ import { adminFetch } from "../utils/admin-fetch";
 export const UNREAD_CHANGED_EVENT = "waves:sms-unread-changed";
 const POLL_MS = 30000;
 
-export default function useUnreadConversations(enabled = true) {
+export default function useUnreadConversations(enabled = true, customerId = null) {
   const [count, setCount] = useState(0);
 
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    let request = 0;
+    setCount(0);
     const load = async () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      const currentRequest = ++request;
       try {
-        const r = await adminFetch("/admin/communications/unread-count");
-        if (!cancelled) setCount(Math.max(0, Number(r?.conversations) || 0));
+        const scope = customerId ? `?customerId=${encodeURIComponent(customerId)}` : "";
+        const r = await adminFetch(`/admin/communications/unread-count${scope}`);
+        if (!cancelled && currentRequest === request) setCount(Math.max(0, Number(r?.conversations) || 0));
       } catch {
         /* keep the last known count */
       }
@@ -39,9 +43,9 @@ export default function useUnreadConversations(enabled = true) {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener(UNREAD_CHANGED_EVENT, load);
     };
-  }, [enabled]);
+  }, [enabled, customerId]);
 
-  return count;
+  return enabled ? count : 0;
 }
 
 export function notifyUnreadChanged() {

@@ -97,6 +97,18 @@ beforeEach(() => {
 });
 
 describe('Action Inbox generators', () => {
+  test('churn alert opens the directory scoped to high and critical risk', async () => {
+    db.raw.mockImplementation((sql) => ({
+      sql,
+      rows: sql.includes('FROM customer_health_scores') ? [{ c: '3' }] : [],
+    }));
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(alerts.find((alert) => alert.id === 'churn_at_risk')).toMatchObject({
+      count: 3,
+      href: '/admin/customers?healthRisk=at_risk',
+    });
+  });
+
   test('leads_awaiting_contact: critical action, floored at the fresh-start baseline', async () => {
     const capture = primeDb({
       leads: leadsResult({

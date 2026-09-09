@@ -30,6 +30,7 @@ router.use(adminAuthenticate, requireAdmin);
 const ALLOWED_STATUSES = new Set(['pending', 'auto_applied', 'approved', 'rejected', 'superseded', 'stale', 'reverted', 'all']);
 const ALLOWED_PHASES = new Set(['normalization', 'extraction']);
 const PROPERTY_PREF_APPLY_FIELDS = new Set([
+  'contact_preference',
   'neighborhood_gate_code',
   'property_gate_code',
   'garage_code',

@@ -636,7 +636,7 @@ function candidateStreetMatchesRow(candidate, row) {
   });
 }
 
-async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRIAGE_TIMEOUT_MS }) {
+async function loadTriageInner({ phone, triggerBody, triggerSmsLogId, deadline = Date.now() + TRIAGE_TIMEOUT_MS }) {
   const db = require('../../models/db');
   // Cooperative deadline: Promise.race in the wrapper bounds the RESPONSE,
   // this bounds the WORK — an expired budget stops issuing queries (and the
@@ -723,6 +723,9 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
           this.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
             .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);
         })
+        // The persisted trigger is supplied separately to the classifier.
+        // Exclude its identity before paging; equal-text older SMS still count.
+        .modify((query) => { if (triggerSmsLogId) query.whereNot('id', triggerSmsLogId); })
         .whereRaw(`created_at >= NOW() - INTERVAL '${THREAD_WINDOW_HOURS} hours'`)
         .orderBy('created_at', 'desc')
         .limit(THREAD_FETCH_LIMIT))
@@ -1160,14 +1163,14 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
 // error AND on the time budget: null → the caller uses the ungrounded
 // prompt, exactly today's behavior. The deadline is shared with the inner
 // loader so expiry stops the WORK, not just the response.
-async function loadThreadTriageContext({ phone, triggerBody }) {
+async function loadThreadTriageContext({ phone, triggerBody, triggerSmsLogId }) {
   let timer = null;
   try {
     const deadline = Date.now() + TRIAGE_TIMEOUT_MS;
     const timeout = new Promise((resolve) => {
       timer = setTimeout(() => resolve(null), TRIAGE_TIMEOUT_MS);
     });
-    const result = await Promise.race([loadTriageInner({ phone, triggerBody, deadline }), timeout]);
+    const result = await Promise.race([loadTriageInner({ phone, triggerBody, triggerSmsLogId, deadline }), timeout]);
     if (!result) logger.warn('[estimator-scope] triage context timed out (falling back ungrounded)');
     return result;
   } catch (err) {

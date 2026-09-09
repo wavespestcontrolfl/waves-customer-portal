@@ -30,7 +30,7 @@ const LATER = new Date('2026-09-04T07:35:00Z');
 const EARLIER = new Date('2026-09-01T00:00:00Z');
 const HASH = 'b'.repeat(64);
 const policyRow = (over = {}) => ({ id: 1, ...P.normalizePolicyRow(null), updated_at: EARLIER, ...over });
-const domainRow = (over = {}) => ({ id: uid(), domain: 'example.org', source: 'competitor_gap', agent_state: 'qualified', score: 75, spam_score: 2, domain_rating: 40, organic_traffic: 1200, competitors_linked: 2, best_path_id: null, rejected_by: null, updated_at: EARLIER, ...over });
+const domainRow = (over = {}) => ({ id: uid(), domain: 'example.org', source: 'competitor_gap', agent_state: 'qualified', score: 75, spam_score: 2, enriched_at: EARLIER, domain_rating: 40, organic_traffic: 1200, competitors_linked: 2, best_path_id: null, rejected_by: null, updated_at: EARLIER, ...over });
 const pathRow = (domain, over = {}) => ({
   id: uid(), domain_id: domain.id, acquisition_type: 'self_service_free', link_type: 'directory', submission_url: 'https://example.org/add',
   estimated_cost_cents: null, renewal_cost_cents: null, renewal_period: null, currency: 'unknown', fee_scope: null, merchant_binding: null,

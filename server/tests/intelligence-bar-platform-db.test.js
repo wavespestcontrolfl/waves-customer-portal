@@ -298,7 +298,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
         { type: 'tool_use', name: 'get_call_log', input: { call_id: unlinkedCall }, id: 'unlinked-call' },
         { type: 'tool_use', name: 'get_call_log', input: { call_id: ownCall }, id: 'own-call' },
       ], usage: {} }).mockResolvedValueOnce(answer('One call is loaded.'));
-    const response = await api('/query', request(`Read both calls for ${nameA}`));
+    const response = await api('/query', request(`Read the two calls for ${nameA}`));
     expect(response.status).toBe(200);
     const round = mockModel.mock.calls.at(-1)[0].messages.at(-1).content;
     expect(round.find(block => block.tool_use_id === 'own-call').content).toContain('Synthetic own call evidence');
@@ -448,13 +448,15 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       const select = await api(`/tasks/${response.body.taskId}/select-target`, { session_id: sessionId, customer_id: customerA });
       expect(select.status).toBe(409);
     }
+    // A named cohort is fail-closed (owner decision 2026-09-08): even with every name matching, the request has no targets and refuses a selection.
     const customer = await db('customers').where('id', customerB).first('first_name', 'last_name');
-    mockModel.mockResolvedValueOnce(answer('Both requested customers are selected.'));
     const complete = await api('/query', request(`Update both ${nameA} and ${customer.first_name} ${customer.last_name}`, {
       selected_target: { customer_id: customerA },
     }));
+    expect(complete.body).toMatchObject({ taskState: 'needs_information', pendingActions: [] });
+    expect(mockModel).not.toHaveBeenCalled();
     const stored = await db('ib_tasks').where('id', complete.body.taskId).first('target');
-    expect(stored.target.targets.map(target => target.customer_id).sort()).toEqual([customerA, customerB].sort());
+    expect(stored.target).toMatchObject({ code: 'context_mismatch', selectable: true });
   }, 30000);
 
   test('a unique phone explicitly requested for a read permits that thread, without authorizing writes', async () => {

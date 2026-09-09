@@ -142,31 +142,33 @@ describe('rendered-output whitespace hygiene', () => {
   });
 });
 
-describe('scheme-less portal links in SMS', () => {
-  // Mirror of stripPortalUrlScheme in routes/admin-sms-templates.js.
-  const HOSTS = ['portal.wavespestcontrol.com', 'waves-customer-portal-production.up.railway.app'];
-  const esc = (h) => h.replace(/\./g, '\\.');
-  const RE = new RegExp(
-    `https://(?=(?:${HOSTS.map(esc).join('|')})[/\\s]|(?:${HOSTS.map(esc).join('|')})$)`, 'g'
-  );
-  const strip = (s) => s.replace(RE, '');
+describe('scheme-less SMS links', () => {
+  const { stripSmsUrlScheme: strip } = require('../services/messaging/sms-link-policy');
 
-  test('drops the scheme from our own portal links', () => {
-    expect(strip('Track live: https://portal.wavespestcontrol.com/l/adwy9'))
-      .toBe('Track live: portal.wavespestcontrol.com/l/adwy9');
-    expect(strip('Visit https://portal.wavespestcontrol.com'))
-      .toBe('Visit portal.wavespestcontrol.com');
-    expect(strip('Pay: https://waves-customer-portal-production.up.railway.app/l/x9'))
-      .toBe('Pay: waves-customer-portal-production.up.railway.app/l/x9');
+  test('strips every HTTPS host while preserving destinations and punctuation', () => {
+    const body = 'Pay: https://portal.wavespestcontrol.com/l/demo\nReview: https://g.page/r/demo/review\n(HTTPS://WWW.EPA.GOV/label).';
+    expect(strip(body)).toBe('Pay: portal.wavespestcontrol.com/l/demo\nReview: g.page/r/demo/review\n(WWW.EPA.GOV/label).');
+    expect(strip('Visit https://wavespestcontrol.com')).toBe('Visit wavespestcontrol.com');
+    expect(strip('Pay:https://portal.wavespestcontrol.com/l/demo')).toBe('Pay:portal.wavespestcontrol.com/l/demo');
   });
 
-  test('leaves third-party links (Google review) with their scheme', () => {
-    const google = 'Review us: https://g.page/r/abc/review';
-    expect(strip(google)).toBe(google);
+  test('repeated render/send passes preserve nested URLs and signed query bytes', () => {
+    const urls = [
+      'https://portal.wavespestcontrol.com/path?return=https://example.com/a&sig=a%2Fb%2Bc#keep',
+      'https://example.com/https://another.example/path',
+      'https://example.com?return=https://another.example/path',
+      'http://example.com?return=https://another.example/path',
+    ];
+    for (const url of urls) {
+      const expected = url.replace(/^https:\/\//, '');
+      expect(strip(url)).toBe(expected);
+      expect(strip(strip(url))).toBe(expected);
+    }
   });
 
-  test('does not match a foreign URL that merely contains our host in its path', () => {
-    const spoof = 'https://example.com/portal.wavespestcontrol.com/fake';
-    expect(strip(spoof)).toBe(spoof);
+  test('leaves other protocols and non-string input alone', () => {
+    for (const value of [null, undefined, '', 'Email contact@example.com', 'http://example.com/path']) {
+      expect(strip(value)).toBe(value);
+    }
   });
 });

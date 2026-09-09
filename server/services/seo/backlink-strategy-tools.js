@@ -8,6 +8,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { claimProspectDomain, findPlacementRow } = require('./prospect-domain-lock');
+const { isMeasuredAnswer, ownedCitations, asJsonArray } = require('./aeo-measurement');
 
 function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
@@ -357,9 +358,12 @@ async function executeBacklinkTool(toolName, input) {
         checks: recent.map(r => ({
           query: r.query,
           platform: r.llm_platform,
-          waves_mentioned: r.waves_mentioned,
-          competitors: typeof r.competitors_mentioned === 'string'
-            ? JSON.parse(r.competitors_mentioned) : r.competitors_mentioned,
+          model: r.model_version,
+          measurement_available: isMeasuredAnswer(r),
+          waves_mentioned: isMeasuredAnswer(r) ? r.waves_mentioned : null,
+          waves_cited: isMeasuredAnswer(r) ? ownedCitations(r).length > 0 : null,
+          waves_cited_urls: ownedCitations(r),
+          competitors_mentioned: asJsonArray(r.competitors_mentioned),
           date: r.check_date,
         })),
       };

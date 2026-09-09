@@ -37,7 +37,7 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     expect(version).toContain('.123456');
     const requests = [
       { prompt: 'Update this customer', pageData: { customer_id: customerId } },
-      { prompt: 'Update the customer', pageData: {}, selectedTarget: { customer_id: customerId } },
+      { prompt: 'Update Synthetic Targetfixture', pageData: {}, selectedTarget: { customer_id: customerId } },
       { prompt: 'Send to Synthetic Targetfixture using this customer', pageData: {} },
       { prompt: 'Send a message to Targetfixture using this customer', pageData: {} },
     ];

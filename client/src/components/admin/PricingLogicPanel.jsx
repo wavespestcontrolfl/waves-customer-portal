@@ -35,7 +35,13 @@ const af = (p, o = {}) =>
       "Content-Type": "application/json",
       ...o.headers,
     },
-  }).then((r) => r.json());
+  }).then(async (r) => {
+    // A 401/403/500 JSON body is not data — throw so a technician's 403 on
+    // save is reported instead of reading as success (same as PricingLogicPage).
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    return body;
+  });
 
 // ── Category tabs ──
 const TABS = [
@@ -1310,12 +1316,17 @@ function ConfigCard({ config, onUpdate }) {
   const handlePathUpdate = async (path, newVal) => {
     const updated = setAtPath(data, path, newVal);
     setSaving(true);
-    await af(`/admin/pricing-config/${config.config_key}`, {
-      method: "PUT",
-      body: JSON.stringify({ data: updated }),
-    });
-    onUpdate(config.config_key, updated);
-    setSaving(false);
+    try {
+      await af(`/admin/pricing-config/${config.config_key}`, {
+        method: "PUT",
+        body: JSON.stringify({ data: updated }),
+      });
+      onUpdate(config.config_key, updated);
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleRawSave = async () => {
@@ -1328,9 +1339,10 @@ function ConfigCard({ config, onUpdate }) {
       });
       onUpdate(config.config_key, parsed);
       setRawEdit(false);
-      setSaving(false);
     } catch (e) {
-      alert("Invalid JSON: " + e.message);
+      alert("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1765,13 +1777,18 @@ function LawnBracketsTab() {
     );
     setTracks((prev) => ({ ...prev, [activeTrack]: updated }));
     setSaving(true);
-    await af(`/admin/pricing-config/lawn-brackets/${activeTrack}`, {
-      method: "PUT",
-      body: JSON.stringify({
-        brackets: [{ sqft_bracket: sqft, tier, monthly_price: newPrice }],
-      }),
-    });
-    setSaving(false);
+    try {
+      await af(`/admin/pricing-config/lawn-brackets/${activeTrack}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          brackets: [{ sqft_bracket: sqft, tier, monthly_price: newPrice }],
+        }),
+      });
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
+    }
   };
 
   if (loading)
@@ -1929,10 +1946,14 @@ function DiscountRulesTab() {
         r.service_key === serviceKey ? { ...r, [field]: value } : r,
       ),
     );
-    await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
-      method: "PUT",
-      body: JSON.stringify({ [field]: value }),
-    });
+    try {
+      await af(`/admin/pricing-config/discount-rules/${serviceKey}`, {
+        method: "PUT",
+        body: JSON.stringify({ [field]: value }),
+      });
+    } catch (e) {
+      alert("Save failed: " + e.message);
+    }
   };
 
   if (loading)

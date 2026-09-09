@@ -73,6 +73,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
+const { observationDate, asJsonArray, isMeasuredAnswer, ownedCitations } = require('./aeo-measurement');
 const { geoBlockReason } = require('../content/topic-targeting-gate');
 const { WEIGHTS, THRESHOLDS, REVENUE_PRIORITY, CITIES, minScoreToActFor, isTransactionalQuery } =
   require('../content/scoring-config');
@@ -2875,10 +2876,10 @@ class GscOpportunityMiner {
    *
    * A gap qualifies only when:
    *   - the city×service was observed on ≥ AEO_GAP_MIN_DAYS distinct days and
-   *     Waves was NEVER mentioned (persistent, not a one-off probe miss), and
+   *     Waves was NEVER linked by that engine/model (a mention is not a link), and
    *   - that city×service has ≥ minImpressionsToScore GSC impressions
    *     (demand-gated — we don't chase queries nobody searches).
-   * Competitor citations strengthen the gap (they're winning the answer).
+   * Competitor brand mentions strengthen the gap; they are not link evidence.
    */
   async mineAeoGaps(since, ownPagesByServiceCity = new Map()) {
     if (!isEnabled('aeoGapMining')) return []; // dormant until explicitly enabled
@@ -2895,16 +2896,14 @@ class GscOpportunityMiner {
         // Unmanaged/legacy rows (no query_id) have no toggle, so keep them.
         .where((b) => b.whereNull('m.query_id').orWhere('q.active', true))
         .select(
-          'm.query', 'm.waves_mentioned', 'm.check_date', 'm.competitors_mentioned',
+          'm.query', 'm.check_date', 'm.competitors_mentioned', 'm.waves_cited_urls',
+          'm.measurement_version', 'm.answer_available', 'm.citations_complete', 'm.llm_platform', 'm.model_version',
           'q.city as q_city', 'q.service as q_service'
         );
     } catch (err) {
       logger.warn(`[gsc-opp-miner] aeo_gap: mentions read failed: ${err.message}`);
       return [];
     }
-
-    const asArray = (v) => Array.isArray(v) ? v
-      : (typeof v === 'string' ? (() => { try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; } })() : []);
 
     // Map a probe's managed service label onto the miner's service vocabulary.
     const SERVICE_ALIAS = { 'pest control': 'pest', 'lawn care': 'lawn', termite: 'termite', mosquito: 'mosquito', rodent: 'rodent' };
@@ -2913,26 +2912,35 @@ class GscOpportunityMiner {
 
     // Group by city×service.
     const groups = new Map();
-    for (const r of rows) {
+    for (const r of rows.filter(isMeasuredAnswer)) {
       const city = normalizeCity(r.q_city) || inferCityFromQuery(r.query);
       const service = resolveService(r.q_service, r.query);
       if (!city || !service) continue;
-      const key = ownPageKey(service, city);
+      const key = `${ownPageKey(service, city)}|${r.llm_platform}|${r.model_version}`;
       let g = groups.get(key);
-      if (!g) { g = { city, service, days: new Set(), wavesHits: 0, competitors: new Set() }; groups.set(key, g); }
-      g.days.add(String(r.check_date).slice(0, 10));
-      if (r.waves_mentioned) g.wavesHits++;
-      for (const c of asArray(r.competitors_mentioned)) if (c && c.name) g.competitors.add(c.name);
+      if (!g) { g = { city, service, platform: r.llm_platform, model: r.model_version, days: new Set(), wavesHits: 0, competitors: new Set() }; groups.set(key, g); }
+      g.days.add(observationDate(r.check_date));
+      if (ownedCitations(r).length) g.wavesHits++;
+      g.competitors = new Set([...g.competitors, ...asJsonArray(r.competitors_mentioned).map(c => c?.name).filter(Boolean)]);
     }
 
     // GSC demand per city×service (same aggregation shape as local_gap).
     const demand = await this._gscDemandByServiceCity(since)
       .catch((err) => { logger.warn(`[gsc-opp-miner] aeo_gap: demand map failed: ${err.message}`); return new Map(); });
 
+    // Keep the publisher's one city/service opportunity. Multiple missing
+    // engines are evidence for that opportunity, not competing draft jobs.
+    const gaps = new Map();
+    for (const group of groups.values()) {
+      if (group.days.size < minDays || group.wavesHits > 0) continue;
+      const key = ownPageKey(group.service, group.city);
+      const combined = gaps.get(key) || { ...group, engines: [], competitors: new Set() };
+      combined.engines.push({ platform: group.platform, model: group.model, absence_days: group.days.size });
+      for (const competitor of group.competitors) combined.competitors.add(competitor);
+      gaps.set(key, combined);
+    }
     const out = [];
-    for (const g of groups.values()) {
-      // Persistent absence: enough distinct observation days, never mentioned.
-      if (g.days.size < minDays || g.wavesHits > 0) continue;
+    for (const g of gaps.values()) {
       const impressions = demand.get(ownPageKey(g.service, g.city)) || 0;
       if (impressions < THRESHOLDS.minImpressionsToScore) continue; // demand gate
       const page_url = ownPagesByServiceCity.get(ownPageKey(g.service, g.city)) || null;
@@ -2949,7 +2957,8 @@ class GscOpportunityMiner {
         signal_metadata: {
           impressions,
           absence_days: g.days.size,
-          competitors_cited: Array.from(g.competitors),
+          competitors_mentioned: Array.from(g.competitors),
+          engines: g.engines,
           gap_strength: Number(gapStrength.toFixed(2)),
         },
       };

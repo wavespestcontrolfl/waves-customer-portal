@@ -34,12 +34,13 @@ const KNOWN_FLAGS = new Map([['--json', 1], ['--md', 1], ['--since', 1]]);
 const SINCE = argValue('--since') || '2026-06-01';
 // Reused from the billing code, never re-typed (codex r3 P1): the always-free
 // service-type list and the active-autopay predicate the workbench applies.
-const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS } = require(path.join(__dirname, '..', 'server', 'services', 'no-cost-visit-types'));
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX } = require(path.join(__dirname, '..', 'server', 'services', 'no-cost-visit-types'));
 const { autopayActivePredicate } = require(path.join(__dirname, '..', 'server', 'services', 'autopay-eligibility'));
 const { INTERNAL_TEST_CUSTOMERS } = require(path.join(__dirname, '..', 'server', 'services', 'internal-test-customers'));
 const { etDateString } = require(path.join(__dirname, '..', 'server', 'utils', 'datetime-et'));
 const TODAY_ET = etDateString(new Date());
-const ALWAYS_FREE_SQL_ARRAY = ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map((p) => `'%${p.replace(/'/g, "''")}%'`).join(',');
+// Word-boundary regex, same as the workbench's `~*` bind (a bare `%re service%` ILIKE matched "Lawn Ca-re Service").
+const ALWAYS_FREE_SQL_LITERAL = `'${ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX.replace(/'/g, "''")}'`;
 const AUTOPAY_ACTIVE_SQL = autopayActivePredicate(new Date()).sql.replace('?', '$2');
 const ENGINE_TIER_SQL = `coalesce(${['serviceOptOut,engineTier','result,recurring,waveGuardTier','result,recurring,tier','recurring,waveGuardTier','recurring,tier','engineResult,recurring,waveGuardTier','engineResult,recurring,tier','engineResult,waveGuard,tier','result,waveGuard,tier','waveGuard,tier'].map((p) => { const k = p.split(','); return `nullif(trim(estimate_data${k.slice(0, -1).map((x) => `->'${x}'`).join('')}->>'${k[k.length - 1]}'), '')`; }).join(', ')})`;
 // Same exclusion as the workbench (admin-billing-recovery.js INTERNAL_NAME_SQL + INTERNAL_TEST_CUSTOMERS) — codex r4 P1; empty list ⇒ no-op
@@ -362,7 +363,7 @@ const CHECKS = [
               and coalesce(ss.prepaid_amount,0) < ${EFFECTIVE_PRICE_SQL}
               and ss.annual_prepay_term_id is null
               and coalesce(ss.payer_id, case when coalesce(ss.self_pay_override,false) then null else c.payer_id end) is null
-              and coalesce(ss.service_type,'') not ilike all (array[${ALWAYS_FREE_SQL_ARRAY}]::text[])
+              and coalesce(ss.service_type,'') !~* ${ALWAYS_FREE_SQL_LITERAL}
               and coalesce(c.billing_mode,'') <> 'monthly_membership'
               ${INTERNAL_TEST_SQL}
               and (not ${AUTOPAY_ACTIVE_SQL} or c.billing_mode in ('per_application','per_visit','one_time')))

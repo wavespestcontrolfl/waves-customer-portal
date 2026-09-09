@@ -135,8 +135,15 @@ fi
 # re-stamped under a new filename. Rename/copy detection is exact-match
 # only, so a newer main file a stale branch merely lacks (D at the tip,
 # not checked — that is not a deletion) is never paired with the branch's
-# own similar boilerplate. Both baselines are fetched from the push's
-# remote first (bounded, non-interactive): origin/main so the tip is the
+# own similar boilerplate. Against the remote tip and the merge base, an
+# in-place modification whose pushed content already equals origin/main's
+# is skipped: it is main's deployed content (a branch that merged main
+# after main repaired a migration in place — #4078 — inherits the
+# repair), and the tip check still owns every real edit of it; renames,
+# copies and deletions are never skipped, and nothing is skipped when
+# origin/main could not be refreshed. Both baselines are fetched
+# from the push's remote first (bounded, non-interactive): origin/main so
+# the tip is the
 # deployed one, and a destination tip this clone has never fetched —
 # which is BLOCKED if it still cannot be inspected, because a force-push
 # over a tip the guard cannot diff is exactly the case it exists for.
@@ -176,8 +183,33 @@ guard_diff() {
   # name-status lines under the migrations dir, prefixed with the
   # baseline for the message. Exact-match rename AND copy detection
   # (--find-copies-harder lets an unchanged file be a copy source).
+  # An in-place modification (M) whose pushed content is byte-identical
+  # to origin/main's is main's deployed content, not this push's edit —
+  # a branch that merged main after main repaired a migration in place
+  # inherits the repair — so it is dropped; the origin/main tip check
+  # owns that file. Only M: a rename or copy whose destination matches
+  # main still removes or duplicates a filename the baseline has run
+  # (R100 old→new with new.js on main leaves old.js missing for the
+  # preview that ran it), and a deletion has no pushed content. Only
+  # against a FRESHLY fetched origin/main: a stale local copy could
+  # vouch for a revert to content main has since repaired away, and
+  # the tip check against that same stale copy would not catch it.
   git diff --name-status --find-copies-harder -C100% --diff-filter="$3" "$1" "$2" -- "$MIGRATIONS_DIR" 2>/dev/null \
-    | sed "s|^|    vs ${1:0:9}: |"
+    | while IFS= read -r line; do
+        case "$line" in
+          M$'\t'*)
+            if [ "$MAIN_FRESH" = "1" ]; then
+              file="${line#M$'\t'}"
+              pushed_blob="$(git rev-parse --verify -q "$2:$file" 2>/dev/null || true)"
+              base_blob="$(git rev-parse --verify -q "$GUARD_BASE:$file" 2>/dev/null || true)"
+              if [ -n "$pushed_blob" ] && [ "$pushed_blob" = "$base_blob" ]; then
+                continue
+              fi
+            fi
+            ;;
+        esac
+        printf '    vs %s: %s\n' "${1:0:9}" "$line"
+      done
 }
 if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
   echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2
@@ -187,9 +219,13 @@ else
   # Refresh origin/main: the hook otherwise runs against whatever the
   # last fetch left locally, and a main that advanced since then could
   # have deployed a migration this push carries an edited copy of. A
-  # failed or timed-out fetch falls back to the local copy with a warning.
+  # failed or timed-out fetch falls back to the local copy with a warning
+  # (and the identical-to-main exception in guard_diff stays off).
+  MAIN_FRESH=0
   if git remote get-url origin >/dev/null 2>&1; then
-    if ! bounded_fetch origin "+refs/heads/main:refs/remotes/origin/main"; then
+    if bounded_fetch origin "+refs/heads/main:refs/remotes/origin/main"; then
+      MAIN_FRESH=1
+    else
       echo "[migration-guard] could not fetch main from origin (offline, or it took over 30 s) — checking against the local $GUARD_BASE, which may be stale." >&2
     fi
   fi

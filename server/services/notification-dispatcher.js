@@ -104,7 +104,7 @@ async function deferredNotificationStillWanted(notificationType, customerId, now
       return { eligible: false, reason: 'type_disabled' };
     }
     const channel = prefs?.[typeConfig.channel] || 'sms';
-    if (channel !== 'sms' && channel !== 'both') {
+    if (!['sms', 'both', 'push'].includes(channel)) {
       return { eligible: false, reason: `channel_${channel}` };
     }
     if (inCustomerQuietHours(prefs, now)) {
@@ -196,11 +196,11 @@ const NotificationDispatcher = {
       || (prefs && prefs[marketingConsentColumn] === true);
 
     // Send SMS
-    if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone && !marketingSmsOptIn) {
+    if (['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone && !marketingSmsOptIn) {
       logger.info(`[notify] ${notificationType} SMS skipped — no stored marketing opt-in for customer ${customerId}`);
       results.sms = 'no_marketing_consent';
     }
-    if ((channel === 'sms' || channel === 'both') && smsMessage && customer.phone && marketingSmsOptIn) {
+    if (['sms', 'both', 'push'].includes(channel) && smsMessage && customer.phone && marketingSmsOptIn) {
       try {
         const smsResult = await sendCustomerMessage({
           to: customer.phone,
@@ -289,3 +289,6 @@ module.exports.deferredNotificationStillWanted = deferredNotificationStillWanted
 // Shared with the property-alerts sweep so both surfaces enforce the same
 // customer quiet-hours window shape.
 module.exports.inCustomerQuietHours = inCustomerQuietHours;
+
+module.exports.nextCustomerQuietHoursEndET = nextCustomerQuietHoursEndET;
+module.exports.customerQuietHoursCoverSendWindow = customerQuietHoursCoverSendWindow;

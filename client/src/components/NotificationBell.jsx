@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import useModalFocus from '../hooks/useModalFocus';
+import { useBiometricLock } from './BiometricGate';
 import { ensurePushSubscription, isPushEnabled, syncPushSubscription } from '../lib/push-subscribe.js';
-import { isNativeApp, nativePushPermissionState, requestNativePushPermission } from '../native/nativePush.js';
+import { isNativeApp, nativePushConnectionState, requestNativePushPermission } from '../native/nativePush.js';
 import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -72,6 +73,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const [pushOn, setPushOn] = useState(false);
   const [pushEnabling, setPushEnabling] = useState(false);
   const [pushError, setPushError] = useState(null);
+  const biometricLocked = useBiometricLock();
+  const pushPromptRequested = useRef(false);
   const bellRef = useRef(null);
   const panelRef = useRef(null);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -165,10 +168,8 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   // Probe Web Push state when the panel opens (admin only). Re-runs on
   // each open so a user who enabled push elsewhere doesn't see a stale
   // "Enable push" strip. Admins get operational Web Push. In the native
-  // customer app this strip is the ONLY push opt-in surface — startup never
-  // prompts for permission (nativePush.js delegates that explicit gesture
-  // here), so without it a fresh install could never grant APNs permission.
-  // Customer web stays strip-free.
+  // customer app this strip supplies recovery if automatic permission setup
+  // did not connect. Customer web stays strip-free.
   const showPushStrip = (type === 'admin' || isNativeApp()) && !pushOn;
   useEffect(() => {
     if (!open) return;
@@ -181,7 +182,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       return;
     }
     if (isNativeApp()) {
-      nativePushPermissionState()
+      nativePushConnectionState()
         .then((state) => setPushOn(state === 'granted'))
         .catch(() => setPushOn(false));
     }
@@ -194,7 +195,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       if (type === 'customer' && isNativeApp()) {
         const result = await requestNativePushPermission();
         if (result !== 'granted') {
-          throw new Error('Notifications are off. Enable them for Waves in your device Settings, then try again.');
+          const errors = {
+            denied: 'Notifications are off. Enable them for Waves in your device Settings, then try again.',
+            setup_unavailable: 'The Waves app did not respond to notification setup. Close and reopen the app, then try again.',
+            permission_unavailable: 'Waves did not receive a notification permission response. Check Waves in your device’s notification Settings, then try again.',
+          };
+          throw new Error(errors[result] || 'This device could not connect for app notifications. Check your connection and try again.');
         }
         setPushOn(true);
         return;
@@ -214,6 +220,21 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       setPushEnabling(false);
     }
   };
+
+  // This bell mounts inside the authenticated customer portal. Show Apple's
+  // normal permission popup after Face ID unlock, without a preliminary tap.
+  // The OS remembers the choice; this ref avoids overlapping attempts when
+  // the system sheet causes lock/foreground changes during the same mount.
+  useEffect(() => {
+    if (type !== 'customer' || !isNativeApp() || biometricLocked || pushPromptRequested.current) return;
+    let current = true;
+    void api.getCustomerPushStatus().then((status) => {
+      if (!current || status?.available !== true) return;
+      pushPromptRequested.current = true;
+      void handleEnablePush();
+    }).catch(() => { /* Availability fails closed; the drawer keeps its retry action. */ });
+    return () => { current = false; };
+  }, [type, biometricLocked]);
 
   // Load notifications when opened. A failed load is recorded — rendering
   // "No notifications yet" (or stale rows) for an outage would present a
@@ -357,10 +378,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // full-screen panel (no glass theme mounted on /admin).
           <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
-            top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
+            top: isDark ? 'calc(56px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
             right: isDark ? 0 : 10,
-            bottom: isDark ? 56 : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
+            bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
             background: '#FFFFFF', zIndex: 9999,
             borderRadius: isDark ? 0 : 24,
             border: isDark ? 'none' : '1px solid #E7E2D7',
@@ -676,7 +697,7 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
         {enabling ? 'Enabling…' : 'Enable push'}
       </button>
       {error && (
-        <div style={{ marginTop: 8, color: '#C8312F', fontSize: 12, lineHeight: 1.4 }}>
+        <div style={{ marginTop: 8, color: '#C8312F', fontSize: 14, lineHeight: 1.4 }}>
           {error}
         </div>
       )}
