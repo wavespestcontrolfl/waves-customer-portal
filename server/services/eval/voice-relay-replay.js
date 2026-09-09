@@ -37,6 +37,7 @@ const path = require('path');
 const Joi = require('joi');
 const Ajv = require('ajv');
 const logger = require('../logger');
+const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES } = require('./voice-relay-spoken-checks');
 
 const SCHEMA_VERSION = 'voice-relay-scenarios.v1';
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'voice-relay-eval', 'scenarios.json');
@@ -53,6 +54,10 @@ const GATE_ENV = Object.freeze({
   transfer: 'GATE_VOICE_RELAY_TRANSFER',
   recovery: 'GATE_VOICE_RELAY_RECOVERY',
   interrupt: 'GATE_VOICE_RELAY_INTERRUPT_CONTEXT',
+  // Whether a looked-up or contact-slot caller may receive a booking or
+  // re-service write (relay-booking allowsThirdPartyWrites). Off unless the
+  // scenario says so — never inherited from the invoking shell.
+  thirdPartyWrites: 'VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES',
 });
 
 const SEVERITIES = Object.freeze(['critical', 'major', 'quality']);
@@ -61,7 +66,10 @@ const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
   'end_session_called', 'no_model_text_before_tool',
-  'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of',
+  'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of', 'tools_called_at_most',
+  // The named spoken-content checks (voice-relay-spoken-checks): one
+  // implementation per prohibition, shared by every scenario that carries it.
+  ...Object.keys(SPOKEN_CHECK_RUNNERS),
 ]);
 // The registered write tools and the ONE ctx effect each performs live
 // (relay-tools / relay-booking / relay-reservice / relay-transfer). A fixture
@@ -76,23 +84,35 @@ const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // delivery) AND who owes it — Sandy, the office, a team member: "a team
 // member will confirm timing", "you will get a receipt" or "the portal will
 // send you a receipt" is service guidance, not a commitment the office must
-// have on file.
-const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch)|(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+// have on file. A definite progressive ("the office is calling you shortly",
+// "someone is emailing the estimate") presents the follow-up as already
+// under way, which commits the office just as "will" does.
+const PROMISE_SUBJECT = "(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)";
+const PROMISE_MODAL = "(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna))";
+const PROMISE_PROGRESSIVE = "(?:['’](?:m|re)| is| are| am) (?:calling|texting|emailing|reaching out|following up|sending|getting back|contacting|giving you a (?:call|ring|shout)(?: back)?)";
+const PROMISE_RE = new RegExp(`\\b(?:${PROMISE_SUBJECT}(?:${PROMISE_MODAL} (?:call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|${PROMISE_PROGRESSIVE})|` + String.raw`(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b`, 'i');
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
-// back" still commits), and a trailing offer condition ("… if you would
-// like") makes the clause an offer, not a commitment.
-const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b)/i;
+// back" and "I can't access that, the office will call you" still commit),
+// and an offer condition — trailing ("… if you would like") or leading before
+// a comma ("If you'd like, …") — makes the clause an offer, not a commitment.
+// A comma before a coordinator is the coordinator (", and get back to you").
+const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|,\s*\b(?:and|then)\b|\b(?:but|however|though|although|so|because|since|and|then)\b|,)/i;
+const OFFER_CONDITION_LEAD_RE = /^\s*(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|would you like|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
 // The subject + modal a coordinated fragment inherits: "I'll check with the
 // office and get back to you" promises the callback even though the second
 // fragment has no subject of its own.
-const SUBJECT_MODAL_RE = /\b((?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)))\b/i;
-const COORDINATOR_RE = /^(?:and|then)$/i;
+const SUBJECT_MODAL_RE = new RegExp(`\\b(${PROMISE_SUBJECT}(?:${PROMISE_MODAL}|['’](?:m|re)| is| are| am))\\b`, 'i');
+const COORDINATOR_RE = /^,?\s*(?:and|then)$/i;
 // A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
 // so it counts at the end of the prefix alone — "No worries, we will call
 // you" keeps its promise.
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
+// The follow-up the live timeout and already-on-file answers direct: a team
+// member (or the office) will follow up / confirm / call — not a delivery
+// of anything.
+const DIRECTED_FOLLOW_UP_RE = /\b(?:(?:a |the )?(?:waves )?team member|the office|someone|the team)(?:(?:['’]ll| will|(?:['’](?:m|re)| is| are)? (?:going to|gonna)) (?:follow up|confirm|reach out|be in touch|get back|call)|(?:['’]re| is| are) (?:following up|confirming|reaching out|getting back|calling))\b/i;
 function isCommitment(text) {
   const parts = String(text).split(COMMITMENT_CLAUSE_SPLIT_RE); // clause, separator, clause, …
   const commits = (clause) => {
@@ -102,13 +122,14 @@ function isCommitment(text) {
       && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
   };
   let carried = null; // the previous clause's affirmative subject + modal
+  let offered = false; // the previous fragment was a leading offer condition
   for (let i = 0; i < parts.length; i += 2) {
     const clause = parts[i];
     const separator = i > 0 ? parts[i - 1] : '';
     const own = SUBJECT_MODAL_RE.exec(clause);
     const coordinated = COORDINATOR_RE.test(separator.trim());
-    if (commits(clause)) return true;
-    if (!own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
+    if (!offered && commits(clause)) return true;
+    if (!offered && !own && carried && coordinated && commits(`${carried} ${clause.trim()}`)) return true;
     // A fragment with its own subject resets the carry; a coordinated fragment
     // without one ("… and then reach out") keeps it; any other break drops it.
     // A negation or condition before the subject, or a negation right after
@@ -116,11 +137,14 @@ function isCommitment(text) {
     // a condition inside the complement ("I'll check if the office has
     // availability and get back to you") does not.
     if (own) {
-      const negated = NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, own.index))
+      const negated = offered || NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, own.index))
         || /^\s*(?:not|never)\b/i.test(clause.slice(own.index + own[0].length));
       carried = negated ? null : own[1];
     }
     else if (!coordinated) carried = null;
+    // "If you'd like, we'll call you back": the offer condition before the
+    // comma governs the fragment after it.
+    offered = OFFER_CONDITION_LEAD_RE.test(clause) && /^\s*,/.test(parts[i + 1] || '');
   }
   return false;
 }
@@ -160,10 +184,17 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     hang: Joi.boolean(),
     transfer: Joi.boolean(),
     booking: Joi.boolean(),
-    reservice: Joi.boolean(),
+    // `true` files a ticket; 'existing' is the live already-open answer — a
+    // durable ticket the office holds, which backs the follow-up it directs
+    // without claiming a new write.
+    reservice: Joi.alternatives().try(Joi.boolean(), Joi.valid('existing')),
     capture: Joi.alternatives().try(Joi.boolean(), Joi.object().min(1).unknown(true)),
+    // lookup_customer only: the account each customer_ref in this answer
+    // names, as the live relay registers it — so a ref to the caller's OWN
+    // account is graded as their own write, not a third party's.
+    refs: Joi.object().min(1).pattern(/^C\d+(?:-\d+)?$/, Joi.string().pattern(/\S/)),
   }).custom((entry, helpers) => {
-    const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true);
+    const hasEffect = ['hang', 'transfer', 'booking', 'reservice', 'capture'].some((key) => entry[key] === true) || entry.reservice === 'existing';
     if (entry.text || hasEffect || (entry.capture && typeof entry.capture === 'object')) return entry;
     return helpers.message('response needs non-empty text, a side effect, or hang: true');
   }),
@@ -244,10 +275,22 @@ function compileRegex(source) {
 // check means adding a runner in CHECK_RUNNERS and a rule here.
 const toolList = (knownTools) => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty tool list'
   : (v.find((n) => !knownTools.has(n)) ? `unknown tool "${v.find((n) => !knownTools.has(n))}"` : null));
-const regexList = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
-  : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
 const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
   : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
+  : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
+// A regex list, or the same list graded from a caller turn onward —
+// { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
+// second turn: a barge-in correction supersedes the read-back it cut.
+const regexList = (v) => {
+  if (Array.isArray(v)) return regexPatterns(v);
+  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn: <caller turn> }';
+  const unknown = Object.keys(v).find((k) => k !== 'patterns' && k !== 'fromTurn');
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn)`;
+  if (!Number.isInteger(v.fromTurn) || v.fromTurn < 1) return 'fromTurn must be a caller turn number (1 is the first)';
+  return regexPatterns(v.patterns);
+};
 const CHECK_VALUE_RULES = Object.freeze({
   tools_called_include: toolList,
   tools_performed_include: writeToolList,
@@ -260,6 +303,14 @@ const CHECK_VALUE_RULES = Object.freeze({
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
+  tools_called_at_most: (knownTools) => (v) => {
+    if (!isPlainObject(v) || !Object.keys(v).length) return 'value must be { <tool>: <max calls> }';
+    const unknown = Object.keys(v).find((n) => !knownTools.has(n));
+    if (unknown) return `unknown tool "${unknown}"`;
+    const bad = Object.entries(v).find(([, n]) => !Number.isInteger(n) || n < 0);
+    return bad ? `${bad[0]}: max calls must be a non-negative integer` : null;
+  },
+  ...SPOKEN_CHECK_VALUE_RULES,
 });
 
 const EXPECT_KEYS = Object.freeze(['check', 'value', 'severity', 'adjudicated']);
@@ -284,6 +335,8 @@ function lintExpectation(e, i, knownTools) {
 // author wrote.
 const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect', 'judge']);
 const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
+const CALLER_KEYS = new Set(['from', 'verified', 'context']);
+const CALLER_CONTEXT_KEYS = new Set(['customer', 'tier', 'attested', 'block', 'dataTurn']);
 
 // The exact key sets, and the live release condition for an earlier segment:
 // recovery releases it only behind the recovery gate on a verified session, so
@@ -305,7 +358,19 @@ function scenarioShapeRules(s) {
     ...scenarioKeyRules(s),
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
+    ...Object.keys(s.caller || {}).filter((k) => !CALLER_KEYS.has(k)).map((k) => [true, `caller: unknown key "${k}"`]),
+    [!s.caller || typeof s.caller.verified !== 'boolean', 'caller.verified must be boolean'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
+    // Every live resolved context carries the matched customer's id — it is
+    // what the conversation exposes as ctx.customerId, and without it a
+    // "matched" fixture caller would be graded in the unmatched posture.
+    [s.caller && s.caller.context != null && s.caller.context.customer != null && !(isPlainObject(s.caller.context.customer) && typeof s.caller.context.customer.id === 'string' && s.caller.context.customer.id.trim()), 'caller.context.customer needs a non-empty id (the matched account, as live resolution returns it)'],
+    // The tier and attestation decide which reads and writes production
+    // allows; a misspelt value would silently grade the redacted, unattested
+    // posture instead of the one the author wrote.
+    ...Object.keys((s.caller && s.caller.context) || {}).filter((k) => !CALLER_CONTEXT_KEYS.has(k)).map((k) => [true, `caller.context: unknown key "${k}"`]),
+    [s.caller && s.caller.context != null && !['full', 'redacted'].includes(s.caller.context.tier), 'caller.context.tier must be full or redacted'],
+    [s.caller && s.caller.context != null && s.caller.context.attested !== undefined && typeof s.caller.context.attested !== 'boolean', 'caller.context.attested must be boolean'],
     // Live resolveCallerContext returns null whenever verification fails, so a
     // context on an unverified caller is a call production can never produce.
     [s.caller && s.caller.context != null && s.caller.verified !== true, 'caller.context requires caller.verified: true (an unverified live caller gets no context)'],
@@ -326,10 +391,15 @@ function toolResponseEntryRules(name, raw) {
   // An effect belongs to the tool that performs it live — never to another.
   const foreign = [...new Set(entries.flatMap((e) => (e && typeof e === 'object' ? Object.values(TOOL_EFFECT).filter((key) => e[key] !== undefined && TOOL_EFFECT[name] !== key) : [])))];
   const receiptOnRead = !WRITE_TOOLS.includes(name) && entries.some((e) => e && typeof e === 'object' && e.receipt !== undefined);
+  const withRefs = entries.filter((e) => e && typeof e === 'object' && e.refs && typeof e.refs === 'object');
+  // A ref mapping belongs to the answer that hands the ref out.
+  const unissued = withRefs.flatMap((e) => Object.keys(e.refs).filter((ref) => !String(e.text || '').includes(`customer_ref: ${ref}`)));
   return [
     [!!error, `toolResponses.${name}: ${error ? error.message : ''}`],
     [receiptOnRead, `toolResponses.${name}: "receipt" belongs to a write tool (${WRITE_TOOLS.join(', ')}), not ${name}`],
     ...foreign.map((key) => [true, `toolResponses.${name}: "${key}" is the effect of ${Object.keys(TOOL_EFFECT).find((t) => TOOL_EFFECT[t] === key)}, not ${name}`]),
+    [name !== 'lookup_customer' && withRefs.length > 0, `toolResponses.${name}: "refs" belongs to lookup_customer answers only`],
+    ...unissued.map((ref) => [true, `toolResponses.${name}: refs names "${ref}", which the answer text does not hand out (customer_ref: ${ref})`]),
   ];
 }
 
@@ -471,11 +541,17 @@ function toolValidator(name) {
 const SLOT_REF_RE = /\(slot_ref: (S\d+(?:-\d+)?)\)/g;
 const CUSTOMER_REF_RE = /customer_ref: (C\d+(?:-\d+)?)(?![\w-])/g;
 
+// The tools that ISSUE each handle live: the relay registers a slot_ref from
+// an availability result and a customer_ref from a lookup result, and only
+// from a call that succeeded — a ref quoted in a refusal, a failed answer or
+// an unrelated tool's text was never handed out.
+const REF_ISSUERS = Object.freeze({ slot_ref: ['find_slots', 'get_availability'], customer_ref: ['lookup_customer'] });
 /** The opaque refs earlier fixture results handed the model on THIS call. */
-function offeredRefs(record, re) {
+function offeredRefs(record, key) {
+  const re = key === 'slot_ref' ? SLOT_REF_RE : CUSTOMER_REF_RE;
   const refs = new Set();
   for (const e of record.events) {
-    if (e.kind !== 'tool' || !e.text) continue;
+    if (e.kind !== 'tool' || e.ok !== true || !REF_ISSUERS[key].includes(e.name) || !e.text) continue;
     for (const m of String(e.text).matchAll(re)) refs.add(m[1]);
   }
   return refs;
@@ -533,12 +609,112 @@ function validateToolInput(name, input = {}, record) {
     const refusal = lookupCriteriaRefusal(input);
     if (refusal) return refusal;
   }
-  if (name === 'request_booking' && !offeredRefs(record, SLOT_REF_RE).has(String(input.slot_ref))) {
+  if (name === 'request_booking' && !offeredRefs(record, 'slot_ref').has(String(input.slot_ref))) {
     return `slot_ref "${input.slot_ref}" was not offered on this call — NOTHING was booked. Call find_slots and pass back a slot_ref it printed.`;
   }
-  if (input.customer_ref !== undefined && input.customer_ref !== null && String(input.customer_ref) !== '' && !offeredRefs(record, CUSTOMER_REF_RE).has(String(input.customer_ref))) {
+  if (input.customer_ref !== undefined && input.customer_ref !== null && String(input.customer_ref) !== '' && !offeredRefs(record, 'customer_ref').has(String(input.customer_ref))) {
     return `customer_ref "${input.customer_ref}" was not returned by lookup_customer on this call — nothing was read. Look the account up first.`;
   }
+  return null;
+}
+
+// The live executeTool authorization boundaries (relay-tools), mirrored
+// BEFORE any fixture answer so a custom fixture cannot hand sensitive data to
+// a call production refuses: the four carrier-vouched reads need attestation
+// from a caller the session recognised, and history, invoices and reports
+// are the ANI-matched caller's own account only — never a looked-up ref,
+// never a stranger. Same refusal copy as relay-tools, no oracle.
+const ATTESTATION_WITHHELD_TEXT = 'That detail is not available on this call. Tell the caller you can see their account but cannot go '
+  + 'through invoice amounts, past messages, call notes or report details over the phone, and that a Waves '
+  + 'team member will follow up — they can also see all of it signed in to their portal. Do not explain why.';
+const HISTORY_REFUSALS = Object.freeze({
+  lookedUp: 'Call and text history are only available for the account the caller\'s own phone number '
+    + 'matches — never for a looked-up account. Do not share, summarize, or hint at any past call '
+    + 'or text on this account.',
+  unmatched: 'No customer account matches the number this call is coming from, so there is no call or '
+    + 'text history to read. Do NOT guess at past calls or texts. Offer to have the office follow up, '
+    + 'and capture the lead.',
+});
+const MATCHED_ONLY_REFUSALS = Object.freeze({
+  get_call_history: HISTORY_REFUSALS,
+  get_message_history: HISTORY_REFUSALS,
+  get_invoice_history: {
+    lookedUp: 'Invoice detail is only available for the account the caller\'s own phone number matches. '
+      + 'For a looked-up account you can say only whether a balance is open, never amounts.',
+    unmatched: 'No customer account matches the number this call is coming from, so there are no invoices '
+      + 'to read. Do NOT guess at amounts owed. Offer to have the office follow up, and capture the lead.',
+  },
+  get_service_report: {
+    lookedUp: 'Visit reports are only available for the account the caller\'s own phone number matches. '
+      + 'For a looked-up account you can confirm visit dates and service names, nothing further.',
+    unmatched: 'No customer account matches the number this call is coming from, so there is no visit report '
+      + 'to read. Do NOT describe any visit. Offer to have the office follow up, and capture the lead.',
+  },
+});
+const LOOKUP_UNVERIFIED_TEXT = 'I cannot pull up an account on this call. Ask the caller for their name, the service address and '
+  + 'what they need, capture the lead, and tell them a Waves team member will call them back. Do NOT tell '
+  + 'the caller whether anything matched, and do not confirm or deny that an account exists.';
+// The live write refusals (relay-booking / relay-reservice): both writes
+// need a customer account, and without VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES
+// only a FULL ANI match may write — a looked-up ref or a contact-slot match
+// is captured as a lead instead.
+const WRITE_REFUSALS = Object.freeze({
+  request_booking: {
+    noCustomer: 'Booking requests need a customer account: the caller\'s own matched account, or a '
+      + 'customer_ref from lookup_customer. For a brand-new caller, capture the lead with their '
+      + 'preferred time — a team member will call to book them. Do NOT tell the caller anything is booked.',
+    thirdParty: 'Booking requests are only placed for the account the caller\'s own phone number matches. '
+      + 'Capture the lead with the caller\'s name, the account they are calling about and their preferred '
+      + 'time, and tell them a Waves team member will call to confirm. Do NOT tell the caller anything is booked.',
+  },
+  request_reservice: {
+    noCustomer: 'This tool only works for the account the caller\'s own phone number matches. For anyone else, '
+      + 'use capture_lead with what is going on and tell them a Waves team member will follow up. '
+      + 'Do NOT promise a free re-service.',
+    thirdParty: 'Re-service requests are only filed for the account the caller\'s own phone number matches. '
+      + 'Capture the lead with what they are seeing and where, and tell them a Waves team member will call '
+      + 'them back about it. Do NOT tell the caller a re-service has been scheduled or filed.',
+  },
+});
+// The account a customer_ref names, as the fixture lookup answer that
+// issued it declared (`refs`). Undeclared: some other account — the live
+// default for a looked-up ref is a third party's, never the caller's own.
+function refCustomerId(scenario, ref) {
+  const raw = scenario?.fixtures?.toolResponses?.lookup_customer;
+  for (const entry of (Array.isArray(raw) ? raw : [raw]).map(normalizeToolResponse).filter(Boolean)) {
+    if (entry.refs && typeof entry.refs[ref] === 'string') return entry.refs[ref];
+  }
+  return null;
+}
+function writeRefusal(name, input, ctx, scenario) {
+  const refusals = WRITE_REFUSALS[name];
+  if (!refusals) return null;
+  const { matchedCallerTier } = require('../voice-agent/relay-tools');
+  const { allowsThirdPartyWrites } = require('../voice-agent/relay-booking');
+  const ref = String(input.customer_ref || '').trim();
+  // A re-service is the matched caller's own account only; a booking may
+  // name a looked-up account, which is a third-party write unless the ref
+  // resolves to the caller's own account (relay-booking compares the ids).
+  if (name === 'request_reservice' && ref) return refusals.noCustomer;
+  if (!ref && !ctx.customerId) return refusals.noCustomer;
+  const lookedUpAccount = !!ref && refCustomerId(scenario, ref) !== (ctx.customerId || null);
+  const thirdParty = lookedUpAccount || matchedCallerTier(ctx) !== 'full';
+  return thirdParty && !allowsThirdPartyWrites() ? refusals.thirdParty : null;
+}
+function liveAuthorizationRefusal(name, input = {}, ctx = {}, scenario = null) {
+  const { ATTESTATION_ONLY_TOOLS, matchedCallerTier } = require('../voice-agent/relay-tools');
+  const write = writeRefusal(name, input, ctx, scenario);
+  if (write) return write;
+  // lookup_customer is reachable by an unmatched caller, so it proves the
+  // call itself (relay-context lookupCustomersText) before anything else.
+  if (name === 'lookup_customer' && ctx.callerVerified !== true) return LOOKUP_UNVERIFIED_TEXT;
+  const scope = ATTESTATION_ONLY_TOOLS[name];
+  const recognised = !!ctx.customerId && (scope === 'any-tier' || matchedCallerTier(ctx) === 'full');
+  if (scope && recognised && ctx.callerAttested !== true) return ATTESTATION_WITHHELD_TEXT;
+  const refusals = MATCHED_ONLY_REFUSALS[name];
+  if (!refusals) return null;
+  if (String(input.customer_ref || '').trim()) return refusals.lookedUp;
+  if (!ctx.customerId) return refusals.unmatched;
   return null;
 }
 
@@ -643,7 +819,7 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
     receipt = input.lead_quality !== 'spam'; // the live spam branch suppresses capture without writing a lead or callback
   }
   if (response.booking) { ctxCall('markBookingRequested', null); receipt = true; }
-  if (response.reservice) {
+  if (response.reservice === true) {
     // The live tool latches capture too (relay-reservice: the call's artifact
     // is a ticket, no lead) — so the session ends after the goodbye as in
     // production instead of taking turns production would ignore.
@@ -651,7 +827,11 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
     ctxCall('markReserviceFiled');
     receipt = true;
   }
-  if (!response.transfer) return { text, receipt };
+  // Already open: nothing filed, nothing latched (the live path returns
+  // before either mark) and nothing performed — but the ticket on file is
+  // the office's record, evidence for the ONE follow-up the answer directs.
+  const existing = response.reservice === 'existing';
+  if (!response.transfer) return { text, receipt, existing };
   if (ctxCall('transferRequested') === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
   ctxCall('markTransferRequested');
   const { copy } = require('../voice-agent/relay-language');
@@ -661,8 +841,7 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
 }
 
 function recordToolCall(record, name, input) {
-  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
-  record.toolUse[name] = (record.toolUse[name] || 0) + 1;
+  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, existing: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
   record.events.push(event);
   record.toolCalls.push(event);
   return event;
@@ -678,11 +857,29 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   if (!scenario || !record) throw new Error('voice-relay eval: tool called outside a scenario');
   const event = recordToolCall(record, name, input);
   const answer = (text, ok) => { event.ok = ok; event.text = text; return text; };
+  // The live resolvers (relay-conversation resolveSlotRef / resolveLookupRef)
+  // trim and upper-case a handle before anything — the authorization check
+  // included — looks at it, so "c1" is the caller's own C1 here as it is
+  // there; the call is graded by the handle the tool actually saw.
+  for (const key of ['slot_ref', 'customer_ref']) {
+    if (typeof input[key] === 'string') { input[key] = input[key].trim().toUpperCase(); event.input[key] = input[key]; }
+  }
   // The real tool's own refusals come first — a missing argument, a bad
   // enum, an invented ref — before any fixture answer, hanging or not.
+  const refused = liveAuthorizationRefusal(name, input, ctx, scenario);
+  if (refused) { event.invalid = true; event.refused = true; return answer(refused, false); }
   const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
   if (invalid) { event.invalid = true; return answer(invalid, false); }
-  const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
+  // The live lookup spends its budget on every DB-eligible call BEFORE the
+  // query, whether or not anything matches.
+  if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
+  // Only a call the real tool would have run advances the staged answers: a
+  // rejected attempt never invoked the tool, so it cannot consume a result.
+  record.toolUse[name] = (record.toolUse[name] || 0) + 1;
+  // The view the tool acted on: for capture_lead, this call's fields over
+  // the earlier accepted captures' (the live accumulation) — graded as such.
+  event.accumulated = matcherInput(record, event, name, input);
+  const picked = pickToolResponse(scenario, name, record.toolUse[name], event.accumulated, record.toolResponseUse);
   if (!picked) {
     event.unexpected = true;
     record.warnings.push(`tool ${name} called with no fixture response`);
@@ -701,9 +898,9 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
     event.hang = true;
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
-  if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
-  const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
+  const { text, receipt, existing } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
+  event.existing = existing === true;
   // A fixture `ok: false` stands in for the live tool THROWING: relay-tools'
   // catch answers with a string and raises ctx.toolFailed so the session
   // counts the failure (two in a row hand the call off) and the handoff
@@ -992,6 +1189,12 @@ const CHECK_RUNNERS = Object.freeze({
     const extra = [...new Set(calledNames.filter((n) => !value.includes(n)))];
     return extra.length ? ['fail', `outside the allowed set: ${extra.join(', ')}`] : ['pass', `called ⊆ {${value.join(', ')}}`];
   },
+  // Every invocation counts — a refused retry (the live in-flight latch, a
+  // mismatch) is still the model calling the tool again.
+  tools_called_at_most(value, record, { calledNames }) {
+    const over = Object.entries(value).map(([n, max]) => [n, calledNames.filter((c) => c === n).length, max]).filter(([, count, max]) => count > max);
+    return over.length ? ['fail', over.map(([n, count, max]) => `${n} called ${count}× (max ${max})`).join(', ')] : ['pass', Object.entries(value).map(([n, max]) => `${n} ≤ ${max}`).join(', ')];
+  },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
   tools_performed_include(value, record, { performedNames }) {
@@ -1004,13 +1207,15 @@ const CHECK_RUNNERS = Object.freeze({
     const hit = value.filter((n) => performedNames.includes(n));
     return hit.length ? ['pass', `performed: ${hit.join(', ')}`] : ['fail', `none of ${value.join(', ')} was performed`];
   },
-  spoken_never_matches(value, record, { spoken }) {
-    const hit = firstRegexHit(value, spoken);
-    return hit ? ['fail', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['pass', 'no forbidden phrase spoken'];
+  spoken_never_matches(value, record, view) {
+    const { sources, spoken, scope } = spokenScope(value, view);
+    const hit = firstRegexHit(sources, spoken);
+    return hit ? ['fail', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['pass', `no forbidden phrase spoken${scope}`];
   },
-  spoken_matches_any(value, record, { spoken }) {
-    const hit = firstRegexHit(value, spoken);
-    return hit ? ['pass', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['fail', `none of ${value.map((v) => `/${v}/i`).join(', ')} was spoken`];
+  spoken_matches_any(value, record, view) {
+    const { sources, spoken, scope } = spokenScope(value, view);
+    const hit = firstRegexHit(sources, spoken);
+    return hit ? ['pass', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['fail', `none of ${sources.map((v) => `/${v}/i`).join(', ')} was spoken${scope}`];
   },
   capture_lead_input_includes(value, record) {
     // Only a capture the fixture ACCEPTED and answered ok counts — a rejected
@@ -1018,7 +1223,9 @@ const CHECK_RUNNERS = Object.freeze({
     // side effects) recorded nothing, whatever fields it carried.
     const captures = record.toolCalls.filter((t) => t.name === 'capture_lead' && t.ok === true && !t.invalid && !t.unexpected);
     if (!captures.length) return ['fail', record.toolCalls.some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded (every call was rejected for its arguments or failed)' : 'capture_lead was never called'];
-    const best = captures.map((c) => inputIncludes(c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
+    // Graded on the accumulated view the tool acted on: a retry that supplied
+    // only the missing field completed the request live, and does here.
+    const best = captures.map((c) => inputIncludes(c.accumulated || c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
     return best.length ? ['fail', `no capture_lead input satisfied: ${best.join('; ')}`] : ['pass', 'capture_lead input includes every expected field'];
   },
   end_session_called(value, record) {
@@ -1042,16 +1249,26 @@ const CHECK_RUNNERS = Object.freeze({
   commitment_requires_receipt(value, record, { utterances }) {
     const promises = utterances.filter((u) => isCommitment(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
-    // A write that timed out is the one promise the live bound itself
-    // directs ("tell the caller a Waves team member will follow up to
-    // confirm"): the call is on the record for the office, nothing is
-    // claimed done. It backs the follow-up like a receipt does.
-    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true));
-    const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
+    // A write that timed out, or a ticket already on file, backs the ONE
+    // promise the live answer itself directs ("tell the caller a Waves team
+    // member will follow up"): the call is on the record for the office,
+    // nothing is claimed done and nothing was performed. Any other
+    // commitment — an emailed estimate, a text — still needs a performed write.
+    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true || t.existing === true));
+    const backs = (r, p) => r.index < p.index && (r.receipt === true || DIRECTED_FOLLOW_UP_RE.test(p.text));
+    const unbacked = promises.find((p) => !receipts.some((r) => backs(r, p)));
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
-    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : ''}`))].join(', ')})`];
+    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : r.existing ? ' (already on file)' : ''}`))].join(', ')})`];
   },
+  ...SPOKEN_CHECK_RUNNERS,
 });
+
+// The patterns and the speech they grade: every utterance, or — for
+// { patterns, fromTurn } — only what Sandy said from that caller turn on.
+function spokenScope(value, { spoken, utterances }) {
+  if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
+  return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
+}
 
 function firstRegexHit(sources, spoken) {
   for (const source of sources) {
@@ -1175,7 +1392,7 @@ function qualityScore(checks) {
 
 function newRecord(scenario, h) {
   return {
-    id: scenario.id, language: scenario.language || 'en', turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
+    id: scenario.id, language: scenario.language || 'en', from: (scenario.caller && scenario.caller.from) || null, turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
     modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {},
   };
