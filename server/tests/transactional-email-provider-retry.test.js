@@ -11,6 +11,7 @@ jest.mock('../services/email-template-library', () => ({
   redactEmailAddresses: jest.fn((value) => String(value).replace(/\b[^\s@]+@[^\s@]+\b/g, '[redacted-email]')),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/visit-completion-summary', () => ({ summaryRetryAuthorized: jest.fn(async () => ({ ok: true })) }));
 
 const retry = require('../services/transactional-email-provider-retry');
 const db = require('../models/db');
@@ -108,6 +109,40 @@ describe('transactional email provider retry classification', () => {
     }));
     expect(sendgrid.clearBlockedAddress.mock.invocationCallOrder[0])
       .toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
+  });
+
+  test('a visit summary retry is refused before the handoff when its recipient is no longer current', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(async () => 1);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    const summary = require('../services/visit-completion-summary');
+    summary.summaryRetryAuthorized.mockResolvedValueOnce({ ok: false, reason: 'visit_summary_recipient_changed' });
+
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
+      send_attempt_token: 'attempt-2' });
+    const result = await retry.retryOne(stored);
+
+    expect(result).toMatchObject({ sent: false, stopped: true, reason: 'Suppressed before retry: visit_summary_recipient_changed' });
+    expect(summary.summaryRetryAuthorized).toHaveBeenCalledWith(stored);
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
+    expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('other templates never consult the visit summary fence', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'sent' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-3' });
+    expect((await retry.retryOne(message({ send_attempt_token: 'attempt-3' }))).sent).toBe(true);
+    expect(require('../services/visit-completion-summary').summaryRetryAuthorized).not.toHaveBeenCalled();
   });
 
   test('stops without touching SendGrid when the recipient became suppressed', async () => {
