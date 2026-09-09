@@ -933,6 +933,41 @@ async function priorAssessmentCount(customerId, knex) {
 // confirm that raced another merges into what that one saved (Codex #4153
 // r6) — and null when the row is already confirmed or does not exist.
 // Callers take the customer's baseline advisory lock first (lock order).
+// A confirmed row's customer delivery (recommendations, health signal,
+// standalone notification, report) is claimed DURABLY on the run row before
+// it is queued, and marked complete when it finishes: a retry arriving after
+// the confirm committed but before the queue (process exit, redeploy) claims
+// and RESUMES it; a retry after a completed delivery never runs it twice; a
+// claim older than PIPELINE_STALE_MS with no completion is resumable (the
+// process died mid-delivery). One UPDATE, so concurrent retries race on the
+// row and exactly one claims (Codex #4150 r13). A database without the
+// columns yet delivers as before (every caller claims).
+const PIPELINE_STALE_MS = 15 * 60 * 1000;
+const missingPipelineColumns = (err) => err && (err.code === '42P01' || err.code === '42703');
+async function claimPipeline(assessmentId, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  try {
+    const rows = await knex('lawn_assessment_runs')
+      .where({ assessment_id: assessmentId })
+      .where(function claimable() {
+        this.whereNull('pipeline_claimed_at')
+          .orWhere(function stale() { this.whereNull('pipeline_completed_at').andWhere('pipeline_claimed_at', '<', new Date(Date.now() - staleAfterMs)); });
+      })
+      .update({ pipeline_claimed_at: knex.fn.now(), updated_at: knex.fn.now() })
+      .returning('id');
+    return rows.length > 0;
+  } catch (err) {
+    if (missingPipelineColumns(err)) return true;
+    throw err;
+  }
+}
+async function completePipeline(assessmentId, knex) {
+  try {
+    await knex('lawn_assessment_runs').where({ assessment_id: assessmentId }).update({ pipeline_completed_at: knex.fn.now(), updated_at: knex.fn.now() });
+  } catch (err) {
+    if (!missingPipelineColumns(err)) throw err;
+  }
+}
+
 async function claimConfirm(assessmentId, trx) {
   const row = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
   return row && !row.confirmed_by_tech ? row : null;
@@ -1451,6 +1486,9 @@ module.exports = {
   withoutPendingRuns,
   priorAssessmentCount,
   claimConfirm,
+  claimPipeline,
+  completePipeline,
+  PIPELINE_STALE_MS,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
   SYSTEM_PROMPT,
