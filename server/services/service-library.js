@@ -6,11 +6,13 @@ const { auditServiceCatalogChange, auditServicePackageChange } = require('./audi
 const { inferCloseoutDefaults } = require('./service-closeout-requirements');
 const { refreshCatalogNames } = require('./service-catalog-names');
 const logger = require('./logger');
+const { capacityEnabled } = require('./scheduling/policy');
 
 const SERVICE_COLS = [
   'id', 'service_key', 'name', 'short_name', 'description', 'internal_notes',
   'category', 'subcategory', 'billing_type', 'is_waveguard',
   'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+  'scheduling_duration_policy',
   'scheduling_buffer_minutes', 'requires_follow_up', 'follow_up_interval_days',
   'frequency', 'visits_per_year',
   'pricing_type', 'base_price', 'price_range_min', 'price_range_max', 'pricing_model_key',
@@ -47,6 +49,20 @@ const BOOLEAN_COLS = new Set([
   'requires_customer_signature', 'requires_customer_notice',
   'customer_visible', 'booking_enabled', 'public_quote_selectable', 'is_active', 'is_archived',
 ]);
+
+function withSchedulingDuration(service) {
+  const policy = service?.scheduling_duration_policy;
+  if (!service || !capacityEnabled() || policy?.version !== 1) return service;
+  return { ...service, default_duration_minutes: policy.default_duration_minutes,
+    min_duration_minutes: policy.min_duration_minutes, max_duration_minutes: policy.max_duration_minutes };
+}
+
+// All booking callers use the catalog allowance. Appointment overrides are
+// supplied separately by staff paths and must never be truncated to this range.
+function serviceDurationMinutes(service, fallback = 60) {
+  const duration = Number(withSchedulingDuration(service)?.default_duration_minutes);
+  return Number.isInteger(duration) && duration > 0 ? duration : fallback;
+}
 
 function validationError(message) {
   const err = new Error(message);
@@ -326,7 +342,7 @@ async function getServices({ category, billingType, isActive, isArchived, includ
     countQuery,
   ]);
 
-  return { services: rows, total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
+  return { services: rows.map(withSchedulingDuration), total: parseInt(countResult.total, 10), limit: safeLimit, offset: safeOffset };
 }
 
 /**
@@ -343,14 +359,14 @@ async function getServiceById(id) {
       's.id', 's.service_key', 's.name', 's.short_name', 's.icon', 's.base_price')
     .orderBy('sa.sort_order');
 
-  return { ...service, addons };
+  return { ...withSchedulingDuration(service), addons };
 }
 
 /**
  * Lookup by service_key
  */
 async function getServiceByKey(serviceKey) {
-  return db('services').where({ service_key: serviceKey }).first();
+  return withSchedulingDuration(await db('services').where({ service_key: serviceKey }).first());
 }
 
 /**
@@ -522,6 +538,10 @@ async function updateService(id, data, { audit } = {}) {
   ].some((key) => data[key] !== undefined
     && JSON.stringify(update[key] ?? null) !== JSON.stringify(before[key] ?? null));
   if (operationalChanged) assertOperationalConsistency({ ...before, ...update });
+  if (['min_duration_minutes', 'default_duration_minutes', 'max_duration_minutes']
+    .some(key => data[key] !== undefined && numOrNull(update[key]) !== numOrNull(before[key]))) {
+    update.scheduling_duration_policy = null;
+  }
 
   let archiveReferences = null;
   if (update.is_archived === true && before.is_archived !== true) {
@@ -741,6 +761,8 @@ async function resolveServiceType(freeTextServiceType) {
 }
 
 module.exports = {
+  withSchedulingDuration,
+  serviceDurationMinutes,
   getServices,
   getServiceById,
   getServiceByKey,

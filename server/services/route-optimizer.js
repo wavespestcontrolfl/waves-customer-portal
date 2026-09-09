@@ -28,6 +28,107 @@ const FIELD_MASK = [
   'routes.legs.endLocation',
 ].join(',');
 
+/** Request-scoped road estimates. Nothing from Google is persisted or shared
+ * across requests. The caller preloads before taking any scheduling lock. */
+function createSchedulingTravel({ maxRequests = 40, maxElements = 800, budgetMs = 6000, fetchImpl = fetch, now = () => Date.now() } = {}) {
+  const { parseETDateTime } = require('../utils/datetime-et');
+  const results = new Map();
+  const attempted = new Set();
+  let deadline = null;
+  const apiKey = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
+  let requests = 0;
+  let elements = 0;
+  const pin = (p) => `${Number(p.lat)},${Number(p.lng)}`;
+  const keyFor = ({ date, from, to, departureMin }) => `${date}|${Math.ceil(departureMin)}|${pin(from)}>${pin(to)}`;
+  const validPin = (p) => p?.lat != null && p?.lng != null
+    && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))
+    && Math.abs(Number(p.lat)) <= 90 && Math.abs(Number(p.lng)) <= 180
+    && Number(p.lat) !== 0 && Number(p.lng) !== 0;
+  function fallback(leg, reason) {
+    if (!validPin(leg.from) || !validPin(leg.to)) return { minutes: Infinity, source: 'unverified', reason: 'missing_coordinates' };
+    const miles = haversine(Number(leg.from.lat), Number(leg.from.lng), Number(leg.to.lat), Number(leg.to.lng));
+    // Retain the calibrated park/drive model even if its separate legacy gate
+    // is off; an API outage must not increase the capacity of a new booking.
+    const minutes = miles < SAME_PLACE_MILES ? 0 : Math.ceil(Math.max(
+      fallbackLegMetrics(miles).minutes,
+      CALIBRATED_FIXED_MINUTES + miles * CALIBRATED_MINUTES_PER_MILE,
+    ));
+    return { minutes, source: 'conservative_model', reason };
+  }
+  function lookup(leg) {
+    return results.get(keyFor(leg)) || fallback(leg, apiKey ? 'request_budget' : 'provider_unconfigured');
+  }
+  async function preload(legs) {
+    if (!apiKey) return;
+    // Building the live calendar can take longer than the provider budget.
+    // Start that budget with the first preload, then share it across passes.
+    deadline ??= now() + budgetMs;
+    const batches = new Map();
+    for (const leg of legs) {
+      const key = keyFor(leg);
+      if (attempted.has(key) || !validPin(leg.from) || !validPin(leg.to)) continue;
+      attempted.add(key);
+      const minutes = Math.ceil(leg.departureMin);
+      const departure = parseETDateTime(`${leg.date}T${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`);
+      if (!departure || !Number.isFinite(departure.getTime()) || departure.getTime() < now()) {
+        results.set(key, fallback(leg, 'departure_not_future'));
+        continue;
+      }
+      // One origin, up to 25 destinations at an identical predicted departure.
+      // This avoids buying an entire N² matrix to use only a handful of legs.
+      const batchKey = `${departure.toISOString()}|${pin(leg.from)}`;
+      if (!batches.has(batchKey)) batches.set(batchKey, { departure, from: leg.from, legs: [] });
+      batches.get(batchKey).legs.push(leg);
+    }
+    const work = [];
+    for (const batch of batches.values()) {
+      for (let i = 0; i < batch.legs.length; i += 25) work.push({ ...batch, legs: batch.legs.slice(i, i + 25) });
+    }
+    async function worker() {
+      for (;;) {
+        const batch = work.shift();
+        if (!batch) return;
+        if (requests >= maxRequests || elements + batch.legs.length > maxElements || now() >= deadline) return;
+        requests++;
+        elements += batch.legs.length;
+        let reason = 'provider_error';
+        try {
+          const response = await fetchImpl('https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey,
+              'X-Goog-FieldMask': 'originIndex,destinationIndex,status,condition,duration,fallbackInfo' },
+            body: JSON.stringify({ origins: [{ waypoint: toWaypoint(batch.from.lat, batch.from.lng) }],
+              destinations: batch.legs.map((leg) => ({ waypoint: toWaypoint(leg.to.lat, leg.to.lng) })),
+              travelMode: 'DRIVE', routingPreference: 'TRAFFIC_AWARE', departureTime: batch.departure.toISOString() }),
+            signal: AbortSignal.timeout(Math.max(1, Math.min(1800, deadline - now()))),
+          });
+          const data = response.ok ? await response.json() : null;
+          if (Array.isArray(data)) {
+            for (const row of data) {
+              const index = row.destinationIndex ?? 0; // protobuf omits zero-valued indices
+              const leg = batch.legs[index];
+              if (!leg || (row.originIndex ?? 0) !== 0 || !Number.isInteger(index)) continue;
+              const seconds = /^\d+(?:\.\d+)?s$/.test(row.duration || '') ? Number(row.duration.slice(0, -1)) : NaN;
+              if ((row.status?.code ?? 0) !== 0 || row.condition !== 'ROUTE_EXISTS'
+                || row.fallbackInfo || !Number.isFinite(seconds) || seconds < 0
+                || (seconds === 0 && pin(leg.from) !== pin(leg.to))) continue;
+              results.set(keyFor(leg), { minutes: Math.ceil(seconds / 60), source: 'google_traffic', reason: null });
+            }
+            reason = 'partial_matrix';
+          }
+        } catch (err) {
+          reason = ['AbortError', 'TimeoutError'].includes(err.name) ? 'provider_timeout' : 'provider_error';
+        }
+        for (const leg of batch.legs) {
+          if (!results.has(keyFor(leg))) results.set(keyFor(leg), fallback(leg, reason));
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, work.length) }, worker));
+  }
+  return { lookup, preload, diagnostics: () => ({ requests, elements }) };
+}
+
 /**
  * Build a Google Routes API waypoint from lat/lng
  */
@@ -475,6 +576,7 @@ async function optimizeRoute(stops, options = {}) {
 module.exports = {
   optimizeRoute,
   callGoogleRoutesAPI,
+  createSchedulingTravel,
   nearestNeighborOptimize,
   calcUnoptimizedDistance,
   haversine,

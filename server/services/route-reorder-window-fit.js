@@ -133,24 +133,35 @@ function stopDuration(stop) {
  * making prefixes prunable: the clock only moves forward, so no suffix can
  * rescue a missed window.
  */
-function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop) {
+function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, { legMinutes, bufferMinutes = 0, blockedIntervals = [] } = {}) {
   const lat = parseFloat(stop.lat);
   const lng = parseFloat(stop.lng);
   let travel = 0;
   let prev = state.prev;
+  let departMin = state.clock;
   if (lat && lng) {
-    travel = RouteOptimizer.fallbackLegMetrics(
+    for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
+    travel = legMinutes ? legMinutes(prev, stop, departMin) : RouteOptimizer.fallbackLegMetrics(
       RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng),
     ).minutes || 0;
+    if (!Number.isFinite(travel) || travel < 0) return null;
+    if (state.visited && (prev.lat !== lat || prev.lng !== lng)) travel += bufferMinutes;
+    const blocked = blockedIntervals.find(block => departMin < block.endMin && departMin + travel > block.startMin);
+    if (!blocked) break;
+    departMin = blocked.endMin;
+    }
     prev = { lat, lng };
   }
-  let startMin = state.clock + travel;
+  let startMin = departMin + travel;
   const range = effectiveWindowRange(stop);
   if (range) {
-    if (startMin > range.endMin) return null;
     startMin = Math.max(startMin, range.startMin);
   }
-  return { clock: startMin + stopDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+  for (const block of blockedIntervals) {
+    if (startMin < block.endMin && startMin + stopDuration(stop) > block.startMin) startMin = block.endMin;
+  }
+  if (range && startMin > range.endMin) return null;
+  return { clock: startMin + stopDuration(stop), prev, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
 }
 
 /** Simulate the complete route under the promised ARRIVAL windows. Work may
@@ -159,18 +170,33 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop) {
  * null means at least one promise (or the requested day end) cannot be kept. */
 function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
   startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity,
+  includeReturnInFinish = false, legMinutes, bufferMinutes = 0, blockedIntervals = [],
 } = {}) {
+  if (blockedIntervals.some(block => !Number.isFinite(block.startMin) || !Number.isFinite(block.endMin) || block.endMin <= block.startMin)) return null;
+  blockedIntervals = [...blockedIntervals].sort((a, b) => a.startMin - b.startMin);
   let state = { clock: startMin, prev: origin, travelMin: 0, waitingMin: 0 };
   const arrivals = [];
   for (const stop of seq) {
-    state = advanceSim(RouteOptimizer, rangeForStop, state, stop);
+    state = advanceSim(RouteOptimizer, rangeForStop, state, stop, { legMinutes, bufferMinutes, blockedIntervals });
     if (!state || state.clock > dayEndMin) return null;
     arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock });
   }
-  const returnMin = RouteOptimizer.fallbackLegMetrics(
+  let returnDeparture = state.clock;
+  let returnMin;
+  for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
+  returnMin = legMinutes ? legMinutes(state.prev, RouteOptimizer.HQ, returnDeparture) : RouteOptimizer.fallbackLegMetrics(
     RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
   ).minutes || 0;
-  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin, finishMin: state.clock };
+  if (!Number.isFinite(returnMin) || returnMin < 0) return null;
+  const blocked = blockedIntervals.find(block => returnDeparture < block.endMin && returnDeparture + returnMin > block.startMin);
+  if (!blocked) break;
+  returnDeparture = blocked.endMin;
+  }
+  const returnFinishMin = returnDeparture + returnMin;
+  if (includeReturnInFinish && returnFinishMin > dayEndMin) return null;
+  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin + returnDeparture - state.clock,
+    finishMin: includeReturnInFinish ? returnFinishMin : state.clock,
+    serviceFinishMin: state.clock, returnFinishMin };
 }
 
 /** Exhaustive backbone-preserving interleaving search with prefix pruning.
