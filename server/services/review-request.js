@@ -3576,10 +3576,22 @@ const ReviewService = {
       review_url: reviewUrl,
     };
 
+    const dispatch = () => actualChannel === "email"
+      ? this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia, introParagraph: persistedBody })
+      : this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
+    // The runner owns the sequence lock. Private check-ins are not asks.
+    if (sequenceId != null || noLinkSend) return dispatch();
+    const result = await require("./review-ask-dispatch").dispatchReviewAsk(customer.id, dispatch);
+    if (!result?.code?.startsWith("REVIEW_")) return result;
+    const nextAllowedAt = result.nextAllowedAt || new Date(Date.now() + 15 * 60000).toISOString();
     if (actualChannel === "email") {
-      return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia, introParagraph: persistedBody });
+      // processScheduled only delivers SMS; no worker owns this email retry.
+      await db("review_requests").where({ id: request.id, status: "pending" }).update({ status: "deferred" });
+      return { ok: false, blocked: true, channel: "email", requestId: request.id,
+        code: result.code, reason: result.reason, nextAllowedAt };
     }
-    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
+    return this._applyOutreachSendResult(request,
+      { ...result, deferred: true, nextAllowedAt }, manageRetryVia, "sms");
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
@@ -4061,7 +4073,7 @@ const ReviewService = {
         return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
       }
       if (touch.blocked || touch.terminal) {
-        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null };
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, nextAllowedAt: touch.nextAllowedAt || null };
       }
       // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
       // hides its fallback link on it), so only report it when a durable

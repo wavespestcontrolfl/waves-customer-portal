@@ -492,6 +492,18 @@ describe('POST /admin/communications/customer-link', () => {
       });
     });
 
+    test('email: a spacing refusal exposes the retry date without claiming a queued email', async () => {
+      wireDb({ customers: soloCustomer() });
+      const nextAllowedAt = '2026-09-12T14:00:00.000Z';
+      const reason = 'The next ask can be sent after September 12 at 10:00 AM Eastern.';
+      ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', code: 'REVIEW_ASK_SPACING', reason, nextAllowedAt });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'customer-link', { phone: '+15551234567', kind: 'review_request', channel: 'email' });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ outcome: 'blocked', code: 'REVIEW_ASK_SPACING', error: reason, nextAllowedAt });
+      });
+    });
+
     test('email: a gate refusal is a 409 with the shared gate copy', async () => {
       wireDb({ customers: soloCustomer() });
       ReviewService.sendGatedAsk.mockResolvedValue({ outcome: 'cooldown' });

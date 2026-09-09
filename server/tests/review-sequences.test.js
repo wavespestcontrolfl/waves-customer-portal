@@ -20,16 +20,21 @@ jest.mock('../services/review-ask-drafter', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 // The per-customer send lock needs a real pool; its own suite covers it.
-jest.mock('../utils/cron-lock', () => ({
-  runExclusive: async (key, fn) => {
-    (global.__reviewLockKeys = global.__reviewLockKeys || []).push(key);
-    const held = global.__reviewLockHeld = global.__reviewLockHeld || new Set();
-    if (held.has(key)) return { skipped: true, reason: 'lease_held' };
-    held.add(key);
-    try { return await fn(); } finally { held.delete(key); }
-  },
-  wasLockSkipped: result => result?.skipped === true,
-}));
+jest.mock('../utils/cron-lock', () => {
+  const context = new (require('async_hooks').AsyncLocalStorage)();
+  return {
+    runExclusive: async (key, fn) => {
+      (global.__reviewLockKeys = global.__reviewLockKeys || []).push(key);
+      if (context.getStore()?.has(key)) return fn();
+      const held = global.__reviewLockHeld = global.__reviewLockHeld || new Set();
+      if (held.has(key)) return { skipped: true, reason: 'lease_held' };
+      held.add(key);
+      try { return await context.run(new Set([...(context.getStore() || []), key]), fn); }
+      finally { held.delete(key); }
+    },
+    wasLockSkipped: result => result?.skipped === true,
+  };
+});
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
@@ -4528,4 +4533,61 @@ test.each(['spacing', 'pin'])('a %s write that loses the pending row cannot revi
   expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
   expect(mock.__state.rows.review_requests[0].scheduled_for).toBeUndefined();
   expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+});
+
+describe('direct outreach serialization', () => {
+  test.each(['sms', 'email'])('%s respects a delivered staff ask and retains truthful retry ownership', async channel => {
+    const customer = { id: 'direct-spacing', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+    const deliveredAt = new Date();
+    const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }], sms_log: [{ customer_id: customer.id,
+      direction: 'outbound', status: 'sent', message_body: 'Please leave a Google review.', created_at: deliveredAt }] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.sendOutreachTouch({ customer, channel });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(new Date(result.nextAllowedAt).getTime()).toBe(deliveredAt.getTime() + 72 * 3600000);
+    const request = mock.__state.rows.review_requests[0];
+    if (channel === 'sms') {
+      expect(result).toMatchObject({ ok: false, deferred: true });
+      expect(request.status).toBe('pending');
+      expect(request.scheduled_for).toBeTruthy();
+    } else {
+      expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_ASK_SPACING' });
+      expect(result.deferred).toBeUndefined();
+      expect(request.status).toBe('deferred');
+      expect(request.scheduled_for).toBeUndefined();
+    }
+  });
+
+  test('history failure refuses a direct email without promising a queued retry', async () => {
+    const customer = { id: 'direct-history', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+    const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] }, { throwSelectWhen: q => q.table === 'sms_log' });
+    db.mockImplementation(mock);
+    const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+    expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE' });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeUndefined();
+  });
+
+  test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {
+    const customer = { id: 'direct-lock', first_name: 'Synthetic', phone: '+12025550101' };
+    let stampHeld = false;
+    const mock = makeMock({ customers: [customer] }, { onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.sms_sent_at) stampHeld = global.__reviewLockHeld.has('review-send:direct-lock');
+    } });
+    db.mockImplementation(mock);
+    let entered, finish;
+    const started = new Promise(resolve => { entered = resolve; });
+    const wait = new Promise(resolve => { finish = resolve; });
+    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true }; });
+    const first = ReviewService.sendOutreachTouch({ customer, channel: 'sms' });
+    try {
+      await started;
+      const second = await require('../services/review-ask-dispatch').dispatchReviewAsk(customer.id, () => { throw new Error('must not dispatch'); });
+      expect(second.code).toBe('REVIEW_SEND_BUSY');
+    } finally { finish(); }
+    expect(await first).toMatchObject({ ok: true, sent: true });
+    expect(stampHeld).toBe(true);
+    expect(global.__reviewLockHeld.has('review-send:direct-lock')).toBe(false);
+  });
 });

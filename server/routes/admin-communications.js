@@ -2133,6 +2133,9 @@ async function emailReviewAskNow(primaryId) {
     const firstName = await emailContactFirstName(primaryId);
     return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: ask.requestId, firstName } };
   }
+  if (ask.outcome === 'blocked' && ['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'].includes(ask.code)) {
+    return { status: 409, body: { error: ask.reason, outcome: 'blocked', code: ask.code, nextAllowedAt: ask.nextAllowedAt } };
+  }
   const outcomeReasons = {
     already_reviewed: 'This customer is already marked as having left a review',
     no_customer: 'That customer could not be found',
