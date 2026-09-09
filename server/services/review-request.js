@@ -3596,10 +3596,11 @@ const ReviewService = {
     if (!result?.code?.startsWith("REVIEW_")) return result;
     const nextAllowedAt = result.nextAllowedAt || new Date(Date.now() + 15 * 60000).toISOString();
     if (actualChannel === "email") {
-      // processScheduled only delivers SMS; no worker owns this email retry.
-      await db("review_requests").where({ id: request.id, status: "pending" }).update({ status: "deferred" });
-      return { ok: false, blocked: true, channel: "email", requestId: request.id,
-        code: result.code, reason: result.reason, nextAllowedAt };
+      // No provider was called and no worker owns an email retry. Remove the
+      // fresh attempt so it cannot inflate email-touch/sent reporting.
+      await db("review_requests").where({ id: request.id, status: "pending" }).del();
+      return { ok: false, blocked: true, channel: "email",
+        code: result.code, reason: result.reason, nextAllowedAt, httpStatus: result.httpStatus };
     }
     return this._applyOutreachSendResult(request,
       { ...result, deferred: true, nextAllowedAt }, manageRetryVia, "sms");
@@ -4084,7 +4085,8 @@ const ReviewService = {
         return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
       }
       if (touch.blocked || touch.terminal) {
-        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, nextAllowedAt: touch.nextAllowedAt || null };
+        return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, nextAllowedAt: touch.nextAllowedAt || null,
+          ...(touch.httpStatus ? { httpStatus: touch.httpStatus } : {}) };
       }
       // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
       // hides its fallback link on it), so only report it when a durable

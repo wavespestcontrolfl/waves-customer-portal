@@ -4629,8 +4629,8 @@ describe('direct outreach serialization', () => {
     } else {
       expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_ASK_SPACING' });
       expect(result.deferred).toBeUndefined();
-      expect(request.status).toBe('deferred');
-      expect(request.scheduled_for).toBeUndefined();
+      expect(request).toBeUndefined();
+      expect(mock.__state.rows.review_requests).toEqual([]);
     }
   });
 
@@ -4639,9 +4639,9 @@ describe('direct outreach serialization', () => {
     const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] }, { throwSelectWhen: q => q.table === 'sms_log' });
     db.mockImplementation(mock);
     const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
-    expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE' });
+    expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503 });
     expect(mockEmailSendTemplate).not.toHaveBeenCalled();
-    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeUndefined();
+    expect(mock.__state.rows.review_requests).toEqual([]);
   });
 
   test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {
