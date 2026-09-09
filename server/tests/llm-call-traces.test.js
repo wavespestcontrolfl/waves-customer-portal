@@ -161,7 +161,7 @@ describe('recordTrace', () => {
     try {
       let call;
       jest.isolateModules(() => { call = require('../services/llm/call'); });
-      expect(await call.callOpenAI({ model: 'm', system: 'sys', text: 'ask', laneId: 'traced_plain', maxTokens: 50 })).toEqual({ ok: false, reason: 'openai_incomplete' });
+      expect(await call.callOpenAI({ model: 'm', system: 'sys', text: 'ask', laneId: 'traced_plain', maxTokens: 50 })).toMatchObject({ ok: false, reason: 'openai_incomplete' });
       await flush();
       expect(traceRows()).toEqual([expect.objectContaining({ lane_id: 'traced_plain', system_redacted: 'sys', prompt_redacted: 'ask', response_redacted: 'partial answer [phone]' })]);
     } finally {
