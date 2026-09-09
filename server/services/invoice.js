@@ -2862,7 +2862,7 @@ const InvoiceService = {
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
-      && sms.code === "QUIET_HOURS_HOLD"
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(sms.code)
       && sms.deferred
       && sms.nextAllowedAt
       && sms.heldBody
@@ -2934,13 +2934,13 @@ const InvoiceService = {
     // night sends, admin resends) are NOT deferred: their documented
     // gate-ON behavior is email-immediate with the SMS leg held.
     const scheduledSmsHeld = allowClaimed
-      && sms.code === "QUIET_HOURS_HOLD"
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
     if (scheduledSmsHeld || sms.holdUnowned) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
         : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
-      email.code = "QUIET_HOURS_HOLD";
+      email.code = sms.code;
     } else {
       try {
         const r = await sendInvoiceEmail(invoiceId, {
@@ -3324,7 +3324,7 @@ const InvoiceService = {
       // to the window open and leave the attempt counter alone — five
       // overnight cron passes must not permanently fail the send.
       const smsHeld =
-        result.sms?.code === "QUIET_HOURS_HOLD" && result.sms?.nextAllowedAt;
+        ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
       if (smsHeld) {
         deferred += 1;
         await db("invoices")
