@@ -6308,7 +6308,15 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       ...(appPreferencesAvailable && paymentIssueChannel !== savedPaymentIssueChannel ? { paymentIssueChannel } : {}),
       paymentConfirmationChannel: paymentConfirmationChannel === 'push' || hasBillingEmail ? paymentConfirmationChannel : 'sms',
     })
-      .then(() => {
+      .then((result) => {
+        if (appPreferencesAvailable && (
+          (invoiceChannel !== savedInvoiceChannel && result?.preferences?.invoiceChannel !== invoiceChannel)
+          || (paymentIssueChannel !== savedPaymentIssueChannel && result?.preferences?.paymentIssueChannel !== paymentIssueChannel)
+        )) {
+          setInvoiceChannel(result?.preferences?.invoiceChannel || savedInvoiceChannel);
+          setPaymentIssueChannel(result?.preferences?.paymentIssueChannel || savedPaymentIssueChannel);
+          throw new Error('Billing delivery preference was not saved');
+        }
         setSavedInvoiceChannel(invoiceChannel);
         setSavedPaymentIssueChannel(paymentIssueChannel);
         // Keep local state in step with the coerced save — otherwise
@@ -7090,7 +7098,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         }}>
           <div style={{ minWidth: 0, flex: '1 1 160px' }}>
             <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Payment problems</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Failed payments, retries and bank verification. App opens your payment methods, with an allowed text backup. Email copies continue.</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Auto Pay failures, payment retries and bank verification. App opens your payment methods, with an allowed text backup. Email copies continue.</div>
           </div>
           <div style={{ display: 'flex', flex: compact ? '1 0 100%' : '0 0 auto', justifyContent: 'flex-end' }}>
             <select aria-label="Delivery method for payment problems" value={paymentIssueChannel}

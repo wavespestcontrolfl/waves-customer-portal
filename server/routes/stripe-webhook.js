@@ -256,6 +256,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
         message_type: metadata.original_message_type || 'billing_reminder',
         metadata: JSON.stringify({
           ...metadata,
+          customer_initiated: customerInitiated,
           ...(resolvedInvoiceId ? { invoice_id: resolvedInvoiceId } : {}),
           entry_point: 'stripe_webhook_billing_deferred',
           original_block_code: result.code,

@@ -99,6 +99,15 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     fcm.send.mockResolvedValue({ ok: true });
   });
 
+  test('profile preference merge retains App instead of resuming primary Text', async () => {
+    await mockPg('notification_prefs').where({ customer_id: owner }).update({ payment_issue_channel: 'sms' });
+    await mockPg('notification_prefs').where({ customer_id: outsider }).update({ payment_issue_channel: 'push' });
+    const { mergeSingletonPrefRow } = require('../services/customer-dedupe')._test;
+    await mockPg.transaction((trx) => mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', owner, outsider));
+    expect(await mockPg('notification_prefs').where({ customer_id: owner }).first()).toMatchObject({ payment_issue_channel: 'push' });
+    expect(await mockPg('notification_prefs').where({ customer_id: outsider }).first()).toBeUndefined();
+  });
+
   const prefsUrl = '/api/notifications/preferences?appPreferences=1';
   async function http(method, url, body, authenticated = true) {
     const response = await fetch(baseUrl + url, { method,

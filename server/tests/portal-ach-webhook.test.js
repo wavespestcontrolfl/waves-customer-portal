@@ -243,7 +243,7 @@ test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'])('setup failure deferred by %s 
     const meta = JSON.parse(row.metadata);
     expect(meta).toMatchObject({ entry_point: 'stripe_webhook_billing_deferred',
       notificationEventKey: `payment-problem:stripe:evt-failure-${index + 1}:bank_verification_failed:0`,
-      replay_purpose: 'payment_failure', waves_customer_id: 'cust-1',
+      replay_purpose: 'payment_failure', waves_customer_id: 'cust-1', customer_initiated: true,
     });
     expect(sender.mock.calls[index][0].metadata.notificationEventKey).toBe(meta.notificationEventKey);
   }

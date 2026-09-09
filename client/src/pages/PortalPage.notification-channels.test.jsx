@@ -122,6 +122,19 @@ it.each([['invoiceChannel', 'invoices'], ['paymentIssueChannel', 'payment proble
   expect(select).toHaveValue('push');
 });
 
+it.each([['invoiceChannel', 'invoices'], ['paymentIssueChannel', 'payment problems']])('rejects an ignored %s opt-out after rollback and restores the saved choice', async (field, label) => {
+  prefs[field] = 'push';
+  render(<BillingTab customer={customer} />);
+  const select = await screen.findByRole('combobox', { name: `Delivery method for ${label}` });
+  expect(select).toHaveValue('push');
+  api.updateNotificationPrefs.mockResolvedValue({ success: true, preferences: { ...prefs } });
+  fireEvent.change(select, { target: { value: 'sms' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
+  await screen.findByText(/Couldn.t save your billing preferences/);
+  expect(select).toHaveValue('push');
+  expect(screen.queryByRole('button', { name: 'Saved', exact: true })).not.toBeInTheDocument();
+});
+
 it('retains the saved invoice choice when the app is stale and hides it with the gate off', async () => {
   prefs.invoiceChannel = 'push';
   api.getCustomerPushStatus.mockResolvedValue({ available: true, enabled: true, registered: true, fresh: false });
