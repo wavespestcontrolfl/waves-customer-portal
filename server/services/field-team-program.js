@@ -3,6 +3,7 @@ const db = require('../models/db');
 const { hash } = require('./staff-document-source');
 const { recordAuditEvent } = require('./audit-log');
 const { resolveServiceRecord } = require('./job-costing');
+const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { etDateString, parseETDateTime, addETDays, etWeekStart } = require('../utils/datetime-et');
 const {
   PROGRAM, schemas, validate, reject, dateOnly, ruleDefinition, splitCents,
@@ -122,16 +123,16 @@ async function allocationCustomers(conn, customerId) {
 
 async function visitFacts(conn, id, lock = false) {
   const query = conn('scheduled_services').where({ id });
-  const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback', 'completed_at', 'actual_end_time', 'actual_start_time');
+  const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback', 'followup_included', 'completed_at', 'actual_end_time');
   if (!visit) reject('Service not found.', 404);
   const catalog = visit.service_id ? await conn('services').where({ id: visit.service_id }).first('service_key') : null;
   return { ...calendarRow(visit, ['scheduled_date']), service_key: visit.service_key_snapshot || catalog?.service_key || null, service_date: dateOnly(visit.scheduled_date) };
 }
 
-// The recorded completion instant orders two services that share a calendar
-// date. Without one on both, same-day ordering cannot be established.
+// Only a recorded completion or end instant proves when a service was done;
+// a start time cannot, because the visit may still be in progress.
 function completionInstant(visit) {
-  const value = visit.completed_at || visit.actual_end_time || visit.actual_start_time;
+  const value = visit.completed_at || visit.actual_end_time;
   return value ? new Date(value).getTime() : null;
 }
 function returnedAfter(returned, visit) {
@@ -159,9 +160,24 @@ async function validateServiceEvidence(conn, data, visit, last) {
     [isReturn, data.same_issue_confirmed, 'Confirm that the qualifying return concerns the same issue.'],
   ];
   for (const [required, reference, message] of references) if (required && !reference) reject(message);
-  if (data.cutoff_at && [new Date(data.cutoff_at) > new Date(), etDateString(new Date(data.cutoff_at)) < visit.service_date].some(Boolean)) reject('The cutoff must be on or after the service date and no later than now.');
+  if (data.cutoff_at) validateCutoff(new Date(data.cutoff_at), visit);
   if (data.rework_outcome === 'no_return' && data.return_service_id) reject('A no-return finding cannot include a qualifying return.');
   return data.return_service_id ? qualifyingReturn(conn, data.return_service_id, visit) : null;
+}
+
+function validateCutoff(cutoffAt, visit) {
+  if (cutoffAt > new Date() || etDateString(cutoffAt) < visit.service_date) reject('The cutoff must be on or after the service date and no later than now.');
+  const completed = completionInstant(visit);
+  if (etDateString(cutoffAt) === visit.service_date && (completed == null || cutoffAt.getTime() < completed)) reject('A same-day cutoff must follow the recorded completion time of the service.');
+}
+
+// Callbacks are corrective. Included follow-ups and always-free visit types
+// never earn production credit or count toward outcome rates, whatever
+// exclusion the caller sent.
+function resolveExclusion(visit, record, requested) {
+  if ([visit.is_callback, record.record?.is_callback].some(Boolean)) return 'corrective';
+  const free = visit.followup_included === true || isAlwaysFreeServiceType(visit.service_type);
+  return free && requested === 'none' ? 'planned_followup' : requested;
 }
 
 async function qualifyingReturn(conn, id, visit) {
@@ -204,8 +220,7 @@ async function saveServiceEvidence(input, actor) {
     };
     const returned = await validateServiceEvidence(trx, data, visit, last);
     const record = await resolveServiceRecord(trx, visit, { scheduled_service_id: true });
-    const callback = [visit.is_callback, record.record?.is_callback].some(Boolean);
-    const facts = { ...data, return_service_date: returned?.service_date || null, exclusion: callback ? 'corrective' : data.exclusion };
+    const facts = { ...data, return_service_date: returned?.service_date || null, exclusion: resolveExclusion(visit, record, data.exclusion) };
     if (record.ambiguous && facts.provenance === 'verified') reject('Historical service records are ambiguous. Resolve their attribution before verifying credit.');
     const claimsAllocation = !!data.allocation_id && !last.allocation_id;
     if (facts.exclusion !== 'none' && claimsAllocation) reject('An excluded service cannot claim a scheduled application. Remove its allocation.');
