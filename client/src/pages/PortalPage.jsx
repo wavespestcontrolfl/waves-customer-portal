@@ -15821,9 +15821,14 @@ export default function PortalPage() {
   // A NON-primary saved property of a profile is selected: My Property is
   // profile-scoped (see PropertyProfileScopedNotice) — the primary entry of
   // the same profile is the switch target (absent when the office retired it).
-  const savedSecondarySelection = !!(activeProperty && activeProperty.key && activeProperty.propertyId && activeProperty.isPrimaryProperty !== true);
+  // Also PENDING while a saved-property selection has no resolved entry yet
+  // (the list read failed; /auth/me still names the claim — uncapped codex
+  // r1r P1): a missing entry is NOT a primary selection, and the tab would
+  // read and write the primary's preferences under an unknown house.
+  const savedSecondarySelection = !!(selectedProperty && selectedProperty.propertyId
+    && (!activeProperty || (activeProperty.key && activeProperty.propertyId && activeProperty.isPrimaryProperty !== true)));
   const profilePrimaryEntry = savedSecondarySelection
-    ? (portalProperties.find((p) => String(p.customerId) === String(activeProperty.customerId) && p.isPrimaryProperty === true) || null)
+    ? (portalProperties.find((p) => String(p.customerId) === String(selectedProperty.customerId) && p.isPrimaryProperty === true) || null)
     : null;
   // Keep the destination explicit for Visits and watering-plan deep links.
   const selectProperty = async (propertyId, { tab = 'dashboard' } = {}) => {

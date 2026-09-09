@@ -452,8 +452,16 @@ function ProtectedRoute({ children }) {
   // an arbitrary house whose scoped reads would hide the notified visit.
   const currentProfileEntries = properties.filter((property) => String(property.customerId || property.id) === String(customer?.id));
   const primaryEntry = currentProfileEntries.find((property) => property.isPrimaryProperty) || null;
+  // Only PROPERTY-scoped destinations (Home, Visits, My Property — the tabs
+  // whose reads follow the saved-property selection) need that profile's
+  // primary. Billing, Refer, Documents, Plan and Learn are customer-wide, so
+  // an account-wide push (an invoice, a receipt) requires only the right
+  // profile — a retired primary must not turn it into "Property unavailable"
+  // when opening the tab directly works (uncapped codex r1r P1).
+  const destinationTab = new URLSearchParams(location.search).get('tab') || 'dashboard';
+  const propertyScopedDestination = !['billing', 'refer', 'documents', 'plan', 'learn'].includes(destinationTab);
   const resolvedTargetPropertyId = targetPropertyId
-    || (!profileDiffers && primaryEntry && selectedProperty?.propertyId && String(selectedProperty.propertyId) !== String(primaryEntry.propertyId)
+    || (propertyScopedDestination && !profileDiffers && primaryEntry && selectedProperty?.propertyId && String(selectedProperty.propertyId) !== String(primaryEntry.propertyId)
       ? String(primaryEntry.propertyId)
       : null);
   const savedDiffers = !!targetProperty && !!resolvedTargetPropertyId && !profileDiffers
@@ -462,7 +470,7 @@ function ProtectedRoute({ children }) {
   // not known yet (list still loading, or failed) stays pending — mounting
   // the portal would open the notification under the wrong house (codex
   // #4207 r2). The propertiesError guard below fails it closed.
-  const primaryUnknown = !!targetProperty && !targetPropertyId && !profileDiffers
+  const primaryUnknown = propertyScopedDestination && !!targetProperty && !targetPropertyId && !profileDiffers
     && !!selectedProperty?.propertyId && !primaryEntry;
   const targetPending = isAuthenticated && (profileDiffers || savedDiffers || primaryUnknown);
   const switchingTarget = useRef(null);

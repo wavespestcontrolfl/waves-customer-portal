@@ -141,3 +141,28 @@ test('a profile-only push under a NON-primary selection with a FAILED list read 
   await waitFor(() => expect(document.body.textContent).toMatch(/could not be checked/));
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
 });
+
+test('an ACCOUNT-WIDE push (Billing) for the current profile needs only the profile: no primary fallback, no "unavailable" when the primary was retired (uncapped codex r1r P1)', async () => {
+  window.history.replaceState({}, '', '/?tab=billing&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    // The primary was retired: only the secondary is listed.
+    properties: [{ id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  expect(await screen.findByText('Authorized property portal')).toBeInTheDocument();
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+  expect(document.body.textContent).not.toMatch(/no longer available/);
+});
+
+test('a PROPERTY-scoped push (Visits) for the same profile with a retired primary still fails closed', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    properties: [{ id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(document.body.textContent).toMatch(/no longer available/));
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});
+
