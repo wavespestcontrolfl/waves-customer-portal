@@ -45,6 +45,8 @@ function customerObservations(text, findings = []) {
 // #4149 r13). A prose term is published only when a moderate+ finding's own
 // NAME or label carries that same governed term.
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
+// Generic cause words never authorize prose on their own.
+const GENERIC_CAUSE_TERMS = ['insect', 'pest', 'disease', 'infestation'];
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
   const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
@@ -58,22 +60,30 @@ function governedTerms(text) {
   while ((match = re.exec(String(text || ''))) !== null) terms.add(causeTerm(match[1]));
   return terms;
 }
+// True when a reviewed finding is positive, unambiguous evidence for the causes
+// its name and label carry. A negated name ("Chinch bugs weren't observed",
+// "Neither chinch bugs nor drought stress"), an unresolved differential ("Chinch
+// bugs or drought stress", "chinch vs. drought", "chinch/drought", "Chinch bugs?")
+// and a conjunctive pair of governed causes ("Chinch bugs and drought stress")
+// established no single cause; the prompt keeps inseparable causes together, so
+// such a name authorizes nothing until review picks one. One cause plus a symptom
+// ("Chinch bug damage and thinning") is still a single cause.
+function establishesCause(finding) {
+  if (!finding || !finding.label || (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) < CONFIDENCE_RANK.moderate) return false;
+  if (finding.negated || finding.label === NO_STRESS_LABEL) return false;
+  const name = finding.name || '';
+  if (/\b(?:no|not|none|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|excluded|free)\b/i.test(name)) return false;
+  if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
+  const namedCauses = [...governedTerms(name)].filter((term) => !GENERIC_CAUSE_TERMS.includes(term));
+  return !(namedCauses.length > 1 && /\b(?:and|plus|with|as well as|along with|together with|alongside)\b/i.test(name));
+}
+
 function namesUnpublishedCause(text, findings) {
   const published = new Set();
   for (const finding of findings || []) {
-    if (!finding || !finding.label || (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) < CONFIDENCE_RANK.moderate) continue;
-    // A negated technician detail names the cause it ruled OUT — it publishes nothing.
-    if (finding.negated || finding.label === NO_STRESS_LABEL) continue;
-    // A mixed/negated name cannot establish positive evidence for prose.
-    // Keep it internal until review supplies an unambiguous finding.
-    if (/\b(?:no|not|none|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|excluded|free)\b/i.test(finding.name || '')) continue;
-    // An unresolved differential ("Chinch bugs or drought stress", "chinch vs.
-    // drought", "chinch/drought", "Chinch bugs?") established neither cause; the
-    // prompt keeps inseparable causes as a differential, so the name must not
-    // authorize either one until review picks a single cause.
-    if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(finding.name || '')) continue;
+    if (!establishesCause(finding)) continue;
     for (const term of governedTerms(`${finding.name || ''} ${finding.label}`)) {
-      if (!['insect', 'pest', 'disease', 'infestation'].includes(term)) published.add(term);
+      if (!GENERIC_CAUSE_TERMS.includes(term)) published.add(term);
     }
   }
   for (const term of governedTerms(text)) if (!published.has(term)) return true;

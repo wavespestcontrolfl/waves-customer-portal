@@ -549,6 +549,15 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel('Possible fungal disease; no weed pressure')).toBe('fungal activity');
   });
 
+  test.each([
+    ['Sod-webworm damage', 'caterpillar activity'], ['Sod‑webworm damage', 'caterpillar activity'], ['Armyworm feeding', 'caterpillar activity'],
+    ['Large-patch activity', 'large patch (fungal) activity'], ['Brownpatch rings', 'large patch (fungal) activity'],
+    ['Gray-leaf-spot lesions', 'gray leaf spot'], ['Greyleaf spot', 'gray leaf spot'], ['Dollar-spot lesions', 'dollar spot'],
+    ['Leaf-spot activity', 'fungal activity'], ['Water-stress pattern', 'drought stress'], ['Underwatered turf', 'drought stress'],
+  ])('safeConditionLabel maps the separator spelling %s to %s at moderate confidence', (name, label) => {
+    expect(safeConditionLabel(name, 'moderate')).toBe(label);
+  });
+
   test('safeConditionLabel downgrades a named cause to a generic symptom below moderate confidence', () => {
     expect(safeConditionLabel('Chinch bug pressure', 'low')).toBe('general lawn stress');
     expect(safeConditionLabel('Large patch disease', 'unknown')).toBe('general lawn stress');

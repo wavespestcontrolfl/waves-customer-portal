@@ -68,7 +68,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?'])(
+  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed'])(
     'an unresolved differential named %s cannot authorize either cause', (name) => {
       const evidence = { name, label: 'general lawn stress', confidence: 'high' };
       expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
@@ -78,6 +78,12 @@ describe('customer publication', () => {
       expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [resolved])).toMatch(/chinch/i);
     },
   );
+
+  test('a single cause paired with a symptom still authorizes that cause', () => {
+    const evidence = { name: 'Chinch bug damage and thinning', label: 'chinch bug activity', confidence: 'moderate' };
+    expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toMatch(/chinch/i);
+    expect(copy.customerObservations('Drought stress is spreading along the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
+  });
 
   test('requires the named cause at moderate confidence or better in a published finding', () => {
     const text = 'The browning along the driveway is consistent with chinch bug activity.';

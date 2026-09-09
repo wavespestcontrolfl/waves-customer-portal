@@ -517,18 +517,20 @@ function buildWatchItems(findings = [], flags = []) {
 // customer-facing condition label. The single source of truth for both the public
 // egress route and the customer-summary builders — so no raw finding name (and the
 // email/phone/product/tech-note it could carry) ever reaches customer copy. Falls
-// back to a generic monitored-condition label when nothing matches.
+// back to a generic monitored-condition label when nothing matches. Separators inside
+// a multi-word condition are optional, in lockstep with SUMMARY_CAUSE_RE, so a
+// spelling the cause gate recognizes ("Sod-webworm", "Large-patch") maps to its label.
 const CONDITION_LABELS = [
   [/chinch/, 'chinch bug activity'],
-  [/(army\s?worm|sod\s?webworm|caterpillar|\bworm)/, 'caterpillar activity'],
+  [/(army[\s‐‑‒–—-]*worm|sod[\s‐‑‒–—-]*webworm|caterpillar|\bworm)/, 'caterpillar activity'],
   [/grub/, 'grub activity'],
-  [/(large patch|brown patch)/, 'large patch (fungal) activity'],
-  [/(gray|grey)\s?leaf/, 'gray leaf spot'],
-  [/dollar spot/, 'dollar spot'],
-  [/(fungus|fungal|disease|leaf spot|mold|mildew)/, 'fungal activity'],
+  [/(large[\s‐‑‒–—-]*patch|brown[\s‐‑‒–—-]*patch)/, 'large patch (fungal) activity'],
+  [/(gray|grey)[\s‐‑‒–—-]*leaf/, 'gray leaf spot'],
+  [/dollar[\s‐‑‒–—-]*spot/, 'dollar spot'],
+  [/(fungus|fungal|disease|leaf[\s‐‑‒–—-]*spot|mold|mildew)/, 'fungal activity'],
   [/(nutsedge|sedge|crabgrass|dollarweed|clover|spurge|\bweed)/, 'weed pressure'],
   [/(overwater|too much water|excess(ive)?\s+(water|moisture)|soggy|saturat)/, 'overwatering signal'],
-  [/(drought|\bdry\b|water stress|wilt|under\s?water)/, 'drought stress'],
+  [/(drought|\bdry\b|water[\s‐‑‒–—-]*stress|wilt|under[\s‐‑‒–—-]*water)/, 'drought stress'],
   [/(thin|bare|sparse|patchy)/, 'thinning turf'],
   [/(chlorosis|iron|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
   [/(\bhealthy\b|looks good|looks healthy)/, 'no major visible stress'],
