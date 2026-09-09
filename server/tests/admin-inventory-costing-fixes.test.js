@@ -31,6 +31,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const inventoryRouter = require('../routes/admin-inventory');
+const { errorHandler } = require('../middleware/errors');
 
 const { recalcBestPrice } = inventoryRouter._test;
 
@@ -38,9 +39,7 @@ function appServer() {
   const app = express();
   app.use(express.json());
   app.use('/admin/inventory', inventoryRouter);
-  app.use((err, _req, res, _next) => {
-    res.status(err.status || 500).json({ error: err.message });
-  });
+  app.use(errorHandler);
   const server = app.listen(0);
   return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
 }
@@ -80,6 +79,20 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.schema.hasTable.mockResolvedValue(true);
   db.fn = { now: jest.fn(() => 'NOW()') };
+});
+
+describe('GET /restock-requests validation', () => {
+  test.each([
+    ['requestId=truncated-request-id', 'Invalid restock request id'],
+    ['status=unknown', 'Invalid request status'],
+  ])('rejects %s with a client error through the production error handler', async (query, message) => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests?${query}`);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: message });
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
