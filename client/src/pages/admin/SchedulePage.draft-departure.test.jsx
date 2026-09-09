@@ -126,6 +126,11 @@ describe('completion review timing across midnight', () => {
     });
     expect(screen.getByText(expected)).toBeTruthy();
     expect(screen.queryByText(/about Wed,? 8:/)).toBeNull();
+    if (cadence && window) {
+      expect(screen.getByText(/email instead.*about Thu,? 12:14 AM.*without waiting for the SMS window/)).toBeTruthy();
+    } else {
+      expect(screen.queryByText(/email instead/)).toBeNull();
+    }
   });
 });
 
