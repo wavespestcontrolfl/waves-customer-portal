@@ -43,7 +43,7 @@ function fixture({ invoice = {}, visit = {}, customer = {}, payers = [], records
   conn.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
   return { conn, inv, svc };
 }
-const run = (f) => evaluate(f.conn, 'invoice', new Set());
+const run = (f) => evaluate(f.conn, 'invoice');
 
 describe('historical invoice repair Bill-To and reviewed mutations', () => {
   test('refuses an invoice billed to the customer default instead of the per-job payer', async () => {
@@ -117,14 +117,14 @@ describe('conservative historical repair evidence', () => {
   test('keeps Tree & Shrub as one program', () => {
     expect(isCompositeService('Tree & Shrub Care')).toBe(false);
     expect(invoiceBillsVisitApplication({ line_items: [{ description: 'Tree & Shrub Care', amount: 50 }] },
-      { service_type: 'Tree & Shrub Care' }, new Set())).toBe(true);
+      { service_type: 'Tree & Shrub Care' })).toBe(true);
   });
   test.each([
     [{ description: 'Pest Control', amount: 100 }],
     [{ description: 'Pest Control', unit_price: 50, quantity: 2 }],
     [{ description: 'Pest Control', amount: 100 }, { description: 'Discount', amount: -10 }],
   ].map((line_items) => ({ line_items })))('accepts positive application evidence: %j', ({ line_items }) => {
-    expect(invoiceBillsVisitApplication({ line_items }, { service_type: 'Pest Control' }, new Set())).toBe(true);
+    expect(invoiceBillsVisitApplication({ line_items }, { service_type: 'Pest Control' })).toBe(true);
   });
   test.each([
     [{ description: 'Pest Control supplies', amount: 100 }],
@@ -134,17 +134,17 @@ describe('conservative historical repair evidence', () => {
     [{ description: 'Pest Control', amount: 100 }, { description: 'Mosquito Control', amount: 50 }],
     [{ description: 'Pest Control + Termite Bait', amount: 100 }],
   ].map((line_items) => ({ line_items })))('refuses non-application or conflicting evidence: %j', ({ line_items }) => {
-    expect(invoiceBillsVisitApplication({ line_items }, { service_type: 'Pest Control' }, new Set())).toBe(false);
+    expect(invoiceBillsVisitApplication({ line_items }, { service_type: 'Pest Control' })).toBe(false);
   });
-  test.each([false, true])('catalog ordering cannot hide an ambiguous containing program (reverse=%s)', (reverse) => {
-    const names = ['Pest Control', 'Pest Control + Mosquito Control'];
-    if (reverse) names.reverse();
-    expect(invoiceBillsVisitApplication({ line_items: [{ description: 'Pest Control', amount: 100 }] },
-      { service_type: 'Pest Control' }, new Set(names))).toBe(false);
-  });
-  test('unknown catalog services cannot stand in for the visit application', () => {
-    expect(invoiceBillsVisitApplication({ line_items: [{ description: 'WDO Inspection Service', amount: 100 }] },
-      { service_type: 'Pest Control' }, new Set(['WDO Inspection Service']))).toBe(false);
+  test.each([
+    ['Pest Inspection Service', 'Quarterly Pest Control Service'],
+    ['Termite Inspection Service', 'Termite Bait Station Service'],
+    ['Termite Foam Service', 'Termite Bait Station Service'],
+    ['Pest Control Re-Service', 'Quarterly Pest Control Service'],
+    ['WDO Inspection Service', 'Pest Control'],
+    ['Pest Inspection Service', 'Pest Inspection Service'],
+  ])('refuses %s as application evidence for %s', (description, service_type) => {
+    expect(invoiceBillsVisitApplication({ line_items: [{ description, amount: 100 }] }, { service_type })).toBe(false);
   });
   test('propagates closeout lookup failures rather than reporting a packet exclusion', async () => {
     assertScheduledInvoiceNotPacketOwned.mockRejectedValueOnce(new Error('lookup failed'));
