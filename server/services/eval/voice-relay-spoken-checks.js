@@ -439,10 +439,14 @@ const VISIT_AUXILIARY = `(?:\\s+(?:(?:am|is|are|was|were|has|have|had)(?:n[\\x27
 const VISIT_ARRIVAL = '(?:(?:come(?: out)?|coming)(?!\\s+(?:back\\s+)?to\\s+(?:(?:your|her|his|the|a|an)\\s+)?(?:question|decision|conclusion|agreement|point|issue|topic)\\b)|follow[ -]up\\s+(?:at\\s+(?:her|his|their|the)\\s+(?:home|house|property)|with\\s+(?:a\\s+)?visit)|arriv\\w*|visit(?:ing)?(?:\\s+(?:her|him|them))?|on (?:the|their|his|her|our) way|en route|at (?:her|his|the) (?:home|house|property))(?:\\s+(?:at|to)\\s+(?:her|his|their|the)\\s+(?:home|house|property))?';
 const VISIT_SCHEDULING_COMPLEMENT = `(?:\\s+to\\s+${VISIT_ARRIVAL}|\\s+for\\s+(?:(?:an?|the|her|his|their)\\s+)?${VISIT_NOUN})`;
 const TELEPHONE_COMPLEMENT = '(?:\\s+to\\s+(?:call|phone|contact|speak|talk|make\\s+(?:a\\s+)?(?:phone\\s+)?call|follow[ -]up\\s+(?:by|via|on the)\\s+(?:phone|telephone|video))|\\s+for\\s+(?:(?:a|an|the|office|phone|telephone|video)\\s+)*(?:call|callback))\\b';
+// A time may sit between a status and its complement on either side of the
+// callback line: "scheduled tomorrow to arrive" discloses, "scheduled tomorrow
+// to call her" does not.
+const LEADING_VISIT_TIME = `(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?(?:${VISIT_TIME_RE.source}))*`;
 const VISIT_DISCLOSURE_RES = Object.freeze([
   // First-person scheduling needs an arrival/visit complement; office callbacks
   // can also be scheduled or booked without revealing an appointment.
-  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})${VISIT_SCHEDULING_COMPLEMENT}|${VISIT_ARRIVAL})\\b`, 'gi'),
+  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})${LEADING_VISIT_TIME}${VISIT_SCHEDULING_COMPLEMENT}|${VISIT_ARRIVAL})\\b`, 'gi'),
   new RegExp(`\\b(?:eta|arrival time|(?:appointment|visit) (?:time|date|window))${VISIT_AUXILIARY}(?:${HOUR_WORDS}|\\d{1,2}|${RELATIVE_DAY_RE.source}|today|tonight)\\b`, 'gi'),
   new RegExp(`\\b(?:technician|tech|she|he|they|someone|somebody)${VISIT_AUXILIARY}(?:(?:${VISIT_STATUS})(?:${VISIT_SCHEDULING_COMPLEMENT})?|${VISIT_ARRIVAL})\\b`, 'gi'),
   new RegExp(`\\b(?:there(?: (?:is|are|was|were)(?:n[\\x27\\u2019]t| not)?|[\\x27\\u2019]s)|[a-z]+ (?:has|have|had|(?:has|have|had)n[\\x27\\u2019]t|(?:do|does|did)(?:n[\\x27\\u2019]t| not)? have))\\s+(?:(?:no|not|an?|any|upcoming|future|${VISIT_STATUS}|\\d+|${NUMBER_WORD_EN_STRICT}|zero|and|several|multiple|some|many|few)\\s+)*${VISIT_NOUN}(?:\\s+(?:${VISIT_STATUS}))?`, 'gi'),
@@ -482,7 +486,6 @@ const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;,]|(?<!\\d):|:(?!\\d)|\\b(?:bu
 
 const VISIT_COORDINATION_RE = new RegExp(`\\b(?:and(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b)|or)(?!\\s+(?:whether|if|not|when)\\b)\\b`, 'gi');
 
-const LEADING_VISIT_TIME = `(?:\\s*(?:(?:for|on|at|by|from|between|around|about)\\s+)?(?:${VISIT_TIME_RE.source}))*`;
 function isNonVisitPredicate(clause, match) {
   const suffix = clause.slice(match.index + match[0].length);
   // Telephone activity must not hide an explicit property destination.
