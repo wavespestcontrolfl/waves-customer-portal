@@ -81,41 +81,10 @@ const QUOTE_HINT_RE = new RegExp(
   'i',
 );
 
-// Business-to-business pitches TO Waves. Lead-gen / marketing / software /
-// staffing robotexts to the location lines pass QUOTE_HINT_RE on words like
-// "service", "cost", "rate", "lawn" (18 senders, 41 texts in the 60 days to
-// 2026-09-09) and the classifier prompt had no vendor category, so a
-// confident "quote_request: true" would mint an owed-quote bell and a DEEP
-// composer run for a sales pitch.
-//
-// Marker CATEGORIES, same shape as call-spam-classifier's robocall script
-// signature: a STRONG marker is phrasing a homeowner never writes and is a
-// verdict alone; a WEAK marker is vendor-flavored but a prospect can write
-// it too ("no upfront cost?", "reply NO if you can't make it", "would you
-// like more details?") and counts only alongside another marker (codex
-// #4212 r2). Anything softer is left to the model, which is told vendors
-// are not quote requests.
-const SOLICITATION_MARKERS = [
-  { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited|more|extra)\s+(?:\w+\s+){0,3}(?:leads?|jobs?|customers?|estimates?)\b|\bleads?\s+(?:for|to)\s+(?:you|your)\b/i },
-  { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
-  { key: 'grow_business', strong: true, re: /\b(?:grow|scale|book(?:ing)?\s+more|fill)\s+(?:your\s+)?(?:business|schedule|calendar)\b/i },
-  { key: 'vendor_tool', strong: true, re: /\bai\s+receptionist\b|\breview\s+system\b/i },
-  { key: 'connects_you', strong: true, re: /\bconnect(?:s|ing)?\s+(?:you|local\s+homeowners)\s+with\b/i },
-  { key: 'service_requested_by', strong: true, re: /\bservice\s+is\s+being\s+requested\s+by\b/i },
-  // "$" is not a word character, so the boundary sits inside the
-  // alternation rather than in front of it (codex r2).
-  { key: 'no_upfront', strong: false, re: /(?:\bno|\bzero|\$0)\s+(?:upfront|up-front|set-?up|monthly)\s+(?:cost|costs|fee|fees)?|\bfree\s+(?:setup|set-up|trial)\b/i },
-  { key: 'reply_directive', strong: false, re: /\b(?:reply|say|text)\s+"?(?:stop|no|byebye|end)"?\s+(?:if|to)\b/i },
-  { key: 'more_details', strong: false, re: /\b(?:want|like)\s+(?:more\s+)?details\?/i },
-];
-
-/** Pure. True when a strong marker hits, or at least two distinct weak ones. */
-function isSolicitationPitch(text) {
-  const t = String(text || '');
-  if (!t.trim()) return false;
-  const hits = SOLICITATION_MARKERS.filter((m) => m.re.test(t));
-  return hits.some((m) => m.strong) || hits.filter((m) => !m.strong).length >= 2;
-}
+// Business-to-business pitches TO Waves are never quote requests. The
+// detector lives with the SMS solicitation classifier (the inbox's screen
+// for the same texts); here it vetoes before triage or a model call.
+const { isSolicitationPitch } = require('../sms-solicitation-classifier');
 
 // Markers that the sender is REPLACING the previous ask rather than
 // continuing it. Deliberately narrow — an explicit correction word plus a

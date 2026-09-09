@@ -269,6 +269,23 @@ router.post('/sms', async (req, res) => {
     // while older customer rows may still have local formatting.
     const customer = await findSingleCustomerByPhone(From);
 
+    // SMS solicitation screen (GATE_SMS_SPAM_CLASSIFIER: off / shadow /
+    // true). Unknown senders only. Shadow records the verdict on the
+    // sms_log row and changes nothing else; enforce lands a confident
+    // vendor pitch already-read — no bell, no push, no badge, no digest
+    // row, no estimator — while the thread stays in the inbox under the
+    // Unknown filter. Nothing is blocked, deleted, or sent. Fails to
+    // "not spam" on any error or timeout.
+    let solicitation = null;
+    try {
+      solicitation = await require('../services/sms-solicitation-classifier')
+        .screenInboundSms({ body: Body, hasCustomer: Boolean(customer), isReaction: smsReaction });
+    } catch (e) { logger.warn(`[sms-solicitation] screen failed: ${e.message}`); }
+    const solicitationEnforced = Boolean(solicitation?.enforced);
+    const solicitationMeta = solicitation
+      ? { spam_verdict: { solicitation: solicitation.solicitation, confidence: solicitation.confidence, method: solicitation.method, mode: solicitation.mode, enforced: solicitationEnforced, version: solicitation.version } }
+      : {};
+
     // Event-driven health rescore on a hot inbound signal (competitor mention,
     // cancellation, price complaint). Fire-and-forget so it never delays the
     // webhook ack; gated behind GATE_EVENT_RESCORE (no-op when off). Defined
@@ -338,11 +355,11 @@ router.post('/sms', async (req, res) => {
       // Reactions and pure courtesy closers never needed a human to "open"
       // them — write the row already read so the Messages unread dot and
       // the Unread chip only count messages that want an answer.
-      isRead: quietReaction || courtesyOnly,
+      isRead: quietReaction || courtesyOnly || solicitationEnforced,
       // Loud reactions are typed as ordinary inbound so the unanswered digest
       // and completion guard count them (codex r3).
       messageType: quietReaction ? 'sms_reaction' : undefined,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}), ...solicitationMeta },
     }).catch(() => {});
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
@@ -708,8 +725,9 @@ router.post('/sms', async (req, res) => {
       message_type: messageType,
       // Courtesy closers are read on arrival in the legacy log too, so the
       // sms_log-backed unread counts agree with the unified messages row.
-      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
+      ...((courtesyOnly || unifiedAlreadyRead || solicitationEnforced) ? { is_read: true } : {}),
       metadata: JSON.stringify({
+        ...solicitationMeta,
         locationId: numberConfig.locationId,
         source: numberConfig.type,
         domain: numberConfig.domain,
@@ -806,7 +824,7 @@ router.post('/sms', async (req, res) => {
     }
 
     // DOMAIN TRACKING — new lead from a domain-specific number
-    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
+    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !solicitationEnforced) {
       const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
       const { CREATED_VIA } = require('../services/customer-stages');
       const { resolveLocation } = require('../config/locations');
@@ -899,7 +917,7 @@ router.post('/sms', async (req, res) => {
         ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (!intakeScopeVetoed && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+      if (!intakeScopeVetoed && !solicitationEnforced && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
         await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
@@ -1093,7 +1111,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !solicitationEnforced && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length

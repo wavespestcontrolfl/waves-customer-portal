@@ -1,0 +1,84 @@
+// SMS solicitation classifier: dark by default, shadow records only, enforce
+// needs a regex hit or a confident model verdict, and nothing is ever sent.
+const mockDispatch = jest.fn();
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mockDispatch(...args) }));
+jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'fast-structured-policy' } }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const {
+  screenInboundSms, classifySolicitation, classifierMode, SOLICITATION_RE, ENFORCE_CONFIDENCE,
+} = require('../services/sms-solicitation-classifier');
+
+const PITCH = 'Hey Waves Pest Control Lakewood Ranch, Maya here. Our Labor Day Deal for Home-Service leads gets you a free setup, no monthly cost, & we fund your ads. Want details?';
+const SOFT_PITCH = "Hi, this is JL from BOLT Systems. I wasn't able to reach anyone when I called earlier, so I thought I'd send you a quick message instead.";
+const HOMEOWNER = 'Hi - do you provide organic options to keeping the bugs under control in my yard. It’s a small front and side yard.';
+
+beforeEach(() => { mockDispatch.mockReset(); delete process.env.GATE_SMS_SPAM_CLASSIFIER; });
+
+describe('gate', () => {
+  test('unset, empty, and unknown values are off', () => {
+    expect(classifierMode()).toBe('off');
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'on';
+    expect(classifierMode()).toBe('off');
+  });
+  test('off: nothing runs, nothing returned', async () => {
+    expect(await screenInboundSms({ body: PITCH, hasCustomer: false, isReaction: false })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+  test('a matched customer, a reaction, or an empty body is never screened', async () => {
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    expect(await screenInboundSms({ body: PITCH, hasCustomer: true, isReaction: false })).toBeNull();
+    expect(await screenInboundSms({ body: 'Liked "…"', hasCustomer: false, isReaction: true })).toBeNull();
+    expect(await screenInboundSms({ body: '  ', hasCustomer: false, isReaction: false })).toBeNull();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('regex layer', () => {
+  test('explicit vendor phrasing is a verdict without a model call', async () => {
+    const v = await classifySolicitation({ body: PITCH });
+    expect(v).toMatchObject({ solicitation: true, confidence: 1, method: 'regex' });
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+  test('a homeowner ask that shares vocabulary does not match', () => {
+    expect(SOLICITATION_RE.test('Can you give me a free estimate on lawn treatment for my new house?')).toBe(false);
+    expect(SOLICITATION_RE.test('How much do you charge for a monthly pest plan? No contract preferred.')).toBe(false);
+    expect(SOLICITATION_RE.test(HOMEOWNER)).toBe(false);
+  });
+});
+
+describe('model layer', () => {
+  test('a confident solicitation verdict enforces only in enforce mode', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.93 } });
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
+    const shadow = await screenInboundSms({ body: SOFT_PITCH, hasCustomer: false, isReaction: false });
+    expect(shadow).toMatchObject({ solicitation: true, method: 'model', mode: 'shadow', confident: true, enforced: false });
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    const enforce = await screenInboundSms({ body: SOFT_PITCH, hasCustomer: false, isReaction: false });
+    expect(enforce).toMatchObject({ mode: 'enforce', confident: true, enforced: true });
+    expect(mockDispatch).toHaveBeenCalledWith('fast-structured-policy', expect.objectContaining({
+      laneId: 'sms_solicitation', jsonMode: true, timeoutMs: 3500,
+    }));
+  });
+  test('below the confidence floor nothing is enforced', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: ENFORCE_CONFIDENCE - 0.05 } });
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    const v = await screenInboundSms({ body: SOFT_PITCH, hasCustomer: false, isReaction: false });
+    expect(v).toMatchObject({ solicitation: true, confident: false, enforced: false });
+  });
+  test('a homeowner verdict is recorded as not a solicitation', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    const v = await screenInboundSms({ body: HOMEOWNER, hasCustomer: false, isReaction: false });
+    expect(v).toMatchObject({ solicitation: false, enforced: false });
+  });
+  test('model failure, timeout, or malformed output fails to not-spam', async () => {
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    mockDispatch.mockResolvedValueOnce({ ok: false });
+    expect(await screenInboundSms({ body: SOFT_PITCH, hasCustomer: false, isReaction: false })).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
+    mockDispatch.mockRejectedValueOnce(new Error('timeout'));
+    expect(await screenInboundSms({ body: SOFT_PITCH, hasCustomer: false, isReaction: false })).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
+    mockDispatch.mockResolvedValueOnce({ ok: true, json: { solicitation: true, confidence: 'high' } });
+    expect(await screenInboundSms({ body: SOFT_PITCH, hasCustomer: false, isReaction: false })).toMatchObject({ solicitation: true, confidence: 0, enforced: false });
+  });
+});

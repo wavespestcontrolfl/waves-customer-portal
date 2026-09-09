@@ -1223,6 +1223,12 @@ const gates = {
   // Layered spam classifier: records verdicts to call_spam_verdicts (100%
   // precision offline; any discard action is a separate consumer decision).
   callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
+  // SMS solicitation classifier (services/sms-solicitation-classifier.js):
+  // three-state, read at CALL time by the module — 'shadow' records
+  // verdicts only, 'true' lands confident vendor pitches already-read.
+  // Registered here for logGateStatus / the gates listing; the module does
+  // not read this boolean.
+  smsSpamClassifier: process.env.GATE_SMS_SPAM_CLASSIFIER === 'true',
   // Profile-enrichment writer: gate codes/pets/notes from extraction into
   // property_preferences + customers.internal_notes (admin-edit-preserving).
   callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
