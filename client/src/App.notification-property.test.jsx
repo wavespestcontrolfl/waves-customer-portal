@@ -68,3 +68,37 @@ test('saved-property entries (composite ids) still resolve a notification by its
   await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith('property-2'));
   expect(document.body.textContent).not.toMatch(/no longer available/);
 });
+
+test('a push that names the saved property switches by the (profile, property) pair even on the current profile', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-b');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [
+      { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+      { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    ], propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledWith({ customerId: 'property-1', propertyId: 'prop-b' }));
+});
+
+test('a profile-only push for the current profile keeps today\'s rule: no switch', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' },
+    properties: [{ id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' }, { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await new Promise((r) => setTimeout(r, 50));
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});
+
+test('a push naming a saved property that is no longer listed shows the unavailable notice, no switch', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-gone');
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' },
+    selectedProperty: { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' },
+    properties: [{ id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' }],
+    propertiesError: null, switchProperty: vi.fn(async () => true) };
+  render(<App />);
+  await waitFor(() => expect(document.body.textContent).toMatch(/no longer available/));
+  expect(state.auth.switchProperty).not.toHaveBeenCalled();
+});

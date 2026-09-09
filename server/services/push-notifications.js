@@ -164,6 +164,11 @@ class PushNotificationService {
     if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
       const target = new URL(notification.url, 'https://portal.wavespestcontrol.com');
       target.searchParams.set('notificationProperty', String(customerId));
+      // Saved-property destination (GATE_APP_PROPERTY_SCOPE): a composer that
+      // knows the visit's property passes notification.propertyId so the app
+      // opens THAT house, not just the profile (the appointment composers
+      // adopt this in the notifications PR of the lane).
+      if (notification.propertyId) target.searchParams.set('notificationPropertyId', String(notification.propertyId));
       notification = { ...notification, url: `${target.pathname}${target.search}${target.hash}` };
     }
     const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });

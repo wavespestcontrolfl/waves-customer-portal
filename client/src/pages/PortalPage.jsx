@@ -5244,16 +5244,27 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
                 <div style={{ marginTop: 12 }}>
+                  {/* Appointment texts and on-location contacts are stored per
+                      PROFILE (notification_prefs / customers.service_contact*),
+                      so this picker lists profiles even under the saved-property
+                      scope — a saved-house picker here would show house B while
+                      an edit applied to every house on the profile. Per-property
+                      texts arrive with the notifications PR of the lane. */}
                   <PropertyScopeSelect
                     id="notifications-property-scope"
-                    properties={properties}
-                    currentId={activePropertyId}
+                    properties={savedScope ? propertyPrefs : properties}
+                    currentId={savedScope ? customer.id : activePropertyId}
                     onSelect={onSelectProperty}
                     switchingId={switchingPropertyId}
-                    nextById={nextById}
+                    nextById={savedScope ? null : nextById}
                     compact
                   />
                 </div>
+                {savedScope && (
+                  <div style={{ fontSize: 14, color: muted, marginTop: 8 }}>
+                    These settings apply to every property on this profile.
+                  </div>
+                )}
                 <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
                   {customer.isPrimaryProfile
                     ? 'Your primary residence gets every alert unless you turn one off.'
