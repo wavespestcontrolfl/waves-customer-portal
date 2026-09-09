@@ -197,7 +197,6 @@ const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
     when: INPUT_MATCHER_SCHEMA,
     once: Joi.boolean(),
     ok: Joi.boolean(),
-    receipt: Joi.boolean(),
     hang: Joi.boolean(),
     transfer: Joi.boolean(),
     booking: Joi.boolean(),
@@ -351,6 +350,24 @@ function lintExpectation(e, i, knownTools) {
 // would otherwise be ignored and grade a replay without the restriction the
 // author wrote.
 const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect', 'judge']);
+// The judge block and the spec are executable contracts, not notes: the judge
+// grades against exactly these fields, so a misspelt or mistyped one would
+// silently grade a weaker contract than the author wrote (a misspelt
+// `adjudicated` makes majors non-blocking; `required_fact` renders as no
+// required facts). Every key is validated, unknown keys are refused.
+const JUDGE_BLOCK_SCHEMA = Joi.object({ severity: Joi.valid(...SEVERITIES), adjudicated: Joi.boolean() });
+const FACT_LIST_SCHEMA = Joi.array().items(Joi.string().pattern(/\S/));
+const SPEC_SCHEMA = Joi.object({
+  fixture_facts: FACT_LIST_SCHEMA,
+  required_facts: FACT_LIST_SCHEMA,
+  prohibited_facts: FACT_LIST_SCHEMA,
+  acceptable_actions: FACT_LIST_SCHEMA,
+  required_action: Joi.string().pattern(/\S/),
+  ideal_move: Joi.string().pattern(/\S/),
+  transfer_required: Joi.boolean(),
+  response_range: Joi.object({ min: Joi.number().integer().min(1).required(), max: Joi.number().integer().min(Joi.ref('min')).required() }),
+  max_words_per_agent_turn: Joi.number().integer().min(1),
+});
 const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
 const CALLER_KEYS = new Set(['from', 'verified', 'context']);
 const CALLER_CONTEXT_KEYS = new Set(['customer', 'tier', 'attested', 'block', 'dataTurn']);
@@ -370,7 +387,9 @@ function scenarioKeyRules(s) {
 
 function scenarioShapeRules(s) {
   const turns = Array.isArray(s.turns) ? s.turns : [];
-  const spec = s.spec && typeof s.spec === 'object' ? s.spec : null;
+  const spec = isPlainObject(s.spec) ? s.spec : null;
+  const specError = spec ? SPEC_SCHEMA.validate(spec, { convert: false }).error : null;
+  const judgeError = s.judge !== undefined ? JUDGE_BLOCK_SCHEMA.validate(s.judge, { convert: false }).error : null;
   return [
     ...scenarioKeyRules(s),
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
@@ -395,9 +414,8 @@ function scenarioShapeRules(s) {
     [!turns.length, 'needs at least one caller turn'],
     ...turns.map((t, i) => { const { error } = TURN_SCHEMA.validate(t, { convert: false }); return [!!error, `turns[${i}]: ${error ? error.message : ''}`]; }),
     [!spec, 'spec is required'],
-    ...['required_facts', 'prohibited_facts', 'acceptable_actions'].map((k) => [spec && spec[k] != null && !Array.isArray(spec[k]), `spec.${k} must be an array`]),
-    [spec && spec.required_action != null && typeof spec.required_action !== 'string', 'spec.required_action must be a string'],
-    [s.judge && (!SEVERITIES.includes(s.judge.severity || 'major') || (s.judge.adjudicated != null && typeof s.judge.adjudicated !== 'boolean')), 'judge block invalid'],
+    [!!specError, `spec: ${specError ? specError.message : ''}`],
+    [!!judgeError, `judge: ${judgeError ? judgeError.message : ''}`],
     [!Array.isArray(s.expect), 'expect must be an array'],
   ];
 }
@@ -407,13 +425,11 @@ function toolResponseEntryRules(name, raw) {
   const { error } = TOOL_RESPONSES_SCHEMA.validate(entries, { convert: false });
   // An effect belongs to the tool that performs it live — never to another.
   const foreign = [...new Set(entries.flatMap((e) => (e && typeof e === 'object' ? Object.values(TOOL_EFFECT).filter((key) => e[key] !== undefined && TOOL_EFFECT[name] !== key) : [])))];
-  const receiptOnRead = !WRITE_TOOLS.includes(name) && entries.some((e) => e && typeof e === 'object' && e.receipt !== undefined);
   const withRefs = entries.filter((e) => e && typeof e === 'object' && e.refs && typeof e.refs === 'object');
   // A ref mapping belongs to the answer that hands the ref out.
   const unissued = withRefs.flatMap((e) => Object.keys(e.refs).filter((ref) => !String(e.text || '').includes(`customer_ref: ${ref}`)));
   return [
     [!!error, `toolResponses.${name}: ${error ? error.message : ''}`],
-    [receiptOnRead, `toolResponses.${name}: "receipt" belongs to a write tool (${WRITE_TOOLS.join(', ')}), not ${name}`],
     ...foreign.map((key) => [true, `toolResponses.${name}: "${key}" is the effect of ${Object.keys(TOOL_EFFECT).find((t) => TOOL_EFFECT[t] === key)}, not ${name}`]),
     [name !== 'lookup_customer' && withRefs.length > 0, `toolResponses.${name}: "refs" belongs to lookup_customer answers only`],
     ...unissued.map((ref) => [true, `toolResponses.${name}: refs names "${ref}", which the answer text does not hand out (customer_ref: ${ref})`]),
@@ -816,20 +832,17 @@ function matcherInput(record, event, name, input) {
 /**
  * The ctx side effects the real write tools perform — capture latch, booking /
  * re-service / transfer marks. Never a write. Returns the answer text and
- * whether a RECEIPT was produced: a fixture answer that performed one of these
- * effects is a receipt, and so is a dedupe answer marked `receipt: true`; a
- * refusal ("that time is gone", "transfer not available") is an answer, never
- * a receipt.
+ * whether a RECEIPT was produced: only a fixture answer that performed one of
+ * these effects is a receipt — there is no bare receipt marker, since a write
+ * the live tool never latched cannot back a promise; a dedupe answer is
+ * `reservice: 'existing'` (evidence, not a receipt), and a refusal ("that
+ * time is gone", "transfer not available") is an answer, never a receipt.
  */
 function applyToolSideEffects(response, { input, ctx, scenario }) {
   const text = response.text || '';
   if (response.ok === false) return { text, receipt: false };
   const ctxCall = (fn, ...args) => (typeof ctx[fn] === 'function' ? ctx[fn](...args) : undefined);
-  // `receipt: true` without an effect is the live dedupe branch: the tool
-  // verified the durable record already exists (a re-service already open, a
-  // visit already booked), performed nothing, and its answer still backs the
-  // follow-up it tells Sandy to promise — relay-reservice's alreadyOpenText.
-  let receipt = response.receipt === true;
+  let receipt = false;
   if (response.capture) {
     ctxCall('markCaptured', response.capture === true ? {} : response.capture);
     if (input.call_summary) ctxCall('noteCallSummary', input.call_summary);
@@ -1351,14 +1364,17 @@ function evaluateChecks(scenario, record) {
 // own call); a fail explained by a detail finding is counted once, on that
 // finding's line.
 function judgeMajorLines(v, scenario) {
-  const detailFailed = v.forbidden_claims.length > 0 || v.required_facts_missing.length > 0 || v.prohibited_facts_stated.length > 0 || !v.action_ok || !v.transfer_ok;
+  // transfer_ok is graded only where the spec requires a transfer; elsewhere a
+  // verdict that fails on it alone is a holistic fail, reported on the verdict line.
+  const transferRequired = !!(scenario.spec && scenario.spec.transfer_required === true);
+  const detailFailed = v.forbidden_claims.length > 0 || v.required_facts_missing.length > 0 || v.prohibited_facts_stated.length > 0 || !v.action_ok || (transferRequired && !v.transfer_ok);
   const verdictDetail = v.pass ? 'pass' : (detailFailed ? 'failed on the findings below' : (v.rationale ? clip(v.rationale, 200) : 'the judge failed the call'));
   return [
     ['judge:verdict', !v.pass && !detailFailed, verdictDetail],
     ['judge:required_facts', v.required_facts_missing.length > 0, v.required_facts_missing.length ? `missing: ${v.required_facts_missing.join('; ')}` : 'all required facts conveyed'],
     ['judge:prohibited_facts', v.prohibited_facts_stated.length > 0, v.prohibited_facts_stated.length ? `stated: ${v.prohibited_facts_stated.join('; ')}` : 'none stated'],
     ['judge:action', !v.action_ok, v.action_taken || (v.action_ok ? 'acceptable' : 'not an acceptable action')],
-    ...(scenario.spec && scenario.spec.transfer_required === true ? [['judge:transfer', !v.transfer_ok, v.transfer_ok ? 'transferred' : 'the caller was not handed to a person']] : []),
+    ...(transferRequired ? [['judge:transfer', !v.transfer_ok, v.transfer_ok ? 'transferred' : 'the caller was not handed to a person']] : []),
   ];
 }
 
@@ -1452,10 +1468,14 @@ function errorRecord(err) {
 /** The judged layer for one finished record (run in a pool after the conversations). */
 async function judgeRecord(scenario, record, judgeFn) {
   const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
-  const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
+  const context = (scenario.caller && scenario.caller.context) || {};
+  const callerBlock = context.block || null;
+  // The recent-text data turn the conversation seeds into Sandy's context is
+  // agent-visible: a fact repeated from it is grounded, not invented.
+  const dataTurn = typeof context.dataTurn === 'string' && context.dataTurn.trim() ? context.dataTurn : null;
   const { runAsReplay } = require('../llm-dispatch-metrics');
   const transcript = renderTranscript(record.events, { full: true });
-  record.judge = await runAsReplay(() => run({ spec: scenario.spec || {}, transcript, language: record.language, toolsAvailable: record.toolsAvailable, callerBlock, standingInstructions: record.standingInstructions || null }), 'voice_relay_judge')
+  record.judge = await runAsReplay(() => run({ spec: scenario.spec || {}, transcript, language: record.language, toolsAvailable: record.toolsAvailable, callerBlock, dataTurn, standingInstructions: record.standingInstructions || null }), 'voice_relay_judge')
     .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
   record.checks.push(...judgeChecks(scenario, record.judge));
   record.qualityScore = qualityScore(record.checks);
