@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const { PDFDocument, PDFArray, PDFDict, PDFName, PDFRef, PDFStream, PDFRawStream, StandardFonts, rgb } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../estimate-proposal');
+const { assertBidSendDate } = require('../proposal-bid');
 const { validDateOnly } = require('../../utils/date-only');
 const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQuantity, formatUnitPrice } = require('../../../shared/proposal-bid.cjs');
 
@@ -163,6 +164,9 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   if (!details || typeof details !== 'object' || Array.isArray(details)) throw invalid('Form details must be an object.');
   if (!Buffer.isBuffer(sourcePdf) || sourcePdf.length > 12 * 1024 * 1024 || sourcePdf.subarray(0, 5).toString() !== '%PDF-') throw invalid('Upload the original PDF (up to 12 MB).');
   const proposal = normalizeProposal(estimate);
+  // A lapsed fixed hold must never produce a submission-ready form with
+  // expired prices (pre-push codex P1 on #4270); same 409 as sending.
+  assertBidSendDate(estimate);
   const prices = mapFormPrices(proposal, template, mapping);
   let document;
   try { document = await PDFDocument.load(sourcePdf); } catch { throw invalid('The PDF could not be read. Upload the original, unencrypted form.'); }

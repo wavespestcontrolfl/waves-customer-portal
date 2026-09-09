@@ -162,6 +162,11 @@ describe('required bid form price mapping', () => {
     expect(result.total).toBe(321.32);
     expect(Object.values(result.amounts).reduce((sum, value) => sum + value, 0)).toBeCloseTo(321.32, 2);
   });
+  test('refuses to export a bid whose fixed validity date has passed', async () => {
+    const pdf = await PDFDocument.create(); pdf.addPage([612, 792]);
+    await expect(buildProposalBidForm({ estimate: estimate(lines, { validThrough: '2020-01-01' }), sourcePdf: Buffer.from(await pdf.save()), template: 'cove_termite', pageNumber: 1, mapping: { product: 'apartments', apply: 'clubhouse', freight: 'garages' } }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/validity date has passed/) });
+  });
   test('refuses a PDF with the wrong layout even when prices and page size are valid', async () => {
     const pdf = await PDFDocument.create(); const page = pdf.addPage([612, 792]); page.drawText('Synthetic wrong form');
     await expect(buildProposalBidForm({ estimate: estimate(lines), sourcePdf: Buffer.from(await pdf.save()), template: 'north_port_pr27_02', pageNumber: 1, mapping })).rejects.toThrow(/does not match/);
