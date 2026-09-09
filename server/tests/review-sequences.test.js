@@ -4697,6 +4697,25 @@ describe('legacy follow-up delivery spacing', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('a lost accepted-delivery stamp stays durably handled and reports reconciliation needed', async () => {
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_delivered_at) throw new Error('delivery stamp unavailable');
+    } });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, unrecordedDeliveries: 1 });
+    expect(request.followup_sent).toBe(true);
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a definite retryable refusal reopens the reserved follow-up', async () => {
+    const { request } = setup();
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_RETRY' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(request.followup_sent).toBe(false);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+  });
+
   test('another worker cannot send the follow-up during provider dispatch', async () => {
     setup();
     let entered, finish;
