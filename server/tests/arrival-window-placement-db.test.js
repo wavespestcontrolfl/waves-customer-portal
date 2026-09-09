@@ -82,6 +82,11 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       }
       const offers = await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' });
       expect(offers.slots.length).toBeGreaterThan(0);
+      expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control', bufferMinutes: 15 })).slots).toEqual(offers.slots);
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      const moving = await findAvailableSlots({ ...OPTIONS, arrivalWindow: undefined });
+      expect(moving.slots.length).toBeGreaterThan(0);
+      expect(moving.slots.every(slot => slot.route_arrivals.every(row => row.id !== TARGET))).toBe(true);
       expect(offers.slots.every(slot => /^\d{2}:00$/.test(slot.start_time) && slot.start_time <= '16:00')).toBe(true);
       expect(offers.slots.every(slot => slot.travel_source === 'conservative_model')).toBe(true);
       await mockConn('tech_schedule_blocks').insert({ date: DAY, technician_id: TECH, block_type: 'unavailable', start_time: '08:00', end_time: '18:00' });

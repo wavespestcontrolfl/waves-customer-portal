@@ -90,14 +90,15 @@ async function loadArrivalRouteContext({
     .select('id', 'start_time', 'end_time', 'updated_at') : [];
   // A series mover's exclusion list names planned source rows, including
   // siblings it may already have placed on this destination. Count them in
-  // live capacity. Complete visit members are excluded below only when their
+  // live capacity. Prospective replacement callers still exclude their source.
+  // Complete visit members are excluded below only when their
   // total work is represented by the moving group.
   const capacity = capacityEnabled() || preserveCapacity;
   for (const row of [...rows, target]) {
     const patch = routeOrderChanges.find(change => String(change.id) === String(row.id));
     if (patch) row.route_order = patch.routeOrder;
   }
-  const excluded = new Set([serviceId, ...(capacity ? [] : excludeServiceIds)].map(String));
+  const excluded = new Set([serviceId, ...(capacity && !prospective ? [] : excludeServiceIds)].map(String));
   // Grouped work needs the unit mover's complete duration/placement. Do not
   // certify a partial group by excluding siblings from the simulated route.
   let grouped = !!target.visit_id && !!(await conn('scheduled_services')

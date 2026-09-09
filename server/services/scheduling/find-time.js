@@ -148,6 +148,7 @@ async function findCapacitySlots(opts) {
         if (!placementFitsShift(start, start + durationMinutes)) continue;
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
+          // Owner policy: ordinary setup/closeout is already in the on-site allowance.
           durationMinutes, bufferMinutes: 0,
         } });
       }
