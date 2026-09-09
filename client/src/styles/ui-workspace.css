@@ -85,7 +85,7 @@
 @media (max-width: 767px) { .ui-record-title { font-size: 23px; } }
 .ui-action-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 14px; line-height: 1.55; }
 .ui-table { font-size: var(--ui-body-size, 14px); }
-.ui-table-heading { height: 48px; padding: 8px 12px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+.ui-table-heading { box-sizing: border-box; height: 48px; padding: 8px 12px; font-size: 14px; font-weight: 500; text-transform: none; letter-spacing: 0; }
 .ui-table-cell { padding: 20px 12px; vertical-align: top; line-height: 1.6; overflow-wrap: anywhere; }
 [data-ui-density="compact"] .ui-table-cell { padding-top: 12px; padding-bottom: 12px; }
 .ui-tab-navigation { display: flex; min-width: 0; width: 100%; }
