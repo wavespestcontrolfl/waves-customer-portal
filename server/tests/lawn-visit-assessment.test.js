@@ -441,6 +441,10 @@ describe('technician notes never reach customer copy', () => {
     expect(visit.echoesTechnicianNotes("Thinning near the gate, as Kowalski's note says.", 'Kowalski says the dog digs there')).toBe(true);
     expect(visit.echoesTechnicianNotes('Chinch damage along the drive; the back yard was checked.', 'Chinch damage by the drive. Checked the back yard. Dog digs.')).toBe(false);
     expect(visit.echoesTechnicianNotes('Thin turf near the mailbox.', 'Mailbox side is thin. Nothing else.')).toBe(false);
+    // A surname that is also lawn vocabulary is a name when it is the note's subject ("Brown reports …", "Green's dog").
+    expect(visit.echoesTechnicianNotes('Brown reports damage near the gate.', 'Brown reports damage near the gate')).toBe(true);
+    expect(visit.echoesTechnicianNotes("The dog is Green's; brown patch by the drive.", "Green's dog digs. Brown patch by the drive.")).toBe(true);
+    expect(visit.echoesTechnicianNotes('Brown patches near the drive.', 'Brown patches by the drive. Green strip is fine.')).toBe(false);
     expect(visit.echoesTechnicianNotes('Turf is thin near the side gate.', '')).toBe(false);
     expect(visit.echoesTechnicianNotes('', notes)).toBe(false);
     const analysis = visit.normalizeAssessment(answer({ observations: "Mrs. Kowalski's dog has worn a path by the gate.", findings: [finding({ confirmation_step: 'Ask Mrs. Kowalski when the dog is out' }), finding({ name: 'Dollar spot', confirmation_step: 'Check the shaded strip at dawn' })] }), 2);
@@ -494,7 +498,7 @@ describe('customer copy compliance screen', () => {
     expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(/^Nutsedge/);
     expect(visit.customerObservations('Weed pressure along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toMatch(/^Weed pressure/);
     // Every weed species the label mapper recognises is governed the same way.
-    for (const species of ['Clover', 'Spurge', 'Sedge', 'Crabgrass', 'Dollarweed']) {
+    for (const species of ['Clover', 'Clovers', 'Spurge', 'Spurges', 'Sedge', 'Sedges', 'Crabgrass', 'Dollarweed']) {
       expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ label: 'weed pressure', confidence: 'low' }])).toBe(visit.NO_OBSERVATIONS);
       expect(visit.customerObservations(`${species} is spreading along the walk.`, [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(new RegExp(`^${species}`));
     }
@@ -771,6 +775,9 @@ describe('technician review on confirm', () => {
     const { review } = visit.validateReview({ addedDetails: [{ text: 'Checked for chinch bugs; none found', zone: 'front' }, { text: 'Float test negative for chinch at the drive' }, { text: 'Chinch confirmed by float test' }, { text: 'No dollar spot seen' }] }, run);
     const built = visit.buildReview(run, review);
     expect(built.added_details.map((d) => [d.finding_id, d.label, d.negated])).toEqual([['T1', 'no major visible stress', true], ['T2', 'no major visible stress', true], ['T3', 'chinch bug activity', false], ['T4', 'no major visible stress', true]]);
+    // Negation is scoped to its clause: a detail that rules one cause out and confirms another names the confirmed one.
+    const mixed = visit.buildReview(run, visit.validateReview({ addedDetails: [{ text: 'No signs of drought; chinch bugs confirmed by float test' }, { text: 'Checked for grubs, none found, but dollar spot is active in the shade' }, { text: 'Chinch ruled out and no drought either' }] }, run).review);
+    expect(mixed.added_details.map((d) => [d.label, d.negated])).toEqual([['chinch bug activity', false], ['dollar spot', false], ['no major visible stress', true]]);
     expect(built.added_details[0].name).toBe('Checked for chinch bugs; none found'); // the technician's record is kept verbatim
     const rec = built.reconciliation;
     expect(rec.flags.filter((f) => f.type === 'untreated_condition').map((f) => f.finding_id)).toEqual(['F1', 'F2', 'T3']);
@@ -835,9 +842,26 @@ describe('confirm scores preserve NULLs', () => {
     expect(Object.values(noBaseline.aiScores).every((value) => value == null)).toBe(true);
   });
 
-  test('the AI stress floor still bounds the derivation when it exists', () => {
-    const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 75, thatch_level: 85, stress_damage: 50 };
-    expect(visit.resolveConfirmScores(assessment, {}, scoreValue).stress_damage).toBe(50);
+  test('the stress floor is the run\'s independent stressors: a corrected fungus or thatch re-derives stress, the stored AI stress is not a permanent floor', () => {
+    const assessment = { turf_density: 70, weed_suppression: 80, color_health: 70, fungus_control: 20, thatch_level: 85, stress_damage: 20 };
+    // No run (legacy fallback): the stored value still bounds the derivation.
+    expect(visit.resolveConfirmScores(assessment, {}, scoreValue).stress_damage).toBe(20);
+    expect(visit.resolveConfirmScores(assessment, { fungus_control: 90 }, scoreValue).stress_damage).toBe(20);
+    // A run whose independent stressors are unknown: fungus was the sole source of the AI stress, so raising it raises stress.
+    const quiet = { status: 'complete', scores_raw: '{}', severities: JSON.stringify({ fungal_activity: sig('severe'), insect_damage: sig('unknown', 'unknown', ''), drought_stress: sig('unknown', 'unknown', ''), mechanical_damage: sig('none') }) };
+    expect(visit.independentStressFloor(quiet)).toBe(visit.independentStressFloor({ severities: JSON.stringify({ mechanical_damage: sig('none') }) }));
+    const corrected = visit.confirmScores(assessment, quiet, { fungus_control: 90 }, { scoreValue, calculateOverallScore: () => 77 });
+    expect(corrected.finalScores).toMatchObject({ fungus_control: 90, thatch_level: 85 });
+    expect(corrected.finalScores.stress_damage).toBe(Math.min(85, visit.independentStressFloor(quiet)));
+    // An independent stressor the technician cannot correct through fungus / thatch still floors it.
+    const insects = { ...quiet, severities: JSON.stringify({ fungal_activity: sig('severe'), insect_damage: sig('moderate'), drought_stress: sig('unknown', 'unknown', '') }) };
+    expect(visit.independentStressFloor(insects)).toBe(50);
+    expect(visit.confirmScores(assessment, insects, { fungus_control: 90 }, { scoreValue, calculateOverallScore: () => 77 }).finalScores.stress_damage).toBe(50);
+    // An explicit correction always wins.
+    expect(visit.confirmScores(assessment, insects, { stress_damage: 95 }, { scoreValue, calculateOverallScore: () => 77 }).finalScores.stress_damage).toBe(95);
+    // A run that rated no independent stressor: stress is the worst of the corrected components alone.
+    expect(visit.independentStressFloor({ status: 'complete', severities: JSON.stringify({ fungal_activity: sig('minor') }) })).toBeNull();
+    expect(visit.confirmScores(assessment, { status: 'complete', scores_raw: '{}', severities: JSON.stringify({ fungal_activity: sig('minor') }) }, { fungus_control: 90 }, { scoreValue, calculateOverallScore: () => 77 }).finalScores.stress_damage).toBe(85);
     expect(visit.scoresComplete(visit.resolveConfirmScores(assessment, {}, scoreValue))).toBe(true);
   });
 });
