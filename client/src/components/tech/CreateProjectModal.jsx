@@ -1851,6 +1851,8 @@ export default function CreateProjectModal({
         display: 'flex', flexDirection: 'column',
         overflow: 'hidden',
         paddingTop: 'env(safe-area-inset-top, 0px)',
+        paddingLeft: 'env(safe-area-inset-left, 0px)',
+        paddingRight: 'env(safe-area-inset-right, 0px)',
         boxSizing: 'border-box',
       } : {
         width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
@@ -2660,11 +2662,7 @@ export default function CreateProjectModal({
             </>
           )}
 
-          {error && (
-            <div style={{ padding: '8px 12px', background: `${P.red}22`, border: `1px solid ${P.red}`, borderRadius: 8, color: P.red, fontSize: 13 }}>
-              {error}
-            </div>
-          )}
+
 
           {saving && uploadProgress.total > 0 && (
             <div style={{ fontSize: 12, color: P.muted }}>
@@ -2678,9 +2676,14 @@ export default function CreateProjectModal({
           padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
           borderTop: `1px solid ${P.border}`,
           background: P.card,
-          display: 'flex', gap: 10, justifyContent: 'flex-end',
+          display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'flex-end',
           ...(isFullHeight ? { flexShrink: 0, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
         }}>
+          {error && (
+            <div role="alert" style={{ flexBasis: '100%', boxSizing: 'border-box', padding: '8px 12px', background: `${P.red}22`, border: `1px solid ${P.red}`, borderRadius: 8, color: P.red, fontSize: 13 }}>
+              {error}
+            </div>
+          )}
           <button
             type="button"
             onClick={() => !saving && onClose?.()}

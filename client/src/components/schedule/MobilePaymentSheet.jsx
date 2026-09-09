@@ -125,7 +125,7 @@ export default function MobilePaymentSheet({
 
   return createPortal(
     <>
-      <div className={`fixed inset-0 z-[110] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
+      <div className={`fixed inset-0 z-[110] bg-white overflow-y-auto overscroll-contain ${desktopVisible ? '' : 'md:hidden'}`}>
         {/* Header */}
         <div
           className="box-border sticky top-0 z-[1] shrink-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"

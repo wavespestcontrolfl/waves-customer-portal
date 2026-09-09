@@ -348,6 +348,8 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           </label>
         )}
 
+        </DialogBody>
+        <DialogFooter className="flex-col items-stretch">
         {receiptNote && (
           <div
             className="border border-hairline border-zinc-200 rounded-lg bg-zinc-50 text-ink-secondary"
@@ -359,6 +361,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
         {error && (
           <div
+            role="alert"
             className="text-alert-fg"
             style={{ fontSize: 13, marginBottom: 12 }}
           >
@@ -366,8 +369,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           </div>
         )}
 
-        </DialogBody>
-        <DialogFooter>
+
         <button
           type="button"
           onClick={savedWithNote ? dismiss : handleSave}

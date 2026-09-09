@@ -2159,9 +2159,10 @@ function AiDraftModal({ initialNewsletterType, initialPrompt, onClose, onDraft }
           />
           Include a call to action at the end
         </label>
-        {err && <div className="text-12 text-alert-fg">{err}</div>}
+
         </DialogBody>
-        <DialogFooter>
+        <DialogFooter className="flex-wrap">
+        {err && <div role="alert" className="basis-full text-12 text-alert-fg">{err}</div>}
           {" "}
           <Button onClick={onClose} variant="secondary" disabled={loading}>
             Cancel

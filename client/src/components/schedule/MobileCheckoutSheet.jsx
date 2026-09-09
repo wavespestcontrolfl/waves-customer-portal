@@ -323,18 +323,19 @@ export default function MobileCheckoutSheet({
                 ? 'No charge — complete from job'
                 : `Charge $${total.toFixed(2)}`}
         </button>
+        {mintError && (
+          <div role="alert" className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
+            {mintError}
+          </div>
+        )}
       </div>
-      <div className="box-border min-h-0 flex-1 overflow-y-auto w-full px-4 pb-10 mx-auto" style={{ maxWidth: 560, paddingBottom: "calc(40px + env(safe-area-inset-bottom, 0px))" }}>
+      <div className="box-border min-h-0 flex-1 overflow-y-auto overscroll-contain w-full px-4 pb-10 mx-auto" style={{ maxWidth: 560, paddingBottom: "calc(40px + env(safe-area-inset-bottom, 0px))" }}>
         {cardOnFileNote && (
           <div className="text-center text-ink-tertiary" style={{ fontSize: 13, marginTop: 8 }}>
             {cardOnFileNote}
           </div>
         )}
-        {mintError && (
-          <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
-            {mintError}
-          </div>
-        )}
+
         {/* Service line items */}
         <div className="mt-6">
           {invoicePreview ? (

@@ -49,7 +49,7 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
 
   return createPortal(
     <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Flag Opportunity" style={{
-      position: 'fixed', inset: 0, zIndex: 9999, fontFamily: 'Inter, system-ui, sans-serif',
+      position: 'fixed', inset: 0, zIndex: 9999, fontFamily: '"DM Sans", Inter, system-ui, sans-serif',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       background: 'rgba(0,0,0,0.5)',
     }} onClick={onClose}>
@@ -122,10 +122,10 @@ export default function FieldLeadModal({ service, onClose, onSubmit }) {
               ))}
             </div>
 
-            {error && <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 12 }}>{error}</div>}
 
             </div>
             <div style={{ flexShrink: 0, padding: '14px 24px 24px' }}>
+            {error && <div role="alert" style={{ color: '#ef4444', fontSize: 13, marginBottom: 12 }}>{error}</div>}
             <button
               onClick={handleSubmit} disabled={submitting}
               style={{

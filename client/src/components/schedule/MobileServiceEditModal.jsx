@@ -143,7 +143,7 @@ export default function MobileServiceEditModal({
   if (!service) return null;
 
   return createPortal(
-    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
+    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto overscroll-contain ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header: X + title + Save */}
       <div
         className="box-border sticky top-0 z-[1] shrink-0 bg-white border-b border-hairline border-zinc-200 flex items-center"

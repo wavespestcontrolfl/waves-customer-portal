@@ -611,13 +611,11 @@ export default function ServiceRecapModal({
               </div>
             )}
 
-            {error && (
-              <div style={{ color: P.red, fontSize: 13, marginTop: 10 }}>{error}</div>
-            )}
 
           </div>
             {/* Footer */}
-            <div style={{ display: 'flex', flexShrink: 0, gap: 10, padding: '12px 18px 18px', borderTop: `1px solid ${P.border}` }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', flexShrink: 0, gap: 10, padding: '12px 18px 18px', borderTop: `1px solid ${P.border}` }}>
+              {error && <div role="alert" style={{ flexBasis: '100%', color: P.red, fontSize: 13 }}>{error}</div>}
               <button
                 type="button"
                 onClick={onClose}
