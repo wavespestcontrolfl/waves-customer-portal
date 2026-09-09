@@ -140,6 +140,20 @@ run('callback ledger on PostgreSQL', () => {
     expect((await trx('notifications').where({ id: bell.id }).first()).read_at).toBeNull();
   });
 
+  test.each(['claim', 'snooze', 'release'])('%s on an AI callback records the review, so a later extraction cannot withdraw it', async (action) => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    const acted = await cards.actOnCallback(trx, row.id, { action, actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
+    expect(acted.human_state).toBe('confirmed');
+    expect(acted.reviewed_by).toBe(staff.id);
+    expect(acted.updated_at).toEqual(now);
+    await trx('call_commitments').insert({ call_log_id: row.call_log_id, commitment_key: 'waves:send_report',
+      party: 'waves', kind: 'send_report', description: 'Newer extraction', source: 'ai', last_seen_generation: 2 });
+    const live = await ledger.listOpenCommitments(trx, { kind: 'callback', now: new Date(now.getTime() + 3 * 3600000) });
+    expect(live.map((r) => r.id)).toContain(row.id);
+  });
+
   test.each(['confirm', 'edit', 'claim'])('a newer extraction rejects a stale %s action without reviving the callback', async (action) => {
     const row = await seed({ source: 'ai', last_seen_generation: 1 });
     await trx('call_commitments').insert({ call_log_id: row.call_log_id, commitment_key: 'waves:send_report',

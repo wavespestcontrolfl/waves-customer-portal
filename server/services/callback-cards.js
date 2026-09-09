@@ -136,6 +136,13 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     if (action === 'claim') patch.assigned_to = actorId;
     if (action === 'release') patch.assigned_to = null;
     if (action === 'snooze') patch.snoozed_until = until;
+    // Claiming, releasing or snoozing an AI callback is the office vouching
+    // for it: record the review through the ledger's own confirm action so
+    // a later extraction that omits the callback cannot withdraw work staff
+    // already took on (staleAiRowSql keeps human-reviewed rows live).
+    if (['claim', 'release', 'snooze'].includes(action) && row.human_state == null) {
+      await require('./call-commitments').applyHumanUpdate(trx, id, { action: 'confirm', reviewedBy: actorId });
+    }
     if (['fulfill', 'dismiss', 'reopen', 'confirm', 'edit'].includes(action)) {
       const changed = await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, description, due_at, note });
       if (action === 'edit' && due_at !== undefined && changed.due_at == null) patch.callback_due_at = null;
