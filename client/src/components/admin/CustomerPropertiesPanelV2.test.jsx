@@ -32,6 +32,7 @@ describe('CustomerPropertiesPanelV2', () => {
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit onChanged={onChanged} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
     expect(await screen.findByText('Keeps existing invoice addresses.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toHaveStyle({ zIndex: 1100 });
     expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Confirm primary property' }));
     await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());

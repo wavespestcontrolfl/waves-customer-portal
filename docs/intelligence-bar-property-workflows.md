@@ -170,3 +170,12 @@ routes remain unavailable; there are no IB or property failures, JavaScript
 exceptions or horizontal overflow. The model is scripted and physical iOS
 keyboard/notch behavior remains unverified. Final GitHub Codex review is
 pending its shared usage-limit reset; this remains a development-only draft.
+
+The latest review corrections also cover a legacy account selecting its own
+saved, non-primary address row, and completed visits already linked to the old
+primary but missing their service-address stamp. Existing stamps and visits at
+other properties remain untouched. The primary confirmation uses the Dialog's
+layer prop so it stays above the Customer 360 overlay. Verification passes all
+15 isolated PostgreSQL cases, 28 property unit tests and 16 panel tests. Chrome
+at 1440 and 390 pixels confirms the dialog is visible and clickable over the
+profile, with loaded fonts, no JavaScript exceptions and no horizontal overflow.
