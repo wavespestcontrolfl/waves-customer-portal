@@ -105,6 +105,39 @@ describe('CustomersPageV2 workflow state', () => {
     expect(requests.at(-1).has('healthRisk')).toBe(false);
   });
 
+  it('retains an edit through workspace navigation and a failed save without creating a membership', async () => {
+    const writes = [];
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (options.method === 'PUT') {
+        writes.push({ path: parsed.pathname, body: JSON.parse(options.body) });
+        return writes.length === 1 ? response({ error: 'Try again' }, 500) : response({ success: true });
+      }
+      return response(parsed.pathname === '/api/admin/customers' ? list : {});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getByLabelText('Actions for Avery Customer'));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    fireEvent.change(screen.getByDisplayValue('Avery'), { target: { value: 'Edited name' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    expect(screen.getByDisplayValue('Edited name')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith('Save failed: Try again'));
+    expect(screen.getByDisplayValue('Edited name')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Save', exact: true }));
+    await waitFor(() => expect(screen.queryByDisplayValue('Edited name')).not.toBeInTheDocument());
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual(writes[0]);
+    expect(writes[0]).toMatchObject({
+      path: '/api/admin/customers/customer-a',
+      body: { firstName: 'Edited name', tier: null, serviceContactEmail: '' },
+    });
+    alert.mockRestore();
+  });
+
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {
@@ -235,14 +268,14 @@ describe('CustomersPageV2 workflow state', () => {
     });
   });
 
-  it('returns to the filtered directory and preserves the workspace opt-in when switching customers', async () => {
+  it.each(['/admin/customers', '/admin/customers?customer360=workspace'])('returns to the filtered directory when switching customers from %s', async (entry) => {
     const workspaceList = { ...list, customers: [...list.customers, { ...list.customers[0], id: 'customer-b', firstName: 'Blake' }], total: 2 };
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.includes('/admin/customers?')) return response(workspaceList);
       return response({});
     }));
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={[entry]}><CustomersPageV2 /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     expect(screen.getAllByRole('link', { name: '10 Palm Ave, Unit 4, Naples FL 34102' })).toHaveLength(2);
     const search = screen.getByPlaceholderText('Search customers...');

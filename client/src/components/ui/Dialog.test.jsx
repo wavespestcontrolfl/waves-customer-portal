@@ -25,6 +25,42 @@ function Harness() {
 }
 
 describe('Dialog keyboard accessibility', () => {
+  it('contains focus while a pending fieldset disables every control', async () => {
+    render(<Dialog open onClose={() => {}} aria-label="Saving visit"><fieldset disabled><input aria-label="Visit note" /><button>Complete</button></fieldset></Dialog>);
+    const dialog = screen.getByRole('dialog', { name: 'Saving visit' });
+    const panel = dialog.querySelector('[tabindex="-1"]');
+    await waitFor(() => expect(panel).toHaveFocus());
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    document.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(panel).toHaveFocus();
+  });
+  it('uses the actual title ID and follows conditional titles and custom-ID changes', () => {
+    const content = (id, showTitle = true) => (
+      <Dialog open onClose={() => {}} aria-label={showTitle ? undefined : 'Edit customer'}>
+        {showTitle && <DialogTitle id={id}>Edit customer</DialogTitle>}
+      </Dialog>
+    );
+    const { rerender } = render(content('customer-edit-title'));
+    for (const id of ['customer-edit-title', 'replacement-title', undefined]) {
+      rerender(content(id));
+      const dialog = screen.getByRole('dialog', { name: 'Edit customer' });
+      const tokens = dialog.getAttribute('aria-labelledby').split(/\s+/);
+      expect(tokens).toHaveLength(1);
+      expect(document.getElementById(tokens[0])).toBe(screen.getByRole('heading', { name: 'Edit customer' }));
+      if (id) expect(tokens[0]).toBe(id);
+    }
+    rerender(content('customer-edit-title', false));
+    expect(screen.getByRole('dialog', { name: 'Edit customer' })).not.toHaveAttribute('aria-labelledby');
+    rerender(content('customer-edit-title'));
+    expect(screen.getByRole('dialog', { name: 'Edit customer' })).toHaveAttribute('aria-labelledby', 'customer-edit-title');
+  });
+
+  it('preserves an explicit label when a custom title is also present', () => {
+    render(<Dialog open onClose={() => {}} aria-label="Customer action"><DialogTitle id="visible-title">Edit</DialogTitle></Dialog>);
+    expect(screen.getByRole('dialog', { name: 'Customer action' })).not.toHaveAttribute('aria-labelledby');
+  });
+
   it('names the dialog, contains Tab focus, closes on Escape, and restores focus', async () => {
     render(<Harness />);
     const trigger = screen.getByRole('button', { name: 'Open filters' });

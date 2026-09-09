@@ -53,6 +53,7 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
 import useIsMobile from "../../hooks/useIsMobile";
+import useCustomerEditor from "./useCustomerEditor";
 import {
   CUSTOMER_TAG_OPTIONS,
   LEAD_SOURCE_OPTIONS,
@@ -61,7 +62,7 @@ import {
 } from "../../lib/customerFormOptions";
 import CustomerHealthGrade from "../../components/admin/CustomerHealthGrade";
 import CustomerHealthFilters from "../../components/admin/CustomerHealthFilters";
-import {
+import { Select, Textarea,
   Button,
   Badge,
   Card,
@@ -72,6 +73,9 @@ import {
   DialogBody,
   DialogFooter,
   Input,
+  inputStyles,
+  UiSurface,
+  useUiDensity,
   cn,
 } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
@@ -130,13 +134,13 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 
   if (loadError) {
     return (
-      <div className="p-6 text-13 text-alert-fg">
+      <div className="p-6 text-ui-body text-alert-fg">
         Could not load this panel: {loadError.message}
       </div>
     );
   }
   if (!Component) {
-    return <div className="p-6 text-13 text-ink-tertiary">Loading...</div>;
+    return <div className="p-6 text-ui-body text-ink-tertiary">Loading...</div>;
   }
   return <Component {...props} />;
 }
@@ -145,7 +149,7 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 // render neutral. No-plan ("Bronze" default with no services) renders as
 // plain text to de-emphasize.
 function TierBadgeV2({ tier }) {
-  if (!tier) return <span className="text-11 text-ink-tertiary">—</span>;
+  if (!tier) return <span className="text-ui-caption text-ink-tertiary">—</span>;
   return <Badge tone="neutral">{tier}</Badge>;
 }
 
@@ -192,11 +196,11 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
       {" "}
       <div className="flex justify-between items-start mb-1">
         {" "}
-        <div className="text-13 font-medium text-ink-primary tracking-tight">
+        <div className="text-ui-body font-medium text-ink-primary tracking-tight">
           {customer.firstName} {customer.lastName}
         </div>
         {canDelete && (
-          <button
+          <button data-ui-text-action
             onClick={(e) => {
               e.stopPropagation();
               setConfirming(!confirming);
@@ -211,7 +215,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
       {confirming && (
         <div className="bg-alert-bg border border-hairline border-alert-fg/30 rounded p-2 mb-2">
           {" "}
-          <div className="text-12 text-alert-fg mb-2">
+          <div className="text-ui-label text-alert-fg mb-2">
             Delete {customer.firstName} {customer.lastName}?
           </div>{" "}
           <div className="flex gap-1.5">
@@ -253,7 +257,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
         </div>
       )}
       {addressLine && (
-        <div className="text-12 text-ink-tertiary mb-2 truncate">
+        <div className="text-ui-label text-ink-tertiary mb-2 truncate">
           {addressLine}
         </div>
       )}
@@ -262,13 +266,13 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
         <CustomerHealthGrade score={customer.leadScore} label="Lead score" />
         {tier && <TierBadgeV2 tier={tier} />}
         {customer.monthlyRate > 0 && (
-          <span className="font-mono u-nums text-12 text-ink-primary">
+          <span className="font-mono u-nums text-ui-label text-ink-primary">
             ${customer.monthlyRate}/mo
           </span>
         )}
       </div>
       {daysInStage != null && (
-        <div className="text-11 text-ink-tertiary u-label mt-1.5">
+        <div className="text-ui-caption text-ink-tertiary ui-label mt-1.5">
           {daysInStage === 0 ? "Today" : `${daysInStage}d in stage`}
         </div>
       )}
@@ -304,27 +308,27 @@ function PipelineColumnV2({
           {" "}
           <div className="flex items-center gap-2">
             {" "}
-            <span className="text-13 font-medium text-ink-primary">
+            <span className="text-ui-body font-medium text-ink-primary">
               {stage.label}
             </span>
             {isAlertStage && (
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-alert-fg" />
             )}
           </div>{" "}
-          <div className="text-11 font-mono u-nums text-ink-tertiary mt-0.5">
+          <div className="text-ui-caption font-mono u-nums text-ink-tertiary mt-0.5">
             {customers.length}{" "}
             {customers.length === 1 ? "customer" : "customers"}
           </div>{" "}
         </div>
         {monthlyTotal > 0 && (
-          <span className="font-mono u-nums text-12 text-ink-primary font-medium">
+          <span className="font-mono u-nums text-ui-label text-ink-primary font-medium">
             ${monthlyTotal.toLocaleString()}/mo
           </span>
         )}
       </div>{" "}
       <div className="p-2 overflow-y-auto flex-1">
         {customers.length === 0 ? (
-          <div className="text-ink-tertiary text-12 text-center py-5">
+          <div className="text-ink-tertiary text-ui-label text-center py-5">
             No customers
           </div>
         ) : (
@@ -409,6 +413,7 @@ function QuickAddModalV2({
   initialValues = null,
   title = "Add customer",
 }) {
+  const density = useUiDensity();
   const formId = useId();
   const [form, setForm] = useState(() =>
     normalizeQuickAddInitialValues(initialValues),
@@ -516,9 +521,9 @@ function QuickAddModalV2({
   };
 
   const INPUT_CLS =
-    "block w-full bg-white text-13 text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 " +
+    "block w-full bg-white text-ui-body text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 " +
     "focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900";
-  const LABEL_CLS = "block u-label text-zinc-900 mb-1";
+  const LABEL_CLS = "block ui-label text-zinc-900 mb-1";
   const FORM_FONT = { fontFamily: "Roboto, Arial, sans-serif" };
 
   return (
@@ -537,7 +542,7 @@ function QuickAddModalV2({
               className="rounded-sm border-hairline border-zinc-300 bg-zinc-50 p-3 flex flex-col gap-2"
               role="status"
             >
-              <div className="text-13 text-zinc-900">
+              <div className="text-ui-body text-zinc-900">
                 This phone belongs to{" "}
                 <strong>{phoneMatch.match?.name || "an existing customer"}</strong>
                 {phoneMatch.match?.address
@@ -596,7 +601,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-firstName`} className={LABEL_CLS}>First name *</label>{" "}
-              <input
+              <Input
                 id={`${formId}-firstName`}
                 value={form.firstName}
                 onChange={(e) => set("firstName", e.target.value)}
@@ -607,7 +612,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-lastName`} className={LABEL_CLS}>Last name</label>{" "}
-              <input
+              <Input
                 id={`${formId}-lastName`}
                 value={form.lastName}
                 onChange={(e) => set("lastName", e.target.value)}
@@ -620,7 +625,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-phone`} className={LABEL_CLS}>Phone *</label>{" "}
-              <input
+              <Input
                 id={`${formId}-phone`}
                 value={form.phone}
                 onChange={(e) => set("phone", e.target.value)}
@@ -632,7 +637,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-email`} className={LABEL_CLS}>Email</label>{" "}
-              <input
+              <Input
                 type="email"
                 id={`${formId}-email`}
                 value={form.email}
@@ -659,13 +664,13 @@ function QuickAddModalV2({
                   zip: parts.zip || p.zip,
                 }));
               }}
-              className={INPUT_CLS}
+              className={inputStyles({ density, className: INPUT_CLS })}
               style={{ height: 36 }}
             />{" "}
           </div>{" "}
           <div>
             <label htmlFor={`${formId}-addressLine2`} className={LABEL_CLS}>Address line 2</label>
-            <input
+            <Input
               id={`${formId}-addressLine2`}
               value={form.addressLine2}
               onChange={(e) => set("addressLine2", e.target.value)}
@@ -679,7 +684,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-city`} className={LABEL_CLS}>City</label>{" "}
-              <input
+              <Input
                 id={`${formId}-city`}
                 value={form.city}
                 onChange={(e) => set("city", e.target.value)}
@@ -689,7 +694,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-state`} className={LABEL_CLS}>State</label>{" "}
-              <input
+              <Input
                 id={`${formId}-state`}
                 value={form.state}
                 onChange={(e) =>
@@ -701,7 +706,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-zip`} className={LABEL_CLS}>ZIP</label>{" "}
-              <input
+              <Input
                 id={`${formId}-zip`}
                 value={form.zip}
                 onChange={(e) => set("zip", e.target.value)}
@@ -713,7 +718,7 @@ function QuickAddModalV2({
           <div>
             {" "}
             <label htmlFor={`${formId}-profileLabel`} className={LABEL_CLS}>Property label</label>{" "}
-            <select
+            <Select
               id={`${formId}-profileLabel`}
               value={form.profileLabel}
               onChange={(e) => set("profileLabel", e.target.value)}
@@ -724,9 +729,9 @@ function QuickAddModalV2({
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
             {form.profileLabel === "__custom__" && (
-              <input
+              <Input
                 aria-label="Custom property label"
                 value={form.customProfileLabel}
                 onChange={(e) => set("customProfileLabel", e.target.value)}
@@ -740,7 +745,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-leadSource`} className={LABEL_CLS}>Lead source</label>{" "}
-              <select
+              <Select
                 id={`${formId}-leadSource`}
                 value={form.leadSource}
                 onChange={(e) => set("leadSource", e.target.value)}
@@ -751,12 +756,12 @@ function QuickAddModalV2({
                     {s.replace(/_/g, " ")}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
             <div>
               {" "}
               <label htmlFor={`${formId}-pipelineStage`} className={LABEL_CLS}>Pipeline stage</label>{" "}
-              <select
+              <Select
                 id={`${formId}-pipelineStage`}
                 value={form.pipelineStage}
                 onChange={(e) => set("pipelineStage", e.target.value)}
@@ -767,7 +772,7 @@ function QuickAddModalV2({
                     {s.label}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
           </div>{" "}
           <div>
@@ -775,7 +780,7 @@ function QuickAddModalV2({
             <label htmlFor={`${formId}-tags`} className={LABEL_CLS}>Tags</label>{" "}
             <div className="flex gap-2">
               {" "}
-              <select
+              <Select
                 id={`${formId}-tags`}
                 value=""
                 onChange={(e) => addTag(e.target.value)}
@@ -788,8 +793,8 @@ function QuickAddModalV2({
                     {option.label}
                   </option>
                 ))}
-              </select>{" "}
-              <input
+              </Select>{" "}
+              <Input
                 aria-label="Custom tag"
                 value={form.customTag}
                 onChange={(e) => set("customTag", e.target.value)}
@@ -807,11 +812,11 @@ function QuickAddModalV2({
             {selectedTags.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {selectedTags.map((tag) => (
-                  <button
+                  <button data-ui-text-action
                     key={tag}
                     type="button"
                     onClick={() => removeTag(tag)}
-                    className="inline-flex items-center h-6 px-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-11 text-ink-secondary hover:bg-zinc-100"
+                    className="inline-flex items-center h-6 px-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-ui-caption text-ink-secondary hover:bg-zinc-100"
                     title="Remove tag"
                   >
                     {tag.replace(/_/g, " ")} ×
@@ -823,7 +828,7 @@ function QuickAddModalV2({
           <div>
             {" "}
             <label htmlFor={`${formId}-notes`} className={LABEL_CLS}>Notes</label>{" "}
-            <textarea
+            <Textarea
               rows={3}
               id={`${formId}-notes`}
               value={form.notes}
@@ -862,18 +867,18 @@ function SortHeaderV2({
 }) {
   const active = currentSort === sortKey;
   return (
-    <button
+    <button data-ui-text-action
       type="button"
       onClick={() => onSort(sortKey)}
       style={{ fontWeight: 700 }}
       className={cn(
-        "inline-flex items-center gap-1 text-11 uppercase tracking-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none",
+        "inline-flex items-center gap-1 text-ui-caption ui-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none",
         className,
       )}
     >
       {label}
       {active && (
-        <span className="text-11">{currentDir === "asc" ? "↑" : "↓"}</span>
+        <span className="text-ui-caption">{currentDir === "asc" ? "↑" : "↓"}</span>
       )}
     </button>
   );
@@ -883,14 +888,16 @@ function SortHeaderV2({
 const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
-  { key: "intelligence", label: "Outreach & Upsells", Icon: Sparkles },
+  { key: "intelligence", label: "Opportunities", Icon: Sparkles },
 ];
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
+  const density = useUiDensity();
   const activeConfig = VIEWS.find((v) => v.key === view) || VIEWS[0];
 
   return (
     <AdminCommandHeader
+      variant={density === 'legacy' ? 'framed' : 'workspace'}
       title="Customers"
       icon={activeConfig.Icon}
       sections={VIEWS}
@@ -913,7 +920,7 @@ function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
 // --- Filter pill ---
 function FilterPill({ active, onClick, alert = false, children }) {
   return (
-    <button
+    <button data-ui-text-action
       type="button"
       onClick={onClick}
       aria-pressed={active}
@@ -983,6 +990,690 @@ async function callCustomer(customer) {
   }
 }
 
+const TABLE_COLS = "1.6fr 2fr 0.3fr 0.6fr 0.9fr";
+const NAME_SORT_KEYS = new Set(["name", "lastName", "firstName"]);
+const NUMBER_SORT_KEYS = new Set([
+  "leadScore",
+  "monthlyRate",
+  "lifetimeRevenue",
+]);
+
+function customerSortValue(customer, key) {
+  // First name only; missing names sort last, matching the server reader.
+  if (NAME_SORT_KEYS.has(key))
+    return (
+      String(customer.firstName || "")
+        .toLowerCase()
+        .trim() || "￿"
+    );
+  if (NUMBER_SORT_KEYS.has(key)) return customer[key] || 0;
+  if (key === "lastContactDate") return customer[key] || "";
+  return (customer[key] || "").toString().toLowerCase();
+}
+
+function CustomerDirectoryView({
+  view,
+  totalCustomers,
+  workspaceMode,
+  isMobile,
+  sortBy,
+  sortDir,
+  handleSort,
+  error,
+  loadCustomers,
+  filteredSorted,
+  openCustomerProfile,
+  startEdit,
+  handleDeleteCustomer,
+  isAdmin,
+  editingId,
+  customerEditor,
+  totalPages,
+  page,
+  setPage,
+}) {
+  return (
+    view === "directory" && (
+      <>
+        {" "}
+        <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
+          {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
+        </div>
+        {/* Desktop table header */}
+        {!workspaceMode && !isMobile && (
+          <div
+            className="grid gap-1.5 px-4 py-2.5 mb-1 text-ui-caption ui-label text-zinc-900"
+            style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
+          >
+            {" "}
+            <div className="flex justify-center">
+              {" "}
+              <SortHeaderV2
+                label="Name"
+                sortKey="lastName"
+                currentSort={sortBy}
+                currentDir={sortDir}
+                onSort={handleSort}
+              />{" "}
+            </div>{" "}
+            <div className="text-center">Address</div>{" "}
+            <div className="text-center">Score</div>{" "}
+            <div className="text-center">Next Svc</div> <div />{" "}
+          </div>
+        )}
+        {/* Rows */}
+        {error ? (
+          <Card>
+            <CardBody className="p-12 text-center">
+              <div className="text-14 text-alert-fg mb-2">
+                {isRateLimitError(error)
+                  ? "Too many requests"
+                  : "Failed to load customers"}
+              </div>
+              <div className="text-ui-body text-ink-tertiary mb-4">
+                {isRateLimitError(error)
+                  ? "Wait a few seconds and try again."
+                  : error?.message || String(error)}
+              </div>
+              <Button variant="primary" onClick={() => loadCustomers()}>
+                Retry
+              </Button>
+            </CardBody>
+          </Card>
+        ) : filteredSorted.length === 0 ? (
+          <Card>
+            {" "}
+            <CardBody className="p-12 text-center">
+              {" "}
+              <div className="text-14 text-ink-primary mb-1">
+                No customers found
+              </div>{" "}
+              <div className="text-ui-body text-ink-tertiary">
+                Try adjusting your filters or add a new customer
+              </div>{" "}
+            </CardBody>{" "}
+          </Card>
+        ) : workspaceMode ? (
+          <CustomerDirectoryTable
+            customers={filteredSorted.map((customer) => ({
+              ...customer,
+              address: formatCustomerAddress(customer.address),
+            }))}
+            onOpen={openCustomerProfile}
+            onEdit={startEdit}
+            onDelete={handleDeleteCustomer}
+            onCall={callCustomer}
+            canEdit={isAdmin}
+            sortBy={sortBy}
+            sortDir={sortDir}
+            onSort={handleSort}
+            editingId={editingId}
+            editor={customerEditor}
+          />
+        ) : (
+          filteredSorted.map((c) => {
+            return (
+              <div key={c.id} className="mb-2">
+                {isMobile ? (
+                  (() => {
+                    const addr = formatCustomerAddress(c.address);
+                    return (
+                      <div
+                        data-customer-id={c.id}
+                        className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3"
+                        style={{ height: 64 }}
+                      >
+                        {" "}
+                        <CustomerHealthGrade score={c.healthScore} />{" "}
+                        <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                          {" "}
+                          <button data-ui-text-action
+                            type="button"
+                            onClick={() => openCustomerProfile(c.id)}
+                            aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
+                            className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
+                          >
+                            {c.firstName} {c.lastName}
+                          </button>
+                          {addr ? (
+                            <a
+                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="text-ui-caption text-ink-tertiary truncate no-underline hover:text-ink-primary"
+                            >
+                              {addr}
+                            </a>
+                          ) : (
+                            <div className="text-ui-caption text-ink-tertiary">—</div>
+                          )}
+                        </div>
+                        {c.phone && (
+                          <button data-ui-text-action
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void callCustomer(c);
+                            }}
+                            aria-label="Call via Waves"
+                            title="Call via Waves — rings your phone first, press 1 to connect"
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                          >
+                            {" "}
+                            <Phone size={16} strokeWidth={1.75} />{" "}
+                          </button>
+                        )}
+                        {c.phone && (
+                          <a
+                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="SMS"
+                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
+                          >
+                            {" "}
+                            <MessageSquare size={16} strokeWidth={1.75} />{" "}
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div
+                    onClick={() => openCustomerProfile(c.id)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openCustomerProfile(c.id);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
+                    className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
+                    style={{ gridTemplateColumns: TABLE_COLS }}
+                  >
+                    {" "}
+                    <div className="text-ui-body font-medium text-ink-primary text-center">
+                      {c.firstName} {c.lastName}
+                      {c.profileLabel && c.profileLabel !== "Primary" && (
+                        <span className="ml-1 text-ui-caption font-normal text-ink-tertiary">
+                          · {c.profileLabel}
+                        </span>
+                      )}
+                    </div>{" "}
+                    <div className="text-ui-label text-ink-secondary truncate text-center">
+                      {(() => {
+                        const full = formatCustomerAddress(c.address);
+                        if (!full)
+                          return <span className="text-ink-tertiary">—</span>;
+                        return (
+                          <a
+                            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-zinc-900 hover:underline"
+                          >
+                            {full}
+                          </a>
+                        );
+                      })()}
+                    </div>{" "}
+                    <div className="flex items-center justify-center">
+                      {" "}
+                      <CustomerHealthGrade score={c.healthScore} />{" "}
+                    </div>{" "}
+                    <div className="u-nums text-ui-caption text-ink-secondary text-center">
+                      {c.nextServiceDate ? (
+                        formatETDateOnly(c.nextServiceDate, {
+                          month: "short",
+                          day: "numeric",
+                        })
+                      ) : (
+                        <span className="text-ink-tertiary">—</span>
+                      )}
+                    </div>{" "}
+                    <div className="flex gap-1 justify-end">
+                      {c.phone && (
+                        <button data-ui-text-action
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void callCustomer(c);
+                          }}
+                          aria-label="Call via Waves"
+                          title="Call via Waves — rings your phone first, press 1 to connect"
+                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                        >
+                          {" "}
+                          <Phone size={12} strokeWidth={1.75} />{" "}
+                        </button>
+                      )}
+                      {c.phone && (
+                        <a
+                          href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label="SMS"
+                          title={`SMS ${c.phone}`}
+                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                        >
+                          {" "}
+                          <MessageSquare size={12} strokeWidth={1.75} />{" "}
+                        </a>
+                      )}
+                      {isAdmin && (
+                        <button data-ui-text-action
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            startEdit(c);
+                          }}
+                          className="h-6 px-2 ui-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                        >
+                          Edit
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button data-ui-text-action
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteCustomer(
+                              c.id,
+                              `${c.firstName} ${c.lastName}`,
+                            );
+                          }}
+                          aria-label="Delete customer"
+                          className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
+                        >
+                          {" "}
+                          <Trash2 size={12} strokeWidth={1.75} />{" "}
+                        </button>
+                      )}
+                    </div>{" "}
+                  </div>
+                )}
+
+                {editingId === c.id && customerEditor}
+              </div>
+            );
+          })
+        )}
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-3 mt-5 py-3">
+            {" "}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => {
+                const p = Math.max(1, page - 1);
+                setPage(p);
+                loadCustomers(p);
+              }}
+            >
+              ← Previous
+            </Button>{" "}
+            <span className="u-nums text-ui-body text-ink-secondary">
+              Page {page} of {totalPages} ({totalCustomers} total)
+            </span>{" "}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={page >= totalPages}
+              onClick={() => {
+                const p = Math.min(totalPages, page + 1);
+                setPage(p);
+                loadCustomers(p);
+              }}
+            >
+              Next →
+            </Button>{" "}
+          </div>
+        )}
+      </>
+    )
+  );
+}
+
+function CustomerMapView({
+  view,
+  error,
+  loadCustomers,
+  customers,
+  openCustomerProfile,
+}) {
+  return (
+    view === "map" && (
+      <div className="mt-4">
+        {error ? (
+          <Card>
+            <CardBody className="p-12 text-center">
+              <div className="text-14 text-alert-fg mb-2">
+                {isRateLimitError(error)
+                  ? "Too many requests"
+                  : "Failed to load customers"}
+              </div>
+              <div className="text-ui-body text-ink-tertiary mb-4">
+                {isRateLimitError(error)
+                  ? "Wait a few seconds and try again."
+                  : error?.message || String(error)}
+              </div>
+              <Button variant="primary" onClick={() => loadCustomers()}>
+                Retry
+              </Button>
+            </CardBody>
+          </Card>
+        ) : (
+          <LegacyCustomersPanel
+            exportName="CustomerMap"
+            props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
+          />
+        )}
+      </div>
+    )
+  );
+}
+
+function CustomerPipelineView({
+  view,
+  pipelineLoading,
+  pipelineError,
+  loadPipeline,
+  pipelineStageMobile,
+  pipelineGroups,
+  loadCustomers,
+  isAdmin,
+}) {
+  return (
+    view === "pipeline" && (
+      <>
+        {pipelineLoading && (
+          <div className="p-6 text-center text-ui-body text-ink-secondary">
+            Loading pipeline…
+          </div>
+        )}
+        {pipelineError && !pipelineLoading && (
+          <div className="p-6 text-center">
+            {" "}
+            <div className="text-14 text-alert-fg mb-3">
+              Failed to load pipeline
+            </div>{" "}
+            <div className="text-ui-body text-ink-tertiary mb-4">
+              {pipelineError.message || String(pipelineError)}
+            </div>{" "}
+            <Button variant="primary" onClick={() => loadPipeline()}>
+              Retry
+            </Button>{" "}
+          </div>
+        )}
+        {/* Mobile: single selected stage, full-width */}
+        {!pipelineError && (
+          <div className="sm:hidden mt-4">
+            {" "}
+            <PipelineColumnV2
+              stage={STAGE_MAP[pipelineStageMobile]}
+              customers={pipelineGroups[pipelineStageMobile] || []}
+              onDeleteCustomer={() => {
+                loadPipeline();
+                loadCustomers();
+              }}
+              canDelete={isAdmin}
+              fullWidth
+            />{" "}
+          </div>
+        )}
+        {/* Desktop: horizontal scrolling board */}
+        {!pipelineError && (
+          <div
+            className="hidden sm:flex gap-3 overflow-x-auto pb-3 mt-4"
+            style={{ WebkitOverflowScrolling: "touch" }}
+          >
+            {KANBAN_STAGES.map((key) => {
+              const stage = STAGE_MAP[key];
+              return (
+                <PipelineColumnV2
+                  key={key}
+                  stage={stage}
+                  customers={pipelineGroups[key] || []}
+                  onDeleteCustomer={() => {
+                    loadPipeline();
+                    loadCustomers();
+                  }}
+                  canDelete={isAdmin}
+                />
+              );
+            })}
+          </div>
+        )}
+      </>
+    )
+  );
+}
+
+function CustomerFiltersDialog({
+  showFilters,
+  setShowFilters,
+  isAdmin,
+  healthFilters,
+  setHealthFilters,
+  filterLastVisited,
+  setFilterLastVisited,
+  filterCards,
+  setFilterCards,
+  filterStage,
+  setFilterStage,
+  filterHasBalance,
+  setFilterHasBalance,
+  filterTier,
+  setFilterTier,
+  setSearchParams,
+}) {
+  return (
+    <Dialog open={showFilters} onClose={() => setShowFilters(false)}>
+      {" "}
+      <DialogHeader onClose={() => setShowFilters(false)}>
+        {" "}
+        <DialogTitle>Filter customers</DialogTitle>{" "}
+      </DialogHeader>{" "}
+      <DialogBody>
+        {isAdmin && (
+          <CustomerHealthFilters
+            value={healthFilters}
+            onChange={setHealthFilters}
+          />
+        )}
+        <div className="mb-4">
+          {" "}
+          <div className="text-14 font-medium text-ink-secondary mb-1.5">
+            Last visited
+          </div>{" "}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[
+              { v: "all", l: "Any" },
+              { v: "30", l: "≤ 30 days" },
+              { v: "90", l: "≤ 90 days" },
+              { v: "180", l: "≤ 180 days" },
+              { v: "never", l: "Never" },
+            ].map((o) => (
+              <FilterPill
+                key={o.v}
+                active={filterLastVisited === o.v}
+                onClick={() => setFilterLastVisited(o.v)}
+              >
+                {o.l}
+              </FilterPill>
+            ))}
+          </div>{" "}
+        </div>{" "}
+        <div className="mb-4">
+          {" "}
+          <div className="text-14 font-medium text-ink-secondary mb-1.5">
+            Cards on file
+          </div>{" "}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[
+              { v: "all", l: "Any" },
+              { v: "has", l: "Has card" },
+              { v: "none", l: "No card" },
+            ].map((o) => (
+              <FilterPill
+                key={o.v}
+                active={filterCards === o.v}
+                onClick={() => setFilterCards(o.v)}
+              >
+                {o.l}
+              </FilterPill>
+            ))}
+          </div>{" "}
+        </div>{" "}
+        <div className="mb-4">
+          {" "}
+          <div className="text-14 font-medium text-ink-secondary mb-1.5">
+            Status
+          </div>{" "}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[
+              { v: "all", l: "All" },
+              { v: "active_customer", l: "Active" },
+              { v: "new_lead", l: "New Lead" },
+              { v: "at_risk", l: "At Risk", alert: true },
+            ].map((s) => (
+              <FilterPill
+                key={s.v}
+                active={filterStage === s.v}
+                alert={s.alert}
+                onClick={() => setFilterStage(s.v)}
+              >
+                {s.l}
+              </FilterPill>
+            ))}
+            <FilterPill
+              active={filterHasBalance}
+              alert
+              onClick={() => setFilterHasBalance(!filterHasBalance)}
+            >
+              Has Balance
+            </FilterPill>{" "}
+          </div>{" "}
+        </div>{" "}
+        <div>
+          {" "}
+          <div className="text-14 font-medium text-ink-secondary mb-1.5">
+            Tier
+          </div>{" "}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[
+              { v: "all", l: "All Tiers" },
+              { v: "Platinum", l: "Platinum" },
+              { v: "Gold", l: "Gold" },
+              { v: "Silver", l: "Silver" },
+              { v: "Bronze", l: "Bronze" },
+              { v: "One-Time", l: "One-Time" },
+              { v: "none", l: "No Plan" },
+            ].map((t) => (
+              <FilterPill
+                key={t.v}
+                active={filterTier === t.v}
+                onClick={() => setFilterTier(t.v)}
+              >
+                {t.l}
+              </FilterPill>
+            ))}
+          </div>{" "}
+        </div>{" "}
+      </DialogBody>{" "}
+      <DialogFooter>
+        {" "}
+        <Button
+          variant="secondary"
+          onClick={() => {
+            setHealthFilters({});
+            setSearchParams(
+              (current) => {
+                const next = new URLSearchParams(current);
+                next.delete("healthRisk");
+                return next;
+              },
+              { replace: true },
+            );
+            setFilterTier("all");
+            setFilterStage("all");
+            setFilterLastVisited("all");
+            setFilterCards("all");
+            setFilterHasBalance(false);
+          }}
+        >
+          Clear all
+        </Button>{" "}
+        <Button variant="primary" onClick={() => setShowFilters(false)}>
+          Done
+        </Button>{" "}
+      </DialogFooter>{" "}
+    </Dialog>
+  );
+}
+
+// Page controllers stay above these presentations so filters, pagination, and
+// editor drafts survive opening a workspace or switching the selected record.
+function CustomersWorkspacePage({
+  selectedId,
+  onSelect,
+  onClose,
+  initialTab,
+  tabKey,
+  children,
+  overlays,
+}) {
+  return (
+    <UiSurface density="comfortable" className={selectedId ? "c360-workspace-page" : "c360-directory-page"}>
+      {selectedId ? (
+        <Customer360Workspace
+          key={`${selectedId}:${tabKey}`}
+          initialTab={initialTab}
+          selectedId={selectedId}
+          onSelect={onSelect}
+          onClose={onClose}
+        />
+      ) : (
+        children
+      )}
+      {overlays}
+    </UiSurface>
+  );
+}
+
+function CustomersOverlayPage({
+  selectedId,
+  onSelect,
+  onClose,
+  initialTab,
+  tabKey,
+  children,
+  overlays,
+}) {
+  return (
+    <UiSurface density="legacy">
+      {children}
+      {overlays}
+      {selectedId && (
+        <Customer360Profile
+          key={`${selectedId}:${tabKey}`}
+          initialTab={initialTab}
+          customerId={selectedId}
+          onSelectCustomer={onSelect}
+          onClose={onClose}
+        />
+      )}
+    </UiSurface>
+  );
+}
+
+const CUSTOMER_PAGE_PRESENTATIONS = { true: CustomersWorkspacePage, false: CustomersOverlayPage };
+
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -997,11 +1688,8 @@ export default function CustomersPageV2() {
   const [searchParams, setSearchParams] = useSearchParams();
   // Default is Directory on both mobile and desktop (list-first).
   // Explicit ?view=… URLs win — deep-links still work.
-  const [view, setView] = useState(() => {
-    const raw = searchParams.get("view");
-    if (raw && raw !== "health") return raw;
-    return "directory";
-  });
+  const rawView = searchParams.get("view");
+  const view = rawView === "health" ? "directory" : rawView || "directory";
 
   // Usage beacon for the view that actually RENDERS. `view` is taken from
   // the URL unvalidated, and an unknown value matches none of the render
@@ -1026,9 +1714,14 @@ export default function CustomersPageV2() {
   const [filterStage, setFilterStage] = useState("all");
   const [filterTier, setFilterTier] = useState("all");
   const atRiskFromUrl = searchParams.get("healthRisk") === "at_risk";
-  const [healthFilters, setHealthFilters] = useState(() => atRiskFromUrl ? { healthRisk: "at_risk" } : {});
+  const [healthFilters, setHealthFilters] = useState(() =>
+    atRiskFromUrl ? { healthRisk: "at_risk" } : {},
+  );
   useEffect(() => {
-    setHealthFilters((current) => ({ ...current, healthRisk: atRiskFromUrl ? "at_risk" : "" }));
+    setHealthFilters((current) => ({
+      ...current,
+      healthRisk: atRiskFromUrl ? "at_risk" : "",
+    }));
   }, [atRiskFromUrl]);
   const [sortBy, setSortBy] = useState("lastName");
   const [sortDir, setSortDir] = useState("asc");
@@ -1042,38 +1735,38 @@ export default function CustomersPageV2() {
   const [filterCards, setFilterCards] = useState("all"); // all | has | none
   const [pipelineStageMobile, setPipelineStageMobile] = useState("new_lead");
   const [showFilters, setShowFilters] = useState(false);
-  const [selected360Id, setSelected360Id] = useState(() => {
-    const id = searchParams.get("customerId");
-    return id || null;
-  });
-  // Query-gated rollout: opt in with ?customer360=workspace. Existing deep
-  // links and profile sheets on other surfaces keep their current presentation.
-  const workspaceMode = searchParams.get("customer360") === "workspace";
-  const workspaceOpen = workspaceMode && !!selected360Id;
+  const selected360Id = searchParams.get("customerId") || null;
+  // Customers defaults to the workspace; ?customer360=overlay is the rollback.
+  // Profile sheets on other surfaces keep their current presentation.
+  const workspaceMode = searchParams.get("customer360") !== "overlay";
+  const PagePresentation = CUSTOMER_PAGE_PRESENTATIONS[workspaceMode];
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
-  const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({});
-  const [savingEdit, setSavingEdit] = useState(false);
+  const {
+    editingId,
+    startEdit,
+    editor: customerEditor,
+  } = useCustomerEditor(() => loadCustomers(), STAGES);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
 
   const selectCustomer = (id, { replace = false } = {}) => {
     const nextId = id ? String(id) : null;
-    setSelected360Id(nextId);
-    setSearchParams((current) => {
-      const next = new URLSearchParams(current);
-      next.delete("tab");
-      if (nextId) next.set("customerId", nextId);
-      else next.delete("customerId");
-      return next;
-    }, { replace });
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("tab");
+        if (nextId) next.set("customerId", nextId);
+        else next.delete("customerId");
+        return next;
+      },
+      { replace },
+    );
   };
 
   const changeView = (nextView) => {
-    setView(nextView);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
       if (nextView === "directory") next.delete("view");
@@ -1082,17 +1775,8 @@ export default function CustomersPageV2() {
     });
   };
 
-  // Keep the page state aligned with notification/command-palette links and
-  // browser back/forward navigation after the component is already mounted.
-  useEffect(() => {
-    const rawView = searchParams.get("view");
-    const urlView = !rawView || rawView === "health" ? "directory" : rawView;
-    const urlCustomerId = searchParams.get("customerId") || null;
-    setView((current) => (current === urlView ? current : urlView));
-    setSelected360Id((current) =>
-      current === urlCustomerId ? current : urlCustomerId,
-    );
-  }, [searchParams]);
+  // The URL is the sole owner of view and selection, including back/forward
+  // and links opened while this page remains mounted.
   // True once the first customer fetch has resolved. Gates the full-page
   // "Loading customers…" screen so it only shows on initial load — never on
   // a search/filter refetch. Without this, narrowing a search to zero
@@ -1126,7 +1810,10 @@ export default function CustomersPageV2() {
           : "Added as an additional property on an existing customer's account",
       );
       clearTimeout(attachNoticeTimerRef.current);
-      attachNoticeTimerRef.current = setTimeout(() => setAttachNotice(null), 6000);
+      attachNoticeTimerRef.current = setTimeout(
+        () => setAttachNotice(null),
+        6000,
+      );
     }
     if (customer?.id) {
       createdCustomerIdRef.current = String(customer.id);
@@ -1160,49 +1847,6 @@ export default function CustomersPageV2() {
 
   const closeCustomerProfile = () => {
     selectCustomer(null, { replace: true });
-  };
-
-  const startEdit = (c) => {
-    setEditingId(c.id);
-    setEditForm({
-      firstName: c.firstName,
-      lastName: c.lastName,
-      email: c.email || "",
-      phone: c.phone || "",
-      city: c.city || "",
-      // Preserve the customer's real tier (null for leads / one-time / No
-      // Plan). Defaulting to "Bronze" made an unrelated edit (e.g. fixing a
-      // name) PUT waveguard_tier='Bronze', which the server read as a new
-      // membership — writing a phantom plan AND emailing the customer a
-      // "membership started" notice. The select's "No Plan" option is value "".
-      tier: c.tier || null,
-      monthlyRate: c.monthlyRate || "",
-      pipelineStage: c.pipelineStage || "new_lead",
-      serviceContactName: c.serviceContactName || "",
-      serviceContactPhone: c.serviceContactPhone || "",
-      serviceContactEmail: c.serviceContactEmail || "",
-      serviceContact2Name: c.serviceContact2Name || "",
-      serviceContact2Phone: c.serviceContact2Phone || "",
-      serviceContact2Email: c.serviceContact2Email || "",
-      serviceContact3Name: c.serviceContact3Name || "",
-      serviceContact3Phone: c.serviceContact3Phone || "",
-      serviceContact3Email: c.serviceContact3Email || "",
-    });
-  };
-
-  const saveEdit = async () => {
-    setSavingEdit(true);
-    try {
-      await adminFetch(`/admin/customers/${editingId}`, {
-        method: "PUT",
-        body: JSON.stringify(editForm),
-      });
-      setEditingId(null);
-      loadCustomers();
-    } catch (e) {
-      window.alert("Save failed: " + e.message);
-    }
-    setSavingEdit(false);
   };
 
   function loadCustomers(p) {
@@ -1332,46 +1976,12 @@ export default function CustomersPageV2() {
     }
   };
 
-  // First name only, no fallback — operator preference. Blank first
-  // names pin to the end of the list via a max-BMP sentinel so they
-  // don't leak to the top of an ascending sort (matches server's
-  // ORDER BY lower(first_name) NULLS LAST).
-  const firstNameKey = (c) => {
-    const k = (c.firstName || "").toString().toLowerCase().trim();
-    return k || "￿";
-  };
-
   const sorted = [...customers].sort((a, b) => {
-    let aVal, bVal;
-    switch (sortBy) {
-      case "name":
-      case "lastName":
-      case "firstName":
-        aVal = firstNameKey(a);
-        bVal = firstNameKey(b);
-        break;
-      case "leadScore":
-        aVal = a.leadScore || 0;
-        bVal = b.leadScore || 0;
-        break;
-      case "monthlyRate":
-        aVal = a.monthlyRate || 0;
-        bVal = b.monthlyRate || 0;
-        break;
-      case "lastContactDate":
-        aVal = a.lastContactDate || "";
-        bVal = b.lastContactDate || "";
-        break;
-      case "lifetimeRevenue":
-        aVal = a.lifetimeRevenue || 0;
-        bVal = b.lifetimeRevenue || 0;
-        break;
-      default:
-        aVal = (a[sortBy] || "").toString().toLowerCase();
-        bVal = (b[sortBy] || "").toString().toLowerCase();
-    }
-    if (aVal < bVal) return sortDir === "asc" ? -1 : 1;
-    if (aVal > bVal) return sortDir === "asc" ? 1 : -1;
+    const aVal = customerSortValue(a, sortBy);
+    const bVal = customerSortValue(b, sortBy);
+    const direction = sortDir === "asc" ? 1 : -1;
+    if (aVal < bVal) return -direction;
+    if (aVal > bVal) return direction;
     return 0;
   });
 
@@ -1412,186 +2022,78 @@ export default function CustomersPageV2() {
 
   if (view !== "pipeline" && loading && !hasLoadedRef.current) {
     return (
-      <div className="p-16 text-center text-13 text-ink-secondary">
+      <div className="p-16 text-center text-ui-body text-ink-secondary">
         Loading customers…
       </div>
     );
   }
 
-  const TABLE_COLS = "1.6fr 2fr 0.3fr 0.6fr 0.9fr";
-
   const activeFilterCount =
-    (filterTier !== "all" ? 1 : 0) +
-    (filterStage !== "all" ? 1 : 0) +
-    (filterLastVisited !== "all" ? 1 : 0) +
-    (filterCards !== "all" ? 1 : 0) +
-    (filterHasBalance ? 1 : 0) +
-    (isAdmin ? Object.values(healthFilters).filter((value) => value !== "").length : 0);
-
-  const customerEditor = (
-    <div className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
-                      {" "}
-                      <div className="text-13 font-medium text-ink-primary mb-3">
-                        Edit customer
-                      </div>{" "}
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-                        {[
-                          { key: "firstName", label: "First name" },
-                          { key: "lastName", label: "Last name" },
-                          { key: "email", label: "Email", type: "email" },
-                          { key: "phone", label: "Phone", type: "tel" },
-                          { key: "city", label: "City" },
-                          { key: "monthlyRate", label: "$/Mo", type: "number" },
-                        ].map((f) => (
-                          <div key={f.key}>
-                            {" "}
-                            <label className="u-label text-ink-tertiary block mb-1">
-                              {f.label}
-                            </label>{" "}
-                            <input
-                              value={editForm[f.key] || ""}
-                              onChange={(e) =>
-                                setEditForm((p) => ({
-                                  ...p,
-                                  [f.key]: e.target.value,
-                                }))
-                              }
-                              type={f.type || "text"}
-                              className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-                            />{" "}
-                          </div>
-                        ))}
-                        <div>
-                          {" "}
-                          <label className="u-label text-ink-tertiary block mb-1">
-                            Tier
-                          </label>{" "}
-                          <select
-                            value={editForm.tier || ""}
-                            onChange={(e) =>
-                              setEditForm((p) => ({
-                                ...p,
-                                tier: e.target.value || null,
-                              }))
-                            }
-                            className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 cursor-pointer focus:outline-none focus:border-zinc-900"
-                          >
-                            {" "}
-                            <option value="">No Plan</option>{" "}
-                            <option value="Platinum">Platinum (20%)</option>{" "}
-                            <option value="Gold">Gold (15%)</option>{" "}
-                            <option value="Silver">Silver (10%)</option>{" "}
-                            <option value="Bronze">Bronze (0%)</option>{" "}
-                            <option value="One-Time">One-Time</option>{" "}
-                          </select>{" "}
-                        </div>{" "}
-                        <div>
-                          {" "}
-                          <label className="u-label text-ink-tertiary block mb-1">
-                            Stage
-                          </label>{" "}
-                          <select
-                            value={editForm.pipelineStage || ""}
-                            onChange={(e) =>
-                              setEditForm((p) => ({
-                                ...p,
-                                pipelineStage: e.target.value,
-                              }))
-                            }
-                            className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 cursor-pointer focus:outline-none focus:border-zinc-900"
-                          >
-                            {STAGES.map((s) => (
-                              <option key={s.key} value={s.key}>
-                                {s.label}
-                              </option>
-                            ))}
-                          </select>{" "}
-                        </div>{" "}
-                      </div>
-                      {/* Service contacts — route appointment reminders, post-service
-                          SMS, and review requests to different people than the
-                          bill-payer (e.g. mother pays, son lives at the property).
-                          Up to 3 slots; the server compacts them, so clearing
-                          slot 1 promotes slot 2. */}
-                      {[
-                        {
-                          prefix: "serviceContact",
-                          title: "Service Contact",
-                          hint: "(optional — overrides primary for reminders, review requests)",
-                        },
-                        { prefix: "serviceContact2", title: "Service Contact 2" },
-                        { prefix: "serviceContact3", title: "Service Contact 3" },
-                      ].map((slot) => (
-                        <div
-                          key={slot.prefix}
-                          className="border-t border-hairline border-zinc-200 pt-3 mb-3"
-                        >
-                          {" "}
-                          <div className="u-label text-ink-tertiary mb-2">
-                            {slot.title}{" "}
-                            {slot.hint && (
-                              <span className="normal-case text-11 text-ink-tertiary">
-                                {slot.hint}
-                              </span>
-                            )}{" "}
-                          </div>{" "}
-                          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                            {[
-                              { key: `${slot.prefix}Name`, label: "Name" },
-                              {
-                                key: `${slot.prefix}Phone`,
-                                label: "Phone",
-                                type: "tel",
-                              },
-                              {
-                                key: `${slot.prefix}Email`,
-                                label: "Email",
-                                type: "email",
-                              },
-                            ].map((f) => (
-                              <div key={f.key}>
-                                {" "}
-                                <label className="u-label text-ink-tertiary block mb-1">
-                                  {f.label}
-                                </label>{" "}
-                                <input
-                                  value={editForm[f.key] || ""}
-                                  onChange={(e) =>
-                                    setEditForm((p) => ({
-                                      ...p,
-                                      [f.key]: e.target.value,
-                                    }))
-                                  }
-                                  type={f.type || "text"}
-                                  className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-8 px-2 focus:outline-none focus:border-zinc-900"
-                                />{" "}
-                              </div>
-                            ))}
-                          </div>{" "}
-                        </div>
-                      ))}{" "}
-                      <div className="flex gap-2">
-                        {" "}
-                        <Button
-                          variant="primary"
-                          onClick={saveEdit}
-                          disabled={savingEdit}
-                        >
-                          {savingEdit ? "Saving…" : "Save"}
-                        </Button>{" "}
-                        <Button
-                          variant="ghost"
-                          onClick={() => setEditingId(null)}
-                        >
-                          Cancel
-                        </Button>{" "}
-                      </div>{" "}
-                    </div>
-  );
+    [filterTier, filterStage, filterLastVisited, filterCards].filter(
+      (value) => value !== "all",
+    ).length +
+    Number(filterHasBalance) +
+    (isAdmin
+      ? Object.values(healthFilters).filter((value) => value !== "").length
+      : 0);
 
   return (
-    <div className={workspaceOpen ? "c360-workspace-page" : workspaceMode ? "c360-directory-page" : undefined}>
-      {!workspaceOpen && <>
+    <PagePresentation
+      selectedId={selected360Id}
+      onSelect={openCustomerProfile}
+      onClose={closeCustomerProfile}
+      initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
+      tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
+      overlays={
+        <>
+          {/* Filters dialog */}
+          <CustomerFiltersDialog
+            showFilters={showFilters}
+            setShowFilters={setShowFilters}
+            isAdmin={isAdmin}
+            healthFilters={healthFilters}
+            setHealthFilters={setHealthFilters}
+            filterLastVisited={filterLastVisited}
+            setFilterLastVisited={setFilterLastVisited}
+            filterCards={filterCards}
+            setFilterCards={setFilterCards}
+            filterStage={filterStage}
+            setFilterStage={setFilterStage}
+            filterHasBalance={filterHasBalance}
+            setFilterHasBalance={setFilterHasBalance}
+            filterTier={filterTier}
+            setFilterTier={setFilterTier}
+            setSearchParams={setSearchParams}
+          />
+
+          {/* ======================= QUICK ADD (desktop modal / mobile sheet) ======================= */}
+          {isMobile ? (
+            <MobileNewCustomerSheet
+              open={showAddModal}
+              onClose={closeAddCustomer}
+              initialValues={quickAddPreset}
+              onCreated={handleQuickAddCreated}
+            />
+          ) : (
+            <QuickAddModalV2
+              open={showAddModal}
+              onClose={closeAddCustomer}
+              initialValues={quickAddPreset}
+              title="Add customer"
+              onCreated={handleQuickAddCreated}
+            />
+          )}
+          {attachNotice && (
+            <div
+              role="status"
+              className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[130] rounded-sm bg-zinc-900 text-white text-ui-body px-4 py-2 shadow-lg"
+            >
+              {attachNotice}
+            </div>
+          )}
+        </>
+      }
+    >
       {/* ======================= HEADER ======================= */}
       <CustomersCommandHeader
         view={view}
@@ -1614,10 +2116,19 @@ export default function CustomersPageV2() {
               className="pl-10"
             />
           </label>
-          <Button variant="secondary" onClick={() => setShowFilters(true)} aria-label="Filter customers" className="shrink-0 gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => setShowFilters(true)}
+            aria-label="Filter customers"
+            className="shrink-0 gap-2"
+          >
             <Filter size={16} strokeWidth={1.75} />
             Filter
-            {activeFilterCount > 0 && <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-zinc-900 text-white font-mono text-14">{activeFilterCount}</span>}
+            {activeFilterCount > 0 && (
+              <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1 rounded-full bg-zinc-900 text-white font-mono text-14">
+                {activeFilterCount}
+              </span>
+            )}
           </Button>
         </div>
       )}
@@ -1627,7 +2138,7 @@ export default function CustomersPageV2() {
         {view === "pipeline" && (
           <>
             {" "}
-            <h2 className="text-12 font-medium text-ink-primary mb-1.5">
+            <h2 className="text-ui-label font-medium text-ink-primary mb-1.5">
               Stage
             </h2>{" "}
             <div className="grid grid-cols-2 gap-1.5">
@@ -1636,12 +2147,12 @@ export default function CustomersPageV2() {
                 const count = (pipelineGroups[key] || []).length;
                 const active = pipelineStageMobile === key;
                 return (
-                  <button
+                  <button data-ui-text-action
                     key={key}
                     type="button"
                     onClick={() => setPipelineStageMobile(key)}
                     className={cn(
-                      "inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
+                      "inline-flex items-center justify-between gap-2 ui-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
                       active
                         ? "bg-zinc-900 text-white border-zinc-900"
                         : "bg-white text-ink-secondary border-zinc-300",
@@ -1651,7 +2162,7 @@ export default function CustomersPageV2() {
                     <span className="truncate">{stage.label}</span>{" "}
                     <span
                       className={cn(
-                        "u-nums text-11 flex-shrink-0",
+                        "u-nums text-ui-caption flex-shrink-0",
                         active ? "text-white/80" : "text-ink-tertiary",
                       )}
                     >
@@ -1665,385 +2176,48 @@ export default function CustomersPageV2() {
         )}
       </div>
       {/* ======================= DIRECTORY ======================= */}
-      {view === "directory" && (
-        <>
-          {" "}
-          <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
-            {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
-          </div>
-          {/* Desktop table header */}
-          {!workspaceMode && !isMobile && (
-            <div
-              className="grid gap-1.5 px-4 py-2.5 mb-1 text-11 uppercase tracking-label text-zinc-900"
-              style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
-            >
-              {" "}
-              <div className="flex justify-center">
-                {" "}
-                <SortHeaderV2
-                  label="Name"
-                  sortKey="lastName"
-                  currentSort={sortBy}
-                  currentDir={sortDir}
-                  onSort={handleSort}
-                />{" "}
-              </div>{" "}
-              <div className="text-center">Address</div>{" "}
-              <div className="text-center">Score</div>{" "}
-              <div className="text-center">Next Svc</div> <div />{" "}
-            </div>
-          )}
-          {/* Rows */}
-          {error ? (
-            <Card>
-              <CardBody className="p-12 text-center">
-                <div className="text-14 text-alert-fg mb-2">
-                  {isRateLimitError(error)
-                    ? "Too many requests"
-                    : "Failed to load customers"}
-                </div>
-                <div className="text-13 text-ink-tertiary mb-4">
-                  {isRateLimitError(error)
-                    ? "Wait a few seconds and try again."
-                    : error?.message || String(error)}
-                </div>
-                <Button variant="primary" onClick={() => loadCustomers()}>
-                  Retry
-                </Button>
-              </CardBody>
-            </Card>
-          ) : filteredSorted.length === 0 ? (
-            <Card>
-              {" "}
-              <CardBody className="p-12 text-center">
-                {" "}
-                <div className="text-14 text-ink-primary mb-1">
-                  No customers found
-                </div>{" "}
-                <div className="text-13 text-ink-tertiary">
-                  Try adjusting your filters or add a new customer
-                </div>{" "}
-              </CardBody>{" "}
-            </Card>
-          ) : workspaceMode ? (
-            <CustomerDirectoryTable customers={filteredSorted.map((customer) => ({ ...customer, address: formatCustomerAddress(customer.address) }))} onOpen={openCustomerProfile} onEdit={startEdit} onDelete={handleDeleteCustomer} onCall={callCustomer} canEdit={isAdmin} sortBy={sortBy} sortDir={sortDir} onSort={handleSort} editingId={editingId} editor={customerEditor} />
-          ) : (
-            filteredSorted.map((c) => {
-              return (
-                <div key={c.id} className="mb-2">
-                  {isMobile ? (
-                    (() => {
-                      const addr = formatCustomerAddress(c.address);
-                      return (
-                        <div
-                          data-customer-id={c.id}
-                          className="bg-white border-hairline border-zinc-200 rounded-sm px-3 flex items-center gap-3"
-                          style={{ height: 64 }}
-                        >
-                          {" "}
-                          <CustomerHealthGrade score={c.healthScore} />{" "}
-                          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
-                            {" "}
-                            <button
-                              type="button"
-                              onClick={() => openCustomerProfile(c.id)}
-                              aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
-                              className="text-14 font-medium text-zinc-900 hover:underline truncate text-left bg-transparent border-0 p-0 cursor-pointer u-focus-ring rounded-xs"
-                            >
-                              {c.firstName} {c.lastName}
-                            </button>
-                            {addr ? (
-                              <a
-                                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                onClick={(e) => e.stopPropagation()}
-                                className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
-                              >
-                                {addr}
-                              </a>
-                            ) : (
-                              <div className="text-11 text-ink-tertiary">—</div>
-                            )}
-                          </div>
-                          {c.phone && (
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); void callCustomer(c); }}
-                              aria-label="Call via Waves"
-                              title="Call via Waves — rings your phone first, press 1 to connect"
-                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                            >
-                              {" "}
-                              <Phone size={16} strokeWidth={1.75} />{" "}
-                            </button>
-                          )}
-                          {c.phone && (
-                            <a
-                              href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                              onClick={(e) => e.stopPropagation()}
-                              aria-label="SMS"
-                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800"
-                            >
-                              {" "}
-                              <MessageSquare
-                                size={16}
-                                strokeWidth={1.75}
-                              />{" "}
-                            </a>
-                          )}
-                        </div>
-                      );
-                    })()
-                  ) : (
-                    <div
-                      onClick={() => openCustomerProfile(c.id)}
-                      onKeyDown={(event) => {
-                        if (event.target !== event.currentTarget) return;
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          openCustomerProfile(c.id);
-                        }
-                      }}
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
-                      className="grid gap-1.5 px-4 py-3 items-center bg-white border-hairline border-zinc-200 rounded-sm cursor-pointer hover:bg-zinc-50 transition-colors"
-                      style={{ gridTemplateColumns: TABLE_COLS }}
-                    >
-                      {" "}
-                      <div className="text-13 font-medium text-ink-primary text-center">
-                        {c.firstName} {c.lastName}
-                        {c.profileLabel && c.profileLabel !== "Primary" && (
-                          <span className="ml-1 text-11 font-normal text-ink-tertiary">
-                            · {c.profileLabel}
-                          </span>
-                        )}
-                      </div>{" "}
-                      <div className="text-12 text-ink-secondary truncate text-center">
-                        {(() => {
-                          const full = formatCustomerAddress(c.address);
-                          if (!full)
-                            return <span className="text-ink-tertiary">—</span>;
-                          return (
-                            <a
-                              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(full)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-zinc-900 hover:underline"
-                            >
-                              {full}
-                            </a>
-                          );
-                        })()}
-                      </div>{" "}
-                      <div className="flex items-center justify-center">
-                        {" "}
-                        <CustomerHealthGrade score={c.healthScore} />{" "}
-                      </div>{" "}
-                      <div className="u-nums text-11 text-ink-secondary text-center">
-                        {c.nextServiceDate ? (
-                          formatETDateOnly(c.nextServiceDate, {
-                            month: "short",
-                            day: "numeric",
-                          })
-                        ) : (
-                          <span className="text-ink-tertiary">—</span>
-                        )}
-                      </div>{" "}
-                      <div className="flex gap-1 justify-end">
-                        {c.phone && (
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); void callCustomer(c); }}
-                            aria-label="Call via Waves"
-                            title="Call via Waves — rings your phone first, press 1 to connect"
-                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                          >
-                            {" "}
-                            <Phone size={12} strokeWidth={1.75} />{" "}
-                          </button>
-                        )}
-                        {c.phone && (
-                          <a
-                            href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="SMS"
-                            title={`SMS ${c.phone}`}
-                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                          >
-                            {" "}
-                            <MessageSquare size={12} strokeWidth={1.75} />{" "}
-                          </a>
-                        )}
-                        {isAdmin && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              startEdit(c);
-                            }}
-                            className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
-                          >
-                            Edit
-                          </button>
-                        )}
-                        {isAdmin && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteCustomer(
-                                c.id,
-                                `${c.firstName} ${c.lastName}`,
-                              );
-                            }}
-                            aria-label="Delete customer"
-                            className="inline-flex items-center justify-center h-6 w-6 border-hairline border-alert-fg/30 rounded-xs text-alert-fg bg-white hover:bg-alert-bg"
-                          >
-                            {" "}
-                            <Trash2 size={12} strokeWidth={1.75} />{" "}
-                          </button>
-                        )}
-                      </div>{" "}
-                    </div>
-                  )}
-
-                  {editingId === c.id && customerEditor}
-                </div>
-              );
-            })
-          )}
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-3 mt-5 py-3">
-              {" "}
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={page <= 1}
-                onClick={() => {
-                  const p = Math.max(1, page - 1);
-                  setPage(p);
-                  loadCustomers(p);
-                }}
-              >
-                ← Previous
-              </Button>{" "}
-              <span className="u-nums text-13 text-ink-secondary">
-                Page {page} of {totalPages} ({totalCustomers} total)
-              </span>{" "}
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={page >= totalPages}
-                onClick={() => {
-                  const p = Math.min(totalPages, page + 1);
-                  setPage(p);
-                  loadCustomers(p);
-                }}
-              >
-                Next →
-              </Button>{" "}
-            </div>
-          )}
-        </>
-      )}
+      <CustomerDirectoryView
+        view={view}
+        totalCustomers={totalCustomers}
+        workspaceMode={workspaceMode}
+        isMobile={isMobile}
+        sortBy={sortBy}
+        sortDir={sortDir}
+        handleSort={handleSort}
+        error={error}
+        loadCustomers={loadCustomers}
+        filteredSorted={filteredSorted}
+        openCustomerProfile={openCustomerProfile}
+        startEdit={startEdit}
+        handleDeleteCustomer={handleDeleteCustomer}
+        isAdmin={isAdmin}
+        editingId={editingId}
+        customerEditor={customerEditor}
+        totalPages={totalPages}
+        page={page}
+        setPage={setPage}
+      />
 
       {/* ======================= MAP ======================= */}
-      {view === "map" && (
-        <div className="mt-4">
-          {error ? (
-            <Card>
-              <CardBody className="p-12 text-center">
-                <div className="text-14 text-alert-fg mb-2">
-                  {isRateLimitError(error)
-                    ? "Too many requests"
-                    : "Failed to load customers"}
-                </div>
-                <div className="text-13 text-ink-tertiary mb-4">
-                  {isRateLimitError(error)
-                    ? "Wait a few seconds and try again."
-                    : error?.message || String(error)}
-                </div>
-                <Button variant="primary" onClick={() => loadCustomers()}>
-                  Retry
-                </Button>
-              </CardBody>
-            </Card>
-          ) : (
-            <LegacyCustomersPanel
-              exportName="CustomerMap"
-              props={{ customers, onSelect: (c) => openCustomerProfile(c.id) }}
-            />
-          )}
-        </div>
-      )}
+      <CustomerMapView
+        view={view}
+        error={error}
+        loadCustomers={loadCustomers}
+        customers={customers}
+        openCustomerProfile={openCustomerProfile}
+      />
 
       {/* ======================= PIPELINE (V2 monochrome) ======================= */}
-      {view === "pipeline" && (
-        <>
-          {pipelineLoading && (
-            <div className="p-6 text-center text-13 text-ink-secondary">
-              Loading pipeline…
-            </div>
-          )}
-          {pipelineError && !pipelineLoading && (
-            <div className="p-6 text-center">
-              {" "}
-              <div className="text-14 text-alert-fg mb-3">
-                Failed to load pipeline
-              </div>{" "}
-              <div className="text-13 text-ink-tertiary mb-4">
-                {pipelineError.message || String(pipelineError)}
-              </div>{" "}
-              <Button variant="primary" onClick={() => loadPipeline()}>
-                Retry
-              </Button>{" "}
-            </div>
-          )}
-          {/* Mobile: single selected stage, full-width */}
-          {!pipelineError && (
-            <div className="sm:hidden mt-4">
-              {" "}
-              <PipelineColumnV2
-                stage={STAGE_MAP[pipelineStageMobile]}
-                customers={pipelineGroups[pipelineStageMobile] || []}
-                onDeleteCustomer={() => {
-                  loadPipeline();
-                  loadCustomers();
-                }}
-                canDelete={isAdmin}
-                fullWidth
-              />{" "}
-            </div>
-          )}
-          {/* Desktop: horizontal scrolling board */}
-          {!pipelineError && (
-            <div
-              className="hidden sm:flex gap-3 overflow-x-auto pb-3 mt-4"
-              style={{ WebkitOverflowScrolling: "touch" }}
-            >
-              {KANBAN_STAGES.map((key) => {
-                const stage = STAGE_MAP[key];
-                return (
-                  <PipelineColumnV2
-                    key={key}
-                    stage={stage}
-                    customers={pipelineGroups[key] || []}
-                    onDeleteCustomer={() => {
-                      loadPipeline();
-                      loadCustomers();
-                    }}
-                    canDelete={isAdmin}
-                  />
-                );
-              })}
-            </div>
-          )}
-        </>
-      )}
+      <CustomerPipelineView
+        view={view}
+        pipelineLoading={pipelineLoading}
+        pipelineError={pipelineError}
+        loadPipeline={loadPipeline}
+        pipelineStageMobile={pipelineStageMobile}
+        pipelineGroups={pipelineGroups}
+        loadCustomers={loadCustomers}
+        isAdmin={isAdmin}
+      />
 
       {/* ======================= AI ADVISOR ======================= */}
       {view === "intelligence" && (
@@ -2052,190 +2226,6 @@ export default function CustomersPageV2() {
           <LegacyCustomersPanel exportName="CustomerIntelligenceTab" />{" "}
         </div>
       )}
-
-      </>}
-      {workspaceOpen && <Customer360Workspace
-        key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
-        initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
-        selectedId={selected360Id}
-        onSelect={openCustomerProfile}
-        onClose={closeCustomerProfile}
-      />}
-          {/* Filters dialog */}
-          <Dialog
-            open={showFilters}
-            onClose={() => setShowFilters(false)}
-          >
-            {" "}
-            <DialogHeader onClose={() => setShowFilters(false)}>
-              {" "}
-              <DialogTitle>Filter customers</DialogTitle>{" "}
-            </DialogHeader>{" "}
-            <DialogBody>
-              {isAdmin && <CustomerHealthFilters value={healthFilters} onChange={setHealthFilters} />}
-              <div className="mb-4">
-                {" "}
-                <div className="text-14 font-medium text-ink-secondary mb-1.5">
-                  Last visited
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "Any" },
-                    { v: "30", l: "≤ 30 days" },
-                    { v: "90", l: "≤ 90 days" },
-                    { v: "180", l: "≤ 180 days" },
-                    { v: "never", l: "Never" },
-                  ].map((o) => (
-                    <FilterPill
-                      key={o.v}
-                      active={filterLastVisited === o.v}
-                      onClick={() => setFilterLastVisited(o.v)}
-                    >
-                      {o.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="mb-4">
-                {" "}
-                <div className="text-14 font-medium text-ink-secondary mb-1.5">
-                  Cards on file
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "Any" },
-                    { v: "has", l: "Has card" },
-                    { v: "none", l: "No card" },
-                  ].map((o) => (
-                    <FilterPill
-                      key={o.v}
-                      active={filterCards === o.v}
-                      onClick={() => setFilterCards(o.v)}
-                    >
-                      {o.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="mb-4">
-                {" "}
-                <div className="text-14 font-medium text-ink-secondary mb-1.5">
-                  Status
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "All" },
-                    { v: "active_customer", l: "Active" },
-                    { v: "new_lead", l: "New Lead" },
-                    { v: "at_risk", l: "At Risk", alert: true },
-                  ].map((s) => (
-                    <FilterPill
-                      key={s.v}
-                      active={filterStage === s.v}
-                      alert={s.alert}
-                      onClick={() => setFilterStage(s.v)}
-                    >
-                      {s.l}
-                    </FilterPill>
-                  ))}
-                  <FilterPill
-                    active={filterHasBalance}
-                    alert
-                    onClick={() => setFilterHasBalance(!filterHasBalance)}
-                  >
-                    Has Balance
-                  </FilterPill>{" "}
-                </div>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <div className="text-14 font-medium text-ink-secondary mb-1.5">
-                  Tier
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "All Tiers" },
-                    { v: "Platinum", l: "Platinum" },
-                    { v: "Gold", l: "Gold" },
-                    { v: "Silver", l: "Silver" },
-                    { v: "Bronze", l: "Bronze" },
-                    { v: "One-Time", l: "One-Time" },
-                    { v: "none", l: "No Plan" },
-                  ].map((t) => (
-                    <FilterPill
-                      key={t.v}
-                      active={filterTier === t.v}
-                      onClick={() => setFilterTier(t.v)}
-                    >
-                      {t.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-            </DialogBody>{" "}
-            <DialogFooter>
-              {" "}
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setHealthFilters({});
-                  setSearchParams((current) => {
-                    const next = new URLSearchParams(current);
-                    next.delete("healthRisk");
-                    return next;
-                  }, { replace: true });
-                  setFilterTier("all");
-                  setFilterStage("all");
-                  setFilterLastVisited("all");
-                  setFilterCards("all");
-                  setFilterHasBalance(false);
-                }}
-              >
-                Clear all
-              </Button>{" "}
-              <Button variant="primary" onClick={() => setShowFilters(false)}>
-                Done
-              </Button>{" "}
-            </DialogFooter>{" "}
-          </Dialog>
-
-      {/* ======================= QUICK ADD (desktop modal / mobile Square sheet) ======================= */}
-      {!isMobile && (
-        <QuickAddModalV2
-          open={showAddModal}
-          onClose={closeAddCustomer}
-          initialValues={quickAddPreset}
-          title="Add customer"
-          onCreated={handleQuickAddCreated}
-        />
-      )}
-      {isMobile && (
-        <MobileNewCustomerSheet
-          open={showAddModal}
-          onClose={closeAddCustomer}
-          initialValues={quickAddPreset}
-          onCreated={handleQuickAddCreated}
-        />
-      )}
-      {attachNotice && (
-        <div
-          role="status"
-          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[130] rounded-sm bg-zinc-900 text-white text-13 px-4 py-2 shadow-lg"
-        >
-          {attachNotice}
-        </div>
-      )}
-
-      {/* ======================= CUSTOMER 360 (V1) ======================= */}
-      {selected360Id && !workspaceOpen && (
-        <Customer360Profile
-          key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
-          customerId={selected360Id}
-          initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
-          onSelectCustomer={openCustomerProfile}
-          onClose={closeCustomerProfile}
-        />
-      )}
-    </div>
+    </PagePresentation>
   );
 }
