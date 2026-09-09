@@ -13,11 +13,12 @@ const b = { ...a, id: "mail-b", gmail_thread_id: "thread-b", from_address: "b@ex
 const response = (body, status = 200) => Promise.resolve({ ok: status >= 200 && status < 300, status, json: async () => body });
 let overrides;
 const calls = (suffix) => fetch.mock.calls.filter(([url]) => new URL(url, "https://fixture.invalid").pathname.endsWith(suffix));
-function mount(active = true) {
-  return render(<BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: "fixture-workspace-owner", role: "admin" } }} />}>
+function emailRoute(active = true) {
+  return <BrowserRouter><Routes><Route path="/admin" element={<Outlet context={{ user: { id: "fixture-workspace-owner", role: "admin" } }} />}>
     <Route path="communications" element={<EmailPage active={active} navigation={{ title: "Communications", sections: [] }} />} />
-  </Route></Routes></BrowserRouter>);
+  </Route></Routes></BrowserRouter>;
 }
+function mount(active = true) { return render(emailRoute(active)); }
 async function open(mail = a) {
   fireEvent.click(await screen.findByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(mail.subject) }));
   return screen.findByRole("textbox", { name: "Reply", exact: true });
@@ -103,6 +104,22 @@ describe("Email workspace feedback and request ownership", () => {
     await screen.findByText(a.body_text);
     expect(reply).toHaveValue("Retain this reply");
     expect(calls("/thread/thread-a")).toHaveLength(2);
+  });
+
+  it("retries a retained message after its channel reactivation refresh fails", async () => {
+    const view = mount();
+    fireEvent.change(await open(), { target: { value: "Keep the selected reply" } });
+    await screen.findByText(a.body_text);
+    view.rerender(emailRoute(false));
+    overrides.set(`/api/admin/email/message/${a.id}`, () => response({}, 503));
+    view.rerender(emailRoute(true));
+    await screen.findByText("The linked email is unavailable.");
+    const attempts = calls(`/message/${a.id}`).length;
+    overrides.delete(`/api/admin/email/message/${a.id}`);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText(a.body_text);
+    expect(calls(`/message/${a.id}`)).toHaveLength(attempts + 1);
+    expect(screen.getByRole("textbox", { name: "Reply", exact: true })).toHaveValue("Keep the selected reply");
   });
 
   it("retries an unavailable linked message and preserves the previous message's draft", async () => {

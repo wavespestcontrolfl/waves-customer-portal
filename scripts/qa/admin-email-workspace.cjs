@@ -127,6 +127,22 @@ async function main() {
         await page.close();
       });
     }
+    if (!baseline) await scenario('Retry a retained conversation after a channel refresh failure', async () => {
+      const { page, state } = await openPage(390);
+      await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
+      await page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject }).click();
+      await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Retain this reactivation draft');
+      await channel(page, 'SMS').click();
+      state.fail.add(`/admin/email/message/${a.id}`);
+      await channel(page, 'Email').click();
+      await page.getByText('The linked email is unavailable.', { exact: true }).waitFor();
+      state.fail.delete(`/admin/email/message/${a.id}`);
+      await page.getByRole('button', { name: 'Try again', exact: true }).click();
+      await page.getByText(a.body_text, { exact: true }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retain this reactivation draft');
+      await shot(page, 'reactivation-retry-390');
+      await page.close();
+    });
     if (!baseline) await scenario('Older email dates stay Eastern in a UTC browser', async () => {
       const { page, state } = await openPage(1440, { timezone: 'UTC' });
       state.emails[0].received_at = '2020-07-02T02:30:00.000Z';
