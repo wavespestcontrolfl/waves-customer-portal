@@ -3045,6 +3045,7 @@ const ReviewService = {
 
     let sent = 0;
     let suppressed = 0;
+    let unrecordedDeliveries = 0;
     const sentThisRun = new Set();
     const { getServiceContactSmsRecipient } = require("./customer-contact");
     for (const candidate of eligible) {
@@ -3129,6 +3130,14 @@ const ReviewService = {
             return;
           }
 
+          // Reserve this best-effort reminder durably before provider handoff.
+          // A crash/ambiguous provider exception keeps it handled rather than
+          // risking a duplicate; only a definite unsent outcome reopens it.
+          const reserved = await db("review_requests").where({ id: request.id, followup_sent: false }).update({
+            followup_sent: true,
+            followup_sent_at: new Date(),
+          });
+          if (!reserved) return;
           let result;
           try {
             result = await sendCustomerMessage({
@@ -3164,18 +3173,23 @@ const ReviewService = {
                 followup_sent_at: new Date(),
               });
               suppressed++;
+            } else {
+              await db("review_requests").where({ id: request.id }).update({
+                followup_sent: false, followup_sent_at: null,
+              });
             }
             return;
           }
 
           const deliveredAt = new Date();
-          await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
+          const stamped = await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
             followup_sent: true,
             followup_sent_at: deliveredAt,
             followup_delivered_at: deliveredAt,
           }), `follow-up delivery stamp (requestId=${request.id})`);
           sentThisRun.add(request.customer_id);
-          sent++;
+          if (stamped) sent++;
+          else unrecordedDeliveries++;
         });
         if (held?.blocked) {
           // Keep held customers out of the limited batch until their retry is due.
@@ -3193,7 +3207,7 @@ const ReviewService = {
         `[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup), ${internalFollowups} internal`,
       );
     }
-    return { sent, suppressed, internalFollowups };
+    return { sent, suppressed, internalFollowups, ...(unrecordedDeliveries ? { unrecordedDeliveries } : {}) };
   },
 
   // ════════════════════════════════════════════════════════════════

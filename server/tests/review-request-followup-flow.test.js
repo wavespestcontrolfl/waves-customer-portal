@@ -117,6 +117,7 @@ describe('review request follow-up flow', () => {
       ]),
       chain({ first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
       updateQuery,
     ];
     const customerQuery = chain({
@@ -183,6 +184,7 @@ describe('review request follow-up flow', () => {
       ]),
       chain({ first: jest.fn().mockResolvedValue({ id: 'rr-optout', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
       updateQuery,
     ];
     const customerQuery = chain({
@@ -240,6 +242,7 @@ describe('review request follow-up flow', () => {
       ]),
       chain({ first: jest.fn().mockResolvedValue({ id: 'rr-consent-retry', customer_id: 'cust-1', status: 'sent', score: null }) }),
       chain({ first: jest.fn().mockResolvedValue(null) }),
+      chain(), // durable pre-provider reservation
       updateQuery,
     ];
     const customerQuery = chain({
@@ -273,7 +276,7 @@ describe('review request follow-up flow', () => {
     const result = await ReviewService.processFollowups();
 
     expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
-    expect(updateQuery.update).not.toHaveBeenCalled();
+    expect(updateQuery.update).toHaveBeenCalledWith({ followup_sent: false, followup_sent_at: null });
   });
 
   test('creates inline review rows as pending until the bundled completion SMS is delivered', async () => {
