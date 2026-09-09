@@ -179,6 +179,25 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(JSON.parse(result.content[0].text)).toEqual({ error: 'Human-review queue failed: Draft write failed' });
   });
 
+  it.each([
+    { queued: true, activityId: 'draft-1', failed: true, retryable: true, alertStatus: 'failed', error: 'Owner alert unavailable' },
+    { queued: true, activityId: 'draft-1', retryable: true, alertStatus: 'pending', nextAllowedAt: '2099-01-01T00:00:00Z' },
+    { queued: true, activityId: 'draft-1', alertStatus: 'suppressed' },
+  ])('fallback preserves the durable draft and $alertStatus delivery outcome', async queued => {
+    mockExecuteLeadTool.mockImplementation(async name => name === 'get_customer_context' ? { error: 'Context unavailable' } : queued);
+    global.fetch = fetchFor([
+      { event: 'tool_use', data: { id: 'context-1', name: 'get_customer_context', input: {} } },
+      { event: 'tool_use', data: { id: 'send-1', name: 'send_lead_response', input: { message: 'Synthetic draft' } } },
+      { event: 'done', data: {} },
+    ]);
+    expect(await run(load(path))).toMatchObject({ actionTaken: queued.failed ? null : 'auto_send_suppressed_queued' });
+    const events = global.fetch.mock.calls.flatMap(([, options]) => JSON.parse(options.body || '{}').events || []);
+    const result = events.find(event => event.custom_tool_use_id === 'send-1');
+    expect(Boolean(result.is_error)).toBe(Boolean(queued.failed));
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ ...queued, sent: false, autoSendSuppressed: true });
+    expect(mockBreakerFailure).toHaveBeenCalledTimes(queued.failed ? 2 : 1);
+  });
+
   it.each([true, false])('a direct queue result with queued=%s reports only a saved draft', async queued => {
     mockExecuteLeadTool.mockResolvedValue({ queued });
     global.fetch = fetchFor([
