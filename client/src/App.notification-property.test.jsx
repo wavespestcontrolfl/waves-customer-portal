@@ -274,3 +274,26 @@ test('the same unlisted sibling profile on a PROPERTY-scoped push (Visits) is re
   expect(state.auth.switchProperty).not.toHaveBeenCalled();
 });
 
+
+// The switch guard is released once the destination is satisfied: leaving
+// the notified house and coming Back to the same notification URL switches
+// again instead of loading forever (uncapped codex r2d P1).
+test('returning to a notification URL after a manual switch away switches again', async () => {
+  window.history.replaceState({}, '', '/?tab=visits&notificationProperty=property-1&notificationPropertyId=prop-b');
+  const list = [
+    { id: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a', isPrimaryProperty: true },
+    { id: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b', isPrimaryProperty: false },
+  ];
+  const onA = { key: 'property-1:prop-a', customerId: 'property-1', propertyId: 'prop-a' };
+  const onB = { key: 'property-1:prop-b', customerId: 'property-1', propertyId: 'prop-b' };
+  state.auth = { isAuthenticated: true, loading: false, customer: { id: 'property-1' }, selectedProperty: onA, properties: list, propertiesError: null, switchProperty: vi.fn(async () => true) };
+  const view = render(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledTimes(1));
+  state.auth = { ...state.auth, selectedProperty: onB };
+  view.rerender(<App />);
+  await screen.findByText('Authorized property portal');
+  state.auth = { ...state.auth, selectedProperty: onA };
+  view.rerender(<App />);
+  await waitFor(() => expect(state.auth.switchProperty).toHaveBeenCalledTimes(2));
+  expect(state.auth.switchProperty).toHaveBeenLastCalledWith({ customerId: 'property-1', propertyId: 'prop-b' });
+});

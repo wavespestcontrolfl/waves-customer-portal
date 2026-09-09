@@ -498,7 +498,12 @@ function ProtectedRoute({ children }) {
   const [refreshedFor, setRefreshedFor] = useState(null);
   useEffect(() => {
     const destination = `${targetProperty}:${resolvedTargetPropertyId || ''}`;
-    if (!targetPending || loading || switchingTarget.current === destination) return;
+    // Destination satisfied (or gone): release the in-flight guard so a
+    // later return to the same notification URL — Billing, a manual switch
+    // to another house, Back — switches again instead of loading forever
+    // (uncapped codex r2d P1).
+    if (!targetPending) { switchingTarget.current = null; return; }
+    if (loading || switchingTarget.current === destination) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
     const refreshUnseen = () => {
       if (refreshedFor === destination) return false;

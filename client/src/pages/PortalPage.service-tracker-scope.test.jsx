@@ -74,6 +74,19 @@ describe('ServiceTracker arrival checklist under the saved-property scope', () =
     expect(screen.queryByText('Gate code on file')).not.toBeInTheDocument();
     expect(api.getPropertyPreferences).not.toHaveBeenCalled();
   });
+  // /auth/me resolved the primary while the list read failed; the list then
+  // recovers under the same key with the tracker still mounted — the facts
+  // are read when they START applying (uncapped codex r2d P1).
+  it('reads the profile facts once the selection is confirmed primary after mounting without an entry', async () => {
+    const view = render(<ServiceTracker currentEntry={null} savedScope selectedProperty={{ customerId: 'c1', propertyId: 'pa' }} />);
+    expect(await screen.findByText('Before your tech arrives')).toBeInTheDocument();
+    expect(api.getPropertyPreferences).not.toHaveBeenCalled();
+    view.rerender(<ServiceTracker currentEntry={primary} savedScope selectedProperty={{ customerId: 'c1', propertyId: 'pa' }} />);
+    expect(await screen.findByText('Gate code on file')).toBeInTheDocument();
+    expect(api.getPropertyPreferences).toHaveBeenCalledTimes(1);
+    view.rerender(<ServiceTracker currentEntry={secondary} savedScope selectedProperty={{ customerId: 'c1', propertyId: 'pb' }} />);
+    await waitFor(() => expect(screen.queryByText('Gate code on file')).not.toBeInTheDocument());
+  });
   it('profile mode (no selection, no saved entries) still shows them', async () => {
     render(<ServiceTracker currentEntry={null} savedScope={false} selectedProperty={null} />);
     expect(await screen.findByText('Gate code on file')).toBeInTheDocument();

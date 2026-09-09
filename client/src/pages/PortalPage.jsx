@@ -11803,9 +11803,19 @@ function ServiceTracker({ currentEntry = null, savedScope = false, selectedPrope
     api.getTodayTracker()
       .then(d => { if (seq !== trackerSeqRef.current) return; adoptTracker(d); setLoading(false); })
       .catch(() => { if (seq === trackerSeqRef.current) fetchTracker(); });
-    if (profileFactsRef.current) api.getPropertyPreferences().then(d => setPropertyPrefs(d.preferences)).catch(() => {});
     api.getWeather().then(setWeather).catch(() => {});
   }, [fetchTracker, adoptTracker]);
+  // The profile facts are read whenever they START applying — not only on
+  // mount: /auth/me resolved the primary while /auth/properties failed, then
+  // the list recovered under the same selected key with this tracker still
+  // mounted (uncapped codex r2d P1). When they stop applying (a secondary
+  // house selected) the primary's rows are dropped, never shown stale.
+  useEffect(() => {
+    if (!profileFactsApply) { setPropertyPrefs(null); return undefined; }
+    let stale = false;
+    api.getPropertyPreferences().then(d => { if (!stale) setPropertyPrefs(d.preferences); }).catch(() => {});
+    return () => { stale = true; };
+  }, [profileFactsApply]);
 
   // 'none' | step number — derived so the interval effect keys on the PHASE,
   // not the tracker object identity (which changes on every poll).
