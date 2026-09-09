@@ -5,6 +5,7 @@ const apns = require('./apns');
 const fcm = require('./fcm');
 const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
 const { gateEnvValue } = require('../config/feature-gates');
+const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
 
@@ -327,23 +328,7 @@ async function resolveNotificationPropertyId(customerId, notification) {
     return null;
   }
 }
-// A relative in-app destination qualified with the profile it is about
-// (`notificationProperty`, which the app's route guard needs before it will
-// consider a house) and, when known, the saved property
-// (`notificationPropertyId`). Absolute URLs pass through untouched. Used for
-// the push payload AND, when a house resolved, for the stored bell link —
-// the same reminder opened from the bell must land on the same house
-// (uncapped codex r1t P1).
-function qualifyNotificationLink(url, customerId, propertyId = null) {
-  const raw = String(url || '');
-  if (!raw.startsWith('/') || raw.startsWith('//')) return url;
-  const target = new URL(raw, 'https://portal.wavespestcontrol.com');
-  target.searchParams.set('notificationProperty', String(customerId));
-  if (propertyId) target.searchParams.set('notificationPropertyId', String(propertyId));
-  return `${target.pathname}${target.search}${target.hash}`;
-}
 service.resolveNotificationPropertyId = resolveNotificationPropertyId;
-service.qualifyNotificationLink = qualifyNotificationLink;
 service._resolveNotificationPropertyId = resolveNotificationPropertyId;
 
 module.exports = service;

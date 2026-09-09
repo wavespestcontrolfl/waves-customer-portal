@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
@@ -293,17 +294,32 @@ const NotificationService = {
     }
 
     // Saved-property destination (GATE_APP_PROPERTY_SCOPE, uncapped codex r1t
-    // P1): when the visit's house is known (createOpts.propertyId, or
-    // resolved from createOpts.appointmentId) the STORED bell link names it
-    // too, so the same reminder opened from the bell lands on that house —
-    // not on whichever house is selected. No house known: the link is
-    // untouched, today's shape.
+    // + r1u P1). The visit this notification is about: createOpts.appointmentId,
+    // or the emitters' metadata.appointmentId / metadata.scheduledServiceId
+    // (the en-route and completed bells). A notification ABOUT A VISIT stores
+    // a profile-qualified link — plus the house when the visit is stamped
+    // (resolved by the push sink's resolver) — so the same reminder opened
+    // from the bell lands where the push does: an unstamped visit belongs to
+    // the profile's PRIMARY, which the app's profile-only rule selects. Gate
+    // off: nothing is qualified or forwarded — today's link and payload,
+    // byte for byte. No visit, no house: untouched.
     const PushService = require('./push-notifications');
-    const notifiedPropertyId = await PushService.resolveNotificationPropertyId(customerId, {
-      propertyId: createOptsRaw.propertyId, appointmentId: createOptsRaw.appointmentId,
-    });
-    const createOpts = notifiedPropertyId && createOptsRaw.link
-      ? { ...createOptsRaw, link: PushService.qualifyNotificationLink(createOptsRaw.link, customerId, notifiedPropertyId) }
+    const scopeOn = require('./account-properties').appPropertyScopeEnabled();
+    const metadataRaw = createOptsRaw.metadata || {};
+    const visitId = scopeOn
+      ? (createOptsRaw.appointmentId || metadataRaw.appointmentId || metadataRaw.scheduledServiceId || null)
+      : null;
+    // Nothing to resolve for a notification about no visit and no house (a
+    // receipt, a document): no lookup at all.
+    const notifiedPropertyId = scopeOn && (visitId || createOptsRaw.propertyId)
+      ? await PushService.resolveNotificationPropertyId(customerId, { propertyId: createOptsRaw.propertyId, appointmentId: visitId })
+      : null;
+    const createOpts = scopeOn && (visitId || notifiedPropertyId)
+      ? {
+        ...createOptsRaw,
+        ...(visitId ? { appointmentId: visitId } : {}),
+        ...(createOptsRaw.link ? { link: qualifyNotificationLink(createOptsRaw.link, customerId, notifiedPropertyId) } : {}),
+      }
       : createOptsRaw;
 
     const metadata = {

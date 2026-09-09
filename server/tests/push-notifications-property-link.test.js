@@ -9,7 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const pushService = require('../services/push-notifications');
 const resolve = pushService.resolveNotificationPropertyId;
-const { qualifyNotificationLink } = pushService;
+const { qualifyNotificationLink } = require('../services/notification-links');
 const originalGate = process.env.GATE_APP_PROPERTY_SCOPE;
 afterAll(() => { if (originalGate === undefined) delete process.env.GATE_APP_PROPERTY_SCOPE; else process.env.GATE_APP_PROPERTY_SCOPE = originalGate; });
 

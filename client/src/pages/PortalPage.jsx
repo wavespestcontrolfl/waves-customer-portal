@@ -3024,7 +3024,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
           <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
-            Your protection score and local alerts are shown for your primary address. Switch to that property to see them.
+            Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.
           </div>
         </section>
       ) : (
@@ -3340,7 +3340,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           2026-07-15) — home keeps a one-glance teaser so score movement
           stays visible without the full card. The pre-assessment state
           (mowing height + "tracking will start soon") moved with it. */}
-      {!lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+      {/* Lawn health is read by CUSTOMER (useLawnHealth(customer.id)) — the primary's turf; withheld under a secondary with the score and alerts (uncapped codex r1u P1). */}
+      {!dashboardSecondarySelection && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
         const lawnScore = Math.round(lawnHealth.scores.overallScore);
         const lawnInitial = Math.round(lawnHealth.initialScores.overallScore);
         return (
