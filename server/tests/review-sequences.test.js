@@ -3768,8 +3768,8 @@ describe('shared ask history foundation', () => {
   const base = new Date('2035-01-01T15:00:00Z').getTime();
   function installHistory({ sms = [], sends = [] } = {}) {
     const mock = makeMock({
-      sms_log: sms.map(({ at, body }) => ({
-        customer_id: 'history-customer', direction: 'outbound', status: 'sent',
+      sms_log: sms.map(({ at, body, status = 'sent', metadata = {} }) => ({
+        customer_id: 'history-customer', direction: 'outbound', status, metadata,
         message_body: body || 'Please review us: https://g.page/r/example/review', created_at: new Date(at),
       })),
       review_requests: sends.map(at => ({ customer_id: 'history-customer', sms_sent_at: new Date(at) })),
@@ -3823,6 +3823,8 @@ describe('shared ask history foundation', () => {
     'Please review your invoice: https://portal.test/pay/abc',
     'Please review and sign your agreement: https://portal.test/contract/abc',
     'Could you review the service report?',
+    'Please submit your review of the attached estimate.',
+    'Shipping details: https://vendor.example/rate/abc',
     'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
     'We discussed your Google review yesterday.',
@@ -3833,6 +3835,10 @@ describe('shared ask history foundation', () => {
 
   test.each([
     'Could you leave a Google review?',
+    'Could I ask you for a Google review?',
+    'Can we ask for your honest review?',
+    'https://portal.wavespestcontrol.com/rate/abc',
+    'portal.wavespestcontrol.com/api/rate/abc/go',
     'We’d appreciate a Google review.',
     'A quick Google review would mean the world.',
     'We would really love your honest review.',
@@ -3851,6 +3857,16 @@ describe('shared ask history foundation', () => {
     'Please leave a review: https://maps.app.goo.gl/abc123',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
+  });
+
+  test('an unresolved manual review reservation cannot be matched away by a pipeline stamp', async () => {
+    installHistory({ sms: [{ at: base, status: 'sending', metadata: { review_ask_reservation: true } }], sends: [base] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toEqual(new Date(base));
+  });
+
+  test('ordinary in-flight messages do not count as accepted review asks', async () => {
+    installHistory({ sms: [{ at: base, status: 'sending' }] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
   });
 
   test('no manual ask returns null for timestamps and false for the enrollment contract', async () => {
