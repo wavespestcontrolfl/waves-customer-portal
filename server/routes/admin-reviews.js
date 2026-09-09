@@ -917,8 +917,8 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
           message: 'Send deferred. Queued — it will send automatically on the next retry.',
         });
       case 'blocked':
-        return res.status(409).json({
-          error: `Review request was not sent (${result.code || result.reason || 'blocked'}). Check the customer's messaging consent / suppression.`,
+        return res.status(result.httpStatus || 409).json({
+          error: result.reason || `Review request was not sent (${result.code || 'blocked'}). Check the customer's messaging consent / suppression.`,
         });
       case 'error':
         // NON-durable failure (lock never ran, or no scheduled_for was
