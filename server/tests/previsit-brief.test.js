@@ -4319,6 +4319,17 @@ describe('codex #3423 r77 — active-voice statuses, verb-form history, balance 
     expect(validateBriefJson({ ...BASE, customer_context: 'Quarterly service is scheduled' }, quarterly).body).toBeTruthy();
   });
 
+  test('one-time wording is grounded by a non-recurring visit and only by it', () => {
+    const { validateBriefJson } = PrevisitBrief._test;
+    const oneOff = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'One-Time Pest Control', isRecurring: false } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, oneOff).body).toBeTruthy();
+    // Recurring visits and briefs with no visit fact at all still reject it.
+    const recurring = { catalogVocabulary: { names: [], targets: [] }, llmFacts: { visit: { serviceType: 'Quarterly Pest Control', isRecurring: true } } };
+    expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, recurring).reason).toBe('ungrounded_novel_term:one-time');
+    const noVisit = { catalogVocabulary: { names: [], targets: [] }, llmFacts: {} };
+    expect(validateBriefJson({ ...BASE, customer_context: 'This is a one-time service visit' }, noVisit).reason).toBe('ungrounded_novel_term:one-time');
+  });
+
   test('negated pest facts cannot ground affirmative presence', () => {
     const { validateBriefJson } = PrevisitBrief._test;
     const noTermites = { catalogVocabulary: { names: [], targets: ['termites'] }, llmFacts: { flags: [{ detail: 'customer reports no termites' }] } };

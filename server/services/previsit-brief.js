@@ -1379,6 +1379,13 @@ function findUngroundedClaim(body, grounding) {
   const groundedValueText = [
     ...collectFactValues(grounding.llmFacts),
     ...(grounding.llmFacts?.visit?.isRecurring === true ? ['recurring'] : []),
+    // The mirror image: a visit that is NOT part of a series is a one-time
+    // stop, and isRecurring === false is the only fact that says so. Without
+    // this token every truthful "one-time" brief on a one-off visit
+    // re-templates (52 of ~230 rejections in the week to 2026-09-08 were
+    // ungrounded_novel_term:one-time). A recurring visit still rejects it
+    // (cadence-binding test below).
+    ...(grounding.llmFacts?.visit && grounding.llmFacts.visit.isRecurring === false ? ['one-time'] : []),
     // visit.newCustomer === true is likewise the only first-visit fact —
     // without this token every truthful "Initial visit" re-templates (r14).
     ...(grounding.llmFacts?.visit?.newCustomer === true ? ['initial'] : []),
