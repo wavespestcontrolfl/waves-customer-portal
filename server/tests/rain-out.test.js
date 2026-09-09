@@ -3046,6 +3046,19 @@ describe('rain-out service', () => {
       expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      // The sheet counter fails the same way: a link-less body would read
+      // ~40 GSM slots of phantom headroom that commit() then refuses
+      // (claude-review P2). A plain refusal (no `failed`) still measures.
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '', failed: true });
+      const preview = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
+
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '' });
+      const refused = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(refused.ok).toBe(true);
     });
 
     test('gate on: a measured "no link" (plain refusal) stays no link at send — never rebuilt', async () => {

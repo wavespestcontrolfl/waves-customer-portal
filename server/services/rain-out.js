@@ -336,12 +336,18 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
   // counter must not measure one — codex pre-push P1), same existing-code
   // preference — but read-only: a fresh-code-length placeholder where a
   // mint would happen.
-  const { url } = await buildRescheduleLink(serviceId, {
+  const built = await buildRescheduleLink(serviceId, {
     customerId: service.cust_id || service.customer_id,
     reuseExisting: true,
     previewOnly: true,
     assumeConfirmed: true,
   });
+  // A read FAILURE is not "no link": measuring a link-less body would hand
+  // the counter ~40 slots of headroom commit() will not honour — it refuses
+  // the move on the same condition (preMoveRescheduleUrl), so the counter
+  // hides rather than lies, exactly as the snapshot read below does.
+  if (built.failed) return { ok: false, reason: 'note_cap_unavailable' };
+  const { url } = built;
   let templateBody = null;
   if (!isCustom) {
     try {
