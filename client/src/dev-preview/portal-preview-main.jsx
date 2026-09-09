@@ -44,6 +44,25 @@ const day = (n) => iso(addDays(n));
 const PERSONA = new URLSearchParams(window.location.search).get('persona') || 'active';
 const CANCELLED = PERSONA === 'cancelled';
 const RESTART_MODE = new URLSearchParams(window.location.search).get('restart') || 'ready';
+// ?properties=saved renders the saved-property scope (GATE_APP_PROPERTY_SCOPE):
+// one profile with three saved properties — the picker, the per-property
+// chips and the Visits header driven by the unified list. ?selected=<key>
+// picks the entry the session is scoped to (default: the primary).
+const SAVED_PROPERTIES = new URLSearchParams(window.location.search).get('properties') === 'saved';
+const SAVED_ENTRIES = [
+  { key: 'cust-demo-1:prop-demo-a', customerId: 'cust-demo-1', propertyId: 'prop-demo-a', isPrimaryProfile: true, profileLabel: 'Primary', isPrimaryProperty: true, label: 'Primary', relationship: 'own_home', occupancyType: 'owner_occupied', tier: 'Silver', address: { line1: '1200 Palm Row Ct', line2: null, city: 'Parrish', state: 'FL', zip: '34219' } },
+  { key: 'cust-demo-1:prop-demo-b', customerId: 'cust-demo-1', propertyId: 'prop-demo-b', isPrimaryProfile: true, profileLabel: 'Primary', isPrimaryProperty: false, label: null, relationship: 'family_home', occupancyType: 'family_occupied', tier: 'Silver', address: { line1: '418 Oak Ave', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' } },
+  { key: 'cust-demo-1:prop-demo-c', customerId: 'cust-demo-1', propertyId: 'prop-demo-c', isPrimaryProfile: true, profileLabel: 'Primary', isPrimaryProperty: false, label: 'Lake house', relationship: 'family_home', occupancyType: 'family_occupied', tier: 'Silver', address: { line1: '77 Pine Ct', line2: null, city: 'Palmetto', state: 'FL', zip: '34221' } },
+];
+let SAVED_SELECTED_KEY = new URLSearchParams(window.location.search).get('selected') || SAVED_ENTRIES[0].key;
+const savedSelected = () => {
+  const e = SAVED_ENTRIES.find((x) => x.key === SAVED_SELECTED_KEY) || SAVED_ENTRIES[0];
+  return { key: e.key, customerId: e.customerId, propertyId: e.propertyId };
+};
+// The real routes' scope echo: the selection the read was scoped to.
+const savedScopeEcho = () => ({ enabled: true, propertyId: savedSelected().propertyId, closed: false });
+// The selected house's visits (stamped propertyId); every visit in profile mode.
+const scopedUpcoming = () => (SAVED_PROPERTIES ? UPCOMING.filter((v) => v.propertyId === savedSelected().propertyId) : UPCOMING);
 
 // ── demo persona: Jordan Rivera (fictional) ────────────────────────────────
 const CUSTOMER = {
@@ -79,6 +98,7 @@ const CUSTOMER = {
 const UPCOMING = [
   {
     id: 'visit-up-1',
+    propertyId: 'prop-demo-a',
     date: day(5),
     windowStart: '09:00:00',
     windowEnd: '11:00:00',
@@ -93,6 +113,7 @@ const UPCOMING = [
   },
   {
     id: 'visit-up-2',
+    propertyId: 'prop-demo-b',
     date: day(21),
     windowStart: '13:00:00',
     windowEnd: '15:00:00',
@@ -308,27 +329,52 @@ Object.assign(api, {
   getWateringPlan: async () => ({ available: false }),
   // auth
   getMe: async () => CUSTOMER,
-  getAuthProperties: async () => ({
-    properties: [{
-      id: 'cust-demo-1',
-      profileLabel: 'Home',
-      isPrimary: true,
-      address: { line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' },
-    }],
+  getAuthProperties: async () => (SAVED_PROPERTIES
+    ? { scope: 'saved', properties: SAVED_ENTRIES, selected: savedSelected() }
+    : {
+      properties: [{
+        id: 'cust-demo-1',
+        profileLabel: 'Home',
+        isPrimary: true,
+        address: { line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' },
+      }],
+    }),
+  // Saved-property switch: same customer, new selection; the real route
+  // re-issues the tokens — the harness only moves the selection.
+  selectAuthProperty: async (_customerId, propertyId) => {
+    const e = SAVED_ENTRIES.find((x) => x.propertyId === propertyId) || SAVED_ENTRIES[0];
+    SAVED_SELECTED_KEY = e.key;
+    return { token: 'preview-token', refreshToken: 'preview-refresh', customer: CUSTOMER, properties: [], selected: savedSelected() };
+  },
+  // Per-property chips derive from the SAME stamped visits as the schedule.
+  getSavedPropertiesNext: async () => ({
+    properties: SAVED_ENTRIES.map((e) => ({
+      key: e.key, customerId: e.customerId, propertyId: e.propertyId,
+      next: CANCELLED ? null : (UPCOMING.find((v) => v.propertyId === e.propertyId) || null),
+    })),
   }),
 
   // schedule — reservice/overlayHandoff mirror the streamline payload
   // (GATE_RESERVICE_STREAMLINE) so the Request Service overlay's picker
   // handoff and reschedule-online list render in the preview.
+  // Under ?properties=saved the visit stubs are SCOPED like the real routes
+  // (GitHub codex r5 P2): each demo visit is stamped to a saved property,
+  // the schedule and next-visit reads return the selected house's visits and
+  // echo the selection (`propertyScope`) exactly as /schedule does — so the
+  // preview exercises the scoped-schedule behavior instead of relabeling
+  // another house's visits. Profile mode keeps the customer-wide list.
   getSchedule: async () => (CANCELLED
     ? { hasCancellableWork: false, upcoming: [], reservice: null, overlayHandoff: false }
     : {
+      ...(SAVED_PROPERTIES ? { propertyScope: savedScopeEcho() } : {}),
       hasCancellableWork: true,
-      upcoming: UPCOMING,
-      reservice: { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
+      upcoming: scopedUpcoming(),
+      // The re-service picker books the PRIMARY address: withheld under a
+      // secondary selection, like the real route.
+      reservice: SAVED_PROPERTIES && savedSelected().propertyId !== SAVED_ENTRIES[0].propertyId ? null : { url: '/reservice/demo-reservice-token', lanes: ['pest', 'lawn'] },
       overlayHandoff: true,
     }),
-  getNextService: async () => ({ next: CANCELLED ? null : UPCOMING[0] }),
+  getNextService: async () => ({ ...(SAVED_PROPERTIES ? { propertyScope: savedScopeEcho() } : {}), next: CANCELLED ? null : (scopedUpcoming()[0] || null) }),
   // C4 restart hand-off: the real route mints a normal estimate and answers
   // its /estimate path. The demo path lands back on this harness so the
   // eyeball loop never leaves the preview.

@@ -9,6 +9,18 @@ const { authenticate } = require('../middleware/auth');
 // inspection-fee scrub (codex #2817).
 const { customerSafeServiceNotes } = require('../services/project-types');
 const { etDateString } = require('../utils/datetime-et');
+const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
+
+// Saved-property scope (GATE_APP_PROPERTY_SCOPE) on a service-record query
+// that LEFT JOINs the visit: the shared predicate's "every property retired"
+// leg is whereNull(visits.id), which a record WITHOUT a visit would satisfy
+// under a left join — match nothing explicitly instead. Records without a
+// visit (property_id NULL) belong to the primary, like unstamped visits.
+function scopeRecordsToProperty(query, scope) {
+  if (!scope || !scope.enabled || !scope.scoped) return query;
+  if (scope.closed || !scope.property) return query.whereRaw('1 = 0');
+  return applyPropertyPredicate(query, scope, 'scheduled_services');
+}
 
 router.use(authenticate);
 
@@ -34,6 +46,11 @@ const listQuerySchema = Joi.object({
   limit: Joi.number().integer().min(1).max(100).default(20),
   offset: Joi.number().integer().min(0).default(0),
   type: Joi.string().pattern(/^[A-Za-z0-9 _-]+$/).max(50).optional(),
+  // Opt-in saved-property scope (GATE_APP_PROPERTY_SCOPE): Home's "Last
+  // Visit" card and the request overlay's callback check follow the selected
+  // house (GitHub codex r5 P1). The Completed list stays customer-wide by
+  // design — the tab says so. No-op when the gate is off or single-home.
+  propertyScoped: Joi.boolean().truthy('1').falsy('0').default(false),
 });
 
 // =========================================================================
@@ -43,7 +60,8 @@ router.get('/', async (req, res, next) => {
   try {
     const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
-    const { limit, offset, type } = value;
+    const { limit, offset, type, propertyScoped } = value;
+    const scope = propertyScoped ? await resolveSessionScope(req) : null;
 
     let query = db('service_records')
       .where({ 'service_records.customer_id': req.customerId })
@@ -63,6 +81,7 @@ router.get('/', async (req, res, next) => {
     if (type) {
       query = query.where('service_records.service_type', 'ilike', `%${type}%`);
     }
+    if (scope) query = scopeRecordsToProperty(query, scope);
 
     const services = await query;
 
@@ -138,12 +157,21 @@ router.get('/', async (req, res, next) => {
     }));
 
     // Get total count for pagination
-    const total = await db('service_records')
-      .where({ customer_id: req.customerId })
-      .count('id as count')
-      .first();
+    let totalQuery = db('service_records')
+      .where({ 'service_records.customer_id': req.customerId });
+    if (scope) {
+      totalQuery = scopeRecordsToProperty(
+        totalQuery.leftJoin('scheduled_services', 'service_records.scheduled_service_id', 'scheduled_services.id'),
+        scope,
+      );
+    }
+    const total = await totalQuery.count('service_records.id as count').first();
 
     res.json({
+      // The selection this read was scoped to (propertyScoped only): Home
+      // compares it with the house it shows and withholds the Last Visit card
+      // on a mismatch (uncapped codex r1v P1) — same echo as /schedule.
+      ...(scope ? { propertyScope: resolvedScopePayload(scope) } : {}),
       services: enriched,
       total: parseInt(total.count),
       limit: parseInt(limit),

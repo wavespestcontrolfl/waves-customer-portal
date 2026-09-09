@@ -36,6 +36,7 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'customer_email_received',        // a customer emailed
   'customer_voicemail_callback',    // a customer left a voicemail
   'customer_missed_call',           // a customer called, nobody answered, no voicemail
+  'repeat_caller',                  // one number has called 3+ times in 3 hours
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
 ]);
 

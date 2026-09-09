@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -107,7 +107,7 @@ const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, 
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
-const { classifyCall, recordVerdict } = require('./call-spam-classifier');
+const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -976,13 +976,13 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
 
 // Name normalization + nickname-aware first-name matching live in
 // utils/name-match.js (shared with the Zelle notice reconciler, 2026-09-02).
-const { normalizeNamePart, firstNameVariants, sameFirstName } = require('../utils/name-match');
+const { normalizeNamePart, firstNameVariants, sameFirstName, sameSpokenFirstName, spokenFirstNameVariants } = require('../utils/name-match');
 
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (!sameFirstName(extractedFirst, customerFirst)) return false;
+  if (!sameSpokenFirstName(extractedFirst, customerFirst)) return false;
 
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
@@ -1153,6 +1153,19 @@ function summarizeKnownCaller(customer) {
     addressCity: String(customer.city || '').trim() || null,
     addressZip: String(customer.zip || '').trim() || null,
   };
+}
+
+// Carrier caller-ID (CNAM) name for the extraction prompt, from the Twilio
+// AddOns envelope the voice webhook persisted. Only when the caller is NOT
+// withheld and the lookup succeeded; a business-line or "WIRELESS CALLER"
+// style placeholder carries no name and is dropped.
+function callerIdNameForPrompt(call) {
+  try {
+    const meta = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+    const name = String(cnamFromEnvelope(meta.addons) || '').trim();
+    if (!name || /wireless caller|unknown|unavailable|anonymous|private|^\d+$/i.test(name)) return null;
+    return name.slice(0, 80);
+  } catch (_e) { return null; }
 }
 
 // Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
@@ -2642,7 +2655,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       const row = await query.orderBy('created_at', 'desc').first();
       return { lead: row || null, matchedVia: row ? 'phone' : null };
     }
-    const variants = firstNameVariants(extractedFirst);
+    const variants = spokenFirstNameVariants(extractedFirst);
     const FIRST_NORM = "LOWER(REGEXP_REPLACE(first_name, '[^a-zA-Z0-9]', '', 'g'))";
     const LAST_NORM = "LOWER(REGEXP_REPLACE(last_name, '[^a-zA-Z0-9]', '', 'g'))";
     const compatQuery = query.clone().whereRaw(
@@ -6083,6 +6096,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
     knownCaller: opts.knownCaller,
+    // Carrier caller-ID name as a NAME CANDIDATE (2026-09-02..08 audit:
+    // "Smith" won over a spelled S-M-Y-T-H-E and caller ID SMYTHE).
+    callerIdName: opts.callerIdName,
     // Cross-call threading: prior call from this number, so a continuation
     // completes the earlier record instead of restarting from nothing.
     priorCall: opts.priorCall,
@@ -7500,6 +7516,7 @@ const CallRecordingProcessor = {
           callId: call.id,
           bookableServiceNames,
           knownCaller,
+          callerIdName: callerIdNameForPrompt(call),
           priorCall,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
@@ -7584,6 +7601,10 @@ const CallRecordingProcessor = {
       // A NULL call_nature stays out of the hold: the schema reserves null
       // for truly indeterminate calls, where legacy creation behavior stands.
       'other',
+      // A vendor / referral partner is never a customer, whether V1 called
+      // the call spam or V2 cleared it (codex r3 P2): the cleared call keeps
+      // its summary and disposition, not a customer row.
+      'vendor_or_partner',
     ]);
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'
@@ -7955,6 +7976,7 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
     // below reads it, so the ask does not depend on the routing mode
@@ -8369,6 +8391,12 @@ const CallRecordingProcessor = {
               ? routingResult.appointmentBlockingFlags
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
+            // A held scheduling CHANGE (cancel / reschedule / coordination on
+            // an existing visit) is owed work. The card files below, but
+            // review_status is driven by bridgeNeedsConfirmation alone, so the
+            // call itself looked fully processed (2026-09-02..08 audit: a
+            // cancellation, two reschedules and a re-treat with no owner).
+            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
@@ -15843,7 +15871,7 @@ const CallRecordingProcessor = {
           // a terminal status with a log line and nothing else — no review
           // flag, no card, no sweep — the one honest-failure state nobody
           // could see.
-          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
+          ...(bridgeNeedsConfirmation.length || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
             ? { review_status: 'open' } : {}),
           metadata: db.raw(
             "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",

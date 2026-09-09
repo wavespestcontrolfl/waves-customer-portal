@@ -8,6 +8,7 @@ const { minutesFromElapsed } = require('../../utils/duration-minutes');
 const { isOperatorTimeOnSite } = require('../completion-attempts');
 const { effectiveWindowRange } = require('../route-reorder-window-fit');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
+const { summarizeDurationReferences } = require('./duration-priors');
 
 const MAX_RECORDED_MINUTES = 720; // Same single-visit ceiling as completion corrections.
 const EVENT_TOLERANCE_MS = 5 * 60000;
@@ -186,7 +187,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now });
   const plannedIds = [...new Set(plans.flatMap(plan => plan.plannedStops.map(stop => stop.id)))];
   const rows = await conn('scheduled_services').where(query => query.whereIn('id', plannedIds).orWhereBetween('scheduled_date', [from, to]))
-    .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'window_start', 'time_window',
+    .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'status', 'visit_id', 'is_callback', 'followup_included', 'window_start', 'time_window',
       'actual_start_time', 'check_in_time', 'arrived_at', 'actual_end_time', 'check_out_time', 'completed_at',
       'service_time_minutes', 'actual_duration_minutes', 'time_on_site_adjusted_minutes');
   const ids = rows.map(row => row.id);
@@ -211,7 +212,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
   const coveredRoutes = new Map(plans.map(plan => [routeKey(plan.date, plan.technician_id), new Set(plan.plannedStops.map(stop => stop.id))]));
   const today = etDateString(now);
-  const pastWork = rows.filter(row => !NOT_A_ROUTE_STOP_STATUSES.includes(row.status)
+  const pastWork = enriched.filter(row => !NOT_A_ROUTE_STOP_STATUSES.includes(row.status)
     && dateOnly(row.scheduled_date) >= from && dateOnly(row.scheduled_date) <= to && dateOnly(row.scheduled_date) < today);
   // Empty days do not require a route baseline. Report uncovered work, not
   // every weekend or other date on which no visit was scheduled.
@@ -230,6 +231,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     unbaselinedCompletedVisits: pastWork.filter(row => row.status === 'completed'
       && !coveredRoutes.get(routeKey(dateOnly(row.scheduled_date), row.technician_id))?.has(row.id)).length,
     truncatedPlanningRuns: runs.length > 500,
+    durationReferences: summarizeDurationReferences(pastWork, recordedTiming),
     note: 'Unknown arrivals are excluded from the on-time denominator. Duration sources stay separate; no GPS gap is classified as idle and no model is updated.',
   };
 }

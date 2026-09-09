@@ -40,7 +40,7 @@ jest.mock('../models/db', () => {
     // an events read distinguish "is THIS row proven" probes (the r23
     // rebound-child fix makes two of them with different ids in one pass).
     let whereScheduledId;
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereNotExists', 'orderBy', 'orderByRaw', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'whereExists', 'whereNotExists', 'orderBy', 'orderByRaw', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
       chain[m] = jest.fn((...args) => {
         mockChainCalls.push({ m, args });
         if (m === 'join' || m === 'leftJoin') joined = true;
@@ -85,6 +85,7 @@ jest.mock('../models/db', () => {
   // recovery query died at arg-evaluation time and the catch swallowed it,
   // so recovery paths were silently untested.
   db.raw = jest.fn((sql) => sql);
+  db.ref = jest.fn((column) => column);
   db.fn = { now: () => 'NOW' };
   db.transaction = jest.fn(async (cb) => cb(db));
   // Savepoint support: a nested transaction on the same handle.
@@ -1033,7 +1034,7 @@ describe('closeout route wiring — source contracts (the completion route is to
     // the memo, and keying on the offer key alone re-emailed every normal
     // customer a duplicate.
     expect(source).toContain("m.idempotency_key = 'inspection-credit-offer-' || o.id::text");
-    expect(source).toContain("'invoice_receipt:' || i2.id::text");
+    expect(source).toContain("'invoice_receipt:' || invoices.id::text");
     // updated_at (row materialization), never the backdated promise
     // moment (r35 P2): a receipt sent before a recovery-created offer
     // existed could not carry the memo and must not read as delivered.
@@ -1106,7 +1107,7 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(spAt).toBeGreaterThan(-1);
     expect(source.slice(spAt, outboxAt)).toContain('notifyAdmin'); // the outbox rides the savepoint
     // Blocked/failed/stale-queued message rows keep the audit re-queueing.
-    expect(source).toContain("m.status IN ('sent', 'delivered', 'opened', 'clicked')");
+    expect(source).toContain(".whereIn('m.status', ['sent', 'delivered', 'opened', 'clicked'])");
   });
 
   it('both schedule serializers forward the lookup-failed marker (r34 P2)', () => {
