@@ -1401,6 +1401,18 @@ function dedupeKeyFor(visit, effectType) {
     : `${visit.id}:${effectType}`;
 }
 
+// The member that owns a packet-level effect (summary delivery, payment):
+// the packet's first RECORDED member. A frozen visit also retains history
+// rows (cancelled / skipped / no-show / rescheduled) whose stop tuple or
+// assignment no longer matches the visit; judged by claimVisitNotification
+// they are `detached`, so an arbitrary first child can park every packet
+// effect as pending forever (codex #4026 r8).
+async function recordedPacketMember(packetId, database = db) {
+  return database('scheduled_services as s')
+    .join('visit_completion_packet_items as i', 'i.scheduled_service_id', 's.id')
+    .where('i.packet_id', packetId).orderBy('s.id').select('s.*').first();
+}
+
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
   const effectType = effectTypeForKind(kind);
@@ -3271,6 +3283,7 @@ module.exports = {
   releaseReminderHoldByToken,
   MOVE_HOLD_TTL_MS,
   claimVisitNotification,
+  recordedPacketMember,
   beginVisitNotificationDispatch,
   notificationLeaseLive,
   renewNotificationLease,

@@ -684,17 +684,27 @@ postgres('visit completion packet records on PostgreSQL', () => {
   // A cancelled child loses its assignment; a rescheduled child keeps a
   // stale date and window while it awaits re-placement. Neither is this
   // visit's work, so neither reaches the ownership or compatibility checks.
+  // The retained child carries the lexicographically FIRST id: the packet's
+  // effects must pick their owner from the recorded member, not from the
+  // visit's first child, or the history row's stale tuple detaches every
+  // claim and the visit never closes.
   test.each([
     ['cancelled', { status: 'cancelled', technician_id: null }],
     ['rescheduled', { status: 'rescheduled', scheduled_date: '2000-01-01', window_start: '14:00', window_end: '16:00' }],
-  ])('a retained %s child does not block the live member', async (status, changes) => {
-    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update(changes);
+  ])('a retained %s child does not block the live member or own its effects', async (status, changes) => {
+    const [retainedId, liveId] = fixture.serviceIds;
+    await mockPg('scheduled_services').where({ id: retainedId }).update(changes);
     expect(await saveVisitCompletionPacket(submission())).toMatchObject({ status: 409, body: { code: 'visit_members_changed' } });
-    const input = submission({ items: submission().items.filter((item) => item.serviceId === fixture.serviceIds[0]) });
-    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+    const input = submission({ items: submission().items.filter((item) => item.serviceId === liveId) });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved).toMatchObject({ status: 202, body: { state: 'records_saved' } });
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(1);
     const packet = await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId }).first();
-    expect(packet.payload.retainedMembers).toEqual([{ serviceId: fixture.serviceIds[1], status }]);
+    expect(packet.payload.retainedMembers).toEqual([{ serviceId: retainedId, status }]);
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const effects = await mockPg('visit_effects').where({ visit_id: fixture.visitId }).select('effect_type', 'status');
+    expect(effects.map((effect) => effect.effect_type).sort()).toEqual(expect.arrayContaining(['completion_email', 'completion_sms', 'visit_payment']));
+    expect(effects.every((effect) => !['pending', 'claimed'].includes(effect.status))).toBe(true);
   });
 
   test('a member another runner finished first is accepted instead of failing the packet', async () => {
