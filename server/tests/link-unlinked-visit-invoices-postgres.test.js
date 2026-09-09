@@ -31,7 +31,7 @@ jest.setTimeout(30000);
   });
   test.each(['visit', 'record'])('refuses callback evidence from the %s', async (source) => {
     const ids = await seedPair(db, { [source]: { is_callback: true } });
-    expect(await evaluate(db, ids.invoiceId, new Set())).toEqual({ skip: 'callback' });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'callback' });
   });
   test('refuses a combined label and a distinct invoice on the same day', async () => {
     const ids = await seedPair(db, { visit: { service_type: 'Quarterly Pest + Termite Bait Station Service' } });
@@ -45,6 +45,27 @@ jest.setTimeout(30000);
     const ids = await seedPair(db);
     await db('scheduled_services').insert({ id: randomUUID(), customer_id: ids.customerId, scheduled_date: '2020-01-01', status: 'confirmed' });
     expect((await readPlan()).skipped).toEqual({ ambiguous: 1 });
+  });
+  test('counts a legacy record-linked invoice as a competing bill', async () => {
+    const ids = await seedPair(db); const legacyRecordId = randomUUID();
+    await db('service_records').insert({ id: legacyRecordId, customer_id: ids.customerId });
+    await db('invoices').insert({ id: randomUUID(), customer_id: ids.customerId, service_date: '2020-01-01',
+      status: 'paid', service_record_id: legacyRecordId });
+    expect(await readPlan()).toMatchObject({ scanned: 1, pairings: [], skipped: { ambiguous: 1 } });
+  });
+  test('excludes prepay invoices owned only by the term and ignores null term links', async () => {
+    const ids = await seedPair(db);
+    await db('annual_prepay_terms').insert({ id: randomUUID() });
+    expect((await readPlan()).pairings).toHaveLength(1);
+    await db('annual_prepay_terms').insert({ id: randomUUID(), prepay_invoice_id: ids.invoiceId });
+    expect(await readPlan()).toMatchObject({ scanned: 0, pairings: [] });
+    expect(await evaluate(db, ids.invoiceId)).toEqual({ skip: 'invoiceChanged' });
+  });
+  test('catalog membership cannot turn inspection charges into treatment evidence', async () => {
+    await seedPair(db, { visit: { service_type: 'Quarterly Pest Control Service' },
+      invoice: { line_items: JSON.stringify([{ description: 'Pest Inspection Service', amount: 100 }]) } });
+    await db('services').insert({ id: randomUUID(), name: 'Pest Inspection Service' });
+    expect((await readPlan()).skipped).toEqual({ noEvidence: 1 });
   });
   test.each(['scheduled_service_addons', 'visit_billing_dispositions'])('refuses existing %s rows', async (table) => {
     const ids = await seedPair(db);

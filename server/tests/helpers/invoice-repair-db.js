@@ -5,7 +5,7 @@ const { randomUUID } = require('crypto');
 // This is the repair's relevant PostgreSQL schema subset, not a claim that
 // every production migration ran. FK types/links follow initial_schema,
 // invoices, service_records_scheduled_service_id, service_completion_attempts,
-// appointment_workflow, third_party_payers, and visit_billing_dispositions.
+// appointment_workflow, third_party_payers, annual_prepay_terms, and visit_billing_dispositions.
 async function createRepairDatabase() {
   const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.pathname !== '/invoice_repair_test') {
@@ -37,6 +37,7 @@ async function createRepairDatabase() {
       po_number text, tax_rate numeric DEFAULT 0, payer_snapshot jsonb,
       scheduled_service_id uuid REFERENCES scheduled_services(id), service_record_id uuid REFERENCES service_records(id),
       annual_prepay_term_id uuid, archived_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now());
+    CREATE TABLE annual_prepay_terms (id uuid PRIMARY KEY, prepay_invoice_id uuid UNIQUE REFERENCES invoices(id) ON DELETE SET NULL);
     CREATE TABLE scheduled_service_addons (id uuid PRIMARY KEY, scheduled_service_id uuid REFERENCES scheduled_services(id));
     CREATE TABLE visit_billing_dispositions (id uuid PRIMARY KEY, scheduled_service_id uuid UNIQUE REFERENCES scheduled_services(id));
     CREATE TABLE visit_completion_packets (id uuid PRIMARY KEY, visit_id uuid UNIQUE);

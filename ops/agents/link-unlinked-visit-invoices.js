@@ -26,7 +26,7 @@ const { etDateString } = require('../../server/utils/datetime-et');
 const PLAN_VERSION = 2;
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
 const KNOWN_FAMILIES = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'palm_injection', 'foam_recurring', 'rodent_bait', 'termite_bait']);
-const NON_APPLICATION_LINE_RE = /\b(fee|fees|surcharge|cancel\w*|reschedul\w*|no[- ]?show|late|deposit|credit|discount|tax|tip|gratuity|warranty|renewal|callback|re[- ]?treat\w*|refills?|supplies|supply|products?|equipment|parts?|materials?)\b/i;
+const NON_APPLICATION_LINE_RE = /\b(fee|fees|surcharge|cancel\w*|reschedul\w*|no[- ]?show|late|deposit|credit|discount|tax|tip|gratuity|warranty|renewal|callback|re[- ]?(?:treat|service)\w*|inspect\w*|assessment|refills?|supplies|supply|products?|equipment|parts?|materials?)\b/i;
 // Retired identities can encode multiple programs without any add-on rows.
 // This is deliberately conservative: declining a candidate needs manual
 // reconciliation; accepting a partial bill could suppress legitimate billing.
@@ -53,7 +53,7 @@ function pairingDigest(inv, svc, serviceRecordId, billTo, records = []) {
   return crypto.createHash('sha256').update(body).digest('hex');
 }
 
-function invoiceBillsVisitApplication(invoice, svc, catalogNames) {
+function invoiceBillsVisitApplication(invoice, svc) {
   const visitFamily = serviceKeyFor({ service_type: svc.service_type });
   if (!KNOWN_FAMILIES.has(visitFamily)) return false;
   const otherFamily = (label) => {
@@ -70,26 +70,30 @@ function invoiceBillsVisitApplication(invoice, svc, catalogNames) {
     if (NON_APPLICATION_LINE_RE.test(desc)) continue;
     const label = norm(desc);
     if (!label) continue;
-    // Inspect ALL containing catalog names: unordered catalog rows must never
-    // let the first matching family hide a conflicting service identity.
-    const matches = [...catalogNames].filter((name) => norm(name) === label || (label.length >= 8 && norm(name).includes(label)));
-    if (matches.some((name) => isCompositeService(name) || serviceKeyFor({ service_type: name }) !== visitFamily)) return false;
-    if (label === visitLabel || matches.length > 0) evidence = true;
+    // A shared family or catalog substring cannot prove the same application
+    // (e.g. termite inspection/foam/bait). Require the visit's own label;
+    // historical aliases and shortened labels stay for manual reconciliation.
+    if (label === visitLabel) evidence = true;
   }
   return evidence;
 }
 
-// The same live/unlinked filter governs the scan, candidate read, and
-// customer/date uniqueness predicate; the runtime's terminal statuses win.
-function unlinkedInvoices(conn) {
-  return conn('invoices').whereNull('scheduled_service_id').whereNull('service_record_id')
-    .whereNull('annual_prepay_term_id').whereNull('archived_at').whereNotNull('service_date')
+function liveInvoices(conn) {
+  return conn('invoices').whereNull('archived_at')
     .whereNotIn('status', InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+}
+
+// Candidate ownership is stricter than ambiguity: a bill attached to a
+// legacy record or prepay term must still count as a competing same-day bill.
+function unlinkedInvoices(conn) {
+  return liveInvoices(conn).whereNull('scheduled_service_id').whereNull('service_record_id')
+    .whereNull('annual_prepay_term_id').whereNotNull('service_date')
+    .whereNotIn('id', conn('annual_prepay_terms').whereNotNull('prepay_invoice_id').select('prepay_invoice_id'));
 }
 
 // Reads only. The planner supplies a consistent read-only snapshot; the
 // separately reviewed executor supplies a transaction holding the row locks.
-async function evaluate(conn, invoiceId, catalogNames) {
+async function evaluate(conn, invoiceId) {
   const inv = await unlinkedInvoices(conn).where({ id: invoiceId }).first();
   if (!inv) return { skip: 'invoiceChanged' };
   const day = dateOnly(inv.service_date);
@@ -98,37 +102,42 @@ async function evaluate(conn, invoiceId, catalogNames) {
     .whereRaw('scheduled_date::date = ?::date', [day]).whereNotIn('status', DEAD_VISIT_STATUSES).select(VISIT_DIGEST_FIELDS);
   if (visits.length !== 1) return { skip: visits.length ? 'ambiguous' : 'noVisit' };
   const svc = visits[0];
-  if (svc.is_callback) return { skip: 'callback' };
-  if ([svc.service_type, svc.service_key_snapshot].some(isCompositeService)) return { skip: 'compositeVisit' };
-  const sameDayLive = await unlinkedInvoices(conn).where({ customer_id: inv.customer_id })
+  const sameDayLive = await liveInvoices(conn).where({ customer_id: inv.customer_id })
     .whereRaw('service_date::date = ?::date', [day]).select('id');
-  if (sameDayLive.length !== 1 || String(sameDayLive[0].id) !== String(inv.id)) return { skip: 'ambiguous' };
-  if (await conn('scheduled_service_addons').where({ scheduled_service_id: svc.id }).first('id')) return { skip: 'visitHasAddons' };
   const records = await conn('service_records').where({ scheduled_service_id: svc.id }).select('id', 'is_callback');
-  if (records.some((r) => r.is_callback)) return { skip: 'callback' };
   const invoiced = await conn('invoices')
     .where((qb) => qb.where({ scheduled_service_id: svc.id }).orWhereIn('service_record_id', records.map((r) => r.id)))
     .whereNot('status', 'void').first('id');
-  if (invoiced) return { skip: 'visitAlreadyInvoiced' };
-  if (await conn('visit_billing_dispositions').where({ scheduled_service_id: svc.id }).first('id')) return { skip: 'dispositioned' };
+  const exclusions = [
+    ['callback', [svc, ...records].some((r) => r.is_callback)],
+    ['compositeVisit', [svc.service_type, svc.service_key_snapshot].some(isCompositeService)],
+    ['ambiguous', sameDayLive.length !== 1],
+    ['visitHasAddons', await conn('scheduled_service_addons').where({ scheduled_service_id: svc.id }).first('id')],
+    ['visitAlreadyInvoiced', invoiced],
+    ['dispositioned', await conn('visit_billing_dispositions').where({ scheduled_service_id: svc.id }).first('id')],
+  ];
+  const excluded = exclusions.find(([, present]) => present);
+  if (excluded) return { skip: excluded[0] };
   try { await assertScheduledInvoiceNotPacketOwned(conn, svc.id); } catch (err) {
     if (err.code === 'VISIT_PACKET_OWNS_BILLING') return { skip: 'packetOwned' };
     throw err;
   }
-  if (!invoiceBillsVisitApplication(inv, svc, catalogNames)) return { skip: 'noEvidence' };
+  if (!invoiceBillsVisitApplication(inv, svc)) return { skip: 'noEvidence' };
   const customer = await conn('customers').where({ id: inv.customer_id }).first();
   if (!customer) return { skip: 'customerChanged' };
   const billTo = await PayerService.resolveForInvoice({ database: conn, customerId: inv.customer_id,
     customer, scheduledServiceId: svc.id, throwOnError: true });
-  if (String(inv.payer_id || '') !== String(billTo.payerId || '')
-    || String(inv.po_number || '').trim() !== String(billTo.poNumber || '').trim()) return { skip: 'billToMismatch' };
-  if (billTo.taxExempt && (Number(inv.tax_rate) !== 0 || Number(inv.tax_amount) !== 0)) return { skip: 'payerTaxMismatch' };
+  if ([[inv.payer_id, billTo.payerId], [inv.po_number, billTo.poNumber]]
+    .some(([frozen, current]) => String(frozen ?? '').trim() !== String(current ?? '').trim())) return { skip: 'billToMismatch' };
+  if (billTo.taxExempt && [inv.tax_rate, inv.tax_amount].some((value) => Number(value) !== 0)) return { skip: 'payerTaxMismatch' };
   const record = await canonicalCompletionRecordId(conn, svc.id, records);
-  const technicianId = svc.technician_id || inv.technician_id || null;
+  const previousTechnicianId = inv.technician_id || null;
+  const previousTechName = inv.tech_name || null;
+  const technicianId = svc.technician_id || previousTechnicianId;
   return { pairing: { invoiceId: inv.id, invoiceStatus: inv.status, invoiceTotal: inv.total == null ? null : Number(inv.total), serviceDate: day,
-    visitId: svc.id, visitStatus: svc.status, visitService: svc.service_type || null,
-    serviceRecordId: record, previousTechnicianId: inv.technician_id || null, technicianId,
-    previousTechName: inv.tech_name || null, techName: technicianId === (inv.technician_id || null) ? inv.tech_name || null : null,
+    visitId: svc.id, visitStatus: svc.status, visitService: svc.service_type,
+    serviceRecordId: record, previousTechnicianId, technicianId,
+    previousTechName, techName: technicianId === previousTechnicianId ? previousTechName : null,
     digest: pairingDigest(inv, svc, record, billTo, records) } };
 }
 
@@ -144,18 +153,12 @@ async function canonicalCompletionRecordId(conn, scheduledServiceId, records) {
   return attempt && ids.has(String(attempt.service_record_id)) ? attempt.service_record_id : null;
 }
 
-async function catalog(conn) {
-  const rows = await conn('services').where({ is_active: true }).select('name');
-  return new Set(rows.map((r) => r.name).filter(Boolean));
-}
-
 async function plan(conn, days = 120) {
-  const catalogNames = await catalog(conn);
   const unlinked = await unlinkedInvoices(conn)
     .whereRaw("created_at > now() - (? * interval '1 day')", [days]).orderBy('service_date').select('id');
   const pairings = []; const skipped = {};
   for (const { id } of unlinked) {
-    const v = await evaluate(conn, id, catalogNames);
+    const v = await evaluate(conn, id);
     if (v.pairing) pairings.push(v.pairing); else skipped[v.skip] = (skipped[v.skip] || 0) + 1;
   }
   return { version: PLAN_VERSION, plannedAt: new Date().toISOString(), days, scanned: unlinked.length, pairings, skipped };
@@ -203,4 +206,4 @@ async function main() {
 }
 
 if (require.main === module) void main().catch((err) => { console.error(err.message); process.exitCode = 1; });
-module.exports = { evaluate, pairingDigest, readPlan, plan, catalog, formatPairing, invoiceBillsVisitApplication, isCompositeService };
+module.exports = { evaluate, pairingDigest, readPlan, plan, formatPairing, invoiceBillsVisitApplication, isCompositeService };
