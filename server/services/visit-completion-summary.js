@@ -231,7 +231,9 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
         // handoff happened, so the requested SMS stays retryable.
         try {
           dispatched = await claimDispatchForRecipient({ visitId: visit.id, customerId: customer.id, kind: 'completion_sms',
-            token: claim.token, authorized: (current) => getServiceContactSmsRecipient(current).phone === recipient.phone });
+            token: claim.token, authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
+              && currentPrefs.service_completed !== false
+              && getServiceContactSmsRecipient(current).phone === recipient.phone });
         } catch { return { ok: false, code: 'VISIT_SUMMARY_CLAIM_UNAVAILABLE', retryable: true }; }
         return { ok: dispatched, code: 'VISIT_SUMMARY_CLAIM_LOST' };
       },
