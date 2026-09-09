@@ -852,6 +852,21 @@ test('a phone or email literal that resolved nobody fails scoped and selector-fr
   }
 });
 
+test('an explicitly addressed unlinked sender can be drafted a reply by email id even though the contact resolved no customer', async () => {
+  const email = '50000000-0000-4000-8000-000000000021';
+  rows.emails = [{ id: email, customer_id: null, lead_id: null, from_address: 'Vendor@Example.invalid', gmail_thread_id: null }];
+  const schema = { properties: { email_id: { type: 'string' }, instructions: { type: 'string' } } };
+  const params = { email_id: email, instructions: 'Thank them' };
+  const addressed = { targets: [], contactRequested: true, explicitEmails: ['vendor@example.invalid'], page: { ids: {} } };
+  expect(await Context.prepareReadInput(params, addressed, { toolName: 'draft_email_reply', schema })).toEqual({ input: params });
+  // A different explicit address, no explicit address, or no email id at all stays closed.
+  expect((await Context.prepareReadInput(params, { ...addressed, explicitEmails: ['other@example.invalid'] }, { toolName: 'draft_email_reply', schema })).code).toBe('target_clarification_required');
+  expect((await Context.prepareReadInput(params, { ...addressed, explicitEmails: [] }, { toolName: 'draft_email_reply', schema })).code).toBe('target_clarification_required');
+  expect((await Context.prepareReadInput({ instructions: 'Thank them' }, addressed, { toolName: 'draft_email_reply', schema })).code).toBe('customer_scope_required');
+  // A name or phone selector does not reopen a scoped reader for an unresolved contact.
+  expect((await Context.prepareReadInput({ phone: '5550001234' }, addressed, { toolName: 'match_existing_customer', schema: { properties: { phone: { type: 'string' } } } })).code).toBe('customer_scope_required');
+});
+
 test('compute_estimate binds its lead to the task customer', async () => {
   const lead = '60000000-0000-4000-8000-000000000001';
   rows.leads = [{ id: lead, customer_id: B, first_name: 'Synthetic', last_name: 'Lead' }];

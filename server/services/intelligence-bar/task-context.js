@@ -641,8 +641,9 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // against the task's authority further down, so only a selector-free call is
 // broad. `service_id` is the closeout readers' appointment identifier and
 // `candidate_service_id` the gap reader's (both mapped in validateRecordTarget).
+const hasRecordReference = params => Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
 const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone || params.service_id || params.candidate_service_id)
-  || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
+  || hasRecordReference(params);
 // Record readers whose selector-free mode reads no customer-identifying rows:
 // the gap reader without a candidate returns per-technician minute budgets
 // only (the executor strips appointment ids). Such a call has nothing to
@@ -672,8 +673,12 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   // phone/email literal that matched nobody) gives the scoped readers an
   // empty read scope and the record readers no customer to inherit, so a
   // selector-free call would read every customer's rows. Both fail closed.
+  // A scoped reader that names a record (an email id for a reply draft)
+  // reaches validateRecordTarget instead, where the explicitly addressed
+  // sender's unique unlinked thread is the only thing that admits it; a
+  // name or phone selector does not reopen a scoped reader.
   if (customerSpecific && !context.targets?.length && !SELECTOR_FREE_READS_NO_CUSTOMER_ROWS.has(toolName)
-    && (scope === 'scoped' || ((scope === 'record' || schema.properties?.customer_id) && !hasOwnSelector(params)))) {
+    && ((scope === 'scoped' && !hasRecordReference(params)) || ((scope === 'record' || schema.properties?.customer_id) && !hasOwnSelector(params)))) {
     return { error: 'The named customer or contact did not match anyone on file, so this lookup has no customer scope. Correct the name or contact before reading that customer\'s records.', code: 'customer_scope_required' };
   }
   // Keyed readers bind their phone or email to a task customer. A request
