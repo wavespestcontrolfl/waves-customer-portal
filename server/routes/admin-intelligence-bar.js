@@ -356,6 +356,9 @@ function sanitizeQueryImages(images) {
 // taint must survive the round-trip through the client the same way the
 // image taint does.
 const PII_TAINT_MARKER = '[PII-bearing tool context may contain customer PII]';
+// The persisted user turn of a task continuation. The original request is
+// already in the thread and in the client's history from the first reply.
+const CONTINUATION_TURN = 'Continue the saved request using its recorded step outcomes.';
 
 function hasImageTaintedHistory(conversationHistory) {
   if (!Array.isArray(conversationHistory)) return false;
@@ -2170,8 +2173,16 @@ async function runQuery(req, res, next) {
     const priorThread = UUID_RE.test(String(req.body.thread_id || ''))
       ? { threadId: req.body.thread_id, threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null } : {};
     const images = sanitizeQueryImages(req.body.images);
-    const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
-    const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
+    // A continuation of a task that already delivered a reply builds on that
+    // reply: the persisted thread receives a distinct continuation turn and
+    // the returned history keeps the earlier exchange instead of replaying
+    // the original request. A task interrupted before any reply still sends
+    // and persists its original request.
+    const priorReply = req.ibResumedTask?.checkpoint?.length ? req.ibResumedTask.response : null;
+    const continuing = Boolean(priorReply);
+    const historyBase = Array.isArray(priorReply?.conversationHistory) ? priorReply.conversationHistory : conversationHistory;
+    const imageTainted = images.length > 0 || hasImageTaintedHistory(historyBase);
+    const piiTaintedHistory = hasPiiTaintedHistory(historyBase);
 
     if (typeof prompt !== 'string' || !prompt.trim()) {
       return res.status(400).json({ error: 'Prompt is required' });
@@ -2234,8 +2245,10 @@ async function runQuery(req, res, next) {
     }
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
+      // A resumed task keeps its delivered reply (history, thread cursor) so
+      // a later continuation still builds on it; only the answer text changes.
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'failed',
-        response: { ...priorThread, response: 'The model integration is unavailable. No actions were proposed.' } });
+        response: { ...(activeTask.response || {}), ...priorThread, response: 'The model integration is unavailable. No actions were proposed.' } });
       return res.status(503).json({
         error: 'AI not configured',
         message: 'ANTHROPIC_API_KEY is not set. Intelligence Bar requires Claude API access.',
@@ -2599,14 +2612,11 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     // The exact turn pair the client stores — also what a persisted thread
     // keeps. Images are never persisted (their text marker is); taint
     // markers ride along so a resumed thread stays redaction-aware.
+    const requestTurn = images.length
+      ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
+      : prompt;
     const persistedUserTurn = appendTaintMarker(
-      appendTaintMarker(
-        images.length
-          ? `${prompt}\n[Operator attached ${images.length} image${images.length > 1 ? 's' : ''}]`
-          : prompt,
-        imageTainted,
-        IMAGE_TAINT_MARKER,
-      ),
+      appendTaintMarker(continuing ? CONTINUATION_TURN : requestTurn, imageTainted, IMAGE_TAINT_MARKER),
       piiTainted,
       PII_TAINT_MARKER,
     );
@@ -2654,7 +2664,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           // (gate flipped mid-chat, or a detach after a rejected append)
           // survives refresh instead of persisting an amnesiac thread. The
           // service validates roles/content and caps the seed.
-          seedTurns: requestedThreadId ? null : conversationHistory.slice(-8),
+          seedTurns: requestedThreadId ? null : historyBase.slice(-8),
         });
         persistedThreadId = appended?.threadId || null;
         persistedThreadSeq = appended?.lastSeq ?? null;
@@ -2694,7 +2704,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       // markers ride on the stored turns so follow-ups stay redacted; both
       // are stripped before the history reaches the model.
       conversationHistory: [
-        ...conversationHistory.slice(-8),
+        ...historyBase.slice(-8),
         { role: 'user', content: persistedUserTurn },
         { role: 'assistant', content: persistedAssistantTurn },
       ],

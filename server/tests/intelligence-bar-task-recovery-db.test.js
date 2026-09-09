@@ -207,7 +207,7 @@ suite('IB task recovery and retained approval proof in isolated Postgres', () =>
     expect((await Tasks.get(task.id, actorId, sessionId)).response).toMatchObject({ response: 'Current runner' });
   });
 
-  test('finished reads and lost first-checkpoint images are not offered as resumable work', async () => {
+  test('finished reads and image requests are not offered as resumable work', async () => {
     const { task: completed } = await begin();
     await Tasks.checkpoint(completed.id, actorId, { runnerToken: completed.runner_token, state: 'responded', response: { response: 'Synthetic read result' } });
     expect((await Tasks.snapshot(await Tasks.get(completed.id, actorId, sessionId), actorId)).canContinue).toBe(false);
@@ -216,6 +216,17 @@ suite('IB task recovery and retained approval proof in isolated Postgres', () =>
     expect(attached.request.images).toBeUndefined();
     expect(attached.request.had_images).toBe(true);
     await expireLease(attached.id);
+    expect((await Tasks.claimResume(attached.id, actorId, sessionId)).code).toBe('attachments_required');
+    // A checkpoint keeps only the image placeholder, so a later interruption is no more resumable.
+    await Tasks.checkpoint(attached.id, actorId, { runnerToken: attached.runner_token, messages: [
+      { role: 'user', content: [{ type: 'image', source: { type: 'base64', data: 'ephemeral-fixture' } }, { type: 'text', text: 'Synthetic attachment request' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'lookup', name: 'get_customer_detail', input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'lookup', content: '{}' }] }] });
+    await expireLease(attached.id);
+    const saved = await Tasks.get(attached.id, actorId, sessionId);
+    expect(saved.checkpoint).toHaveLength(3);
+    expect(JSON.stringify(saved.checkpoint)).not.toContain('ephemeral-fixture');
+    expect(await Tasks.snapshot(saved, actorId)).toMatchObject({ canContinue: false, response: expect.stringContaining('Reattach') });
     expect((await Tasks.claimResume(attached.id, actorId, sessionId)).code).toBe('attachments_required');
   });
 

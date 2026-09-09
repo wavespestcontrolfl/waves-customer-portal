@@ -454,8 +454,14 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
 // Readers that confine themselves to the task's read scope (readCustomerIds).
 // That scope is empty when an explicitly named customer did not resolve, so
 // they would read every customer's rows; they fail closed until it resolves.
+// Readers with an optional customer selector fail closed the same way when
+// the model supplies no selector at all (see hasOwnSelector).
 const SCOPED_CUSTOMER_ROW_READERS = new Set(['query_customers', 'query_leads', 'get_stale_leads', 'get_schedule_view',
   'search_emails', 'get_email_thread', 'draft_email_reply', 'match_existing_customer']);
+// A customer selector or a record identifier: either one is checked against
+// the task's authority further down, so only a selector-free call is broad.
+const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone)
+  || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
 
 const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
 const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
@@ -465,7 +471,8 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   if ((context.targets?.length || context.namesRequested) && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
   }
-  if (context.namesRequested && !context.targets?.length && SCOPED_CUSTOMER_ROW_READERS.has(toolName)) {
+  if (context.namesRequested && !context.targets?.length
+    && (SCOPED_CUSTOMER_ROW_READERS.has(toolName) || (schema.properties?.customer_id && !hasOwnSelector(params)))) {
     return { error: 'The named customer did not match anyone on file, so this lookup has no customer scope. Correct the name before reading that customer\'s records.', code: 'customer_scope_required' };
   }
   // Phone-keyed readers without a customer selector: the phone must belong to

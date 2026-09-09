@@ -419,6 +419,16 @@ test('scoped customer-row readers fail closed for an explicitly named customer w
   }
   // Readers outside the scoped list keep their own target checks.
   expect(await Context.prepareReadInput({ date: '2026-09-09' }, unresolved, { toolName: 'get_zone_capacity', schema })).toEqual({ input: { date: '2026-09-09' } });
+  // Readers with an optional customer selector are broad only when the model supplies no selector or record id.
+  const optional = { properties: { customer_id: { type: 'string' }, call_id: { type: 'string' }, days_back: { type: 'number' } } };
+  for (const [toolName, params] of [['get_call_log', { days_back: 1 }], ['search_messages', { search: 'estimate' }], ['get_open_commitments', {}]]) {
+    expect(await Context.prepareReadInput(params, unresolved, { toolName, schema: optional })).toMatchObject({ code: 'customer_scope_required' });
+    expect(await Context.prepareReadInput(params, { ...unresolved, namesRequested: false }, { toolName, schema: optional })).toEqual({ input: params });
+    expect(await Context.prepareReadInput(params, { ...context(), namesRequested: true }, { toolName, schema: optional })).toEqual({ input: { ...params, customer_id: A } });
+  }
+  const call = '50000000-0000-4000-8000-000000000001';
+  rows.call_log = [{ id: call, customer_id: B }];
+  expect((await Context.prepareReadInput({ call_id: call }, unresolved, { toolName: 'get_call_log', schema: optional })).code).toBe('target_clarification_required');
 });
 
 test('calendar words after a selector are date filters, not customer names', async () => {

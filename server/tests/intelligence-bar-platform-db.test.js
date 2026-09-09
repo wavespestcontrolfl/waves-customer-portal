@@ -206,13 +206,18 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     // An explicitly named customer who did not resolve leaves no read scope: the schedule read fails closed
     // instead of listing every appointment.
     mockModel.mockReset();
-    mockModel.mockResolvedValueOnce(tools('get_schedule_view', {}, 'schedule'))
-      .mockResolvedValueOnce(answer('Correct the customer name first.'));
-    const misspelled = await api('/query', request("Show Jhon Smyth's schedule today"));
+    mockModel.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', name: 'get_schedule_view', input: {}, id: 'schedule' },
+      { type: 'tool_use', name: 'get_call_log', input: { days_back: 1 }, id: 'calls' },
+      { type: 'tool_use', name: 'search_messages', input: { search: 'schedule' }, id: 'messages' },
+    ], usage: {} }).mockResolvedValueOnce(answer('Correct the customer name first.'));
+    const misspelled = await api('/query', request("Show Jhon Smyth's schedule and calls today"));
     expect(misspelled.status).toBe(200);
     expect(misspelled.body.taskTarget).toBeFalsy();
-    const refused = mockModel.mock.calls.at(-1)[0].messages.at(-1).content.find(block => block.tool_use_id === 'schedule').content;
-    expect(JSON.parse(refused)).toMatchObject({ code: 'customer_scope_required' });
+    const refusals = mockModel.mock.calls.at(-1)[0].messages.at(-1).content;
+    for (const id of ['schedule', 'calls', 'messages']) {
+      expect(JSON.parse(refusals.find(block => block.tool_use_id === id).content)).toMatchObject({ code: 'customer_scope_required' });
+    }
     expect(JSON.stringify(mockModel.mock.calls)).not.toContain(visitA);
     expect(JSON.stringify(mockModel.mock.calls)).not.toContain('Foreign private schedule note');
     await db('scheduled_services').whereIn('id', [visitA, visitB]).del();
@@ -1090,6 +1095,15 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
         expect(result.body).toMatchObject({ taskId, threadId: seed.threadId, threadSeq: sequence });
         await confirm(result);
       }
+      // A continuation persists a distinct turn and returns history built on the delivered exchange:
+      // the original request appears once, and the first reply is not dropped.
+      const userTurns = await db('ib_thread_turns').where({ thread_id: seed.threadId, role: 'user' }).orderBy('seq');
+      expect(userTurns.filter(turn => turn.content.startsWith(`Add notes for ${nameA}`))).toHaveLength(1);
+      expect(userTurns.filter(turn => turn.content.startsWith('Continue the saved request'))).toHaveLength(2);
+      const history = result.body.conversationHistory.map(turn => turn.content);
+      expect(history.filter(content => content.startsWith(`Add notes for ${nameA}`))).toHaveLength(1);
+      expect(history.filter(content => content.startsWith('Continue the saved request'))).toHaveLength(2);
+      expect(history.some(content => content.includes('The note is awaiting confirmation.'))).toBe(true);
       const concurrent = await Threads.appendExchange({ actorId: actor, threadId: seed.threadId, expectedSeq: 8,
         context: 'customers', userText: 'Concurrent synthetic turn', assistantText: 'Another tab reply' });
       expect(concurrent.lastSeq).toBe(10);
