@@ -78,7 +78,22 @@ retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
 Existing request fields, token/signature guards, rate limits and privacy headers
-apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
+apply. With default-off `GATE_SCHEDULING_CAPACITY`, availability and date search
+add `calendar: {rangeFrom, rangeTo, days: [{date, openingCount, nearby}]}` and
+`selectedDay: {date, slots}` (null when empty). The calendar summarizes all
+feasible dates before recommendation limits; counts deduplicate arrival starts.
+The selected day carries every signed selectable window for that date, using
+the existing `date` query and service-selection parameters. Public slots carry
+no exact coordinates, full route, provider legs or reservation allocation.
+Routine durations resolve through the catalog's additive scheduling policy;
+new arrival labels start on the hour within 08:00–18:00 ET, last start 16:00.
+Reserve and accept recheck the full live route and eligibility under the shared
+date lock; a stale route or changed service allowance returns the existing
+409 `SLOT_UNAVAILABLE`. New combined allocations use version 2, per-service
+work allowances and one shared arrival anchor. Version-1 holds retain their
+60-minute member contract through expiry or completion; existing appointments
+are not shortened by switching the gate. With strict opt-in
+`GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
 per physical service program. Termite rental and bond billing riders fold into
 bait service; legacy supplements use the converter's physical-program rules.
@@ -1060,7 +1075,12 @@ than duplicates).
 gains `van_scene` — the same `GATE_VAN_SCENE` boolean, read by booking step 4
 to show the van scene above the secure-card block. Unset gate = `false`
 in production (non-production envs return true, as above); no other field
-changes.
+changes from that gate. Under `GATE_SCHEDULING_CAPACITY`, the existing config
+hours read `day_start: '08:00'`, `day_end: '18:00'`, and optional
+`scheduling_capacity: true` accompanies `service_durations`, which maps
+supported public service keys to catalog minutes. Both fields are absent
+when the capacity gate is off.
+The existing lunch exclusion and global self-booking day cap still apply.
 `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
 customer self-serve reschedule linked from appointment
 confirmation/72h/24h texts + reminder emails.

@@ -12,6 +12,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
+const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
@@ -938,7 +939,7 @@ function combinedRewriteUpdate(combo, catalogRow) {
     // standalone (codex #3485 r6 P2).
     update.service_key_snapshot = combo.route.catalogServiceKey;
     if (catalogRow.default_duration_minutes) {
-      update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+      update.estimated_duration_minutes = serviceDurationMinutes(catalogRow);
     }
   }
   return update;
@@ -3178,6 +3179,10 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
   // default so combined follow-ups inherit the right visit length.
   const explicit = firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes);
   if (explicit) return explicit;
+  // The new policy resolves defaults from the catalog at the booking
+  // boundary. Follow-ups inherit that reserved allowance, including custom
+  // longer estimates, instead of reinstating the retired family-wide hour.
+  if (require('./scheduling/policy').capacityEnabled()) return firstPositiveNumber(parentRow.estimated_duration_minutes);
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
@@ -3267,6 +3272,7 @@ const IDENTITY_ONLY_CATALOG_KEYS = new Set([
 // byte-identical.
 const TREE_SHRUB_IDENTITY_ONLY_KEYS = new Set(Object.values(TREE_SHRUB_CADENCE_CATALOG_KEYS));
 function identityOnlyCatalogKey(catalogServiceKey) {
+  if (require('./scheduling/policy').capacityEnabled()) return false;
   return IDENTITY_ONLY_CATALOG_KEYS.has(catalogServiceKey)
     || (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
       && TREE_SHRUB_IDENTITY_ONLY_KEYS.has(catalogServiceKey));
@@ -5609,14 +5615,16 @@ const EstimateConverter = {
             try {
               const catalogRow = await database('services')
                 .where({ service_key: unit.catalogServiceKey })
-                .first('id', 'name', 'default_duration_minutes');
+                .first('id', 'name', 'default_duration_minutes', 'scheduling_duration_policy');
               if (catalogRow) {
                 standaloneRow.service_id = catalogRow.id;
                 standaloneRow.service_type = Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)
                   ? (catalogRow.name || standaloneRow.service_type) : standaloneRow.service_type;
                 unit.service.name = standaloneRow.service_type;
                 if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                  standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                  standaloneRow.estimated_duration_minutes = Math.max(serviceDurationMinutes(catalogRow),
+                    require('./scheduling/policy').capacityEnabled()
+                      ? firstPositiveNumber(unit.service.estimatedDurationMinutes, unit.service.estimated_duration_minutes) || 0 : 0);
                 }
               }
             } catch (lookupErr) {
@@ -5799,7 +5807,7 @@ const EstimateConverter = {
           try {
             catalogRow = await database('services')
               .where({ service_key: combo.route.catalogServiceKey })
-              .first('id', 'default_duration_minutes');
+              .first('id', 'default_duration_minutes', 'scheduling_duration_policy');
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
           }
@@ -5858,7 +5866,8 @@ const EstimateConverter = {
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
-          .update({ reservation_service_mix: allocation.reservation_service_mix });
+          .update({ reservation_service_mix: allocation.reservation_service_mix,
+            ...(combinedCapacity.version === 2 ? { reservation_policy_version: 2 } : {}) });
         await database('scheduled_services').where({ id: reservedStart.id }).update(
           VisitCapacity.windowForCapacityService(reservedStart, 0),
         );
@@ -6120,14 +6129,16 @@ const EstimateConverter = {
             // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
-              .first('id', 'name', 'default_duration_minutes');
+              .first('id', 'name', 'default_duration_minutes', 'scheduling_duration_policy');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
               if (Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)) {
                 acceptedPestServiceName = catalogRow.name;
               }
               if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+                svc.estimatedDurationMinutes = Math.max(serviceDurationMinutes(catalogRow),
+                  require('./scheduling/policy').capacityEnabled()
+                    ? firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes) || 0 : 0);
               }
             } else {
               logger.warn(`[estimate-converter] catalog row ${unit.catalogServiceKey} absent — scheduling by name only`);

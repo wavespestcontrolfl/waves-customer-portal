@@ -10100,6 +10100,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // acceptance back (a committed accepted-but-unconverted estimate is
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
+    const capacityHold = reservationRow || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow) ? existingAppointmentRow : null);
+    const preparedReservationCapacity = capacityHold && typeof slotReservation.prepareReservationCommit === 'function'
+      ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
+        ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
+        serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
+        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -10733,6 +10739,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
+            preparedCapacity: preparedReservationCapacity,
             trx,
           });
           reservationCommitted = true;
@@ -10790,6 +10797,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
+              preparedCapacity: preparedReservationCapacity,
               trx,
             });
             reservationCommitted = true;

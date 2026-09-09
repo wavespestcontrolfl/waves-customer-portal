@@ -31,7 +31,7 @@ const db = require('../models/db');
 const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { capacityEnabled } = require('./scheduling/policy');
+const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -242,7 +242,7 @@ function visitsForService(row = {}) {
 function clampDuration(minutes) {
   const n = Number(minutes);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_OPTS.durationMinutes;
-  const rounded = Math.ceil(n / 15) * 15;
+  const rounded = capacityEnabled() ? Math.ceil(n) : Math.ceil(n / 15) * 15;
   return Math.max(30, Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, rounded));
 }
 
@@ -765,7 +765,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   // this axis while selectedFrequency stays the pest cadence (r14 P1).
   const mosquitoAxis = normalizeSelectionToken(cadences?.mosquito);
   const combinedPolicy = serviceMode !== 'one_time'
-    && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
+    && (capacityEnabled() || process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
   let recurringSelection = [];
   let services;
   if (serviceMode === 'one_time') {
@@ -797,11 +797,14 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
         // cadence catalog link can refuse residential rows (codex r12 P1).
         const rawIdentity = [row.service, row.serviceKey, row.service_key, row.key, row.name, row.label, row.displayName]
           .filter(Boolean).join(' ');
+        const explicitDuration = Number(row.estimatedDurationMinutes || row.estimated_duration_minutes || row.durationMinutes);
         return {
           service: key,
           label,
           visitsPerYear: visitsForService(row),
           commercial: /commercial/i.test(rawIdentity) || undefined,
+          ...(capacityEnabled() && Number.isFinite(explicitDuration) && explicitDuration > 0
+            ? { durationMinutes: explicitDuration } : {}),
         };
       })
       .filter((row) => row.service && row.label);
@@ -847,6 +850,28 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
     services,
     ...(reservationServiceMix ? { reservationServiceMix } : {}),
   };
+}
+
+/** Keep classification synchronous; resolve catalog allowances once at every
+ * booking boundary. This is also used inside reserve/commit transactions. */
+async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
+  const profile = resolveEstimateSlotProfile(estimate, userOpts);
+  if (!capacityEnabled()) return profile;
+  const { catalogLinkForProfile } = require('./slot-reservation');
+  const { serviceDurationMinutes } = require('./service-library');
+  const services = [];
+  for (const service of profile.services) {
+    const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] });
+    const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes);
+    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0),
+      ...(catalog ? { catalogServiceId: catalog.id } : {}) });
+  }
+  const capacity = profile.reservationServiceMix
+    ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
+  return { ...profile, services, durationMinutes: capacity?.durationMinutes
+    || Math.max(services.reduce((total, service) => total + service.durationMinutes, 0) || DEFAULT_OPTS.durationMinutes,
+      Number(userOpts.durationMinutes) > 0 ? clampDuration(userOpts.durationMinutes) : 0),
+  ...(capacity ? { reservationServiceMix: capacity } : {}) };
 }
 
 // ---------- geocoding ----------
@@ -1060,6 +1085,7 @@ function addMinutesToHHMM(hhmm, minutes) {
 function slotWindowFitsDay(windowStart, windowEnd) {
   const startMin = timeToMinutes(windowStart);
   const endMin = timeToMinutes(windowEnd);
+  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
   return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
 }
@@ -1075,6 +1101,26 @@ function splitSlotResults(slots, maxResults, expanderMaxResults) {
     primary: safeSlots.slice(0, visibleCount),
     expander: safeSlots.slice(visibleCount, visibleCount + moreCount),
   };
+}
+
+function distinctArrivalWindows(slots) {
+  const windows = new Map();
+  for (const slot of slots) {
+    const key = `${slot.date}|${slot.windowStart}`;
+    if (!windows.has(key)) windows.set(key, slot);
+  }
+  return [...windows.values()];
+}
+
+function calendarSummary(slots, rangeFrom, rangeTo) {
+  const days = new Map();
+  for (const slot of distinctArrivalWindows(slots)) {
+    if (!days.has(slot.date)) days.set(slot.date, { date: slot.date, openingCount: 0, nearby: false });
+    const day = days.get(slot.date);
+    day.openingCount++;
+    day.nearby ||= !!slot.routeOptimal;
+  }
+  return { rangeFrom, rangeTo, days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)) };
 }
 
 function dateWithTimeSlotId(date, windowStart, techId) {
@@ -1300,6 +1346,15 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
     .sort(compareCustomerFacingSlots);
   if (!sorted.length) return [];
 
+  if (capacityEnabled()) {
+    const unique = distinctArrivalWindows(sorted);
+    const earliest = unique[0];
+    const recommended = unique.slice(1).sort((a, b) =>
+      (a.recommendationScore ?? Infinity) - (b.recommendationScore ?? Infinity)
+      || compareCustomerFacingSlots(a, b));
+    return [earliest, ...diversifyByDay(recommended)].slice(0, safeLimit);
+  }
+
   const diversified = routeFirst ? routeFirstOrder(sorted) : diversifyByDay(sorted);
 
   // Scarce first day (≤2 bookable windows): pin ALL of that day's slots
@@ -1356,6 +1411,13 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       db, ids, serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') })),
     );
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
+  }
+  if (capacityEnabled()) {
+    // The shared complete-route predicate already checked every existing
+    // promise and hold. Reapplying fixed stored work blocks here would erase
+    // the very arrival flexibility it proved. Synthetic capacity is excluded.
+    return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
+      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
   }
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -1514,7 +1576,7 @@ function stampSlotRainChances(slots, outlook) {
 // `{ slotId }` untouched. reserveSlot refuses any slotId that doesn't verify,
 // so the constraint checks it also runs are defense-in-depth, not the gate.
 // Runs LAST (after dedupe/spread/selection, which key off the base slotId).
-function signCustomerFacingSlots(slots, estimateId) {
+function signCustomerFacingSlots(slots, estimateId, offeredAt = Date.now()) {
   return (Array.isArray(slots) ? slots : []).map((slot) => {
     const offer = signSlotOffer({
       surface: 'estimate',
@@ -1523,13 +1585,14 @@ function signCustomerFacingSlots(slots, estimateId) {
       startMinutes: timeToMinutes(slot.windowStart),
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
-    });
+    }, offeredAt);
     return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
   });
 }
 
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
-  const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
+  const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes
+    && (!capacityEnabled() || slot.stops_that_day > 0);
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
   // Round display times to clean hour boundaries. slotId still uses the
   // rounded start so collisions between two slots that rounded to the
@@ -1543,6 +1606,7 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
     windowStart,
     windowEnd,
     durationMinutes,
+    ...(capacityEnabled() ? { routeMode: slot.route_mode, recommendationScore: slot.score } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
     routeOptimal,
@@ -1556,6 +1620,10 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
 
 async function getAvailableSlots(estimateId, userOpts = {}) {
   const opts = { ...DEFAULT_OPTS, ...userOpts };
+  if (capacityEnabled() && opts.dateFrom && opts.dateFrom === opts.dateTo) {
+    opts.maxResults = Number.MAX_SAFE_INTEGER;
+    opts.expanderMaxResults = 0;
+  }
 
   const estimate = await db('estimates').where({ id: estimateId }).first();
   if (!estimate) {
@@ -1574,7 +1642,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     throw err;
   }
 
-  const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
+  const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
   const publicServiceProfile = { ...serviceProfile };
   delete publicServiceProfile.reservationServiceMix;
 
@@ -1582,6 +1650,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   cleanupCache(wrapperCache);
   const cacheKey = [
     estimateId,
+    capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     cacheHour(),
     opts.windowDays,
     opts.maxResults,
@@ -1740,6 +1809,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     const fallback = {
       primary: signCustomerFacingSlots(primary, estimateId),
       expander: signCustomerFacingSlots(expander, estimateId),
+      ...(capacityEnabled() ? { calendar: calendarSummary([], dateFrom, dateTo), selectedDay: null } : {}),
       nearby: [...primary, ...expander].some((s) => s.routeOptimal),
       metadata: {
         // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -1770,6 +1840,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
+      serviceType: serviceProfile.services.map(service => service.label || service.service).join(' '),
       serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
@@ -1778,7 +1849,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       topN: Number.MAX_SAFE_INTEGER,
       includeWeekends: opts.includeWeekends,
     }))),
-    Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+    capacityEnabled() ? Promise.resolve([]) : Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
       dateFrom: segFrom,
       dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
@@ -1827,9 +1898,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   for (const s of seedRankedRoute) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
   }
-  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
-    filterTimeOfDay(bookable, opts.timeOfDay), funnelDays, { preferredSeedDates },
-  );
+  const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
+  const { slots: funneledBookable, funnel } = capacityEnabled()
+    ? { slots: allBookable, funnel: null }
+    : applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
@@ -1843,11 +1915,19 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   stampSlotRainChances(primary, rainOutlook);
   stampSlotRainChances(expander, rainOutlook);
 
+  // The same window appears in both recommendations and the full day.
+  // One signing time gives it one identity, including its expiry/HMAC.
+  const offeredAt = Date.now();
   const result = {
     // Signed at the edge; the 5-min wrapper cache stores the SIGNED result,
     // well inside the offer TTL (see slot-offer-token.js).
-    primary: signCustomerFacingSlots(primary, estimateId),
-    expander: signCustomerFacingSlots(expander, estimateId),
+    primary: signCustomerFacingSlots(primary, estimateId, offeredAt),
+    expander: signCustomerFacingSlots(expander, estimateId, offeredAt),
+    ...(capacityEnabled() ? {
+      calendar: calendarSummary(allBookable, dateFrom, dateTo),
+      selectedDay: allBookable.length ? { date: allBookable[0].date,
+        slots: signCustomerFacingSlots(distinctArrivalWindows(allBookable.filter(slot => slot.date === allBookable[0].date)), estimateId, offeredAt) } : null,
+    } : {}),
     nearby: [...primary, ...expander].some((s) => s.routeOptimal),
     metadata: {
       // Deliberately no estimateAddress / estimateCoords / coordsSource:
@@ -1936,6 +2016,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   return {
     summary: summarizeWindow(when, { count: primary.length + expander.length, nearby }),
     understood: when.understood,
+    ...(result.calendar ? { calendar: result.calendar, selectedDay: result.selectedDay } : {}),
     window: { date_from: when.dateFrom, date_to: when.dateTo },
     time_of_day: when.timeOfDay,
     nearby,
@@ -1957,7 +2038,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 
   const startedAt = Date.now();
   const geocodeBefore = geocodeCache.size;
-  const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
+  const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
   const coords = await resolveEstimateCoords(estimate);
   const geocodeAfter = geocodeCache.size;
 
@@ -2051,6 +2132,7 @@ module.exports = {
   invalidateEstimate,
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
+  resolveCatalogSlotProfile,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.
   resolveEstimateCoords,
   seasonalSelectionProfile,
