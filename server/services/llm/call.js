@@ -8,7 +8,11 @@
  * returns a uniform shape:
  *
  *   { ok: true,  text, json, model }
- *   { ok: false, reason: 'no_key' | '<provider>_<status>' | '<provider>_timeout' | 'empty_json' | 'error' }
+ *   { ok: false, reason: 'no_key' | '<provider>_<status>' | '<provider>_timeout' | 'empty_json' | 'error', usage? }
+ *
+ * `usage` rides on a failure only when the provider billed the leg (an
+ * incomplete / refused / unparseable answer); a chain's `failures` entries
+ * carry it too, so a caller can account for every leg it paid for.
  *
  * Callers route via dispatch(route, payload) where `route` is a models.ROUTES
  * entry ({ provider, model }). On { ok: false } the caller falls back to its
@@ -270,9 +274,14 @@ function usageOf(provider, data) {
 // caller gets back agree (recorded AND returned — the cross-provider fallback
 // runs on the same verdict the ledger files). `served` is what the
 // provider told us about the answer (model, id, usage, latency, the text).
+// A billed leg that failed still spent tokens: its usage rides on the
+// failure so a chain's caller can account for every leg, not only the
+// winner. A usage the provider reported no counts for is not billed.
+const billedUsage = (usage) => (usage && (Number.isFinite(usage.input_tokens) || Number.isFinite(usage.output_tokens)) ? usage : null);
 function failedLeg(base, served, code, response = served.response) {
   recordLedgerCall(base, { ...served, ok: false, errorCode: code, response });
-  return { ok: false, reason: code };
+  const usage = billedUsage(served.usage);
+  return { ok: false, reason: code, ...(usage ? { usage } : {}) };
 }
 
 // The tail every adapter shares once the provider's own verdict is in: a
@@ -533,7 +542,7 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
     const served = { servedModel: resp.model, providerRef: resp.id, usage: usageOf('anthropic', resp), latencyMs: elapsedMs(t0), response: out };
     const code = anthropicVerdict(resp, maxTokens);
     if (code) return failedLeg(base, served, code);
-    return settleLeg(base, served, out, jsonMode, { model, response: resp });
+    return settleLeg(base, served, out, jsonMode, { model, usage: served.usage, response: resp });
   } catch (err) {
     const reason = providerErrorReason('anthropic', err);
     const log = reason === 'anthropic_429' || reason === 'anthropic_529'
@@ -585,6 +594,13 @@ async function dispatchWithFallback(policy, payload = {}, options = {}) {
   return payload.laneId ? agentContext.runInLane(payload.laneId, run) : run();
 }
 
+// One failed leg of a chain. A billed leg (the provider answered, then the
+// answer failed a verdict or the caller's validator) keeps its usage so the
+// caller can account for every leg it paid for.
+function legFailure(route, reason, result, extra = {}) {
+  return { provider: route.provider, model: route.model, reason, ...extra, ...(result?.usage ? { usage: result.usage } : {}) };
+}
+
 async function runFallbackChain(policy, payload, { validate } = {}) {
   const routes = [policy?.primary, policy?.fallback].filter(Boolean);
   if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
@@ -611,7 +627,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
     const route = routes[index];
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      failures.push({ provider: route.provider, model: route.model, reason: 'timeout_budget_exhausted' });
+      failures.push(legFailure(route, 'timeout_budget_exhausted'));
       break;
     }
     const legMs = explicitBudget ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
@@ -625,7 +641,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
     }
 
     if (!result.ok) {
-      failures.push({ provider: route.provider, model: route.model, reason: result.reason || 'error' });
+      failures.push(legFailure(route, result.reason || 'error', result));
       continue;
     }
 
@@ -646,7 +662,7 @@ async function runFallbackChain(policy, payload, { validate } = {}) {
       // A max_tokens-truncated Anthropic answer never reaches the validator:
       // callAnthropic fails that leg as anthropic_incomplete first, so a
       // rejection here is a judgement on a complete answer.
-      failures.push({ provider: route.provider, model: route.model, reason: String(rejection), validator: true });
+      failures.push(legFailure(route, String(rejection), result, { validator: true }));
       rejectLedgerCall(result, String(rejection), true);
       continue;
     }
