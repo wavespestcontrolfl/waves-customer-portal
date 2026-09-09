@@ -10,9 +10,17 @@ const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKe
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
 
 const LIMIT = 50;
+// A logged move: both dates present and either the date or the window
+// changed. Windows are logged as "start-end" text; compare on HH:MM.
+const LOGGED_MOVE_SQL = (t) => `${t}.original_date IS NOT NULL AND ${t}.new_date IS NOT NULL
+  AND (${t}.new_date <> ${t}.original_date
+    OR (${t}.original_window IS NOT NULL AND ${t}.new_window IS NOT NULL AND LEFT(split_part(${t}.new_window, '-', 1), 5) IS DISTINCT FROM LEFT(split_part(COALESCE(${t}.original_window, ''), '-', 1), 5)))`;
+// Whether a logged (date, window) pair describes the visit row as it is now.
+const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
+  AND (${t}.w IS NULL OR LEFT(split_part(${t}.w, '-', 1), 5) = LEFT(scheduled_services.window_start::text, 5))`;
 // Bump when admissibility or completeness rules change: cached verdicts
 // keyed on unchanged evidence would otherwise never be rechecked.
-const FULFILLMENT_POLICY = 2;
+const FULFILLMENT_POLICY = 3;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -81,10 +89,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
             .whereIn('h.to_status', ['confirmed', 'rescheduled', 'completed'])
             .where('h.transitioned_at', '>', after).where('h.transitioned_at', '<=', now))
           // A same-status move writes no status transition; reschedule_log
-          // holds the authoritative before/after dates for it.
+          // holds the authoritative before/after dates and windows for it.
           .orWhereExists(conn('reschedule_log as r').select(conn.raw('1'))
             .whereRaw('r.scheduled_service_id = scheduled_services.id')
-            .whereRaw('r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date')
+            .whereRaw(LOGGED_MOVE_SQL('r'))
             .whereRaw('scheduled_services.updated_at > ?', [after])
             .where('r.created_at', '>', after).where('r.created_at', '<=', now));
       })
@@ -101,17 +109,17 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // time must also postdate the request.
         conn.raw(`(SELECT MIN(r.created_at) FROM reschedule_log r
           WHERE r.scheduled_service_id = scheduled_services.id
-            AND r.original_date IS NOT NULL AND r.new_date IS NOT NULL AND r.new_date <> r.original_date
+            AND ${LOGGED_MOVE_SQL('r')}
             AND scheduled_services.updated_at > ?
             AND r.created_at > ? AND r.created_at <= ?
-            AND scheduled_services.scheduled_date = (SELECT l.new_date FROM reschedule_log l
-              WHERE l.scheduled_service_id = scheduled_services.id
-                AND l.original_date IS NOT NULL AND l.new_date IS NOT NULL AND l.new_date <> l.original_date
-                AND l.created_at > ? AND l.created_at <= ? ORDER BY l.created_at DESC LIMIT 1)
-            AND scheduled_services.scheduled_date <> (SELECT f.original_date FROM reschedule_log f
-              WHERE f.scheduled_service_id = scheduled_services.id
-                AND f.original_date IS NOT NULL AND f.new_date IS NOT NULL AND f.new_date <> f.original_date
-                AND f.created_at > ? AND f.created_at <= ? ORDER BY f.created_at ASC LIMIT 1)) as moved_at`,
+            AND EXISTS (SELECT 1 FROM (SELECT l.new_date AS d, l.new_window AS w FROM reschedule_log l
+              WHERE l.scheduled_service_id = scheduled_services.id AND ${LOGGED_MOVE_SQL('l')}
+                AND l.created_at > ? AND l.created_at <= ? ORDER BY l.created_at DESC LIMIT 1) latest
+              WHERE ${DESCRIBES_CURRENT_SQL('latest')})
+            AND NOT EXISTS (SELECT 1 FROM (SELECT f.original_date AS d, f.original_window AS w FROM reschedule_log f
+              WHERE f.scheduled_service_id = scheduled_services.id AND ${LOGGED_MOVE_SQL('f')}
+                AND f.created_at > ? AND f.created_at <= ? ORDER BY f.created_at ASC LIMIT 1) first
+              WHERE ${DESCRIBES_CURRENT_SQL('first')})) as moved_at`,
         [after, after, now, after, now, after, now]),
         conn.raw(`(SELECT MAX(h.transitioned_at) FROM job_status_history h
           WHERE h.job_id = scheduled_services.id AND h.to_status = scheduled_services.status

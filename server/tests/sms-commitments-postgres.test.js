@@ -697,6 +697,32 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(record.text.includes('moved after the request')).toBe(admissible);
   });
 
+  test.each([
+    ['a same-day change', [['09:00-11:00', '13:00-15:00']], '13:00:00', true],
+    ['a forward same-day chain', [['09:00-11:00', '11:00-13:00'], ['11:00-13:00', '13:00-15:00']], '13:00:00', true],
+    ['a reverted same-day chain', [['09:00-11:00', '13:00-15:00'], ['13:00-15:00', '09:00-11:00']], '09:00:00', false],
+    ['a latest window that does not describe the current row', [['09:00-11:00', '13:00-15:00']], '15:00:00', false],
+    ['a missing original window', [[null, '13:00-15:00']], '13:00:00', false],
+  ])('window-move evidence requires a net change: %s', async (_label, chain, current, admissible) => {
+    const before = new Date(message.created_at.getTime() - 1000);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const day = etDateString(after);
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id,
+      property_id: context.properties[0].id, service_type: 'Quarterly Lawn', scheduled_date: day,
+      window_start: current, status: 'confirmed', created_at: before, updated_at: after }).returning('id');
+    await mockPg('reschedule_log').insert(chain.map(([original_window, new_window], i) => ({
+      scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: day, new_date: day, original_window, new_window, initiated_by: 'admin',
+      created_at: new Date(after.getTime() + i * 1000),
+    })));
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 60000));
+    expect(evidence.failures).toEqual([]);
+    const record = evidence.records.find((r) => r.type === 'visit' && r.id === visit.id);
+    const sms_context = { property_id: context.properties[0].id, source_at: message.created_at.toISOString() };
+    expect(Boolean(record && admissibleWitness(record, { kind: 'schedule_visit', sms_context }))).toBe(admissible);
+    expect(Boolean(record?.text.includes('moved after the request'))).toBe(admissible);
+  });
+
   test.each(['send_report', 'send_paperwork'])('%s keeps its empty witness allowlist: a delivered staff text is no proof', async (kind) => {
     const after = new Date(message.created_at.getTime() + 1000);
     const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
@@ -799,7 +825,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id,
       property_id: variant === 'other_property' ? otherProperty.id : context.properties[0].id, status: 'sent', service_interest: 'Lawn',
       estimate_data: { deliveryState: { lastDeliveredAt: handoff.toISOString() } }, created_at: before }).returning('id');
-    const [email] = await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+    // Keep the linkage fixture stable: a random UUID can coincidentally
+    // match the conservative PAN scrubber (covered separately below).
+    const [email] = await mockPg('email_messages').insert({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', recipient_type: 'customer', recipient_id: message.customer_id,
       recipient_email_snapshot: variant === 'other_recipient' ? 'someone.else@example.invalid' : 'synthetic@example.invalid',
       trigger_event_id: variant === 'unrelated' ? 'appointment_reminder:1' : `estimate_delivery:${estimate.id}`,
       status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your lawn estimate is attached' }).returning('id');
@@ -810,8 +838,16 @@ postgres('SMS commitments on PostgreSQL', () => {
       sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
     expect(admissibleWitness(witness, commitment, evidence.records)).toBe(admissible);
     const verdict = groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: 'lawn estimate' }, evidence, commitment);
-    expect(verdict.verdict).toBe(admissible ? 'fulfilled' : 'uncertain');
+    expect(verdict).toMatchObject({ verdict: admissible ? 'fulfilled' : 'uncertain' });
     if (admissible) expect(verdict).toMatchObject({ record_type: 'email_delivery', record_id: email.id });
+    if (admissible) {
+      // Existing conservative behavior: synthetic UUID digit groups can
+      // collide with PAN detection; leave this separate from linkage QA.
+      const ref = 'email_delivery:32ceafcc-2687-4973-8880-53182e45a0ce';
+      expect(groundFulfillment({ verdict: 'fulfilled', record_ref: ref, quote: 'lawn estimate' },
+        { ...evidence, records: evidence.records.map((r) => r === witness ? { ...r, ref } : r) }, commitment))
+        .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
+    }
   });
 
   test('estimate and visit truncation stays fatal because those queries are not activity-ordered', async () => {
