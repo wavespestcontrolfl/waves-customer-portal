@@ -1776,10 +1776,17 @@ const ReviewService = {
     // row queued (codex #4141 r4 P1): a spacing hold that returned first left a
     // drifted number for processScheduled to text without the pin.
     if (expectedPhone && request.approved_phone !== expectedPhone) {
-      // Persist the approval before any hold can queue the row; a failed
-      // write propagates (no unpinned row may be left for the scheduler).
-      const pinned = await db("review_requests").where({ id: requestId, status: "pending" }).update({ approved_phone: expectedPhone });
-      if (!pinned) throw new Error("Approved review recipient could not be stored");
+      // A failed pin must also park an already scheduled, unpinned row.
+      try {
+        const pinned = await db("review_requests").where({ id: requestId, status: "pending" }).update({ approved_phone: expectedPhone });
+        if (!pinned) throw new Error("Approved review recipient could not be stored");
+      } catch (err) {
+        const parked = await this._parkRequestVerified(requestId);
+        throw Object.assign(new Error(parked
+          ? "Approved review recipient could not be stored — nothing was sent, and the queued ask was parked."
+          : "Approved review recipient could not be stored — nothing was sent, BUT parking the queued ask FAILED. Check the review queue now."),
+        { cause: err, statusCode: 503, code: "approved_phone_persistence_failed" });
+      }
     }
     if (!contact.phone) {
       // No consented SMS recipient (e.g. unstamped contact phone and no
