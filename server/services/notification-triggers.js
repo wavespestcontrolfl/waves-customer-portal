@@ -147,11 +147,11 @@ const TRIGGER_REGISTRY = {
       ];
       if (p.service) bodyParts.push(`Wants ${p.service}`);
       if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
-      if (p.message) bodyParts.push('Message included on lead record');
+      if (p.message) bodyParts.push(p.leadId ? 'Message included on lead record' : 'Message in the SMS inbox');
       return {
         title: p.title || 'New lead',
         body: bodyParts.join(' - '),
-        link: p.leadId ? `/admin/leads?lead=${p.leadId}` : '/admin/leads',
+        link: p.leadId ? `/admin/leads?lead=${p.leadId}` : (p.link || '/admin/leads'),
       };
     },
   },
@@ -771,6 +771,9 @@ const PRIORITY_VIBRATE = {
 };
 
 function pushTagFor(triggerKey, payload = {}) {
+  if (triggerKey === 'new_lead' && payload.twilioSid) {
+    return `waves-new_lead-${payload.twilioSid}`;
+  }
   if (triggerKey === 'sms_reply') {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
@@ -1035,7 +1038,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: triggerKey === 'sms_reply',
+              renotify: triggerKey === 'sms_reply' || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           }

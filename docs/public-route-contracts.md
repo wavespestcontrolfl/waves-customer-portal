@@ -141,6 +141,10 @@ operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+unknown domain/van-tracking SMS stays unlinked in the inbox and does not
+create customer/account rows or guess a customer name from message prose.
+Substantive messages ring a per-message `new_lead` bell/push linking to the
+inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
