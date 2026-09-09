@@ -196,7 +196,7 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(require('../services/lead-estimate-link').markLinkedLeadEstimateSent).not.toHaveBeenCalled();
   });
 
-  test.each(['sent', 'viewed'])('delivery refuses a visible %s sibling whose fixed hold elapsed', async (status) => {
+  test.each(['sent', 'viewed', 'expired'])('delivery refuses a visible %s sibling whose fixed hold elapsed', async (status) => {
     const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group' });
     const sibling = { id: 'synthetic-fixed-sibling', status, pricing_authority: 'SERVER',
       estimate_data: { proposal: { enabled: true, validThrough: '2020-01-01' } } };
