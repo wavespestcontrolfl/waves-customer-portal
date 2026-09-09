@@ -3,8 +3,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
-const { accountPropertyIds, resolvePrimaryProfileId } = require('./account-properties');
+const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
 const { gateEnvValue } = require('../config/feature-gates');
+const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
 
@@ -75,7 +76,8 @@ async function sendSubscription(sub, notification) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
-    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
+      ...(result.retryable ? { retryable: true, retryAfterMs: result.retryAfterMs } : {}) };
   }
 
   // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
@@ -86,7 +88,8 @@ async function sendSubscription(sub, notification) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
-    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
+      ...(result.retryable ? { retryable: true, retryAfterMs: result.retryAfterMs } : {}) };
   }
 
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
@@ -161,10 +164,17 @@ class PushNotificationService {
       return { ...summarize([], 0), reason: 'preferences_unavailable' };
     }
     if (!context?.enabled) return { ...summarize([], 0), reason: 'push_disabled' };
-    if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
-      const target = new URL(notification.url, 'https://portal.wavespestcontrol.com');
-      target.searchParams.set('notificationProperty', String(customerId));
-      notification = { ...notification, url: `${target.pathname}${target.search}${target.hash}` };
+    // Qualify the in-app destination under the app-notifications gate OR the
+    // property scope (uncapped codex r1w P1): with the scope on and only the
+    // legacy push routing delivering, a reminder for house B must still open
+    // house B, not whichever house is selected. Off both: today's bare link.
+    if (pushLinkQualificationEnabled() && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
+      // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the app opens
+      // the visit's HOUSE, not just the profile — from notification.propertyId
+      // (a composer that knows it) or resolved here from the visit id every
+      // appointment message already carries (see resolveNotificationPropertyId).
+      const notifiedPropertyId = await resolveNotificationPropertyId(customerId, notification);
+      notification = { ...notification, url: qualifyNotificationLink(notification.url, customerId, notifiedPropertyId) };
     }
     const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
     if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
@@ -289,12 +299,15 @@ class PushNotificationService {
 }
 
 function summarize(results, subscriptions) {
+  const retryable = results.filter((result) => result.retryable);
   return {
     subscriptions,
     sent: results.filter((r) => r.sent).length,
     expired: results.filter((r) => r.expired).length,
     failed: results.filter((r) => r.failed).length,
     skipped: results.filter((r) => r.skipped).length,
+    ...(retryable.length ? { retryable: retryable.length,
+      retryAfterMs: Math.max(60000, ...retryable.map((result) => Number(result.retryAfterMs) || 0)) } : {}),
     results,
   };
 }
@@ -303,4 +316,38 @@ const service = new PushNotificationService();
 service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
+// The saved property a push is ABOUT (uncapped codex r1s P1 — the producer
+// half of the lane's push item, pulled forward from PR 3): a composer that
+// knows the house passes notification.propertyId; one that only knows the
+// visit (appointmentId = scheduled_services.id, which every appointment
+// message carries through sendCustomerMessage → twilio → push routing) gets
+// it resolved here, ONCE, instead of at thirty composer sites. An unstamped
+// visit resolves to nothing — the profile-only link, which the app reads as
+// the profile's PRIMARY: exactly the house an unstamped visit belongs to.
+// Best-effort: a lookup failure sends the profile-only link, never blocks
+// the push. The visit must belong to the recipient profile.
+async function resolveNotificationPropertyId(customerId, notification) {
+  // Gate off (or rolled back): the app's list is profile-shaped and cannot
+  // honor a house — a hint would only make the tap read "unavailable"
+  // (uncapped codex r1t P1). Profile-only link, today's behavior.
+  if (!appPropertyScopeEnabled()) return null;
+  if (notification?.propertyId) return String(notification.propertyId);
+  if (!notification?.appointmentId) return null;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: notification.appointmentId, customer_id: customerId })
+      .first('property_id');
+    return row && row.property_id ? String(row.property_id) : null;
+  } catch (err) {
+    logger.warn(`[push] property lookup for appointment ${notification.appointmentId} failed: ${err.message}`);
+    return null;
+  }
+}
+function pushLinkQualificationEnabled() {
+  return gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') || appPropertyScopeEnabled();
+}
+service.resolveNotificationPropertyId = resolveNotificationPropertyId;
+service.pushLinkQualificationEnabled = pushLinkQualificationEnabled;
+service._resolveNotificationPropertyId = resolveNotificationPropertyId;
+
 module.exports = service;

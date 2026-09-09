@@ -24,6 +24,20 @@ const { notificationPrefsDbUpdates, preferencePayload, preferenceChangeItems, CH
 const { resolvePrimaryProfileId } = require('../services/account-properties');
 
 describe('notification preference updates', () => {
+  test.each([['email', 'push'], ['push', 'email']])('records an explicit request channel change: %s to %s', (before, after) => {
+    expect(notificationPrefsDbUpdates({ requestChannel: after }, { request_channel: before }))
+      .toEqual({ request_channel: after, request_channel_explicit: true });
+  });
+
+  test.each([false, null, true])('does not replace request provenance %s on an unchanged channel round trip', (explicit) => {
+    expect(notificationPrefsDbUpdates({ requestChannel: 'email', weatherAlerts: false },
+      { request_channel: 'email', request_channel_explicit: explicit }))
+      .toEqual({ request_channel: 'email', weather_alerts: false });
+    expect(notificationPrefsDbUpdates({ weatherAlerts: false },
+      { request_channel: 'push', request_channel_explicit: explicit }))
+      .toEqual({ weather_alerts: false });
+  });
+
   test('clears stale billing contact name when billing email changes without a replacement name', () => {
     const updates = notificationPrefsDbUpdates(
       { billingEmail: 'new-ap@example.com' },

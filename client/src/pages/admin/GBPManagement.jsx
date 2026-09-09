@@ -79,7 +79,7 @@ const sLabel = {
   display: "block",
 };
 const sBadge = (bg, color) => ({
-  fontSize: 10,
+  fontSize: 12, // UI audit F0470
   padding: "2px 8px",
   borderRadius: 4,
   background: bg,
@@ -137,11 +137,11 @@ const gbpPill = (isActive) => ({
   gap: 6,
 });
 const gbpPillBadge = (isActive) => ({
-  fontSize: 9,
+  fontSize: 12, // UI audit F0470 (was 9px, ~2.3:1 contrast)
   padding: "1px 6px",
   borderRadius: 10,
   background: isActive ? "rgba(255,255,255,0.2)" : "#E4E4E7",
-  color: isActive ? "#FFFFFF" : "#A1A1AA",
+  color: isActive ? "#FFFFFF" : "#52525B",
   fontWeight: 700,
 });
 
@@ -394,7 +394,7 @@ export default function GBPManagement() {
             <div
               title={l.authError || ""}
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 marginTop: 4,
                 color: l.hasCredentials ? D.green : l.authError ? D.red : D.muted,
               }}
@@ -1668,7 +1668,7 @@ function UpdateQueueTab({
                     {" "}
                     <div
                       style={{
-                        fontSize: 10,
+                        fontSize: 11,
                         color: D.red,
                         fontWeight: 500,
                         marginBottom: 4,
@@ -1698,7 +1698,7 @@ function UpdateQueueTab({
                     {" "}
                     <div
                       style={{
-                        fontSize: 10,
+                        fontSize: 11,
                         color: D.green,
                         fontWeight: 500,
                         marginBottom: 4,
@@ -1813,7 +1813,7 @@ function ChangeHistoryTab({
                 <th
                   key={h}
                   style={{
-                    fontSize: 10,
+                    fontSize: 11,
                     color: D.muted,
                     textTransform: "uppercase",
                     letterSpacing: 1,

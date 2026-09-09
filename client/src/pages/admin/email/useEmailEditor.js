@@ -4,6 +4,7 @@ import {
   setEmailSending,
   subscribeEmailDrafts,
   updateEmailDrafts,
+  updateEmailSendAttempt,
 } from "../../../lib/emailDrafts";
 import { adminFetch } from "./emailApi";
 
@@ -31,13 +32,14 @@ export default function useEmailEditor(userId) {
     drafts: draftSession.drafts,
     saved: draftSession.saved,
     sending: { ...draftSession.sending },
+    attempts: { ...draftSession.attempts },
   });
   const [editor, setEditor] = useState(snapshot);
   useEffect(
     () => subscribeEmailDrafts(draftSession, () => setEditor(snapshot())),
     [draftSession],
   );
-  const { drafts, saved, sending } = editor;
+  const { drafts, saved, sending, attempts } = editor;
   const composeForm = drafts.compose;
   const [showCompose, setShowCompose] = useState(false);
   const [drafting, setDrafting] = useState(false);
@@ -62,8 +64,17 @@ export default function useEmailEditor(userId) {
     ? "Draft recovery is unavailable. Your text stays while navigating here; copy it before reloading or closing this tab."
     : "Drafts are saved in this browser tab until you send, discard, or sign out.";
 
-  const sendEmail = async (kind, payload, onSuccess) => {
+  const sendEmail = async (kind, payload, snapshot, replyId, onSuccess) => {
+    const key = kind === "compose" ? "compose" : `reply:${replyId}`;
+    if (draftSession.attempts[key]) return;
     if (!setEmailSending(draftSession, kind, true)) return;
+    const attempt = { id: crypto.randomUUID(), status: "running", startedAt: new Date().toISOString(), snapshot, replyId };
+    if (!updateEmailSendAttempt(draftSession, key, attempt)) {
+      setEmailSending(draftSession, kind, false);
+      window.alert("Send was not started because its recovery record could not be saved.");
+      return;
+    }
+    let accepted = false;
     try {
       const response = await adminFetch("/api/admin/email/send", {
         method: "POST",
@@ -72,10 +83,31 @@ export default function useEmailEditor(userId) {
           body: encodeEmailBody(payload.body),
         }),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      // Router-level authentication/authorization answers before the send
+      // handler runs: the email definitively never reached Gmail, so release
+      // the guard instead of locking the composer behind reconciliation.
+      if (response.status === 401 || response.status === 403) {
+        updateEmailSendAttempt(draftSession, key, null, attempt.id);
+        window.alert(SEND_ERRORS[kind] + "Your session is not authorized to send email. Sign in again and retry.");
+        return;
+      }
+      const result = await response.json();
+      if (result.status === "failed") {
+        updateEmailSendAttempt(draftSession, key, null, attempt.id);
+        window.alert(SEND_ERRORS[kind] + (result.error || "The email was not accepted."));
+        return;
+      }
+      if (!response.ok || !result.success || !result.messageId) throw new Error("Email outcome unknown");
+      accepted = true;
+      updateEmailSendAttempt(draftSession, key, { ...attempt, status: "provider_accepted", messageId: result.messageId }, attempt.id);
       await onSuccess();
-    } catch (error) {
-      window.alert(SEND_ERRORS[kind] + error.message);
+      if (draftSession.saved) updateEmailSendAttempt(draftSession, key, null, attempt.id);
+    } catch {
+      if (accepted) {
+        window.alert("Gmail accepted the email. The inbox could not refresh; do not resend it.");
+      } else {
+        updateEmailSendAttempt(draftSession, key, { ...attempt, status: "outcome_unknown" }, attempt.id);
+      }
     } finally {
       setEmailSending(draftSession, kind, false);
     }
@@ -93,6 +125,8 @@ export default function useEmailEditor(userId) {
         body: text,
         threadId: email.gmail_thread_id,
       },
+      text,
+      email.id,
       async () => {
         changeDrafts((current) => ({
           ...current,
@@ -118,15 +152,34 @@ export default function useEmailEditor(userId) {
         subject: composeForm.subject.trim() || "(no subject)",
         body: composeForm.body,
       },
-      () => {
+      composeForm,
+      null,
+      async () => {
         // Only clear the submitted snapshot; edits can outlive this component.
         if (draftSession.drafts.compose === composeForm) {
           setComposeForm(() => ({ to: "", subject: "", body: "" }));
           setShowCompose(false);
         }
-        onSent();
+        await onSent();
       },
     );
+  };
+
+  const reconcileSend = (key, outcome) => {
+    const attempt = draftSession.attempts[key];
+    if (!attempt || draftSession.sending[key === "compose" ? "compose" : "reply"]) return;
+    // Like outreach reconciliation, these are explicit operator verdicts after
+    // checking Sent. An empty search result never releases a send automatically.
+    if (outcome === "sent") {
+      changeDrafts(current => key === "compose" ? { ...current, compose:
+        ["to", "subject", "body"].every(field => current.compose[field] === attempt.snapshot[field])
+          ? { to: "", subject: "", body: "" } : current.compose,
+      } : { ...current, replies: { ...current.replies,
+        [attempt.replyId]: current.replies[attempt.replyId] === attempt.snapshot ? "" : current.replies[attempt.replyId],
+      } });
+      if (!draftSession.saved) return;
+    }
+    updateEmailSendAttempt(draftSession, key, null, attempt.id);
   };
 
   const handleAiDraft = async (email, isSelected) => {
@@ -169,6 +222,8 @@ export default function useEmailEditor(userId) {
     hasComposeDraft,
     storageError,
     recoveryNotice,
+    sendAttempts: attempts,
+    reconcileSend,
     handleReply,
     handleComposeSend,
     handleAiDraft,

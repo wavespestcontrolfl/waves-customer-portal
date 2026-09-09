@@ -125,6 +125,12 @@ export default function CustomerRequestsPanel({ customerId }) {
                   {r.createdAt ? ` · ${fmtDate(r.createdAt)}` : ""}
                   {r.urgency === "urgent" ? " · Urgent" : ""}
                 </div>
+                {r.property?.address && (
+                  <div className="text-12 text-ink-secondary mt-0.5" data-testid="request-property">
+                    {r.property.label ? `${r.property.label} · ` : ""}{r.property.address}
+                    {r.property.isPrimary ? "" : " (secondary property)"}
+                  </div>
+                )}
               </div>
               <Button
                 variant="secondary"
