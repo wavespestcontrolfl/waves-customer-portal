@@ -2230,9 +2230,49 @@ The owner-approved audit sequence promotes comfortable 44px controls, sentence-c
 
 The existing `/admin/_design-system` route demonstrates labeled fields, stable loading and retry states, missing values versus zero, nested overlays, and record/role draft ownership, with the source for each example. `AdminCommandHeader` gains an explicit workspace variant. These examples do not establish estimate pricing, durable offline recovery, or technician completion behavior; those remain separate workflow proofs in the approved sequence.
 
+## 2026-09-09 — Group the admin sidebar around daily work
+
+The owner-approved navigation scope retains every destination while grouping the sidebar into six daily links, four expandable management areas, direct Agent Ops and footer Settings. Leaf roles and feature gates remain authoritative. The default-off `admin-navigation` per-user flag enables the shared desktop/mobile workspace metadata, account-specific expansion and rendered-tab selection. Existing routes, mobile tabs, settings leaves, page data and usage beacons remain intact. New chrome uses the incoming shared UI foundation and its 14px text and responsive control density. See `docs/admin-sidebar-navigation.md` for behavior, rollout and integration dependencies.
+
 ## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
 
 The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
+
+
+## 2026-09-08 — One evidence-based lawn assessment per visit
+
+The owner approved a single multimodal call over up to six numbered visit photos,
+with optional front/back/side labels supplied by the technician. The diagnostic
+rubric and curated agronomy stay shared with the staff diagnostic tool. Planned
+products are excluded from perception and enter deterministic reconciliation at
+confirmation; technician notes are quoted reference data, never instructions.
+
+`TEXT_POLICIES.lawnVisitAssessment` uses the Gemini vision tier first and the
+OpenAI frontier tier (GPT-6 Astra at approval) as its fallback. This is the
+owner-approved exception to the Claude-fallback convention for this lane only.
+Providers run sequentially. The existing dispatcher owns image labels, thinking
+controls, validation failures and token accounting for every billed leg.
+
+`GATE_LAWN_VISIT_ASSESSMENT` remains off until the technician review flow and
+representative live evaluation are ready. The intended route records one run per
+assessment with immutable input provenance, findings, native severity, raw and
+seasonally adjusted scores, photo references and provider usage. Unknown scores
+remain NULL. An unavailable analysis retains the visit and photos; confirmation
+and customer delivery wait until the technician supplies every required score.
+A run keeps its confirmation semantics when the gate changes mid-visit.
+
+The technician provides one overall review: keep or allowlisted rename, added
+field evidence and applied products. Stable finding IDs preserve those decisions
+on follow-up confirmations. Customer labels and prose are derived server-side,
+confidence-gated and re-evaluated after each review; technician notes never enter
+customer copy or replay fixtures. Photo zone claims come only from technician
+labels. Customer report presentation remains a later stage.
+
+The input hash covers the composed rubric and response schema, rendered user
+prompt, context values, and numbered image bytes, MIME types and zones. A replay
+with omitted inputs must declare those omissions and cannot claim exact original
+input reproduction. Database changes are additive, retaining every published
+migration unchanged.
 
 ## 2026-09-08 — Prove the shared foundation in the estimate builder
 

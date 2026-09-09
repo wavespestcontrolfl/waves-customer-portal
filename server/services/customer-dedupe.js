@@ -484,7 +484,7 @@ const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
 // Everything else: empty winner fields fill from the loser, then the loser's
 // row is removed. Anything not copied survives in the journal snapshot.
 const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_preferences: 'or' };
-const CHANNEL_RESTRICTIVENESS = { email: 2, sms: 1, both: 0 };
+const CHANNEL_RESTRICTIVENESS = { email: 3, push: 2, sms: 1, both: 0 };
 // Column defaults that mean "never filled in", not a real choice — a winner
 // holding one of these must still take the loser's actual value (pet details,
 // preferred day) before the loser's row is deleted.
