@@ -6,7 +6,7 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'aut
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
