@@ -366,6 +366,18 @@ async function findConflictingVisits({
   if (arrivalWindow) {
     const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./arrival-route');
     if (arrivalWindowRoutingEnabled()) {
+      if (require('./policy').capacityEnabled() && arrivalWindow.commitPlacement === true) {
+        const { enforceArrivalCapacity, persistArrivalOrder } = require('./arrival-route');
+        const fit = await enforceArrivalCapacity({ conn: db, ...arrivalWindow,
+          date: String(date).split('T')[0], windowStart, windowEnd, excludeServiceIds: excludeIds });
+        // Existing rows can be renumbered now. A pending date/tech move puts
+        // its new order on the same update object the writer will commit.
+        if (!arrivalWindow.prospective) {
+          await persistArrivalOrder(db, fit, arrivalWindow.serviceId);
+          if (arrivalWindow.changes) arrivalWindow.changes.route_order = fit.routeOrder.indexOf(arrivalWindow.serviceId) + 1;
+        }
+        return [];
+      }
       const fit = await checkArrivalPlacement({
         conn: db, ...arrivalWindow, date: String(date).split('T')[0],
         windowStart, windowEnd, excludeServiceIds: excludeIds,

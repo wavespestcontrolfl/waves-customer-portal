@@ -18,6 +18,14 @@
 // deadlock).
 
 async function lockTechDays(trx, pairs) {
+  if (require('./policy').capacityEnabled()) {
+    // Some nested callers already hold rows. Never wait for a date lock in
+    // that order; a retry keeps the shared date-before-tech fence intact.
+    const { tryAcquireOccupancyLock } = require('./occupancy');
+    for (const date of [...new Set(pairs.filter(pair => pair?.date).map(pair => pair.date))].sort()) {
+      if (!await tryAcquireOccupancyLock(trx, date)) throw require('./arrival-route').capacityError('route_busy');
+    }
+  }
   const keys = [...new Set(
     pairs
       .filter(p => p && p.date)
