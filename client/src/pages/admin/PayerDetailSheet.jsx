@@ -88,6 +88,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   // loaded statements, and a later statements success must not erase it.
   const [statementsError, setStatementsError] = useState("");
   const [arError, setArError] = useState("");
+  const [arLoading, setArLoading] = useState(true);
   const [openStmtId, setOpenStmtId] = useState(null);
 
   const loadStatements = useCallback(async () => {
@@ -107,6 +108,7 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
   }, [payer.id]);
 
   const loadAr = useCallback(async () => {
+    setArLoading(true);
     try {
       const r = await adminFetch(`/admin/payers/${payer.id}/ar`);
       const d = await r.json().catch(() => null);
@@ -116,6 +118,8 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
     } catch (e) {
       setAr(null);
       setArError(e?.message || "Could not load this payer's balance.");
+    } finally {
+      setArLoading(false);
     }
   }, [payer.id]);
 
@@ -193,10 +197,12 @@ export default function PayerDetailSheet({ payer, onClose, onChanged }) {
           </TabPanel>
 
           <TabPanel value="ar" className="pt-3">
-            {arError ? (
+            {arLoading ? (
+              <p className="text-13 text-zinc-400 py-4">Loading balance…</p>
+            ) : arError ? (
               <p role="alert" className="text-13 text-alert-fg py-2">
                 {arError}{" "}
-                <Button size="sm" variant="ghost" onClick={loadAr}>
+                <Button size="sm" variant="ghost" onClick={loadAr} disabled={arLoading}>
                   Retry
                 </Button>
               </p>

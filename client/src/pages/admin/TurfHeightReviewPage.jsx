@@ -40,6 +40,9 @@ export default function TurfHeightReviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [resolving, setResolving] = useState(null);
+  // Per-row confirm failures: two rows confirmed back-to-back must not let
+  // one success wipe the other's failure (UI audit F0558, Codex r2).
+  const [rowErrors, setRowErrors] = useState({});
 
   const load = useCallback(() => {
     setLoading(true);
@@ -61,15 +64,15 @@ export default function TurfHeightReviewPage() {
       });
       if (!r.ok) {
         const b = await r.json().catch(() => ({}));
-        setError(b.error || `Could not confirm reading (HTTP ${r.status})`);
+        setRowErrors((prev) => ({ ...prev, [id]: b.error || `Could not confirm reading (HTTP ${r.status})` }));
         return;
       }
-      setError(null);
+      setRowErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
       setItems((prev) => prev.filter((it) => it.id !== id));
     } catch {
       // UI audit F0558: a rejected PATCH used to escape the click handler
       // unhandled while the row silently stayed put.
-      setError("Could not confirm reading — check your connection and try again.");
+      setRowErrors((prev) => ({ ...prev, [id]: "Could not confirm reading — check your connection and try again." }));
     } finally {
       setResolving(null);
     }
@@ -123,6 +126,9 @@ export default function TurfHeightReviewPage() {
               style={{ background: M.ink, color: "#fff", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", opacity: resolving === it.id ? 0.6 : 1 }}>
               {resolving === it.id ? "…" : "Confirm reading"}
             </button>
+            {rowErrors[it.id] && (
+              <div role="alert" style={{ flexBasis: "100%", color: M.red, fontSize: 13 }}>{rowErrors[it.id]}</div>
+            )}
           </div>
         ))}
       </div>

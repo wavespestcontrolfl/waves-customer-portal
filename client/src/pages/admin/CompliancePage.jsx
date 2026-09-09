@@ -99,6 +99,9 @@ function useFetch(url, token, deps = []) {
       .then(setData)
       .catch((e) => {
         console.error(e);
+        // Drop the previous page's rows too: stale records under freshly
+        // chosen filters read as current results.
+        setData(null);
         setError(e?.message || "Request failed");
       })
       .finally(() => setLoading(false));
@@ -293,7 +296,7 @@ function ApplicationLogTab({ token }) {
     limit: String(limit),
     offset: String(filters.page * limit),
   }).toString();
-  const { data, loading } = useFetch(`${API}/applications?${qs}`, token, [qs]);
+  const { data, loading, error, reload } = useFetch(`${API}/applications?${qs}`, token, [qs]);
 
   const exportCSV = async () => {
     const params = new URLSearchParams({
@@ -365,7 +368,12 @@ function ApplicationLogTab({ token }) {
           Export for DACS
         </button>{" "}
       </div>
-      {loading ? (
+      {error ? (
+        <div role="alert" style={{ color: D.red }}>
+          Couldn't load applications — {error}
+          <button type="button" onClick={reload} style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 6, border: `1px solid ${D.red}`, background: "transparent", color: D.red, cursor: "pointer", font: "inherit" }}>Retry</button>
+        </div>
+      ) : loading ? (
         <div style={{ color: D.muted }}>Loading…</div>
       ) : (
         <>

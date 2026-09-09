@@ -7,6 +7,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TurfHeightReviewPage from './TurfHeightReviewPage';
 
+const ITEM2 = { id: 8, customer: 'Sam Customer', grass: 'Zoysia', band: 'ok', gauge: 3.0, measured: '2026-09-02', manual: false, verification: 'pending' };
 const ITEM = { id: 7, customer: 'Pat Customer', grass: 'St. Augustine', band: 'ok', gauge: 3.5, measured: '2026-09-01', manual: false, verification: 'pending' };
 
 beforeEach(() => {
@@ -42,5 +43,25 @@ describe('TurfHeightReviewPage confirm reading', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm reading' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/check your connection/);
     await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm reading' })).not.toBeDisabled());
+  });
+
+  it('a failed row keeps its error when another row confirms successfully afterwards', async () => {
+    let patches = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url, opts = {}) => {
+      if (opts.method === 'PATCH') {
+        patches += 1;
+        if (String(url).includes('/7/')) return { ok: false, status: 500, json: async () => ({ error: 'Row 7 locked' }) };
+        return { ok: true, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => ({ items: [ITEM, ITEM2] }) };
+    }));
+    render(<MemoryRouter><TurfHeightReviewPage /></MemoryRouter>);
+    const buttons = await screen.findAllByRole('button', { name: 'Confirm reading' });
+    fireEvent.click(buttons[0]);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Row 7 locked');
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Confirm reading' })).find((b) => !b.disabled));
+    await waitFor(() => expect(patches).toBe(2));
+    await waitFor(() => expect(screen.queryByText('Sam Customer')).not.toBeInTheDocument());
+    expect(screen.getByRole('alert')).toHaveTextContent('Row 7 locked');
   });
 });
