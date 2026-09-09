@@ -65,6 +65,23 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.deliveredAskRows(customerId, { since: deliveredAt })).toEqual([]);
   });
 
+  test('retry eligibility excludes held rows before the batch limit and admits expired holds', async () => {
+    const held = await request({ followup_sent: false, followup_next_attempt_at: new Date(at.getTime() + 60000) });
+    const due = await request({ followup_sent: false, followup_next_attempt_at: null });
+    const eligible = () => trx('review_requests').where({ customer_id: customerId, followup_sent: false })
+      .whereRaw('(followup_next_attempt_at IS NULL OR followup_next_attempt_at <= ?)', [at]).limit(20);
+    expect((await eligible()).map(row => row.id)).toEqual([due.id]);
+    await trx('review_requests').where({ id: held.id }).update({ followup_next_attempt_at: at });
+    expect((await eligible()).map(row => row.id).sort()).toEqual([held.id, due.id].sort());
+    const migration = require('../models/migrations/20260909000011_review_followup_retry_at');
+    await migration.down(trx);
+    await migration.down(trx);
+    await migration.up(trx);
+    await migration.up(trx);
+    expect(await trx.schema.hasColumn('review_requests', 'followup_next_attempt_at')).toBe(true);
+    expect(await trx.schema.hasColumn('review_requests', 'followup_delivered_at')).toBe(true);
+  });
+
   test('latest delivered manual ask excludes failed sends and acknowledgments', async () => {
     await request({ sms_sent_at: at });
     const manualAt = new Date(at.getTime() + 240000);
