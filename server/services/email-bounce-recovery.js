@@ -488,13 +488,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // or the authority of the original visit link. The original recipient
       // is re-authorized on held rows and the request runs while they are
       // held; a recheck that cannot be read fails closed through the catch.
-      let dispatchStarted = false;
       let fence;
       try {
-        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async () => {
-          dispatchStarted = true;
-          await dispatchToProvider();
-        });
+        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, dispatchToProvider);
       } catch (err) {
         if (!result) throw err;
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);

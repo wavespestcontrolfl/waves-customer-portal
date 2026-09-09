@@ -173,6 +173,21 @@ async function markRetryFailure(message, err, now = new Date()) {
   return updated || null;
 }
 
+// A thrown provider request after the handoff began is ambiguous: SendGrid
+// may hold the message despite the lost response. A bearer-link summary is
+// never requeued from that state; its row settles as an uncertain delivery
+// for the office to reconcile (no sent_at, no provider id, not the
+// pre-dispatch abort marker), and the exhausted alert names it.
+async function markRetryUncertain(message, err, now = new Date()) {
+  const reason = `Provider outcome unknown: ${emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed'))}`.slice(0, 1000);
+  const [updated] = await db('email_messages')
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+    .update({ status: 'failed', error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: now, updated_at: now })
+    .returning('*');
+  if (updated) await alertExhausted(updated, reason);
+  return updated || null;
+}
+
 async function retryOne(message) {
   let suppression;
   try {
@@ -239,7 +254,10 @@ async function retryOne(message) {
       try {
         fence = await withProviderHandoff(async () => { dispatchStarted = true; await dispatchToProvider(); });
       } catch (err) {
-        if (dispatchStarted && !result) throw err;
+        if (dispatchStarted && !result) {
+          await markRetryUncertain(message, err);
+          return { sent: false, uncertain: true, error: err };
+        }
         if (!dispatchStarted) {
           // Fail closed, the same way an unreadable suppression ledger does.
           await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
