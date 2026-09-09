@@ -570,6 +570,7 @@ export function applyServerTermiteRentalPricingConfig(config) {
 const TERMITE_INSTALL_DEFAULTS = Object.freeze({
   trelonaStationCost: 24.00, // $384 / 16-station box (owner 2026-09-02)
   trelonaStationCostSource: 'config',
+  cartridgeCostSource: 'config',
   advanceStationCost: 13.16,
   laborMaterial: 5.25,
   misc: 0.75,
@@ -586,6 +587,10 @@ export function applyServerTermiteInstallPricingConfig(config, effective = confi
   TERMITE_INSTALL = {
     trelonaStationCost,
     trelonaStationCostSource: eff?.trelona_station_cost_source === 'catalog' && pos(eff?.trelona_station_cost) != null ? 'catalog' : 'config',
+    // Provenance only (the client prices no cartridges): carried so a
+    // CLIENT_FALLBACK stamp says 'catalog' exactly when the server's link
+    // succeeded (codex r2 P2).
+    cartridgeCostSource: eff?.cartridge_cost_source === 'catalog' ? 'catalog' : 'config',
     advanceStationCost: pos(eff?.advance_station_cost) ?? pos(row?.advance_bait ?? row?.advance_station_cost) ?? TERMITE_INSTALL_DEFAULTS.advanceStationCost,
     laborMaterial: nonNeg(eff?.labor_material_per_station) ?? nonNeg(row?.labor_per_station ?? row?.labor_material_per_station) ?? TERMITE_INSTALL_DEFAULTS.laborMaterial,
     misc: nonNeg(eff?.misc_per_station) ?? nonNeg(row?.misc_per_station) ?? TERMITE_INSTALL_DEFAULTS.misc,
@@ -2751,7 +2756,7 @@ export function calculateEstimate(inputs) {
         },
         materialCostSource: {
           station: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
-          cartridge: tmSystem === 'trelona' ? 'config' : 'none',
+          cartridge: tmSystem === 'trelona' ? TI.cartridgeCostSource : 'none',
         },
       };
       wgServices.push({

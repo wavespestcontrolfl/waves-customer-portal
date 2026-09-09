@@ -1237,12 +1237,15 @@ function configKeySubFeaturesAvailable(key) {
 // syncTermiteStationCostsFromCatalog), which the row itself cannot show.
 // Served with termite_install so the Admin V1 fallback estimator previews —
 // and stamps — the same hardware cost the server will price (codex #4313
-// r1 P1: the client literal never saw a catalog move). Syncs first when the
-// bridge's cache is stale so a fresh vendor approval reaches the preview.
+// r1 P1: the client literal never saw a catalog move). ALWAYS syncs first
+// (codex r2 P1): inventory approvals do not invalidate the bridge's 60 s
+// cache, and a CLIENT_FALLBACK save cannot be recomputed later, so the one
+// read that stamps the quote must see the catalog as it is right now. One
+// admin request per estimator load — the sync cost is fine here.
 async function effectiveTermiteInstallBasis() {
   try {
     const bridge = require('../services/pricing-engine/db-bridge');
-    if (bridge.needsSync && bridge.needsSync()) await bridge.syncConstantsFromDB();
+    await bridge.syncConstantsFromDB();
     const { TERMITE } = require('../services/pricing-engine/constants');
     const trelona = TERMITE.systems?.trelona || {};
     const cartridges = TERMITE.cartridges || {};

@@ -1829,13 +1829,16 @@ function markupVsMarginAudit() {
 // costs block priceTermiteBait emits — station and cartridge cost, service
 // minutes at GLOBAL rates, label-driven replacement, follow-up reserve), so
 // this table moves with pricing_config / the catalog link, never a private
-// copy. Price side = the plan's candidate shapes (§A1): P1 setup stations ×
-// $30 + annual $249 base / +$50 per 5-station bracket above 10; P2 today's
-// install formula + $249. Today's quarterly program is printed beside them.
-// Report only — nothing here is a price the engine charges.
+// copy. Price side = the plan's candidate shapes (§A1): P1 setup = the
+// engine's per-station material basis (stationCost + laborMaterial + misc)
+// × 1.0 — the plan's "$30" is only the $24.00 worked example, so the setup
+// follows the live/catalog station cost (codex r2 P1) — plus annual $249
+// base / +$50 per 5-station bracket above 10; P2 = today's install formula
+// (material × installMultiplier) + $249. Today's quarterly program is
+// printed beside them. Report only — nothing here is a price the engine charges.
 const TERMITE_PLAN_SHAPES = Object.freeze({
-  P1: { setupPerStation: 30, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10 },
-  P2: { setupPerStation: null, annualBase: 249, annualStep: 0, bracketStations: 5, bracketFloor: 10 },
+  P1: { setupMaterialMultiplier: 1.0, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10 },
+  P2: { setupMaterialMultiplier: null, annualBase: 249, annualStep: 0, bracketStations: 5, bracketFloor: 10 },
 });
 function termitePlanRow(stations) {
   const T = constants.TERMITE;
@@ -1855,7 +1858,9 @@ function termitePlanRow(stations) {
   const bracketsAbove = (shape) => Math.max(0, Math.ceil((stations - shape.bracketFloor) / shape.bracketStations));
   const shapes = {};
   for (const [name, shape] of Object.entries(TERMITE_PLAN_SHAPES)) {
-    const setup = shape.setupPerStation != null ? stations * shape.setupPerStation : li.installation.retailValue;
+    const setup = shape.setupMaterialMultiplier != null
+      ? Math.round(c.installMaterial * shape.setupMaterialMultiplier)
+      : li.installation.retailValue;
     const annual = shape.annualBase + shape.annualStep * bracketsAbove(shape);
     shapes[name] = {
       setup,

@@ -107,39 +107,55 @@ function unstampedTermiteStationCost(system, stations, storedInstall) {
   return legacy;
 }
 
-function termiteKnobSignalForReplay(estData = {}) {
-  const result = estData?.result && typeof estData.result === 'object' ? estData.result : (estData || {});
+// Representation normalization: the stored termite result, whichever shape
+// the estimate persisted it in. The MAPPED envelope (results.tmBait — the
+// only shape Admin V2 saves) wins over a raw line for the same reason tsMeta
+// wins above: a revision replaces the mapped result but can leave an agent
+// draft's older raw engineResult in place. Returns null when no termite
+// result exists anywhere.
+function firstDefined(...values) {
+  for (const value of values) if (value != null) return value;
+  return undefined;
+}
+function termiteRawLine(estData) {
+  const result = estData && typeof estData.result === 'object' ? estData.result : estData;
   const lineItems = [
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
-    ...(Array.isArray(estData?.engineResult?.lineItems) ? estData.engineResult.lineItems : []),
+    ...(Array.isArray(result && result.lineItems) ? result.lineItems : []),
+    ...(Array.isArray(estData && estData.engineResult && estData.engineResult.lineItems) ? estData.engineResult.lineItems : []),
   ];
-  const termiteLine = lineItems.find((li) => (li?.service || '') === 'termite_bait');
-  // Admin V2 persists ONLY the mapped legacy envelope (result.results.tmBait)
-  // with no raw lineItems — the mapped stamp is a first-class source, and
-  // it WINS over a stale raw engineResult for the same reason as tsMeta.
-  const tmBait = result?.results?.tmBait && typeof result.results.tmBait === 'object'
-    ? result.results.tmBait
-    : (estData?.result?.results?.tmBait || null);
-  if (!termiteLine && !tmBait) return null;
-  const stamped = (tmBait && tmBait.pricingKnobs) || (termiteLine && termiteLine.pricingKnobs);
-  const storedSystem = String(
-    (tmBait && (tmBait.selectedSystem || tmBait.system))
-    || (termiteLine && (termiteLine.selectedSystem || termiteLine.system))
-    || 'trelona',
-  ).toLowerCase();
-  const stampedCost = stamped && typeof stamped === 'object' ? Number(stamped.stationCost) : NaN;
+  return lineItems.find((li) => li && li.service === 'termite_bait') || null;
+}
+function termiteMappedEnvelope(estData) {
+  const result = estData && typeof estData.result === 'object' ? estData.result : estData;
+  const tmBait = result && result.results && result.results.tmBait;
+  return tmBait && typeof tmBait === 'object' ? tmBait : null;
+}
+function storedTermiteResult(estData = {}) {
+  const line = termiteRawLine(estData);
+  const mapped = termiteMappedEnvelope(estData);
+  if (!line && !mapped) return null;
+  const m = mapped || {};
+  const r = line || {};
+  const install = r.installation || {};
+  return {
+    stamp: firstDefined(m.pricingKnobs, r.pricingKnobs) || null,
+    system: String(firstDefined(m.selectedSystem, m.system, r.selectedSystem, r.system, 'trelona')).toLowerCase(),
+    stations: firstDefined(m.sta, r.stations),
+    install: firstDefined(m.ti, m.ai, install.retailValue, install.price),
+  };
+}
+
+// Replay decision: stamped replays verbatim; unstamped is read against the
+// stored install (see unstampedTermiteStationCost); nothing stored → null.
+function termiteKnobSignalForReplay(estData = {}) {
+  const stored = storedTermiteResult(estData);
+  if (!stored) return null;
+  const stampedCost = stored.stamp && typeof stored.stamp === 'object' ? Number(stored.stamp.stationCost) : NaN;
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
-    return {
-      system: String(stamped.system || storedSystem).toLowerCase(),
-      stationCost: stampedCost,
-    };
+    return { system: String(stored.stamp.system || stored.system).toLowerCase(), stationCost: stampedCost };
   }
-  const storedStations = (tmBait && tmBait.sta) ?? (termiteLine && termiteLine.stations);
-  const storedInstall = (tmBait && (tmBait.ti ?? tmBait.ai))
-    ?? (termiteLine && (termiteLine.installation?.retailValue ?? termiteLine.installation?.price));
-  const fallback = unstampedTermiteStationCost(storedSystem, storedStations, storedInstall);
-  if (!Number.isFinite(fallback)) return null;
-  return { system: storedSystem, stationCost: fallback };
+  const fallback = unstampedTermiteStationCost(stored.system, stored.stations, stored.install);
+  return Number.isFinite(fallback) ? { system: stored.system, stationCost: fallback } : null;
 }
 
 // Stored-result palm provenance for translator-based replays (v4.8, pre-push

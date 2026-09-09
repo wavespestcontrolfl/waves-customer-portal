@@ -129,12 +129,13 @@ describe("termite station rental — client fallback engine", () => {
     try {
       applyServerTermiteInstallPricingConfig(
         { multiplier: 1.45, trelona_bait: 24 },
-        { trelona_station_cost: 22.5, trelona_station_cost_source: 'catalog', labor_material_per_station: 5.25, misc_per_station: 0.75, install_multiplier: 1.45 },
+        { trelona_station_cost: 22.5, trelona_station_cost_source: 'catalog', cartridge_cost_source: 'catalog', labor_material_per_station: 5.25, misc_per_station: 0.75, install_multiplier: 1.45 },
       );
       const own = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" }));
       const staTre = Math.max(8, Math.ceil(own.results.tmBait.perim / 15));
       expect(own.results.tmBait.ti).toBe(Math.round(staTre * (22.5 + 5.25 + 0.75) * 1.45));
       expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 22.5, stationCostSource: 'catalog' });
+      expect(own.results.tmBait.materialCostSource).toEqual({ station: 'catalog', cartridge: 'catalog' });
       // Row-only (no effective block) reads the row; null resets the default.
       applyServerTermiteInstallPricingConfig({ multiplier: 1.45, trelona_bait: 23 }, null);
       expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" })).results.tmBait.pricingKnobs.stationCost).toBe(23);
