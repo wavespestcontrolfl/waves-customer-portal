@@ -19,7 +19,7 @@ run('callback bridge on PostgreSQL', () => {
   const gates = require('../config/feature-gates').gates;
   const phone = '+15555550176', cell = '+15555550177';
   const from = `+1555555${randomInt(1000, 10000)}`;
-  const claimKey = () => `callback-card-bridge:${customerId}`;
+  const claimKey = () => `callback-card-bridge:${phone}`;
   const callIds = [], commitmentIds = [];
   let conn, handler, customerId, staffId, originalGates, originalFrom;
 
@@ -53,7 +53,7 @@ run('callback bridge on PostgreSQL', () => {
     callIds.push(...await conn('call_log').where({ from_phone: from, direction: 'outbound' }).pluck('id'));
     await conn('call_commitments').whereIn('id', commitmentIds).del();
     await conn('call_log').whereIn('id', callIds).del();
-    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), `callback-card-bridge:${phone}`]).del();
+    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), 'callback-card-bridge:+15555550178', 'callback-card-bridge:+15555550175']).del();
     await conn('customers').where({ id: customerId }).del();
     await conn('technicians').where({ id: staffId }).del();
     callIds.length = commitmentIds.length = 0;
@@ -136,7 +136,6 @@ run('callback bridge on PostgreSQL', () => {
     } finally {
       callIds.push(...await conn('call_log').where({ customer_id: otherCustomer }).pluck('id'));
       await conn('call_log').whereIn('id', callIds).del();
-      await conn('sms_send_claims').where({ claim_key: `callback-card-bridge:${otherCustomer}` }).del();
       await conn('customers').where({ id: otherCustomer }).del();
     }
   });
@@ -149,6 +148,14 @@ run('callback bridge on PostgreSQL', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
     const placed = await conn('call_log').where({ from_phone: from, direction: 'outbound' }).first();
     expect(placed.metadata).toMatchObject({ relatedCommitmentId: row.id, callback_policy: 'card' });
+  });
+
+  test('an unlinked card bridge and the Call Log action for the same number share one interlock', async () => {
+    const row = await seed({ linked: false });
+    expect((await invoke(row, { customerId: undefined })).status).toBe(200);
+    const legacy = await invoke(row, { relatedCommitmentId: undefined, source: 'call-log-callback', relatedCallId: row.call_log_id });
+    expect(legacy.status).toBe(409);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 
   test('an unlinked callback persists its canonical dial target so the live-call interlock matches it', async () => {

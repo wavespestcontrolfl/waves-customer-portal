@@ -1261,19 +1261,19 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId || cardPolicy) bridgeClaimId = await db.transaction(async (trx) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to the CUSTOMER being called
-      // (the linked customer, else the dialed number): every card dials
-      // from the shared main line, so a line-wide key would let one ringing
-      // callback block every other customer's card, while a per-commitment
-      // key would let two promises to one customer ring them twice at once.
+      // before call_log is inserted, keyed to the NUMBER being called: every
+      // card dials from the shared main line, so a line-wide key would let
+      // one ringing callback block every other customer's card; a
+      // per-commitment or per-customer key would let a linked and an
+      // unlinked attempt ring the same phone twice at once.
       const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
         ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${customer?.id || normalizePhone(to)}`]);
+        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${dialTo}`]);
       if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
-      // The live-call interlock is customer-specific: the linked customer,
-      // or the dialed number when the source call never linked one.
+      // The live-call interlock covers the linked customer AND the dialed
+      // number, so a linked and an unlinked attempt to one phone collide.
       const active = await require('../services/call-bridge').activeBridgeCall(
-        { source, customerId: customer?.id || null, toPhone: customer ? null : dialTo }, trx);
+        { source, customerId: customer?.id || null, toPhone: dialTo }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
       if (!relatedCommitmentId) return claim.rows[0].id;
       const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
