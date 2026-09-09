@@ -4163,8 +4163,12 @@ function formatTime(t) {
 // tab was open: the tab re-reads the property list and withholds actions on
 // these visits until the label follows (codex #4207 r1j).
 export function scopeEchoMismatch(propertyScope, currentEntry, savedScope) {
-  if (!savedScope || !propertyScope || !propertyScope.enabled || !currentEntry) return false;
+  if (!propertyScope || !propertyScope.enabled) return false;
   const honored = propertyScope.propertyId ? String(propertyScope.propertyId) : null;
+  // Server scoped to a house while this client is in profile mode (the gate
+  // came back after a rollback): stale until the list is re-read.
+  if (!savedScope) return !!honored;
+  if (!currentEntry) return false;
   if (honored) return honored !== String(currentEntry.propertyId || '');
   return currentEntry.isPrimaryProperty !== true;
 }
@@ -15819,7 +15823,11 @@ export default function PortalPage() {
   return (
     <PortalGlassContext.Provider value={true}>
     <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
-      <PropertySelectionRevalidator active={propertyScope === 'saved'} refresh={refreshProperties} />
+      {/* Always registered (codex #4207 r2): a gate rollback drops the client
+          to profile mode, but the refresh token still forwards its property
+          claim — when the gate returns, the next refresh must re-read the
+          list or reads would honor a house the UI no longer names. */}
+      <PropertySelectionRevalidator active refresh={refreshProperties} />
     <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an

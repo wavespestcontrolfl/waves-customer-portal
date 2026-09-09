@@ -11,7 +11,7 @@ let portal;
 function Probe() { portal = usePortalRefresh(); return null; }
 
 describe('PropertySelectionRevalidator', () => {
-  it('re-reads the property list on every shared refresh while the saved scope is active, and not otherwise', async () => {
+  it('re-reads the property list on every shared refresh while active (the page keeps it active in every scope), and not otherwise', async () => {
     const refresh = vi.fn(async () => true);
     const view = render(
       <PortalReadProvider enabled>

@@ -54,10 +54,10 @@ async function withServer(fn) {
   try { await fn(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise((r) => server.close(r)); }
 }
 
-const MULTI_SECONDARY = { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-b', is_primary: false } };
-const MULTI_PRIMARY = { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-a', is_primary: true } };
-const SINGLE = { customerId: 'cust-1', enabled: true, multi: false, property: { id: 'prop-a', is_primary: true } };
-const OFF = { customerId: 'cust-1', enabled: false, multi: false, property: null };
+const MULTI_SECONDARY = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'prop-b', is_primary: false } };
+const MULTI_PRIMARY = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'prop-a', is_primary: true } };
+const SINGLE = { customerId: 'cust-1', enabled: true, multi: false, scoped: false, property: { id: 'prop-a', is_primary: true } };
+const OFF = { customerId: 'cust-1', enabled: false, multi: false, scoped: false, property: null };
 
 function visitsChainCalls() {
   const idx = db.mock.calls.findIndex((c) => c[0] === 'scheduled_services');

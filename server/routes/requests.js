@@ -219,7 +219,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // The server-validated saved property this ticket is about (codex
       // #4207 r1j): persisted on the row, part of the dedupe key, and shown
       // to staff — a secondary-house ticket must name its house.
-      if (scope && scope.enabled && scope.multi && scope.property) {
+      if (scope && scope.enabled && scope.scoped && scope.property) {
         const p = scope.property;
         requestProperty = {
           id: String(p.id),

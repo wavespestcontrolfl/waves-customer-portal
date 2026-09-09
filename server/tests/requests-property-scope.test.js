@@ -32,8 +32,8 @@ const db = require('../models/db');
 const { notifyAdmin } = require('../services/notification-service');
 const router = require('../routes/requests');
 
-const SECONDARY = { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-b', is_primary: false, label: null, address_line1: '418 Oak Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' } };
-const PRIMARY = { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-a', is_primary: true, label: 'Primary', address_line1: '1200 Palm Row Ct', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' } };
+const SECONDARY = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'prop-b', is_primary: false, label: null, address_line1: '418 Oak Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' } };
+const PRIMARY = { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'prop-a', is_primary: true, label: 'Primary', address_line1: '1200 Palm Row Ct', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' } };
 
 function chain(rows, log) {
   const c = {};

@@ -22,8 +22,11 @@ describe('scopeEchoMismatch', () => {
     expect(scopeEchoMismatch({ enabled: true, propertyId: null }, secondary, true)).toBe(true); // retired house → server fell back to the primary
     expect(scopeEchoMismatch({ enabled: true, propertyId: 'pa' }, secondary, true)).toBe(true);
   });
-  it('never fires outside the saved scope, without an echo, when the scope is disabled, or with no entry to compare', () => {
+  it('a server scoped to a house while the client sits in profile mode (gate back after a rollback) is stale; a primary/unscoped echo is not', () => {
+    expect(scopeEchoMismatch({ enabled: true, propertyId: 'pb' }, null, false)).toBe(true);
     expect(scopeEchoMismatch({ enabled: true, propertyId: null }, secondary, false)).toBe(false);
+  });
+  it('never fires without an echo, when the scope is disabled, or with no entry to compare', () => {
     expect(scopeEchoMismatch(undefined, secondary, true)).toBe(false);
     expect(scopeEchoMismatch({ enabled: false, propertyId: null }, secondary, true)).toBe(false);
     expect(scopeEchoMismatch({ enabled: true, propertyId: 'pa' }, null, true)).toBe(false);

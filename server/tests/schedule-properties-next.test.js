@@ -15,7 +15,7 @@ jest.mock('../services/account-properties', () => {
     ...actual,
     appPropertyScopeEnabled: jest.fn(() => true),
     accountSavedProperties: jest.fn(async () => ({ properties: global.__ENTRIES__, selected: null })),
-    resolveSessionScope: jest.fn(async () => ({ customerId: 'cust-1', enabled: false, multi: false, property: null })),
+    resolveSessionScope: jest.fn(async () => ({ customerId: 'cust-1', enabled: false, multi: false, scoped: false, property: null })),
   };
 });
 jest.mock('../middleware/auth', () => ({

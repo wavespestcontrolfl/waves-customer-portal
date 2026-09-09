@@ -511,7 +511,10 @@ router.put('/credit-preference', authenticate, async (req, res, next) => {
 // simply gets the profile list it already understands.
 router.get('/properties', authenticate, async (req, res, next) => {
   try {
-    if (req.query?.scope === 'saved' && appPropertyScopeEnabled()) {
+    // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
+    // customer-wide, /auth/me reports the scope disabled) — it keeps the
+    // profile list so no saved-property label dresses customer-wide visits.
+    if (req.query?.scope === 'saved' && appPropertyScopeEnabled() && req.customerInactive !== true) {
       const { properties, selected } = await accountSavedProperties(req);
       return res.json({ scope: 'saved', properties, selected });
     }

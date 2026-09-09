@@ -39,7 +39,7 @@ describe('canonical customer tracker query', () => {
   test('a saved-property scope narrows the canonical tracker to that property (primary also owns unstamped rows)', () => {
     const secondary = build(db, 'cust-1', {
       activeOnly: true, today: '2026-05-05', nowIso: '2026-05-05T12:00:00.000Z',
-      scope: { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-b', is_primary: false } },
+      scope: { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'prop-b', is_primary: false } },
     }).toSQL();
     expect(secondary.sql).toMatch(/"scheduled_services"\."property_id" = \?/);
     expect(secondary.sql).not.toMatch(/"property_id" is null/);
@@ -47,14 +47,14 @@ describe('canonical customer tracker query', () => {
 
     const primary = build(db, 'cust-1', {
       activeOnly: true, today: '2026-05-05', nowIso: '2026-05-05T12:00:00.000Z',
-      scope: { customerId: 'cust-1', enabled: true, multi: true, property: { id: 'prop-a', is_primary: true } },
+      scope: { customerId: 'cust-1', enabled: true, multi: true, scoped: true, property: { id: 'prop-a', is_primary: true } },
     }).toSQL();
     expect(primary.sql).toMatch(/\("scheduled_services"\."property_id" = \? or "scheduled_services"\."property_id" is null\)/);
 
     // Gate off / single property: no property predicate at all — today's SQL.
     const off = build(db, 'cust-1', {
       activeOnly: true, today: '2026-05-05', nowIso: '2026-05-05T12:00:00.000Z',
-      scope: { customerId: 'cust-1', enabled: false, multi: false, property: null },
+      scope: { customerId: 'cust-1', enabled: false, multi: false, scoped: false, property: null },
     }).toSQL();
     expect(off.sql).not.toContain('property_id');
   });
@@ -126,14 +126,14 @@ describe('canonical customer tracker query', () => {
     const scoped = trackingRouter._test.scopedLocationCustomer;
     const customer = { id: 'c1', latitude: 27.1, longitude: -82.1, address_line1: '1200 Palm Row Ct', city: 'Parrish', state: 'FL', zip: '34219' };
     const secondary = { id: 'pb', is_primary: false, latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
-    expect(scoped(customer, { enabled: true, multi: true, property: secondary })).toMatchObject({ id: 'c1', latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', city: 'Bradenton', zip: '34205' });
-    expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, latitude: null, longitude: null } })).toMatchObject({ latitude: null, longitude: null, address_line1: '418 Oak Ave' });
+    expect(scoped(customer, { enabled: true, multi: true, scoped: true, property: secondary })).toMatchObject({ id: 'c1', latitude: 27.5, longitude: -82.5, address_line1: '418 Oak Ave', city: 'Bradenton', zip: '34205' });
+    expect(scoped(customer, { enabled: true, multi: true, scoped: true, property: { ...secondary, latitude: null, longitude: null } })).toMatchObject({ latitude: null, longitude: null, address_line1: '418 Oak Ave' });
     // The visit's own stamped geocode wins inside the scoped branch — even when the property row has none.
-    expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, latitude: null, longitude: null } }, { lat: 27.9, lng: -82.9 })).toMatchObject({ latitude: 27.9, longitude: -82.9, address_line1: '418 Oak Ave' });
-    expect(scoped(customer, { enabled: true, multi: true, property: secondary }, { lat: 'nope', lng: null })).toMatchObject({ latitude: 27.5, longitude: -82.5 });
-    expect(scoped(customer, { enabled: true, multi: true, property: { ...secondary, is_primary: true } })).toBe(customer);
-    expect(scoped(customer, { enabled: true, multi: false, property: secondary })).toBe(customer);
-    expect(scoped(customer, { enabled: false, multi: false, property: null })).toBe(customer);
+    expect(scoped(customer, { enabled: true, multi: true, scoped: true, property: { ...secondary, latitude: null, longitude: null } }, { lat: 27.9, lng: -82.9 })).toMatchObject({ latitude: 27.9, longitude: -82.9, address_line1: '418 Oak Ave' });
+    expect(scoped(customer, { enabled: true, multi: true, scoped: true, property: secondary }, { lat: 'nope', lng: null })).toMatchObject({ latitude: 27.5, longitude: -82.5 });
+    expect(scoped(customer, { enabled: true, multi: true, scoped: true, property: { ...secondary, is_primary: true } })).toBe(customer);
+    expect(scoped(customer, { enabled: true, multi: false, scoped: false, property: secondary })).toBe(customer);
+    expect(scoped(customer, { enabled: false, multi: false, scoped: false, property: null })).toBe(customer);
     expect(scoped(customer, null)).toBe(customer);
   });
 });

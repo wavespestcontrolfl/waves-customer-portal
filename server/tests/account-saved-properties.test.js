@@ -162,7 +162,7 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     delete process.env.GATE_APP_PROPERTY_SCOPE;
     expect(appPropertyScopeEnabled()).toBe(false);
     const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: 'prop-b' });
-    expect(scope).toEqual({ customerId: 'cust-1', enabled: false, multi: false, property: null });
+    expect(scope).toEqual({ customerId: 'cust-1', enabled: false, multi: false, scoped: false, closed: false, property: null });
     const { qb, calls } = recordingQb();
     scopeVisitsToProperty(qb, scope);
     expect(calls).toEqual([['where', 'scheduled_services.customer_id', 'cust-1']]);
@@ -172,7 +172,7 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     db.mockClear();
     const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: 'prop-b', customerInactive: true });
-    expect(scope).toEqual({ customerId: 'cust-1', enabled: false, multi: false, property: null });
+    expect(scope).toEqual({ customerId: 'cust-1', enabled: false, multi: false, scoped: false, closed: false, property: null });
     expect(db).not.toHaveBeenCalled();
   });
 
@@ -183,10 +183,46 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
       throw new Error(`unexpected table ${table}`);
     });
     const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
-    expect(scope).toMatchObject({ enabled: true, multi: false, property: { id: 'prop-a' } });
+    expect(scope).toMatchObject({ enabled: true, multi: false, scoped: false, closed: false, property: { id: 'prop-a' } });
     const { qb, calls } = recordingQb();
     scopeVisitsToProperty(qb, scope);
     expect(calls).toEqual([['where', 'scheduled_services.customer_id', 'cust-1']]);
+  });
+
+  test('gate on, a LONE non-primary property (primary retired) is still scoped — no NULL leg, so the retired primary\'s unstamped visits stay out', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    db.mockImplementation((table) => {
+      if (table === 'customer_properties') return chain([PROPS['cust-1'][1]]);
+      throw new Error(`unexpected table ${table}`);
+    });
+    const scope = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    expect(scope).toMatchObject({ enabled: true, multi: false, scoped: true, closed: false, property: { id: 'prop-b', is_primary: false } });
+    const rec = recordingQb();
+    scopeVisitsToProperty(rec.qb, scope);
+    expect(rec.calls).toEqual([
+      ['where', 'scheduled_services.customer_id', 'cust-1'],
+      ['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]],
+    ]);
+  });
+
+  test('gate on, every property RETIRED (rows exist, none active) is CLOSED — the reads match nothing; a profile that never had a row keeps today\'s reads', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    let ever = true;
+    db.mockImplementation((table) => {
+      if (table !== 'customer_properties') throw new Error(`unexpected table ${table}`);
+      const c = chain([]);
+      c.first = jest.fn(async () => (ever ? { id: 'old-row' } : undefined));
+      return c;
+    });
+    const closed = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    expect(closed).toEqual({ customerId: 'cust-1', enabled: true, multi: false, scoped: true, closed: true, property: null });
+    const rec = recordingQb();
+    rec.qb.whereNull = jest.fn((col) => { rec.calls.push(['whereNull', col]); return rec.qb; });
+    scopeVisitsToProperty(rec.qb, closed);
+    expect(rec.calls).toEqual([['where', 'scheduled_services.customer_id', 'cust-1'], ['whereNull', 'scheduled_services.id']]);
+    ever = false;
+    const never = await resolveSessionScope({ customerId: 'cust-1', propertyId: null });
+    expect(never).toEqual({ customerId: 'cust-1', enabled: true, multi: false, scoped: false, closed: false, property: null });
   });
 
   test('gate on, three properties: the claim wins; the primary also owns unstamped visits; a secondary does not', async () => {
@@ -196,7 +232,7 @@ describe('resolveSessionScope + scopeVisitsToProperty — the visit rule', () =>
       throw new Error(`unexpected table ${table}`);
     });
     const secondary = await resolveSessionScope({ customerId: 'cust-1', propertyId: 'prop-b' });
-    expect(secondary).toMatchObject({ enabled: true, multi: true, property: { id: 'prop-b', is_primary: false } });
+    expect(secondary).toMatchObject({ enabled: true, multi: true, scoped: true, property: { id: 'prop-b', is_primary: false } });
     let rec = recordingQb();
     scopeVisitsToProperty(rec.qb, secondary, 'ss');
     expect(rec.calls).toEqual([
@@ -236,6 +272,13 @@ describe('assignVisitsToEntries — next visit per unified entry', () => {
     ]);
     expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pa', 'v1'], ['c1:pb', 'v2'], ['c9:pz', 'v5']]);
   });
+  test('a lone NON-primary entry owns only its stamped visits (its primary was retired)', () => {
+    const next = assignVisitsToEntries([{ key: 'c1:pb', customerId: 'c1', propertyId: 'pb', isPrimaryProperty: false }], [
+      { id: 'v1', customer_id: 'c1', property_id: null },
+      { id: 'v2', customer_id: 'c1', property_id: 'pb' },
+    ]);
+    expect([...next.entries()].map(([k, v]) => [k, v.id])).toEqual([['c1:pb', 'v2']]);
+  });
   test('a multi-property profile with NO active primary leaves unstamped visits unassigned — the list route would not show them under a secondary either', () => {
     const noPrimary = [
       { key: 'c1:pb', customerId: 'c1', propertyId: 'pb', isPrimaryProperty: false },
@@ -264,18 +307,17 @@ describe('applyPropertyPredicate — the property half alone', () => {
   }
   test('adds nothing when disabled, single, or property-less; adds the rule (with the NULL leg for the primary) otherwise, on the given alias', () => {
     for (const scope of [
-      { customerId: 'c1', enabled: false, multi: true, property: { id: 'pa', is_primary: true } },
-      { customerId: 'c1', enabled: true, multi: false, property: { id: 'pa', is_primary: true } },
-      { customerId: 'c1', enabled: true, multi: true, property: null },
+      { customerId: 'c1', enabled: false, scoped: true, property: { id: 'pa', is_primary: true } },
+      { customerId: 'c1', enabled: true, scoped: false, property: { id: 'pa', is_primary: true } },
       null,
     ]) {
       const r = rec(); applyPropertyPredicate(r.qb, scope); expect(r.calls).toEqual([]);
     }
     const primary = rec();
-    applyPropertyPredicate(primary.qb, { customerId: 'c1', enabled: true, multi: true, property: { id: 'pa', is_primary: true } }, 'ss');
+    applyPropertyPredicate(primary.qb, { customerId: 'c1', enabled: true, scoped: true, property: { id: 'pa', is_primary: true } }, 'ss');
     expect(primary.calls).toEqual([['where(fn)', [['where', 'ss.property_id', 'pa'], ['orWhereNull', 'ss.property_id']]]]);
     const secondary = rec();
-    applyPropertyPredicate(secondary.qb, { customerId: 'c1', enabled: true, multi: true, property: { id: 'pb', is_primary: false } });
+    applyPropertyPredicate(secondary.qb, { customerId: 'c1', enabled: true, scoped: true, property: { id: 'pb', is_primary: false } });
     expect(secondary.calls).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'pb']]]]);
   });
 });
@@ -298,10 +340,13 @@ describe('sessionPropertyScopePayload — the selection the middleware honored, 
 
 describe('isSecondarySelection — when customer-wide self-serve surfaces must step aside', () => {
   test('true only for an enabled, multi-property scope resolved to a NON-primary property', () => {
-    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: true, property: { id: 'pb', is_primary: false } })).toBe(true);
-    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: true, property: { id: 'pa', is_primary: true } })).toBe(false);
-    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: false, property: { id: 'pb', is_primary: false } })).toBe(false);
-    expect(isSecondarySelection({ customerId: 'c1', enabled: false, multi: false, property: null })).toBe(false);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, scoped: true, property: { id: 'pb', is_primary: false } })).toBe(true);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, scoped: true, property: { id: 'pa', is_primary: true } })).toBe(false);
+    // A lone secondary (primary retired) IS a secondary selection; every property retired (closed) is too.
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: false, scoped: true, property: { id: 'pb', is_primary: false } })).toBe(true);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, scoped: true, closed: true, property: null })).toBe(true);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, scoped: false, property: { id: 'pa', is_primary: true } })).toBe(false);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: false, scoped: false, property: null })).toBe(false);
     expect(isSecondarySelection(null)).toBe(false);
   });
 });

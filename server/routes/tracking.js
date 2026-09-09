@@ -303,7 +303,7 @@ async function findCanonicalScheduledService(customerId, opts = {}) {
 // same "never the wrong house" posture as the stamped-address branch below.
 // The visit's own stamped geocode still wins where that branch runs.
 function scopedLocationCustomer(customer, scope, visit = null) {
-  const property = scope && scope.enabled && scope.multi && scope.property && scope.property.is_primary !== true
+  const property = scope && scope.enabled && scope.scoped && scope.property && scope.property.is_primary !== true
     ? scope.property
     : null;
   if (!property) return customer;
