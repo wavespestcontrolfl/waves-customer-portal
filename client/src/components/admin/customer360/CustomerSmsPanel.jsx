@@ -20,6 +20,7 @@ import { Button, Textarea } from "../../ui";
 import { cn } from "../../ui/cn";
 import useModalFocus from "../../../hooks/useModalFocus";
 import useIsMobile from "../../../hooks/useIsMobile";
+import { isAcceptedSms } from "../../../utils/sms-delivery";
 import { adminFetch } from "../../../utils/admin-fetch";
 import { notifyUnreadChanged } from "../../../hooks/useUnreadConversations";
 import { getAdminUser } from "../../../lib/adminAuth";
@@ -277,7 +278,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
         method: "POST",
         body: JSON.stringify(leadId ? { message: body, to } : { to, body, ...(customerId ? { customerId } : {}), messageType: "manual" }),
       });
-      if (!result?.sent || !/^SM[0-9a-z_]+$/i.test(result.providerMessageId || "")) {
+      if (!isAcceptedSms(result)) {
         throw new Error(result?.reason || result?.error || "Text was not handed to the provider. Your draft is retained.");
       }
       if (customerRef.current === forCustomerId) {

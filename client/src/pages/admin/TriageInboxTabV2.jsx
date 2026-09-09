@@ -72,6 +72,7 @@ const REASON_LABELS = {
 // Human-readable occupancy names for property-role proposal rows.
 const OCCUPANCY_LABELS = {
   owner_occupied: "owner-occupied",
+  family_occupied: "family-occupied",
   rental_investment: "rental",
   commercial: "commercial",
   seasonal: "seasonal",
@@ -620,7 +621,7 @@ export default function TriageInboxTabV2() {
                         : "border-l-transparent"
                     )}
                   >
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-14 font-medium text-zinc-900 truncate">{callerName(item)}</span>
@@ -653,7 +654,7 @@ export default function TriageInboxTabV2() {
                           so an accidental deny (or a changed mind) can be flipped
                           back to accept — the verdict badge shows current state. */}
                       {(isOpenView || !isTriage) && (
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center gap-2 flex-wrap sm:shrink-0">
                           {isOpenView && (
                             <Button
                               size="sm"

@@ -171,4 +171,23 @@ describe('charge-now already-collected guard', () => {
       expect(chargeOneTimeMock).toHaveBeenCalledWith('cust-1', 25, 'One-off flea add-on', null, { initiated_by: 'machine' });
     });
   });
+
+  test.each(['processing', 'paid'])('%s returns the ledger amount and only receipts settlement', async status => {
+    const original = CUSTOMER.phone;
+    CUSTOMER.phone = '+19415550101';
+    chargeMock.mockResolvedValue({ id: 'pay-new', status, amount: '91.58', metadata: null });
+    try {
+      await withServer(async baseUrl => {
+        const res = await fetch(`${baseUrl}/admin/customers/cust-1/charge-now`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json()).payment).toMatchObject({ status, amount: '91.58' });
+        expect(logAutopay).toHaveBeenCalledWith('cust-1', status === 'paid' ? 'manual_charge' : 'manual_charge_processing', expect.objectContaining({ amountCents: 9158 }));
+        const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+      });
+    } finally { CUSTOMER.phone = original; }
+  });
+
 });

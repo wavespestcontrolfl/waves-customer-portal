@@ -66,6 +66,8 @@ jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayme
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(async (piId) => ({ id: piId, metadata: {} })),
+  // The unstamped recurring-card backstop re-reads the intent live.
+  retrieveSetupIntent: jest.fn(async (id) => ({ id, metadata: {} })),
 }));
 jest.mock('../services/appointment-card-request', () => ({
   completeSecureCardCaptureFromWebhook: jest.fn(),
@@ -493,4 +495,62 @@ test('clean processing path neither captures nor errors', async () => {
   expect(res.status).toBe(200);
   expect(Sentry.captureException).not.toHaveBeenCalled();
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+});
+
+// GitHub Codex #4144 r3 P1: on the unstamped path the event payload is the
+// intent as it SUCCEEDED; a "use a different payment method" replacement
+// since then is visible only in Stripe metadata. Re-read live: retired →
+// ack without enrolling; unreadable → retry.
+describe('unstamped recurring-card backstop re-reads the intent live', () => {
+  const StripeService = require('../services/stripe');
+  const legacyAcceptedDb = () => {
+    const update = jest.fn().mockResolvedValue(1);
+    const ledger = ledgerBuilder({ update });
+    db.schema = { hasTable: jest.fn(async () => false) };
+    db.mockImplementation((table) => {
+      if (table === 'stripe_webhook_events') return ledger;
+      const row = table === 'estimates'
+        ? { id: 'estimate_test', customer_id: 'customer_test', status: 'accepted', estimate_data: {} }
+        : { billing_mode: 'per_application' };
+      return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => row) };
+    });
+    return update;
+  };
+  const event = () => mockConstructEvent.mockReturnValue({
+    id: 'evt_retired', type: 'setup_intent.succeeded',
+    data: { object: {
+      id: 'seti_old', payment_method: 'pm_old',
+      metadata: { purpose: 'estimate_recurring_card', estimate_id: 'estimate_test' },
+    } },
+  });
+
+  test('a retired capture is acked and never enrolled', async () => {
+    const update = legacyAcceptedDb();
+    StripeService.retrieveSetupIntent.mockResolvedValueOnce({ id: 'seti_old', status: 'succeeded', metadata: { retired: 'true', replaced_by: 'seti_new' } });
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(StripeService.retrieveSetupIntent).toHaveBeenCalledWith('seti_old');
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+  });
+
+  test('a live, un-retired capture still enrolls', async () => {
+    legacyAcceptedDb();
+    RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({ enrolled: true });
+    event();
+    expect((await postWebhook()).status).toBe(200);
+    expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(1);
+  });
+
+  test('an unreadable intent rethrows for Stripe retry with a safe reason code', async () => {
+    const update = legacyAcceptedDb();
+    StripeService.retrieveSetupIntent.mockRejectedValueOnce(new Error('PrivateStripeWord'));
+    event();
+    expect((await postWebhook()).status).toBe(500);
+    expect(RecurringCards.completeRecurringCardEnrollment).not.toHaveBeenCalled();
+    const [, context] = Sentry.captureException.mock.calls[0];
+    expect(context.extra.reasonCode).toBe('setup_intent_lookup_failed');
+    expect(JSON.stringify(context)).not.toContain('PrivateStripeWord');
+    expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+  });
 });

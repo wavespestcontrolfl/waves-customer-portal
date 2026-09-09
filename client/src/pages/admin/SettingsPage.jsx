@@ -108,7 +108,18 @@ function Toggle({ checked, onChange, label, description }) {
         )}
       </div>{" "}
       <div
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        tabIndex={0}
+        className="u-focus-ring"
         onClick={() => onChange(!checked)}
+        onKeyDown={(e) => {
+          if (e.key === " " || e.key === "Enter") {
+            e.preventDefault();
+            onChange(!checked);
+          }
+        }}
         style={{
           width: 44,
           height: 24,

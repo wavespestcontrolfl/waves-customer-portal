@@ -1558,7 +1558,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // GET /api/admin/protocols/job-card/mix?serviceId=&productId=&gallons=110|1 —
 // the Tank section's search helper: amount of one product for that much
-// water on the visit's rig (the appointment's assigned equipment). Same gate; pure read. Registered BEFORE /:serviceId so the
+// water on the visit's rig (the appointment's assigned equipment), or with
+// `rig=<equipment system id>` in place of gallons, for a full tank of that
+// rig on its own volume and carrier — a technician's pick doses only on a
+// shared calibration or their own. Same gate; pure read. Registered BEFORE /:serviceId so the
 // literal segment never falls into the id param.
 // A technician token reads only its CURRENT assignment — the shared
 // technicianCurrentVisitFilter predicate (assigned tech, not a
@@ -1586,10 +1589,12 @@ router.get('/job-card/mix', async (req, res, next) => {
     const { productId, serviceId } = req.query;
     if (!UUID_RE.test(String(productId || ''))) return res.status(400).json({ error: 'productId required' });
     if (!UUID_RE.test(String(serviceId || ''))) return res.status(400).json({ error: 'serviceId required' });
-    const gallons = Number(req.query.gallons);
-    if (![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
+    const rig = req.query.rig ? String(req.query.rig) : null;
+    if (rig && !UUID_RE.test(rig)) return res.status(400).json({ error: 'rig must be an equipment system id' });
+    const gallons = rig ? null : Number(req.query.gallons);
+    if (!rig && ![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
     if (!(await techOwnsVisit(req, serviceId))) return res.status(404).json({ error: 'Product or visit not found' });
-    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req) });
+    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req), ...(rig ? { equipmentSystemId: rig, technicianId: isTechnicianRequest(req) ? req.technicianId : null } : {}) });
     if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
     res.json({ enabled: true, ...mix });
   } catch (err) {

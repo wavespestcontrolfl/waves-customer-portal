@@ -210,6 +210,17 @@ const EXTRACTION_MESSAGE_SID = `COALESCE(evidence->>'twilio_sid',
   (SELECT twilio_sid FROM sms_log WHERE id = NULLIF(data_hygiene_proposals.evidence->>'sms_log_id', '')::uuid),
   (SELECT twilio_sid FROM messages WHERE id = NULLIF(data_hygiene_proposals.evidence->>'message_id', '')::uuid))`;
 
+async function findSmsExtractionProposals({ trx, scope_id, sms_log_id, twilio_sid }) {
+  // Rejection does not take the preference advisory lock. Keep dispositions
+  // stable until the replay transaction commits, including terminal rows.
+  return trx('data_hygiene_proposals')
+    .where({ scope_type: 'customer', scope_id, source: 'message-extraction', resource_type: 'property_preferences' })
+    .where(function sameMessage() {
+      this.whereRaw("evidence->>'sms_log_id' = ?", [sms_log_id]);
+      if (twilio_sid) this.orWhereRaw(`${EXTRACTION_MESSAGE_SID} = ?`, [twilio_sid]);
+    }).orderBy('created_at', 'desc').orderBy('id').forUpdate().select('id', 'field', 'status', 'evidence');
+}
+
 async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction', notNewerThan = null, sameMessageSid = null }) {
   const client = trx || db;
   const query = client('data_hygiene_proposals')
@@ -220,8 +231,9 @@ async function stalePendingExtractionProposals({ trx = null, scope_id, field, so
       if (sameMessageSid) candidate.orWhereRaw(`${EXTRACTION_MESSAGE_SID} = ?`, [sameMessageSid]);
     });
   }
-  const updated = await query.update({ status: 'stale', updated_at: client.fn.now() });
-  return Number(updated) || 0;
+  // Return affected identities so replay can bind every retired sibling to
+  // the operator's preview. Other writers do not need the returned rows.
+  return query.update({ status: 'stale', updated_at: client.fn.now() }, ['id']);
 }
 
 // The pending sibling an extraction writer must not stack a second entry on.
@@ -238,6 +250,7 @@ async function findPendingExtractionProposal({ trx = null, scope_id, field, sour
       }
     });
   }
+  if (trx) query.forUpdate();
   return query.first('id');
 }
 
@@ -249,5 +262,6 @@ module.exports = {
   stalePendingNormalizationForResource,
   stalePendingExtractionProposals,
   findPendingExtractionProposal,
+  findSmsExtractionProposals,
   isSensitiveProposal,
 };

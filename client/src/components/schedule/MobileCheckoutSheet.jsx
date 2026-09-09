@@ -406,7 +406,7 @@ export default function MobileCheckoutSheet({
               )}
             </div>
             <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-              ${baseServicePrice.toFixed(0)}
+              ${baseServicePrice.toFixed(2)}
             </div>
           </button>
 
@@ -427,7 +427,7 @@ export default function MobileCheckoutSheet({
                 </div>
               </div>
               <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-                ${Number(addon.estimatedPrice || 0).toFixed(0)}
+                ${Number(addon.estimatedPrice || 0).toFixed(2)}
               </div>
             </div>
           ))}

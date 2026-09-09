@@ -47,7 +47,7 @@ const sTableWrap = {
   background: D.card,
   border: `1px solid ${D.border}`,
   borderRadius: 12,
-  overflow: "hidden",
+  overflow: "auto",
 };
 const sBtn = (bg, c) => ({
   padding: "8px 16px",
@@ -1076,6 +1076,7 @@ function DiscountsSection() {
           </div>{" "}
           <div style={sCard}>
             {" "}
+            <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               {" "}
               <thead>
@@ -1121,7 +1122,7 @@ function DiscountsSection() {
                   </tr>
                 ))}
               </tbody>{" "}
-            </table>{" "}
+            </table></div>{" "}
           </div>{" "}
         </div>
       )}

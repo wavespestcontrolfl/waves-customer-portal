@@ -34,7 +34,7 @@ const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
-const { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
+const { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -54,8 +54,8 @@ const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoi
 // leak or auto-billed. Matched case-insensitively against scheduled_services.service_type.
 // Always-free service types — excluded from the leak queue entirely and rejected
 // on the write path. Shared with the completion auto-invoice gate (admin-dispatch)
-// via no-cost-visit-types so the two paths can't drift; '%'-wrapped for SQL ILIKE.
-const ALWAYS_FREE_PATTERNS = ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map((p) => `%${p}%`);
+// via no-cost-visit-types so the two paths can't drift: the SQL regex below is
+// the word-boundary form of the same patterns isAlwaysFreeServiceType uses.
 
 // Ambiguous types that CAN be paid (paid WDO/inspection, rodent trapping setup)
 // OR free (waived inspection, in-window trap check). Surface these in needs-review
@@ -71,13 +71,19 @@ const matchesPatterns = (serviceType, patterns) => {
 const isNoCostServiceType = isAlwaysFreeServiceType;
 const isReviewServiceType = (serviceType) => matchesPatterns(serviceType, REVIEW_PATTERNS);
 
-// SQL fragment: TRUE when a non-void invoice already exists for the visit.
+// Packet invoices keep ownership after reversal; only ordinary void invoices
+// may re-enter this legacy single-service mint queue.
 // Aliases: `sr` = service_records, `ss` = scheduled_services.
-const HAS_INVOICE_SQL = `EXISTS (
+const HAS_INVOICE_SQL = `(EXISTS (
   SELECT 1 FROM invoices i
   WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id)
     AND COALESCE(i.status, '') <> 'void'
-)`;
+) OR EXISTS (
+  SELECT 1 FROM visit_completion_packet_items pi
+  JOIN visit_completion_packets p ON p.id = pi.packet_id
+  WHERE p.visit_id = ss.visit_id AND pi.scheduled_service_id = ss.id
+    AND pi.service_record_id = sr.id
+))`;
 
 const INTERNAL_NAME_SQL = "LOWER(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,''))";
 
@@ -136,10 +142,7 @@ function uninvoicedLeakQuery(days, { perAppAware = false, selfPayAware = false }
     .whereRaw('COALESCE(sr.is_callback, false) = false')
     .whereRaw(`COALESCE(ss.prepaid_amount, 0) < ${effectivePriceSql}`) // not FULLY prepaid (partial surfaces in needs-review)
     .whereRaw(`${effectivePayerSql} IS NULL`) // self-pay only (v1); payer-billed = payer AP flow
-    .whereRaw(
-      `COALESCE(ss.service_type, '') NOT ILIKE ALL (ARRAY[${ALWAYS_FREE_PATTERNS.map(() => '?').join(',')}]::text[])`,
-      ALWAYS_FREE_PATTERNS,
-    );
+    .whereRaw("COALESCE(ss.service_type, '') !~* ?", [ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX]);
   // Conservative v1 scope (owner priority: never risk double-billing an autopay
   // customer). The completion predicate only treats autopay as covering NO-price
   // visits, so an autopay customer's one-off explicitly-priced visit is

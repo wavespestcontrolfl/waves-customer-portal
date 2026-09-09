@@ -252,6 +252,7 @@ describe('admin customers route helpers', () => {
       services_count: '4',
       service_type_count: '2',
       cards_on_file: '1',
+      property_count: '3',
       tags_str: 'gate,pets',
     });
 
@@ -265,9 +266,15 @@ describe('admin customers route helpers', () => {
       totalServices: 4,
       serviceCount: 2,
       cardsOnFile: 1,
+      propertyCount: 3,
       tags: ['gate', 'pets'],
       address: '1 Algorithm Way, Unit 4, Sarasota, FL 34236',
     });
+  });
+
+  test('propertyCount reads 0, never 1, when the list query did not select property_count', () => {
+    const mapped = mapCustomerListRow({ id: 'customer-2', first_name: 'Ada', tags_str: '' });
+    expect(mapped.propertyCount).toBe(0);
   });
 
   test('maps slot 2/3 service contacts on customer list rows', () => {
@@ -1315,4 +1322,38 @@ describe('360 payload: technician stripping covers address neighbours', () => {
     expect(out.addressNeighbors).toBeUndefined();
     expect(out.accountProperties).toBeUndefined();
   });
+});
+
+
+describe('Customer 360 historical price references', () => {
+  test('uses stored net amounts without a current catalog, preserving an explicitly free application', () => {
+    const lines = scheduleLinesFromEstimate({ id: 'estimate-reference-fixture', estimate_data: {
+      result: { recurring: { services: [
+        { service: 'pest_control', name: 'Pest Control', perTreatment: 121, priceAfterDiscount: 108.90, visitsPerYear: 4, annual: 484 },
+        { service: 'lawn', name: 'Lawn Care', perTreatment: 125, manualFinalAnnual: 0, visitsPerYear: 6, annual: 750 },
+        { service: 'rodent_bait', name: 'Rodent Bait', perTreatment: 117, visitsPerYear: 4, mo: 39 },
+      ] } },
+    } }, indexServicesForSchedule([]), { includeSourceLines: true });
+    expect(lines.find((line) => line.estimateLabel === 'Pest Control').perApplicationPrice).toBe(108.90);
+    expect(lines.find((line) => line.estimateLabel === 'Lawn Care').perApplicationPrice).toBe(0);
+    const monthly = lines.find((line) => line.estimateLabel === 'Rodent Bait');
+    expect(monthly.monthlyPrice).toBe(39);
+    expect(monthly.perApplicationPrice).toBeUndefined();
+  });
+});
+
+
+test('keeps definitive billing summary admin-only', () => {
+  const { techSafe360Payload, TECH_360_STRIPPED_KEYS } = adminCustomersRoute._private;
+  expect(TECH_360_STRIPPED_KEYS).toContain('billingSummary');
+  const result = techSafe360Payload({ customer: { id: 'test' }, billingSummary: { openBalance: 100, overdueBalance: 20 } });
+  expect(result).not.toHaveProperty('billingSummary');
+});
+
+
+test('maps invoice exceptions and strips them from technician directory rows', () => {
+  const { techSafeListRow } = adminCustomersRoute._private;
+  const row = mapCustomerListRow({ id: 'test', overdue_invoice_count: '2' });
+  expect(row.overdueInvoiceCount).toBe(2);
+  expect(techSafeListRow(row)).not.toHaveProperty('overdueInvoiceCount');
 });

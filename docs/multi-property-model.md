@@ -8,8 +8,9 @@ for new data**.
 ## Phase 1 (this PR) — additive, gated, no rewiring
 
 - **`customer_properties` table** (migration `20260629000001`): one customer →
-  many properties, each with `occupancy_type` (owner_occupied / rental_investment
-  / commercial / seasonal / vacant / unknown), `is_primary` (partial-unique: one
+  many properties, each with `occupancy_type` (owner_occupied / family_occupied
+  / rental_investment / commercial / seasonal / vacant / unknown — `family_occupied`
+  is office-set only, the call extractor's enum does not include it), `is_primary` (partial-unique: one
   per customer), address + lat/lng, and mirrored property attributes. Backfills a
   PRIMARY property per existing customer from their address (defaults
   `owner_occupied`; the schema-drift-safe backfill only mirrors columns that
@@ -25,6 +26,12 @@ for new data**.
 - **Admin API** (`admin-customers.js`): `GET/POST/PATCH /:id/properties`
   (read lazily backfills a primary; POST adds a non-primary; PATCH edits
   occupancy/label). Read is open; writes require admin.
+- **Booking anchor** (`soleActivePropertyId`): a booking with no explicit
+  property resolves the customer's sole active property. A customer with NO
+  row yet (created since the migration through a quote / lead / webhook path
+  that never read the properties) gets the primary backfilled here too, so
+  the visit-group stamp has an anchor instead of NULL. An inactive-only
+  primary stays untouched. Historical gap: `ops/agents/primary-property-backfill.js`.
 
 Service: `server/services/customer-properties.js` (pure helpers `normStreet` /
 `normalizeOccupancy` / `isNewStreet` are unit-tested in
