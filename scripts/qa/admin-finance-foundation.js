@@ -384,10 +384,10 @@ function fixtures(state) {
     [
       "GET /api/admin/tax/revenue/reconcile",
       () => ({
-        total: 5000,
-        invoiceRevenue: 5000,
-        paymentRevenue: 5000,
-        months: [],
+        totalRevenue: 5000,
+        taxCollected: 100,
+        taxOwed: null,
+        difference: null,
       }),
     ],
     [
@@ -659,24 +659,57 @@ async function views(page, server, state, report, device) {
     );
   }
   await bankSection(page, "Payouts");
-  await page
-    .getByRole("button", { name: "Payout payout-example", exact: true })
-    .click();
+  const payoutButton = page.getByRole("button", {
+    name: "Payout payout-example",
+    exact: true,
+  });
+  const payoutRow = payoutButton.locator("xpath=ancestor::tr");
+  await payoutRow.getByText("$1,234.56", { exact: true }).click();
+  await page.getByText("Synthetic invoice payment", { exact: true }).waitFor();
+  assert.equal(await payoutButton.getAttribute("aria-expanded"), "true");
+  await payoutButton.focus();
+  await page.keyboard.press("Enter");
+  assert.equal(
+    await payoutButton.getAttribute("aria-expanded"),
+    "false",
+    "Keyboard closes the row once",
+  );
+  await page.keyboard.press("Space");
+  assert.equal(
+    await payoutButton.getAttribute("aria-expanded"),
+    "true",
+    "Keyboard opens the row once",
+  );
+  await payoutButton.click();
+  assert.equal(
+    await payoutButton.getAttribute("aria-expanded"),
+    "false",
+    "Date click closes the row once",
+  );
+  await payoutRow.getByText("paid", { exact: true }).click();
   await page.getByText("Synthetic invoice payment", { exact: true }).waitFor();
   await widths(page, state, "Payout transactions");
   await shot(page, report, `${device}-banking-transactions`);
-  for (const method of ["Standard", "Instant"]) {
+  for (const [method, openerIndex, surface] of [
+    ["Standard", 0, "Header standard"],
+    ["Standard", 1, "Standard"],
+    ["Instant", 0, "Instant"],
+  ]) {
     const open = page
       .getByRole("button", { name: `${method} Payout`, exact: true })
-      .last();
+      .nth(openerIndex);
     await open.click();
     const dialog = page.getByRole("dialog", {
       name: "Transfer Stripe Balance",
       exact: true,
     });
     await dialog.waitFor();
-    await widths(page, state, `${method} payout`);
-    await shot(page, report, `${device}-payout-${method.toLowerCase()}`);
+    await widths(page, state, `${surface} payout`);
+    await shot(
+      page,
+      report,
+      `${device}-payout-${surface.toLowerCase().replaceAll(" ", "-")}`,
+    );
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
     assert.equal(

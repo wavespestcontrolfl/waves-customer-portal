@@ -65,3 +65,25 @@ Pre-push review identified a bank-import pagination race during filter changes.
 The integration clears stale rows/pagination and blocks overlapping page reads.
 A deferred-response regression failed before the fix and passes afterward; the
 production build and full finance browser runner also pass on the fixed code.
+
+## Integration review corrections — September 9, 2026
+
+- Routine cash-flow expenses and the tax-liability total use neutral zinc;
+  genuine shortfalls, negative net, and error states retain alert red.
+- Payout cells activate the existing disclosure, while its native date button
+  supports Enter/Space and stops click bubbling to prevent double activation.
+- The header Standard Payout action focuses its opener before mounting the
+  shared dialog, matching the existing hero actions and restoring WebKit focus.
+- Revenue browser fixtures now use the server's `totalRevenue`, `taxCollected`,
+  and unknown-liability `taxOwed: null` fields. Request contracts are unchanged.
+
+Verification: the header-focus regression and payout-cell browser check failed
+before the fixes. All 35 finance/layout tests and the production build pass.
+The expanded Chromium/WebKit suite passes 336 layout cases and its workflow
+checks, with 72 screenshots and no page errors or unmatched requests. A final
+focused visual run after the tax color/fixture correction passes 28 additional
+layout cases across desktop and phone, with four inspected screenshots. The
+coverage gate remains at zero source drift, and portal brand checks pass.
+Evidence: `.tmp/admin-finance-foundation/report.json`,
+`.tmp/admin-finance-review-colors/report.json`, and the integration PR's native
+image attachments. All APIs are synthetic; no live financial actions occurred.

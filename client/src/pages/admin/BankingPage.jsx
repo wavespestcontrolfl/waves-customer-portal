@@ -289,6 +289,7 @@ function PayoutsTab() {
             {payouts.map((p) => (
               <Fragment key={p.id}>
                 <TR
+                  onClick={() => toggleExpand(p.id)}
                   style={{
                     cursor: "pointer",
                     background: expanded === p.id ? "#F4F4F5" : "transparent",
@@ -306,7 +307,10 @@ function PayoutsTab() {
                   <TD>
                     <Button
                       variant="ghost"
-                      onClick={() => toggleExpand(p.id)}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleExpand(p.id);
+                      }}
                       aria-expanded={expanded === p.id}
                       aria-controls={
                         expanded === p.id ? `payout-detail-${p.id}` : undefined
@@ -794,7 +798,7 @@ function CashFlowTab() {
           <SummaryCard
             label="Expenses + Fees"
             value={data ? fmtM(totalOut) : "—"}
-            color={"#C8312F"}
+            color={"#18181B"}
           />{" "}
           <SummaryCard
             label="Operating Net"
@@ -1941,7 +1945,10 @@ export default function BankingPage() {
         action={{
           label: "Standard Payout",
           icon: Clock3,
-          onClick: () => setPayoutModalMethod("standard"),
+          onClick: (event) => {
+            event.currentTarget.focus({ preventScroll: true });
+            setPayoutModalMethod("standard");
+          },
           disabled: balanceError || !available || available <= 0,
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4"

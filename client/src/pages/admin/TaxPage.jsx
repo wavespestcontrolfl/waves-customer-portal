@@ -3455,7 +3455,7 @@ function RevenueTab() {
           <StatCard
             label="Tax Owed"
             value={fmtM(reconcile.taxOwed)}
-            color={"#C8312F"}
+            color={"#18181B"}
           />{" "}
           {/* Only render a verdict when BOTH figures exist — with either null
               (tax collection isn't recorded in the portal) the old math

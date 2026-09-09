@@ -160,6 +160,25 @@ async function taxSection(group, leaf) {
     );
 }
 describe("Finance workflow preservation", () => {
+  it("returns focus to the header payout opener when clicking does not focus it", async () => {
+    open(BankingPage);
+    const openers = await screen.findAllByRole("button", {
+      name: "Standard Payout",
+      exact: true,
+    });
+    await waitFor(() => expect(openers[0]).toBeEnabled());
+    openers[1].focus();
+    fireEvent.click(openers[0]);
+    const dialog = within(
+      await screen.findByRole("dialog", {
+        name: "Transfer Stripe Balance",
+      }),
+    );
+    fireEvent.click(
+      dialog.getByRole("button", { name: "Cancel", exact: true }),
+    );
+    await waitFor(() => expect(openers[0]).toHaveFocus());
+  });
   it("keeps the payout amount and idempotency key on failed retry, with one in-flight write", async () => {
     const dialog = await bankDialog();
     fireEvent.change(dialog.getByLabelText("Payout Amount"), {
