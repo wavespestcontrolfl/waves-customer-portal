@@ -13988,8 +13988,6 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // GitHub r3 P1), not the profile mirror, which is always the primary.
   const propertyAddress = propertyAddressProp !== undefined ? propertyAddressProp : formatPropertyAddress(customer);
   const customerName = [customer?.firstName, customer?.lastName].filter(Boolean).join(' ');
-  // Shown in the address slot while the selection is being refreshed.
-  const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
 
   // Callback recognition: pest/lawn issue within 30 days of last service
   const activeTierName = resolveActiveTierName(customer);
@@ -14016,6 +14014,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
   // house — until the selection is refreshed (uncapped codex r1n P1).
   const scopeStale = scopeEchoMismatch(scheduleData?.propertyScope, currentEntry, savedScope);
   useEffect(() => { if (scopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [scopeStale, onSavedScopeUnavailable]);
+  // Shown in the address slot while the selection is being refreshed.
+  const propertyAddressShown = scopeStale ? 'Refreshing your property selection…' : propertyAddress;
   const overlayHandoff = !scopeStale && !!scheduleData?.overlayHandoff;
   const handoffLane = category === 'pest_issue' ? 'pest' : category === 'lawn_concern' ? 'lawn' : null;
   const pickerHandoffUrl = overlayHandoff && handoffLane && scheduleData?.reservice?.url
@@ -14200,6 +14200,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
         urgency: isProblemCategory ? urgency : 'routine',
         locationOnProperty: location || null,
         photos: photos.map(p => p.data),
+        // The house shown in this overlay — the server refuses the ticket
+        // when its resolved scope names another (uncapped codex r1o P1).
+        ...(savedScope && currentEntry?.propertyId ? { expectedPropertyId: String(currentEntry.propertyId) } : {}),
       });
       // The server's 60s dedupe path returns success against the EARLIER
       // request with photoCount: 0 — if the customer attached photos this
@@ -14222,6 +14225,9 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer, propertyAddr
       }, hadNote ? 7000 : 2500);
     } catch (err) {
       console.error(err);
+      // The selection went stale between open and submit: re-read the list so
+      // the overlay names the house the server will actually bind to.
+      if (err?.code === 'property_selection_stale' && onSavedScopeUnavailable) onSavedScopeUnavailable();
       setSubmitError(err?.message || 'Could not submit the request. Please try again or call Waves at (941) 297-5749.');
     } finally {
       setSubmitting(false);
@@ -16427,4 +16433,4 @@ export default function PortalPage() {
 
 // Focused exports keep partial-failure behavior directly testable without
 // mounting the entire authenticated shell.
-export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, PortalGlassContext };
+export { ScheduleTab, BillingTab, MyPlanTab, MyRequestsCard, PropertyTab, DocumentSection, DashboardTab, ServiceTracker, ServicesTab, ReportIssueOverlay, PortalGlassContext };

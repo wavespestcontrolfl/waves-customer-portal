@@ -120,6 +120,18 @@ test('a resolver failure on a claim-less session keeps today\'s path (no binding
   expect(res.body.code).toBe('use_reservice_picker');
 });
 
+test('expectedPropertyId pins the house the customer saw: a mismatch with the resolved scope is refused (409 property_selection_stale), a match files (uncapped codex r1o P1)', async () => {
+  global.__SCOPE__ = PRIMARY; // the selected secondary was retired → middleware fell back to the primary
+  const stale = await post({ category: 'schedule_change', subject: 'Move Friday', description: 'Any day next week', expectedPropertyId: 'prop-b' });
+  expect(stale.status).toBe(409);
+  expect(stale.body.code).toBe('property_selection_stale');
+  expect(log.find((e) => e[0] === 'insert')).toBeUndefined();
+  global.__SCOPE__ = SECONDARY;
+  const ok = await post({ category: 'schedule_change', subject: 'Move Friday', description: 'Any day next week', expectedPropertyId: 'prop-b' });
+  expect(ok.status).toBe(201);
+  expect(JSON.parse(log.find((e) => e[0] === 'insert')[1].metadata).propertyId).toBe('prop-b');
+});
+
 test('the same covered issue under the PRIMARY selection is still steered to the re-service picker', async () => {
   global.__SCOPE__ = PRIMARY;
   const res = await post({ category: 'pest_issue', subject: 'Ants in the kitchen' });

@@ -106,6 +106,13 @@ const createSchema = Joi.object({
   locationOnProperty: Joi.string().valid(...VALID_LOCATIONS).allow(null, '').optional(),
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
+  // The saved property the customer SAW this ticket filed under
+  // (GATE_APP_PROPERTY_SCOPE, uncapped codex r1o P1): the server refuses the
+  // ticket when its resolved scope names a different house — the selected
+  // house was retired after the overlay loaded and the middleware fell back
+  // to the primary. Optional: older clients and profile-mode sessions send
+  // nothing and keep today's path.
+  expectedPropertyId: Joi.string().trim().max(64).allow(null, '').optional(),
   photos: Joi.array().items(Joi.string().max(MAX_ENCODED_PHOTO_CHARS)).max(MAX_PHOTOS).optional(),
   // Cancellation resolution engine (PR E, GATE_CANCEL_FLOW_V2) — additive,
   // all optional so every existing client payload validates unchanged. The
@@ -180,7 +187,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     const { value, error } = createSchema.validate(req.body, { stripUnknown: true });
     if (error) return res.status(400).json({ error: error.details[0].message });
 
-    const { category, subject, description, urgency, locationOnProperty, photos } = value;
+    const { category, subject, description, urgency, locationOnProperty, photos, expectedPropertyId } = value;
 
     if (req.customerInactive && category !== 'cancellation') {
       return res.status(401).json({ error: 'Customer not found or inactive' });
@@ -239,6 +246,16 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         requestProperty = ticketProperty(req.property);
         secondarySelection = req.property.is_primary !== true;
       }
+    }
+    // The house the customer saw must be the house this ticket binds to
+    // (uncapped codex r1o P1). Fail CLOSED on a mismatch: a schedule-change
+    // ticket stored and announced for the fallback address is worse than a
+    // retry. 409 (not 4xx-validation) so the client refreshes its selection.
+    if (expectedPropertyId && String(expectedPropertyId) !== String(requestProperty ? requestProperty.id : '')) {
+      return res.status(409).json({
+        error: 'Your property selection changed. Please check the property shown and try again.',
+        code: 'property_selection_stale',
+      });
     }
     // Lightweight server-side dedupe — reject identical create within 60s
     const dupeWindow = new Date(Date.now() - 60 * 1000);
