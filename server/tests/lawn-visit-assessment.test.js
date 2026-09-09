@@ -272,13 +272,18 @@ describe('legacy column derivation — missing is not healthy', () => {
       finding({ name: 'Chinch bug damage', confidence: 'high', photo_refs: [] }),
       finding({ finding_id: 'F2', name: 'Gray leaf spot', confidence: 'high', photo_refs: [7, 0, -1] }),
       finding({ finding_id: 'F3', name: 'No major visible stress', confidence: 'moderate', photo_refs: [] }),
-      finding({ finding_id: 'F4', name: 'Dollar spot', confidence: 'high', photo_refs: [2] }),
+      finding({ finding_id: 'F4', name: 'Dollar spot', confidence: 'high', photo_refs: [1] }),
+      // Photo 2 is rated poor in this answer: a finding resting on it alone is unsupported; one usable photo among the refs is enough.
+      finding({ finding_id: 'F5', name: 'Brown patch', confidence: 'high', photo_refs: [2] }),
+      finding({ finding_id: 'F6', name: 'Gray leaf spot', confidence: 'high', photo_refs: [2, 1] }),
     ] });
-    const [none, outOfRange, clean, cited] = visit.normalizeAssessment(json, 2, [null, null]).findings;
+    const [none, outOfRange, clean, cited, poorOnly, mixed] = visit.normalizeAssessment(json, 2, [null, null]).findings;
     expect(none).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress', cannot_determine_reason: 'no photo of this visit cited', photo_refs: [] });
     expect(outOfRange).toMatchObject({ can_determine: false, confidence: 'unknown', photo_refs: [] });
     expect(clean).toMatchObject({ can_determine: true, confidence: 'moderate', label: 'no major visible stress' });
-    expect(cited).toMatchObject({ can_determine: true, confidence: 'high', label: 'dollar spot', photo_refs: [2] });
+    expect(cited).toMatchObject({ can_determine: true, confidence: 'high', label: 'dollar spot', photo_refs: [1] });
+    expect(poorOnly).toMatchObject({ can_determine: false, confidence: 'unknown', label: 'general lawn stress', cannot_determine_reason: 'every cited photo rated poor', photo_refs: [2] });
+    expect(mixed).toMatchObject({ can_determine: true, confidence: 'high', photo_refs: [1, 2] });
     // The model's own reason wins when it gave one.
     const own = visit.normalizeAssessment(answer({ findings: [finding({ photo_refs: [], can_determine: false, cannot_determine_reason: 'too far' })] }), 2).findings[0];
     expect(own.cannot_determine_reason).toBe('too far');
@@ -337,6 +342,15 @@ describe('legacy column derivation — missing is not healthy', () => {
     expect(scores.weed_suppression).toBe(80);
     expect(scores.overwatering_signal).toBe(false);
     expect(scores.drought_stress).toBeNull();
+  });
+
+  test('a score is known only as the schema states it: determinable literally true and a finite number — never a coerced 0', () => {
+    const scoresOf = (turf_density) => visit.normalizeAssessment(answer({ scores: { ...answer().scores, turf_density } }), 2).scores.turf_density;
+    expect(scoresOf({ determinable: true, value: 72 })).toBe(72);
+    expect(scoresOf({ determinable: true, value: 140 })).toBe(100); // clamped, not rejected
+    for (const malformed of [{ determinable: true, value: null }, { determinable: 'false', value: 0 }, { determinable: true, value: '72' }, { determinable: true, value: NaN }, { determinable: 1, value: 50 }, { value: 50 }]) {
+      expect(scoresOf(malformed)).toBeNull();
+    }
   });
 
   test('the seasonal adjusters only ever see the numeric fields, and NULLs come back NULL', () => {
@@ -478,6 +492,20 @@ describe('technician review on confirm', () => {
     const none = visit.buildReview(stored, visit.validateReview({}, stored).review);
     expect(none.reviewed_findings.find((f) => f.finding_id === 'F2').keep).toBe(false);
     expect(none.reconciliation.products.map((p) => p.product_name)).toEqual(['Bifen I/T']);
+    // Technician finding ids are stable across follow-ups: a re-sent detail keeps the id the retained products address,
+    // a new one takes the next number above every id ever assigned, a dropped one's product reference falls away.
+    const mapped = visit.buildReview(stored, visit.validateReview({ appliedProducts: [{ product_name: 'Bifen I/T', addresses_findings: ['T1'] }] }, stored).review);
+    const remapped = { ...stored, reconciliation: JSON.stringify(mapped.reconciliation) };
+    const reordered = visit.buildReview(remapped, visit.validateReview({ addedDetails: [{ text: 'Sprinkler head broken by the drive', zone: 'front' }, { text: 'dog run along the back fence', zone: 'back' }] }, remapped).review);
+    expect(reordered.added_details.map((d) => [d.finding_id, d.name])).toEqual([['T2', 'Sprinkler head broken by the drive'], ['T1', 'dog run along the back fence']]);
+    expect(reordered.reconciliation.treatment_rationale[0].addresses_findings).toEqual(['T1']);
+    expect(reordered.reconciliation.treatment_rationale[0].customer_explanation).toContain(reordered.added_details[1].label);
+    const replaced = visit.buildReview(remapped, visit.validateReview({ addedDetails: [{ text: 'Sprinkler head broken by the drive', zone: 'front' }] }, remapped).review);
+    expect(replaced.added_details.map((d) => d.finding_id)).toEqual(['T2']);
+    expect(replaced.reconciliation.treatment_rationale[0].addresses_findings).toEqual([]);
+    // Duplicate text takes a fresh id rather than aliasing.
+    const doubled = visit.buildReview(remapped, visit.validateReview({ addedDetails: [{ text: 'Dog run along the back fence' }, { text: 'Dog run along the back fence' }] }, remapped).review);
+    expect(doubled.added_details.map((d) => d.finding_id)).toEqual(['T1', 'T2']);
     // An explicitly empty field clears it.
     const cleared = visit.buildReview(stored, visit.validateReview({ addedDetails: [] }, stored).review);
     expect(cleared.added_details).toEqual([]);
@@ -523,6 +551,17 @@ describe('technician review on confirm', () => {
     // A canonical rename is the label as chosen — never re-mapped through the pattern list.
     const generic = visit.buildReview(run, visit.validateReview({ reviewedFindings: [{ finding_id: 'F1', name: 'general lawn stress' }] }, run).review);
     expect(generic.reviewed_findings[0].label).toBe('general lawn stress');
+  });
+
+  test('a rename carries the technician\'s confidence — moderate, the added-finding ceiling — never the model\'s low/unknown or high', () => {
+    const findings = JSON.parse(run.findings);
+    const graded = { ...run, findings: JSON.stringify([{ ...findings[0], confidence: 'unknown', can_determine: false, label: 'general lawn stress' }, { ...findings[1], confidence: 'high' }]) };
+    const built = visit.buildReview(graded, visit.validateReview({ reviewedFindings: [{ finding_id: 'F1', name: 'chinch bug activity' }, { finding_id: 'F2', name: 'weed pressure' }] }, graded).review);
+    expect(built.reviewed_findings.map((f) => [f.finding_id, f.label, f.confidence])).toEqual([['F1', 'chinch bug activity', 'moderate'], ['F2', 'weed pressure', 'moderate']]);
+    // An unrenamed finding keeps the model's confidence.
+    const kept = visit.buildReview(graded, visit.validateReview({ reviewedFindings: [{ finding_id: 'F2', tech_note: 'agreed' }] }, graded).review);
+    expect(kept.reviewed_findings[1]).toMatchObject({ finding_id: 'F2', confidence: 'high' });
+    expect(kept.reviewed_findings[0]).toMatchObject({ finding_id: 'F1', confidence: 'unknown', label: 'general lawn stress' });
   });
 
   test('the reconciliation only ever sees allowlisted labels, never raw model or technician text', () => {
