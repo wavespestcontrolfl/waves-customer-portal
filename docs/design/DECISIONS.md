@@ -2277,3 +2277,9 @@ prompt, context values, and numbered image bytes, MIME types and zones. A replay
 with omitted inputs must declare those omissions and cannot claim exact original
 input reproduction. Database changes are additive, retaining every published
 migration unchanged.
+
+## 2026-09-08 — Prove the shared foundation in the estimate builder
+
+Following owner acceptance of the Customer 360 render, the real Pipeline estimate builder adopts comfortable density, shared fields/controls, scrolling section navigation, and action feedback. Its estimate-specific state bindings remain authoritative; the duplicated field presentation, custom checkbox/caret, and broad font repair are removed. All sections stay mounted. Save and generate use stable pending actions, and saved-offer review shares the control/focus behavior while retaining its existing delivery gates.
+
+A separate regression fix clears customer-specific notes and custom discounts when starting the next estimate while keeping service selections. Saved draft identity, revision preflight, failed-save retention, customer/property boundaries, and server pricing retain their existing mechanisms. See `estimate-foundation-acceptance-2026-09-08.md` for local tests, synthetic actual-route browser evidence, and physical-device limits. This entry does not record a deployment or customer send.

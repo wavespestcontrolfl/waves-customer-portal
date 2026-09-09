@@ -123,11 +123,11 @@ function sequenceCount(total, timed, groupSizes) {
   return count;
 }
 
-function workDuration(stop) {
+function workDuration(stop, fallback = 60) {
   const start = stop.window_start ? hhmmToMin(String(stop.window_start).slice(0, 5)) : null;
   const end = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : null;
   const span = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
-  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || 60;
+  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || fallback;
 }
 
 /**
@@ -155,6 +155,34 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLat
     startMin = Math.max(startMin, range.startMin);
   }
   return { clock: startMin + workDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+}
+
+/** Repair the demonstrated null-position insertion defect. Keep the relative
+ * order of every already-positioned stop, including ties. Only a fully timed,
+ * ungrouped, unpinned route with a chronological backbone qualifies. A repair
+ * must turn an infeasible baseline into a feasible route; no distance saving
+ * is needed to correct that defect. The caller owns gates and fenced writes. */
+function computeChronologicalRepair(RouteOptimizer, stops) {
+  if (stops.some(stop => {
+    const duration = workDuration(stop, 0);
+    return stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
+      || !Number.isFinite(effectiveWindowRange(stop)?.startMin)
+      || !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
+      || !Number(stop.lat) || !Number(stop.lng) || !Number.isFinite(duration) || duration <= 0;
+  })) return null;
+  const ordered = currentOrder(stops);
+  const backbone = ordered.filter(stop => stop.route_order != null);
+  const additions = ordered.filter(stop => stop.route_order == null);
+  if (!backbone.length || !additions.length) return null;
+  if (backbone.some((stop, i) => i > 0 && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin)) return null;
+  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
+  const candidate = [...backbone];
+  for (const stop of additions) {
+    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > effectiveWindowRange(stop).startMin);
+    candidate.splice(index === -1 ? candidate.length : index, 0, stop);
+  }
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
+  return simulation ? { orderedStops: candidate, simulation } : null;
 }
 
 /** Simulate the complete route under the promised ARRIVAL windows. Work may
@@ -351,6 +379,7 @@ module.exports = {
   effectiveWindowRange,
   currentOrder,
   simulateArrivalRoute,
+  computeChronologicalRepair,
   workDuration,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };
