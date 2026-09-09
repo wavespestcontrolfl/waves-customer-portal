@@ -430,6 +430,30 @@ describe('determinability is a literal claim', () => {
   });
 });
 
+describe('technician notes never reach customer copy', () => {
+  test('an observation or confirmation step that reproduces the notes — a name-like token or a five-word run — is withheld at the source', () => {
+    const notes = 'Mrs. Kowalski says the dog digs by the side gate. St. Augustine, mowed Tuesday.';
+    expect(visit.echoesTechnicianNotes("Mrs. Kowalski's dog has worn a path by the gate.", notes)).toBe(true);
+    expect(visit.echoesTechnicianNotes('Worn strip where the dog digs by the side gate.', notes)).toBe(true);
+    expect(visit.echoesTechnicianNotes('Thin St. Augustine turf at the side gate looks dry.', notes)).toBe(false); // grass and place words are not the notes
+    expect(visit.echoesTechnicianNotes('Turf is thin near the side gate.', '')).toBe(false);
+    expect(visit.echoesTechnicianNotes('', notes)).toBe(false);
+    const analysis = visit.normalizeAssessment(answer({ observations: "Mrs. Kowalski's dog has worn a path by the gate.", findings: [finding({ confirmation_step: 'Ask Mrs. Kowalski when the dog is out' }), finding({ name: 'Dollar spot', confirmation_step: 'Check the shaded strip at dawn' })] }), 2);
+    const bounded = visit.withoutTechnicianEchoes(analysis, notes);
+    expect(bounded.observations).toBe('');
+    expect(bounded.findings.map((f) => f.confirmation_step)).toEqual(['', 'Check the shaded strip at dawn']);
+    expect(visit.deriveLegacyScores({ ...bounded, status: 'complete' }).observations).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.withoutTechnicianEchoes(analysis, null)).toBe(analysis);
+  });
+
+  test('analyzeVisit applies the boundary to the answer it returns, so no stored copy carries an echo', async () => {
+    mockDispatch.mockResolvedValue(okOutcome(answer({ observations: 'Per Mrs. Kowalski the dog digs here; turf thin at the gate.' })));
+    const result = await visit.analyzeVisit({ photos: [photo('a'), photo('b')], photoZones: [null, null], visionContext: { technicianNotes: 'Mrs. Kowalski says the dog digs by the gate' } });
+    expect(result.observations).toBe('');
+    expect(result.raw.observations).toMatch(/Kowalski/); // the raw answer keeps it for the technician
+  });
+});
+
 describe('customer copy compliance screen', () => {
   test('a banned safety, approval, timing or absence claim drops the observation to the neutral fallback; legal copy passes', () => {
     expect(visit.customerObservations('Turf is thin along the driveway edge; the shaded side holds moisture.')).toBe('Turf is thin along the driveway edge; the shaded side holds moisture.');
@@ -459,11 +483,16 @@ describe('customer copy compliance screen', () => {
     // A different cause than the published one is still withheld; the generic class words never publish from prose.
     expect(visit.customerObservations('Signs point to fungus in the shade.', [chinch])).toBe(visit.NO_OBSERVATIONS);
     expect(visit.customerObservations('Some insect pressure is likely.', [chinch])).toBe(visit.NO_OBSERVATIONS);
-    expect(visit.customerObservations('Fungal activity in the shaded strip.', [{ label: 'fungal activity' }])).toMatch(/^Fungal activity/);
+    expect(visit.customerObservations('Fungal activity in the shaded strip.', [{ label: 'fungal activity', confidence: 'moderate' }])).toMatch(/^Fungal activity/);
+    // A weed species collapses to the generic "weed pressure" label a low finding keeps — the species itself still needs moderate+.
+    expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toBe(visit.NO_OBSERVATIONS);
+    expect(visit.customerObservations('Nutsedge is coming up along the walk.', [{ label: 'weed pressure', confidence: 'moderate' }])).toMatch(/^Nutsedge/);
+    expect(visit.customerObservations('Weed pressure along the walk.', [{ label: 'weed pressure', confidence: 'low' }])).toMatch(/^Weed pressure/);
     // Symptom-only prose passes regardless of confidence.
     expect(visit.customerObservations('Thin turf along the driveway edge; the shaded side holds moisture.', [low])).toMatch(/^Thin turf/);
-    expect(visit.namesUnpublishedCause('Drought stress near the curb', ['drought stress'])).toBe(false);
-    expect(visit.namesUnpublishedCause('Drought stress near the curb', ['general lawn stress'])).toBe(true);
+    expect(visit.namesUnpublishedCause('Drought stress near the curb', [{ label: 'drought stress', confidence: 'high' }])).toBe(false);
+    expect(visit.namesUnpublishedCause('Drought stress near the curb', [{ label: 'drought stress', confidence: 'low' }])).toBe(true);
+    expect(visit.namesUnpublishedCause('Drought stress near the curb', [{ label: 'general lawn stress', confidence: 'high' }])).toBe(true);
     // deriveLegacyScores hands the findings through.
     const analysis = { status: 'complete', observations: prose, findings: [low], severities: {}, scores: {} };
     expect(visit.deriveLegacyScores(analysis).observations).toBe(visit.NO_OBSERVATIONS);
@@ -564,6 +593,20 @@ describe('technician review on confirm', () => {
     // Duplicate text takes a fresh id rather than aliasing.
     const doubled = visit.buildReview(remapped, visit.validateReview({ addedDetails: [{ text: 'Dog run along the back fence' }, { text: 'Dog run along the back fence' }] }, remapped).review);
     expect(doubled.added_details.map((d) => d.finding_id)).toEqual(['T1', 'T2']);
+    // Finding decisions merge by id: editing F1 alone keeps the stored rejection of F2; a sent decision replaces its stored one.
+    const oneEdit = visit.buildReview(stored, visit.validateReview({ reviewedFindings: [{ finding_id: 'F1', tech_note: 'edge only' }] }, stored).review);
+    expect(oneEdit.reviewed_findings.map((f) => [f.finding_id, f.keep, f.tech_note])).toEqual([['F1', true, 'edge only'], ['F2', false, 'not chinch']]);
+    const restored = visit.buildReview(stored, visit.validateReview({ reviewedFindings: [{ finding_id: 'F2', keep: true }] }, stored).review);
+    expect(restored.reviewed_findings.find((f) => f.finding_id === 'F2')).toMatchObject({ keep: true, tech_note: null });
+    // Two identical details in different zones keep their own ids across a follow-up; a product mapped to the first stays on it.
+    const twins = visit.buildReview(run, visit.validateReview({ addedDetails: [{ text: 'Dog run', zone: 'front' }, { text: 'Dog run', zone: 'back' }], appliedProducts: [{ product_name: 'Bifen I/T', addresses_findings: ['T1'] }] }, run).review);
+    expect(twins.added_details.map((d) => [d.finding_id, d.zone])).toEqual([['T1', 'front'], ['T2', 'back']]);
+    const twinsStored = { ...run, reviewed_findings: JSON.stringify(twins.reviewed_findings), added_details: JSON.stringify(twins.added_details), reconciliation: JSON.stringify(twins.reconciliation) };
+    const twinsAgain = visit.buildReview(twinsStored, visit.validateReview({ addedDetails: [{ text: 'Dog run', zone: 'back' }, { text: 'Dog run', zone: 'front' }] }, twinsStored).review);
+    expect(twinsAgain.added_details.map((d) => [d.finding_id, d.zone])).toEqual([['T2', 'back'], ['T1', 'front']]);
+    expect(twinsAgain.reconciliation.treatment_rationale[0].addresses_findings).toEqual(['T1']);
+    // The same text re-sent without its zone still finds its id (text-only pass), never a fresh one.
+    expect(visit.buildReview(twinsStored, visit.validateReview({ addedDetails: [{ text: 'dog run' }] }, twinsStored).review).added_details.map((d) => d.finding_id)).toEqual(['T1']);
     // An explicitly empty field clears it.
     const cleared = visit.buildReview(stored, visit.validateReview({ addedDetails: [] }, stored).review);
     expect(cleared.added_details).toEqual([]);
@@ -657,8 +700,9 @@ describe('technician review on confirm', () => {
     const gated = (confidence, label) => ({ ...run, findings: JSON.stringify([{ finding_id: 'F1', name: 'Chinch bug damage', confidence, severity: 'moderate', urgency: 'follow_up', spread_risk: 'moderate', observed_evidence: [], inferred_context: [], negative_evidence: [], confirmation_step: 'Float test at the margin to confirm suspected chinch pressure', customer_wording: null, photo_refs: [1], zone: 'front', label, source: 'model' }]) });
     expect(visit.buildReview(gated('low', 'general lawn stress'), { reviewedFindings: [] }).reconciliation.watch_items[0]).toBe('general lawn stress: monitor response');
     expect(visit.buildReview(gated('high', 'chinch bug activity'), { reviewedFindings: [] }).reconciliation.watch_items[0]).toMatch(/^chinch bug activity: Float test at the margin to confirm suspected chinch pressure/);
-    expect(visit.safeConfirmationStep('Check the shaded strip for fungus', 'chinch bug activity')).toBe('');
-    expect(visit.safeConfirmationStep('Check the shaded strip for fungus', 'fungal activity')).toBe('Check the shaded strip for fungus');
+    expect(visit.safeConfirmationStep('Check the shaded strip for fungus', { label: 'chinch bug activity', confidence: 'high' })).toBe('');
+    expect(visit.safeConfirmationStep('Check the shaded strip for fungus', { label: 'fungal activity', confidence: 'moderate' })).toBe('Check the shaded strip for fungus');
+    expect(visit.safeConfirmationStep('Pull a nutsedge sample by the walk', { label: 'weed pressure', confidence: 'low' })).toBe('');
     // The review keeps the raw step; only the reconciliation copy is scrubbed.
     expect(visit.buildReview(step('Float test by the side gate, code 4471'), {}).reviewed_findings[0].confirmation_step).toBe('Float test by the side gate, code 4471');
   });
