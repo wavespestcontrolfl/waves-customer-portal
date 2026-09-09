@@ -124,8 +124,17 @@ async function recordDecision({ customerId, property, scheduledServiceId, source
         agreed,
         enforced,
       })
+      // One row per key, LATEST decision kept: a toggle or relationship changed
+      // after the first resolution must show in the pre-flip review.
       .onConflict(['property_id', 'scheduled_service_id', 'source'])
-      .ignore();
+      .merge({
+        relationship: property.relationship || null,
+        customer_decisions: JSON.stringify(customer),
+        property_decisions: JSON.stringify(effective),
+        agreed,
+        enforced,
+        created_at: db.fn.now(),
+      });
   } catch (err) {
     logger.warn(`[property-texts] shadow log write failed for property ${property.id}: ${err.message}`);
   }

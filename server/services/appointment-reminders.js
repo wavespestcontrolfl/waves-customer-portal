@@ -5514,4 +5514,8 @@ AppointmentReminders.scheduledServiceApptTime = scheduledServiceApptTime;
 // Same composition for callers that already hold the row (joined reads).
 AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 
+// The visit-aware prefs row for the call-booking confirmation email and the
+// deferred-replay recheck (app property scope, PR 3).
+AppointmentReminders.visitPrefsRow = visitPrefsRow;
+
 module.exports = AppointmentReminders;

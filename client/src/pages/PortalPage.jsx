@@ -4661,11 +4661,15 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         serviceContactsConsent: !!contactConsent[propertyId],
       });
       const sameProfile = (p) => (p.customerId ? String(p.customerId) === String(targetProfileId) : p.id === propertyId);
+      // The response carries the PROFILE row's toggles: they belong to the
+      // profile entry / primary property only — a secondary house keeps its
+      // own effective toggles (GitHub codex #4299 r1 P2).
+      const profileToggles = (p) => !p.propertyId || p.isPrimaryProperty === true;
       setPropertyPrefs(prev => prev.map(p => (
         sameProfile(p)
           ? {
             ...p,
-            ...(p.id === propertyId ? { preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } } : {}),
+            ...(p.id === propertyId && profileToggles(p) ? { preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } } : {}),
             serviceContacts: result.serviceContacts || savedContacts,
           }
           : p

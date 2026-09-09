@@ -74,7 +74,8 @@ function setDb({ propertyRows = [], property = null, prefsRow = CUSTOMER_PREFS }
     throw new Error(`unexpected table ${table}`);
   });
 }
-beforeEach(() => { jest.clearAllMocks(); global.__SCOPE_ON__ = true; global.__ENTRIES__ = ENTRIES; });
+beforeEach(() => { jest.clearAllMocks(); global.__SCOPE_ON__ = true; global.__ENTRIES__ = ENTRIES; process.env.GATE_APP_PROPERTY_TEXTS = 'true'; });
+afterEach(() => { delete process.env.GATE_APP_PROPERTY_TEXTS; });
 
 describe('GET /property-preferences (saved scope)', () => {
   test('one entry per saved property; primary = profile row; family home inherits; rental starts quiet; chosen toggles win', async () => {
@@ -96,7 +97,16 @@ describe('GET /property-preferences (saved scope)', () => {
     expect(pr.serviceContacts.length).toBeGreaterThan(0);
     expect(pr.label).toBeNull();
   });
-  test('gate off: today\'s profile list (no saved read)', async () => {
+  test('SHADOW mode (texts gate off): today\'s profile list — the card shows and edits what actually sends', async () => {
+    delete process.env.GATE_APP_PROPERTY_TEXTS;
+    setDb({});
+    const res = await fetch(`${base}/notifications/property-preferences`);
+    const { properties } = await res.json();
+    expect(properties).toHaveLength(1);
+    expect(properties[0].id).toBe('c1');
+    expect(require('../services/account-properties').accountSavedProperties).not.toHaveBeenCalled();
+  });
+  test('scope gate off: today\'s profile list (no saved read)', async () => {
     global.__SCOPE_ON__ = false;
     setDb({});
     const res = await fetch(`${base}/notifications/property-preferences`);
@@ -140,6 +150,13 @@ describe('PUT /property-preferences/:customerId with propertyId', () => {
     setDb({ property: { id: 'pb', customer_id: 'c1', is_primary: false, active: true, relationship: 'family_home' } });
     const res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', serviceContacts: [{ firstName: 'T', phone: '9415550102' }], serviceContactsConsent: true }) });
     expect(res.status).toBe(400);
+    expect(writes).toHaveLength(0);
+  });
+  test('shadow mode (texts gate off): propertyId is 404 — nothing per-property is writable until enforced', async () => {
+    delete process.env.GATE_APP_PROPERTY_TEXTS;
+    setDb({ property: { id: 'pb', customer_id: 'c1', is_primary: false, active: true } });
+    const res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', techEnRoute: false }) });
+    expect(res.status).toBe(404);
     expect(writes).toHaveLength(0);
   });
   test('a retired or foreign property is 404; gate off is 404', async () => {

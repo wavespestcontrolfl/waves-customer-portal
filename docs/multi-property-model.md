@@ -193,7 +193,9 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   the bell's `appointmentId`; the consent validator's per-purpose toggle via
   `input.appointmentId`. Delivery channels, App-first choices and quiet hours
   stay on the customer row (#4057).
-- **Card + route.** `GET /notifications/property-preferences` under the scope
+- **Card + route.** While `GATE_APP_PROPERTY_TEXTS` is off (shadow mode) the
+  card keeps today's per-profile shape — it shows and edits the row that
+  actually sends. Once enforced, `GET /notifications/property-preferences`
   answers one entry per SAVED property (`id` = the `/auth/properties` entry
   key; `chosen` marks toggles the property picked vs inherited;
   `quietByDefault`; `contactsShared: true`). `PUT
@@ -203,12 +205,18 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   property or no `propertyId` = today's profile write. The Visits tab's
   Appointment-texts card follows the page's selected house.
 - **Shadow-log hygiene.** One row per (property, visit, seam) — the resolver
-  writes `ON CONFLICT DO NOTHING` on the unique index from
+  writes `ON CONFLICT … DO UPDATE` (latest decision wins) on the unique index from
   `20260909000031`, on the ROOT db handle (never a caller's transaction),
   only in shadow mode, and only where the two rules CAN disagree (a chosen
   toggle, or a rental / managed house); an inheriting house with no chosen
-  toggle agrees by construction and is not logged. The scheduler prunes rows
-  older than 90 days (daily 3:35 AM ET).
+  toggle agrees by construction and is not logged. The 3:30 AM ET retention
+  sweep (next to stripe_webhook_events) prunes rows older than 90 days.
+- **Replays.** The scheduled-SMS executor forwards a deferred notice's
+  `scheduled_service_id` as `appointmentId`, and the deferred-replay
+  recipient recheck reads the visit-aware row, so a queued notice for a quiet
+  rental is re-judged by the property, not the profile. The call-booking
+  confirmation email resolves the property toggle before its email-only
+  slots.
 - **Shadow-log review (read-only, prod)** before flipping
   `GATE_APP_PROPERTY_TEXTS` — one week, expect `agreed = true` for every
   inheriting house and `false` only where a rental/managed house would go

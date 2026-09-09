@@ -5,7 +5,7 @@
  * (scope off = never reads the table; texts off = shadow log only) and the
  * failure posture (lookup failure = customer row in shadow, throw enforced).
  */
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => { const fn = jest.fn(); fn.fn = { now: () => 'now()' }; return fn; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
@@ -21,7 +21,7 @@ function chain(rows) {
   for (const m of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'onConflict']) c[m] = jest.fn(() => c);
   c.first = jest.fn(async () => rows[0]);
   c.insert = jest.fn(() => c);
-  c.ignore = jest.fn(async () => [1]);
+  c.merge = jest.fn(async () => [1]);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
 }
@@ -90,6 +90,19 @@ describe('resolveAppointmentPrefs', () => {
     expect(inserts).toHaveLength(1);
     expect(inserts[0].agreed).toBe(false);
   });
+  test('the dedupe key keeps ONE row per (property, visit, seam) with the LATEST decision merged in', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    let merged;
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return chain([{ property_id: 'pr' }]);
+      if (table === 'customer_properties') return chain([RENTAL]);
+      if (table === 'property_notification_prefs') return chain([]);
+      const c = chain([]); c.onConflict = jest.fn((k) => { c.key = k; return c; }); c.merge = jest.fn(async (m) => { merged = m; return [1]; }); return c;
+    });
+    await Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 'en_route' });
+    expect(merged).toMatchObject({ agreed: false, enforced: false, relationship: 'rental_owned' });
+    expect(JSON.parse(merged.property_decisions).tech_en_route).toBe(false);
+  });
   test('the shadow row is written on the ROOT handle with a dedupe key, never on a caller transaction; a trx read failure rethrows', async () => {
     process.env.GATE_APP_PROPERTY_SCOPE = 'true';
     setDb({ visit: { property_id: 'pr' }, property: RENTAL, row: null });
@@ -150,7 +163,7 @@ describe('resolveAppointmentPrefs', () => {
       if (table === 'scheduled_services') return chain([{ property_id: 'pr' }]);
       if (table === 'customer_properties') return chain([RENTAL]);
       if (table === 'property_notification_prefs') return chain([]);
-      const c = chain([]); c.ignore = jest.fn(async () => { throw new Error('log down'); }); return c;
+      const c = chain([]); c.merge = jest.fn(async () => { throw new Error('log down'); }); return c;
     });
     const out = await Prefs.resolveAppointmentPrefs({ customerId: 'c1', scheduledServiceId: 'v1', prefs: CUSTOMER, source: 't' });
     expect(out.prefs).toBe(CUSTOMER);

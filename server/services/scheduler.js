@@ -2463,21 +2463,15 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Stripe webhook events purge failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
-  // DAILY 3:35AM ET — Purge property_text_decisions older than 90 days (the
-  // ruling-R5 shadow log for appointment texts by saved property; the review
-  // window is one week, 90 days keeps the flip's evidence around).
-  // =========================================================================
-  cron.schedule('35 3 * * *', async () => {
+    // Same 90-day sweep for property_text_decisions (the ruling-R5 shadow
+    // log for appointment texts by saved property): the review window is a
+    // week; 90 days keeps the flip's evidence around.
     try {
       const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
       const db = require('../models/db');
-      if (!(await db.schema.hasTable('property_text_decisions'))) return;
-      const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
-      if (purged > 0) {
-        logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
+      if (await db.schema.hasTable('property_text_decisions')) {
+        const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
+        if (purged > 0) logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
       }
     } catch (err) {
       logger.error(`property_text_decisions purge failed: ${err.message}`);
@@ -3725,6 +3719,10 @@ function initScheduledJobs() {
               ? claimMeta.stamp_receipt_invoice_id
               : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
+            // The visit a deferred appointment notice is about: the consent
+            // validator resolves the per-property toggles from it (app
+            // property scope, PR 3) exactly like the immediate send did.
+            ...(claimMeta.scheduled_service_id ? { appointmentId: claimMeta.scheduled_service_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
             // re-queues here minutes later — still an answer to the

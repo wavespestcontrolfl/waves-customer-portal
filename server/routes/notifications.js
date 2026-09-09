@@ -558,7 +558,11 @@ const PREF_COLUMN_TO_KEY = Object.fromEntries(Object.entries(PREF_KEY_TO_COLUMN)
 
 router.get('/property-preferences', async (req, res, next) => {
   try {
-    if (appPropertyScopeEnabled()) {
+    // Shadow mode (GATE_APP_PROPERTY_TEXTS off): the sends still follow the
+    // customer row, so the card must keep showing — and editing — that row
+    // (today's per-profile card). Per-property controls appear only once
+    // they are enforced (GitHub codex #4299 r1 P1).
+    if (PropertyTexts.propertyTextsEnforced()) {
       const saved = await savedPropertyPreferences(req);
       if (saved) return res.json({ properties: saved });
     }
@@ -963,7 +967,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
 // response was sent; false hands the request to the profile path (the
 // property is the profile's PRIMARY — it has no row of its own by design).
 async function savePropertyToggles(req, res, updates) {
-  if (!appPropertyScopeEnabled()) {
+  if (!PropertyTexts.propertyTextsEnforced()) {
     res.status(404).json({ error: 'Per-property notification settings are not available.' });
     return true;
   }
