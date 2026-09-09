@@ -15,7 +15,7 @@ const updatedAt = '2026-09-09T12:00:00.000Z';
 beforeEach(() => {
   jest.clearAllMocks();
   process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
-  request = { id: 'request-1', customer_id: 'customer-1', category: 'general', source: null, status: 'new', updated_at: updatedAt };
+  request = { id: 'request-1', customer_id: 'customer-1', category: 'general', source: null, status: 'new', status_version: 0, updated_at: updatedAt };
   prefs = { request_channel: 'push' };
   customer = { active: true, phone: '+19415550142' };
   queued = [];
@@ -60,6 +60,7 @@ test('each request transition has its own event identity', async () => {
   await RequestApp.send({ customerId: 'customer-1', request, received: true });
   request.updated_at = '2026-09-09T12:01:00Z';
   request.status = 'acknowledged';
+  request.status_version = 1;
   await RequestApp.send({ customerId: 'customer-1', request });
   expect(sendCustomerMessage.mock.calls.map(([input]) => input.customerInitiated)).toEqual([true, false]);
   expect(new Set(sendCustomerMessage.mock.calls.map(([input]) => input.metadata.notificationEventKey)).size).toBe(2);
@@ -68,6 +69,7 @@ test('each request transition has its own event identity', async () => {
 test('an unknown replay state fails closed and remains retryable', async () => {
   readFailed = true;
   expect(await recheckDeferredReplay('request_app_deferred', {
-    customer_id: 'customer-1', service_request_id: request.id, request_status: request.status, request_updated_at: updatedAt,
+    customer_id: 'customer-1', service_request_id: request.id, request_status: request.status,
+    request_status_version: request.status_version, request_updated_at: updatedAt,
   })).toMatchObject({ eligible: false, retryable: true });
 });

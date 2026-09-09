@@ -435,8 +435,8 @@ test('request delivery forwards the queued status and transition identity to the
   const notificationEventKey = 'request:request-1:updated:transition-1';
   expect(await sendCustomerMessage({ ...input, purpose: 'support_resolution', metadata: {
     appOnly: true, original_message_type: 'service_request_updated',
-    service_request_id: 'request-1', request_status: 'acknowledged', notificationEventKey,
+    service_request_id: 'request-1', request_status: 'acknowledged', request_status_version: 1, notificationEventKey,
   } })).toMatchObject({ sent: true, channel: 'push' });
   expect(Twilio.sendSMS.mock.calls[0][2]).toMatchObject({ explicitPushOnly: true,
-    requestNotification: { id: 'request-1', status: 'acknowledged' }, notificationEventKey });
+    requestNotification: { id: 'request-1', status: 'acknowledged', version: 1 }, notificationEventKey });
 });

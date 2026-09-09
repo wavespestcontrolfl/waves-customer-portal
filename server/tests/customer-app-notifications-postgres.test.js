@@ -9,7 +9,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({})) }));
+jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({})), sendRequestUpdated: jest.fn(async () => ({})) }));
 jest.mock('../services/apns', () => ({ send: jest.fn(), status: () => ({ configured: true }) }));
 jest.mock('../services/fcm', () => ({ send: jest.fn(), status: () => ({ configured: true }) }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => ({})) }));
@@ -31,6 +31,7 @@ let admin;
 let mockPg;
 let app;
 let token;
+let adminToken;
 let server;
 let baseUrl;
 jest.setTimeout(30000);
@@ -66,18 +67,33 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       await requestMigration.up(trx); await requestMigration.up(trx);
       await requestMigration.down(trx); await requestMigration.down(trx); await requestMigration.up(trx);
     });
+    const versionMigration = require('../models/migrations/20260909000063_request_status_version');
+    const hadVersion = await mockPg.schema.hasColumn('service_requests', 'status_version');
+    const probe = await mockPg.transaction();
+    try {
+      await versionMigration.up(probe); await versionMigration.up(probe);
+      await versionMigration.down(probe); await versionMigration.down(probe); await versionMigration.up(probe);
+      expect(await probe.schema.hasColumn('service_requests', 'status_version')).toBe(true);
+    } finally { await probe.rollback(); }
+    expect(await mockPg.schema.hasColumn('service_requests', 'status_version')).toBe(hadVersion);
+    await versionMigration.up(mockPg);
     await mockPg('customers').insert([
       { id: owner, account_id: owner, is_primary_profile: true },
       { id: property, account_id: owner, is_primary_profile: false },
       { id: outsider, account_id: outsider, is_primary_profile: true },
     ].map((row, i) => ({ ...row, first_name: 'QA', last_name: 'Fixture', active: true,
       phone: `+1941555010${i}`, email: `qa-app-${i}@example.invalid` })));
+    const [staff] = await mockPg('technicians').insert({ name: 'QA Administrator', email: 'qa-admin@example.invalid',
+      role: 'admin', employment_status: 'active', auth_token_version: 1, must_change_password: false }).returning('id');
+    adminToken = require('jsonwebtoken').sign({ technicianId: staff.id, type: 'access', tokenVersion: 1 },
+      require('../config').jwt.secret, { expiresIn: '1h' });
     app = express();
     app.use(express.json());
     app.use('/api/notifications', require('../routes/notifications'));
     app.use('/api/notification-prefs', require('../routes/notification-prefs'));
     app.use('/api/push', require('../routes/push'));
     app.use('/api/requests', require('../routes/requests'));
+    app.use('/api/admin/requests', require('../routes/admin-requests'));
     app.use((err, req, res, next) => res.status(err.isJoi ? 400 : 500).json({ error: err.message }));
     server = await new Promise((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
     baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -185,7 +201,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       subject: 'QA resolved request', status: 'resolved', created_at: new Date('2025-01-01'), updated_at });
     const input = { customerId: property, to: '+19415550101', body: 'Request update',
       messageType: 'service_request_updated', explicitPushOnly: true, notificationEventKey: `request:${id}`,
-      requestNotification: { id, status: 'resolved' } };
+      requestNotification: { id, status: 'resolved', version: 0 } };
     const routing = require('../services/messaging/push-channel-routing');
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
@@ -211,7 +227,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const [request] = await mockPg('service_requests').insert({ customer_id: property,
       category: 'general', subject: 'QA status update', status: 'acknowledged' }).returning('*');
     const meta = { customer_id: property, service_request_id: request.id, request_status: request.status,
-      request_updated_at: request.updated_at.toISOString() };
+      request_status_version: request.status_version, request_updated_at: request.updated_at.toISOString() };
     const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
     await mockPg('service_requests').where({ id: request.id }).update({ admin_notes: 'Assignment adjusted',
       updated_at: new Date(request.updated_at.getTime() + 60000) });
@@ -219,17 +235,54 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const routing = require('../services/messaging/push-channel-routing');
     const input = { customerId: property, to: '+19415550101', body: 'Request update',
       messageType: 'service_request_updated', explicitPushOnly: true, notificationEventKey: `request:${request.id}:status-1`,
-      requestNotification: { id: request.id, status: request.status } };
+      requestNotification: { id: request.id, status: request.status, version: request.status_version } };
     expect((await routing.attemptPushFirst(input)).delivered).toBe(true);
     const first = await mockPg('notifications').where({ recipient_id: property }).first();
-    await mockPg('service_requests').where({ id: request.id }).update({ status: 'resolved' });
+    await mockPg('service_requests').where({ id: request.id }).update({ status: 'resolved', status_version: mockPg.raw('status_version + 1') });
     expect(await recheckDeferredReplay('request_app_deferred', meta)).toMatchObject({ eligible: false });
     expect((await routing.attemptPushFirst(input)).blocked).toBe(true);
     expect((await routing.attemptPushFirst({ ...input, notificationEventKey: `request:${request.id}:status-2`,
-      requestNotification: { ...input.requestNotification, status: 'resolved' } })).delivered).toBe(true);
+      requestNotification: { ...input.requestNotification, status: 'resolved', version: 1 } })).delivered).toBe(true);
     const notices = await mockPg('notifications').where({ recipient_id: property });
     expect(notices).toHaveLength(2);
     expect(notices.find((row) => row.id !== first.id).link).not.toBe(first.link);
+  });
+
+  test('admin status cycles supersede an earlier matching queued notice without invalidating note edits', async () => {
+    await device(); await put({ requestChannel: 'push' });
+    const [request] = await mockPg('service_requests').insert({ customer_id: property,
+      category: 'general', subject: 'QA status cycle', status: 'new' }).returning('*');
+    const patch = async (body) => {
+      const response = await fetch(`${baseUrl}/api/admin/requests/${request.id}`, { method: 'PATCH',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      expect(response.status).toBe(200);
+      return (await response.json()).request;
+    };
+    const first = await patch({ status: 'acknowledged' });
+    expect(first.status_version).toBe(1);
+    const meta = { customer_id: property, service_request_id: request.id,
+      request_status: first.status, request_status_version: first.status_version };
+    const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+    const notes = await patch({ status: 'acknowledged', adminNotes: 'Assignment confirmed' });
+    expect(notes.status_version).toBe(1);
+    expect(await recheckDeferredReplay('request_app_deferred', meta)).toEqual({ eligible: true });
+    expect((await patch({ status: 'scheduled' })).status_version).toBe(2);
+    const latest = await patch({ status: 'acknowledged' });
+    expect(latest.status_version).toBe(3);
+    expect(await recheckDeferredReplay('request_app_deferred', meta)).toMatchObject({ eligible: false });
+    expect(await recheckDeferredReplay('request_app_deferred', { ...meta, request_status_version: 3 })).toEqual({ eligible: true });
+    const stale = await require('../services/messaging/push-channel-routing').attemptPushFirst({ customerId: property,
+      to: '+19415550101', body: 'Request update', messageType: 'service_request_updated', explicitPushOnly: true,
+      notificationEventKey: `request:${request.id}:service_request_updated:1`,
+      requestNotification: { id: request.id, status: 'acknowledged', version: 1 } });
+    expect(stale.blocked).toBe(true);
+    expect(apns.send).not.toHaveBeenCalled();
+    const mockSend = jest.spyOn(require('../services/messaging/send-customer-message'), 'sendCustomerMessage').mockResolvedValue({ sent: true });
+    try {
+      await require('../services/request-app-notifications').send({ customerId: property, request: latest });
+      expect(mockSend.mock.calls[0][0].metadata).toMatchObject({ request_status_version: 3,
+        notificationEventKey: `request:${request.id}:service_request_updated:3` });
+    } finally { mockSend.mockRestore(); }
   });
 
   test('new choices require readiness and store account channels separately from charged-profile receipts', async () => {
