@@ -213,8 +213,14 @@ const analysis = (overrides = {}) => ({
     // A stale, incomplete claim (the process died mid-delivery) is resumable.
     await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).update({ pipeline_claimed_at: new Date(Date.now() - visit.PIPELINE_STALE_MS - 1000) });
     expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
+    // Completion is proven by the steps' own stamps: nothing delivered → the claim stays open (still resumable when stale).
+    expect(await visit.completePipeline(assessment.id, db.knex)).toEqual(['recommendations', 'report', 'notification']);
+    expect((await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).first()).pipeline_completed_at).toBeNull();
+    const cols = await db.knex('lawn_assessments').columnInfo();
+    const delivered = { recommendations: JSON.stringify({ summary: 's' }), ...(cols.report_auto_generated ? { report_auto_generated: true } : {}), ...(cols.notification_sent ? { notification_sent: true } : {}) };
+    await db.knex('lawn_assessments').where({ id: assessment.id }).update(delivered);
     // A completed delivery is never resumed, however old its claim.
-    await visit.completePipeline(assessment.id, db.knex);
+    expect(await visit.completePipeline(assessment.id, db.knex)).toEqual([]);
     await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).update({ pipeline_claimed_at: new Date(Date.now() - visit.PIPELINE_STALE_MS - 1000) });
     expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(false);
     expect((await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).first()).pipeline_completed_at).not.toBeNull();
@@ -222,7 +228,7 @@ const analysis = (overrides = {}) => ({
     expect(await visit.claimPipeline(randomUUID(), db.knex)).toBe(false);
     await migrations[2].down(db.knex);
     expect(await visit.claimPipeline(assessment.id, db.knex)).toBe(true);
-    await expect(visit.completePipeline(assessment.id, db.knex)).resolves.toBeUndefined();
+    expect(await visit.completePipeline(assessment.id, db.knex)).toEqual([]); // no columns: nothing to stamp, nothing owed
     await migrations[2].up(db.knex);
   });
 

@@ -144,6 +144,9 @@ describe('lawn assessment route contracts', () => {
       // the lock a run-backed confirm's legacy baseline check takes — so the two can never both become the baseline.
       expect(assess).toMatch(/: await db\.transaction\(async \(trx\) => \{[\s\S]{0,800}if \(!propertyHistoryEnabled\) \{\s*await lawnAssessment\.lockCustomerBaseline\(customerId, trx\);\s*isBaseline = \(await visitAssessment\.priorAssessmentCount\(customerId, trx\)\) === 0;\s*assessmentRow\.is_baseline = isBaseline;\s*\}\s*return trx\('lawn_assessments'\)\.insert\(assessmentRow\)\.returning\('\*'\);\s*\}\);/);
       expect(assess).not.toMatch(/: await db\('lawn_assessments'\)\.insert\(assessmentRow\)/);
+      // The response reports the PERSISTED baseline flag — a pending run-backed row is never called the baseline.
+      expect(assess).toMatch(/season,\s*(?:\/\/[^\n]*\n\s*)*isBaseline: assessment\.is_baseline === true,/);
+      expect(assess).not.toMatch(/\n\s*isBaseline,\n/);
       expect(assess).not.toMatch(/withoutPendingRuns\(/);
     });
 
@@ -206,7 +209,8 @@ describe('lawn assessment route contracts', () => {
       // The delivery is claimed durably before it is queued, once per confirmed row, and marked complete at its end.
       expect(confirm).toMatch(/const deliver = !reviewedRun \|\| resumedPipeline \|\| await visitAssessment\.claimPipeline\(assessmentId, db\);\s*if \(deliver\) setImmediate\(async \(\) => \{/);
       expect(confirm.match(/claimPipeline\(/g)).toHaveLength(2);
-      expect(confirm).toMatch(/LawnIntel\.trackAssessmentCompletion\(updated\.service_date\);\s*(?:\/\/[^\n]*\n\s*)*if \(reviewedRun\) await visitAssessment\.completePipeline\(assessmentId, db\);\s*\} catch \(intelErr\)/);
+      // Completion is what the steps' own stamps prove — completePipeline checks them and reports the gaps.
+      expect(confirm).toMatch(/LawnIntel\.trackAssessmentCompletion\(updated\.service_date\);\s*(?:\/\/[^\n]*\n\s*)*if \(reviewedRun\) \{\s*const gaps = await visitAssessment\.completePipeline\(assessmentId, db\);\s*if \(gaps\.length\) logger\.warn\([^\n]*\);\s*\}\s*\} catch \(intelErr\)/);
       expect(confirm).toMatch(/res\.json\(\{ success: true, confirmed: true, \.\.\.\(resumedPipeline \? \{ alreadyConfirmed: true, resumedDelivery: true \} : \{\}\), assessment: updated, \.\.\.runPayload \}\);/);
       expect(confirm).toMatch(/if \(protocolFieldChecksProvided\) Object\.assign\(updated, protocolFieldChecks, \{ protocol_field_checks: protocolFieldChecks \}\);/);
       // The response reads the run the transaction reviewed (or loaded under the lock), not the pre-lock snapshot.
