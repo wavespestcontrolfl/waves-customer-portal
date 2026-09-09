@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, statesNewAddress } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -1169,21 +1169,6 @@ function failOpenKnownCustomer(knownCaller) {
   };
 }
 
-// Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
-// shadow/AUDIT recompute — the saved shadow decision must hold exactly where
-// enforce would hold, or rollout metrics overstate safe fail-open bookings.
-// When address flags failed open (V2 heard no address) but legacy V1 captured
-// ANY address component (street, unit — line2 or embedded, city, ZIP), the
-// booking demotes to the blocked path (address_review card) UNLESS the
-// evidence is a street-anchored echo of the on-file address (same street
-// key, no conflicting unit/city/ZIP) — that is a duplicate, not a new
-// address. Partial-only evidence (city/ZIP/unit with NO street) demotes even
-// when it matches: it cannot disambiguate a second property in the same
-// city/ZIP, mirroring the V2 rule that any partial component is a
-// new-address signal. Same normalization family as the property-linkage
-// exact match (customer-properties), so this guard can't disagree with the
-// stamp downstream. Returns the (possibly demoted) routing result; never
-// mutates.
 /**
  * The EXACT fail-open routing context production hands canAutoRoute for a
  * call. Exported so the three offline routing audits MIRROR production rather
@@ -1214,24 +1199,19 @@ function buildFailOpenRoutingContext({
 
 function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
   if (!routingResult?.allowed
-    || !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
+    || (!routingResult.usesOnFileAddress
+      && !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)))) {
     return routingResult;
   }
-  const { streetKey, unitKey, streetEmbeddedUnitKey, normalizeZip } = require('./customer-properties');
-  const cityKey = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '');
-  const legacyV1Street = String(extracted?.address_line1 || '').trim();
-  const v1Unit = unitKey(extracted?.address_line2) || streetEmbeddedUnitKey(legacyV1Street);
-  const v1City = cityKey(extracted?.city);
-  const v1Zip = normalizeZip(extracted?.zip);
-  if (!legacyV1Street && !v1Unit && !v1City && !v1Zip) return routingResult;
-  const onFileStreet = String(knownCaller?.addressLine1 || '').trim();
-  const onFileUnit = unitKey(knownCaller?.addressLine2) || streetEmbeddedUnitKey(onFileStreet);
-  const v1AddressConflicts = !legacyV1Street
-    || !onFileStreet
-    || streetKey(legacyV1Street) !== streetKey(onFileStreet)
-    || (v1Unit && v1Unit !== onFileUnit)
-    || (v1City && v1City !== cityKey(knownCaller?.addressCity))
-    || (v1Zip && v1Zip !== normalizeZip(knownCaller?.addressZip));
+  // Enforce and shadow share the same restatement rules as V2. Matching
+  // locality fragments retain on-file trust; every contradictory component holds.
+  const v1AddressConflicts = statesNewAddress({ property: { service_address: {
+    street_line_1: extracted?.address_line1,
+    street_line_2: extracted?.address_line2,
+    city: extracted?.city,
+    state: extracted?.state,
+    postal_code: extracted?.zip,
+  } } }, knownCaller);
   if (!v1AddressConflicts) return routingResult;
   return {
     allowed: false,
@@ -3975,9 +3955,9 @@ function v2IsoToEtWallClock(value) {
 // Resolve the booked visit's OWN address (the call's post-AV service address)
 // and, when it exactly key-matches one of the customer's known properties,
 // that property's id. Exact addressKey match only — a booking must never be
-// GUESSED onto a property. Returns nulls when the call carried no address
-// (readers COALESCE back to the customer mirror, i.e. today's behavior).
-async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db) {
+// GUESSED onto a property. Approved on-file restatements use the complete
+// saved address before matching; partial extraction must not lose its key.
+async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db, { useOnFileAddress = false } = {}) {
   const clean = (v, max) => {
     const s = String(v == null ? '' : v).trim();
     return s ? s.slice(0, max) : null;
@@ -3989,9 +3969,8 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     state: clean(extracted.state, 2),
     zip: clean(extracted.zip, 10),
   };
-  if (!address.line1) {
-    // The caller didn't state an address on this call (e.g. an existing
-    // customer confirming a re-service). Dispatch to their on-file,
+  if (useOnFileAddress || !address.line1) {
+    // The caller omitted or restated the saved address. Dispatch to their on-file,
     // Google-verified address instead of leaving the visit address blank —
     // never book a location-less appointment. Falls THROUGH to the exact
     // property match below: the on-file address may itself be an active
@@ -7967,6 +7946,7 @@ const CallRecordingProcessor = {
     // delete its accumulated revenue (pre-push P0 r15).
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
+    let v2UsesOnFileAddress = false;
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
@@ -8446,6 +8426,7 @@ const CallRecordingProcessor = {
               }
             }
             v2ApprovedExtraction = v2Extraction;
+            v2UsesOnFileAddress = routingResult.usesOnFileAddress === true;
           }
         }
       } catch (err) {
@@ -13307,7 +13288,7 @@ const CallRecordingProcessor = {
                       || v2ApprovedExtraction?.property?.service_address?.street_line_2
                       || v2CanonicalExtraction?.property?.service_address?.street_line_2
                       || null,
-                  }, trx);
+                  }, trx, { useOnFileAddress: v2UsesOnFileAddress });
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
                 // portal mid-call, online self-booking) is invisible to it,

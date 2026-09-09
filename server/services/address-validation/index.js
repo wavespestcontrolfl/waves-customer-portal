@@ -26,7 +26,7 @@
 
 const logger = require('../logger');
 const { isInServiceAreaCounty } = require('../call-triage-flags');
-const { normalizeState, parseRawAddress } = require('../../utils/address-normalizer');
+const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../../utils/address-normalizer');
 
 // Google address calls are fail-open by design — a HUNG call must fail the
 // same way a failed one does (validation skipped, raw address kept) instead
@@ -147,7 +147,8 @@ const SERVICE_STATE = 'FL';
 
 async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null } = {}) {
   const lines = (addressLines || []).filter(Boolean);
-  const statedState = parseRawAddress(lines.join(' ').replace(/,/g, ' ')).state;
+  const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]
+    .map(line => parseRawAddress(line).state).filter(Boolean).pop();
   const regionHint = statedState || administrativeArea;
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
@@ -199,11 +200,17 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
 // 4") carries letters but still names no street.
 function buildAddressLines(serviceAddress) {
   const sa = serviceAddress || {};
-  // The extraction schema stores non-Florida states as null; raw_text still
-  // carries the stated geography and must survive request construction.
-  const rawState = parseRawAddress(sa.raw_text).state;
-  const state = rawState && rawState !== SERVICE_STATE ? rawState : (sa.state || rawState);
   const street1 = String(sa.street_line_1 || '').trim();
+  // The extraction schema stores non-Florida states as null; raw_text still
+  // carries the stated geography. A structured street boundary distinguishes
+  // a state-only tail ("Main Street CT") from a street suffix ("Main Ct").
+  const rawTokens = String(sa.raw_text || '').replace(/,/g, ' ').trim().split(/\s+/);
+  const streetKey = normalizeStreetLine(street1).toLowerCase();
+  const boundary = rawTokens.findIndex((_, i) => normalizeStreetLine(rawTokens.slice(0, i + 1).join(' ')).toLowerCase() === streetKey);
+  const tail = boundary >= 0 ? rawTokens.slice(boundary + 1).join(' ') : '';
+  const stateOnlyTail = tail.match(/^([a-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/i);
+  const rawState = (stateOnlyTail && normalizeState(stateOnlyTail[1])) || parseRawAddress(sa.raw_text).state;
+  const state = rawState && rawState !== SERVICE_STATE ? rawState : (sa.state || rawState);
   const line1 = /[a-z]/i.test(street1) ? [street1, sa.street_line_2].filter(Boolean).join(' ').trim() : '';
   const line2 = [sa.city, state, sa.postal_code].filter(Boolean).join(' ').trim();
   if (!line1 && !sa.city) return [];

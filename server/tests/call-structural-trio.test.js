@@ -21,6 +21,7 @@ const {
   extractedNameMatchesCustomer,
 } = _test;
 const { sameFirstName } = require('../utils/name-match');
+const { canAutoRoute } = require('../services/call-triage-flags');
 const { normalizeSecondaryContacts } = require('../utils/normalize-extraction-v2');
 const { mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 const { getServiceContactSlots, SERVICE_CONTACT_SLOTS } = require('../services/customer-contact');
@@ -406,16 +407,50 @@ describe('demoteFailOpenOnV1AddressConflict', () => {
     const r = demoteFailOpenOnV1AddressConflict(allowed, { city: 'Sarasota' }, kc);
     expect(r.allowed).toBe(false);
   });
-  test('partial-only V1 evidence demotes even when it MATCHES on-file (codex r10 P2)', () => {
-    // Same city/ZIP cannot disambiguate a second property in that city/ZIP —
-    // partial evidence without a street always holds for review.
-    expect(demoteFailOpenOnV1AddressConflict(allowed, { city: 'Venice' }, kc).allowed).toBe(false);
-    expect(demoteFailOpenOnV1AddressConflict(allowed, { zip: '34285' }, kc).allowed).toBe(false);
+  test.each([{ city: 'Venice' }, { zip: '34285' }])('matching V1 locality preserves the approved on-file route: %j', v1 => {
+    expect(demoteFailOpenOnV1AddressConflict(allowed, v1, kc)).toBe(allowed);
+  });
+  test.each([{ zip: '34202' }, { state: 'CT' }, { address_line2: 'Apt B' }])('contradictory V1 component still demotes: %j', v1 => {
+    expect(demoteFailOpenOnV1AddressConflict(allowed, v1, kc).allowed).toBe(false);
+  });
+  test('on-file routing without an address flag still checks V1 evidence', () => {
+    const onFile = { allowed: true, usesOnFileAddress: true };
+    expect(demoteFailOpenOnV1AddressConflict(onFile, { address_line1: '9 Elsewhere Rd' }, kc).allowed).toBe(false);
   });
   test('address flags did not fail open → untouched even with a conflicting V1 street', () => {
     const noAddr = { allowed: true, failedOpenFlags: ['caller_phone_missing'] };
     expect(demoteFailOpenOnV1AddressConflict(noAddr, { address_line1: '9 Elsewhere Rd' }, kc)).toBe(noAddr);
   });
+});
+
+test.each([
+  [{ city: 'Venice' }, { city: 'Venice' }, 'missing_component', 'Apt A'],
+  [{ postal_code: '34285' }, { zip: '34285' }, 'missing_component', 'Apt A'],
+  [{ street_line_1: '100 Main Street' }, { address_line1: '100 Main St' }, 'missing_component', null],
+  [{ street_line_1: '100 Main Street' }, { address_line1: '100 Main St' }, 'not_attempted', null],
+])('accepted restatement %j retains the complete saved property through booking', async (service_address, flat, status, unit) => {
+  const saved = { address_line1: '100 Main St', address_line2: unit, city: 'Venice', state: 'FL', zip: '34285' };
+  const knownCustomer = { hasAddress: true, addressLine1: saved.address_line1, addressLine2: unit, addressCity: saved.city, addressZip: saved.zip };
+  const extraction = {
+    meta: { is_voicemail: false, is_spam: false }, caller: { relationship_to_property: 'owner' },
+    property: { service_address }, confidence: { overall: 0.9 }, consent: {},
+    scheduling: { status: 'confirmed', confirmed_start_at: '2026-09-11T10:00:00-04:00' },
+    triage_flags: status === 'missing_component' ? ['address_unverified'] : [],
+  };
+  const route = _test.demoteFailOpenOnV1AddressConflict(canAutoRoute(extraction, {
+    failOpen: true, knownCustomer, contactPhone: '+19415550100', addressValidation: { status, inServiceArea: null },
+  }), flat, knownCustomer);
+  expect(route).toMatchObject({ allowed: true, usesOnFileAddress: true });
+  const trx = table => {
+    const builder = {
+      where: () => builder,
+      first: async () => table === 'customers' ? saved : null,
+      select: async () => table === 'customer_properties' ? [{ ...saved, id: 'home', latitude: 27.1, longitude: -82.4 }] : [],
+    };
+    return builder;
+  };
+  const linkage = await resolveCallBookingPropertyLinkage('cust-1', flat, trx, { useOnFileAddress: route.usesOnFileAddress });
+  expect(linkage).toEqual({ propertyId: 'home', address: { line1: saved.address_line1, line2: unit, city: saved.city, state: 'FL', zip: saved.zip }, lat: 27.1, lng: -82.4 });
 });
 
 // ─── Stamped-address divergence rule (codex round-4 P1) ─────────────────────

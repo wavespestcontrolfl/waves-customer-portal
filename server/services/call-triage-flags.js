@@ -1279,7 +1279,12 @@ function canAutoRoute(extraction, opts = {}) {
     };
   }
 
-  return { allowed: true, flags: finalFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
+  return {
+    allowed: true,
+    flags: finalFlags,
+    failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
+    ...(!avPositivelyValidated && dispatchesToOnFile ? { usesOnFileAddress: true } : {}),
+  };
 }
 
 // Suffix-insensitive street comparison shared by the shadow bridge and the

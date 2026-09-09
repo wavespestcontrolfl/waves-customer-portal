@@ -90,6 +90,23 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('NE');
     expect(av.status).toBe('out_of_service_area');
   });
+  test.each([
+    ['123 Main Street', '123 Main Street CT', 'CT'],
+    ['123 Main St', '123 Main Street CT', 'CT'],
+    ['123 Main Street', '123 Main Street NE', 'NE'],
+    ['123 Main St NE', '123 Main Street NE CT', 'CT'],
+  ])('a structured street boundary preserves the state in %s / %s', async (street_line_1, raw_text, state) => {
+    const lines = buildAddressLines({ street_line_1, raw_text, state: 'FL' });
+    expect(lines).toEqual([street_line_1, state]);
+    const av = await validateAddress({ addressLines: lines, administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe(state);
+    expect(av.status).toBe('out_of_service_area');
+  });
+  test.each([['CT'], ['CT 06001'], ['NE']])('a separate state line survives validation: %s', async tail => {
+    const av = await validateAddress({ addressLines: ['123 Main Street', tail], administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe(tail.slice(0, 2));
+    expect(av.status).toBe('out_of_service_area');
+  });
   test('an incomplete Florida result without a provider state can still recover', async () => {
     providerResult.verdict.addressComplete = false;
     providerResult.address.addressComponents = [];
