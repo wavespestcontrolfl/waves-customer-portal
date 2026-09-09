@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * The durable phase of grouped closeout (visit-closeout-phase2.md, stages 3–4).
- * No route or worker invokes this prerequisite yet. Shared effects and delivery
- * must be complete before a production entry point is connected.
+ * The durable grouped closeout and effect coordinator (stages 3–5).
+ * The recovery worker resumes saved packets; the gated production submission
+ * entry point and technician screen are connected in the next stage.
  *
  * The existing stop lock serializes membership, legacy claims and packets.
  * Every member uses the canonical completion validator/writer on one outer
@@ -12,7 +12,7 @@
 const crypto = require('crypto');
 const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
-const { hashCompletionRequest } = require('./completion-attempts');
+const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
@@ -52,16 +52,11 @@ function packetSnapshot(request, actor, members, existing) {
   if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
   const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
     .map((member) => ({ serviceId: member.id, status: member.status }));
-  const items = structuredClone(request.items);
-  for (const item of items) {
-    if (item.body.gaugePhoto && typeof item.body.gaugePhoto === 'object') delete item.body.gaugePhoto.data;
-    if (!Array.isArray(item.body.completionPhotos)) continue;
-    for (const photo of item.body.completionPhotos) {
-      if (photo && typeof photo === 'object') delete photo.data;
-    }
-  }
-  // The request hash still covers the original photo bytes. Uploaded objects
-  // belong to each service record; packet retries never upload them again.
+  // The packet-level request hash still covers the original photo bytes (a
+  // save-time replay must resend the same photos); each member's attempt hash
+  // covers this stripped form. Uploaded objects belong to each service record;
+  // packet retries never upload them again.
+  const items = request.items.map((item) => ({ ...item, body: withoutPhotoBytes(item.body) }));
   return { items, actor, retainedMembers };
 }
 
@@ -181,7 +176,7 @@ async function saveVisitCompletionPacket(input, database = db) {
         const result = await completeScheduledService({
           serviceId: item.serviceId, idempotencyKey: key,
           body: structuredClone(item.body), actor,
-        }, { trx, itemId: packetItem.id, uploadedPhotoRows });
+        }, { phase: 'records', trx, itemId: packetItem.id, uploadedPhotoRows });
         if (result.status !== 202 || !result.body.serviceRecordId) {
           const rejected = new Error('Visit member completion rejected');
           rejected.completionResult = { ...result, body: { ...result.body, serviceId: item.serviceId } };
@@ -211,4 +206,97 @@ async function saveVisitCompletionPacket(input, database = db) {
   }
 }
 
-module.exports = { saveVisitCompletionPacket };
+/** Resume the existing member claims; the saved packet owns every form/key. */
+async function runVisitCompletionPacketEffects(packetId, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first();
+  if (!packet) return failure(404, 'visit_closeout_not_found', 'Saved visit closeout not found.');
+  if (packet.status === 'failed') return { status: 200, body: {
+    visitId: packet.visit_id, packetId: packet.id, state: 'office_required', code: 'member_effects_rejected',
+  } };
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const items = await database('visit_completion_packet_items').where({ packet_id: packet.id }).orderBy('scheduled_service_id');
+  if (!items.length || items.some((item) => !item.service_record_id)) {
+    return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
+  }
+  const { completeScheduledService } = require('./complete-scheduled-service');
+  for (const item of items) {
+    if (item.status === 'done') continue;
+    const savedForm = payload.items.find((form) => form.serviceId === item.scheduled_service_id);
+    if (!savedForm) throw new Error('Saved visit closeout is missing a member form');
+    const result = await completeScheduledService({
+      serviceId: item.scheduled_service_id, idempotencyKey: item.derived_idempotency_key,
+      body: structuredClone(savedForm.body), actor: payload.actor,
+    }, { phase: 'effects', itemId: item.id });
+    if (result.status !== 200 || result.body.serviceRecordId !== item.service_record_id) {
+      const retryableConflict = result.status === 409
+        && ['service_completion_pending', 'completion_pending', 'completion_side_effects_running'].includes(result.body.code);
+      if (result.status >= 400 && result.status < 500
+          && ![408, 425, 429].includes(result.status) && !retryableConflict) {
+        const code = result.body.code || 'member_effects_rejected';
+        const finishedElsewhere = await database.transaction(async (trx) => {
+          const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
+          await trx('customers').where({ id: visit.customer_id }).forNoKeyUpdate().first('id');
+          await lockStop(trx, visit.stop_base_key);
+          await trx('service_visits').where({ id: visit.id }).forUpdate().first('id');
+          const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
+          if (locked.status === 'failed') return false;
+          // Two runners (the sweep and a Resume tap) can read the same
+          // processing item; the one whose claim lands second is refused
+          // ownership. That refusal is not the member's verdict when the
+          // other runner already finished it under the same record.
+          const current = await trx('visit_completion_packet_items').where({ id: item.id }).forUpdate().first();
+          if (current?.status === 'done' && current.service_record_id === item.service_record_id) return true;
+          const member = await trx('scheduled_services').where({ id: item.scheduled_service_id }).first();
+          await require('./dispatch-alerts').createAlert({
+            type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
+            payload: { visitId: packet.visit_id, packetId: packet.id, serviceId: member.id, code },
+          });
+          await trx('visit_completion_packet_items').where({ id: item.id }).update({
+            status: 'failed', last_error: code, updated_at: trx.fn.now(),
+          });
+          await trx('visit_completion_packets').where({ id: packet.id }).update({
+            status: 'failed', error: JSON.stringify({ serviceId: member.id, code }), updated_at: trx.fn.now(),
+          });
+          await trx('service_visits').where({ id: packet.visit_id }).update({
+            billing_hold: true, updated_at: trx.fn.now(),
+          });
+          return false;
+        });
+        if (finishedElsewhere) continue;
+        return { status: 200, body: {
+          visitId: packet.visit_id, packetId: packet.id, state: 'office_required',
+          serviceId: item.scheduled_service_id, code,
+        } };
+      }
+      const pendingCode = result.body.code || 'member_effects_pending';
+      await database('visit_completion_packet_items').where({ id: item.id }).update({
+        last_error: pendingCode, updated_at: database.fn.now(),
+      });
+      return { status: 202, body: {
+        visitId: packet.visit_id, packetId: packet.id, state: 'service_effects_pending',
+        serviceId: item.scheduled_service_id, code: pendingCode,
+      } };
+    }
+    await database('visit_completion_packet_items').where({ id: item.id, service_record_id: item.service_record_id }).update({
+      status: 'done', completed_at: database.fn.now(), last_error: null, updated_at: database.fn.now(),
+    });
+  }
+  return { status: 202, body: { visitId: packet.visit_id, packetId: packet.id, state: 'member_effects_ready' } };
+}
+
+/** Existing completion/effect claims own retries; this sweep only resumes them. */
+async function resumePendingVisitCompletions({ limit = 3 } = {}) {
+  const packets = await db('visit_completion_packets').where({ status: 'processing' })
+    .where('updated_at', '<', new Date(Date.now() - 60 * 1000)).orderBy('updated_at').limit(limit).select('id');
+  for (const packet of packets) {
+    try { await runVisitCompletionPacketEffects(packet.id); }
+    catch (err) {
+      require('./logger').warn(`[visit-closeout] retry pending for packet ${packet.id} (${err.name || 'Error'})`);
+    }
+    // A persistently blocked packet must not monopolize the oldest-first batch.
+    await db('visit_completion_packets').where({ id: packet.id, status: 'processing' }).update({ updated_at: db.fn.now() });
+  }
+  return { checked: packets.length };
+}
+
+module.exports = { saveVisitCompletionPacket, runVisitCompletionPacketEffects, resumePendingVisitCompletions };
