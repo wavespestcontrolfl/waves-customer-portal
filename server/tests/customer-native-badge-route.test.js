@@ -48,6 +48,21 @@ test('reads enable and kill at request time', async () => {
   }
 });
 
+test.each([[undefined, false], ['ON', true], ['false', false]])('reports the badge startup gate for %s', (value, enabled) => {
+  if (value !== undefined) process.env.GATE_CUSTOMER_NATIVE_BADGES = value;
+  const log = jest.spyOn(console, 'log').mockImplementation(() => {});
+  try {
+    jest.isolateModules(() => {
+      const { gates, logGateStatus } = require('../config/feature-gates');
+      expect(gates.customerNativeBadges).toBe(enabled);
+      logGateStatus();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(`customerNativeBadges: ${enabled ? 'ENABLED' : 'DISABLED'}`));
+    });
+  } finally {
+    log.mockRestore();
+  }
+});
+
 test('requires authentication before counting', async () => {
   expect((await fetch(url)).status).toBe(401);
   expect(NotificationService.getCustomerUnreadCount).not.toHaveBeenCalled();

@@ -9,6 +9,7 @@ With the gate enabled, supported iOS builds mirror confirmed inbox counts on
 launch, resume, foreground notification receipt, the existing 30-second poll,
 and successful read/read-all. Read failures preserve the last badge. Sign-out
 and account/property changes invalidate pending updates and clear the icon.
+A confirmed cancelled account also clears it, including on a fresh launch.
 Routine access-token rotation does not clear it. Disabling the gate clears the
 badge after the next successful count read; offline clients reconcile on resume.
 Older server responses, older binaries, Android and web remain compatible.

@@ -119,6 +119,8 @@ export function AuthProvider({ children }) {
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
+      // Cancelled accounts never mount the bell, including on a fresh launch.
+      if (data?.cancelled === true) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
       try {

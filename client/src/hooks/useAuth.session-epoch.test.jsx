@@ -87,6 +87,19 @@ afterEach(() => {
 });
 
 describe('session epoch guards', () => {
+  it.each(['launch', 'refresh'])('clears a confirmed cancelled account badge on %s', async phase => {
+    stubLocalStorage({ waves_token: 'fixture-token' });
+    api.getMe.mockResolvedValueOnce({ id: 'fixture-customer', cancelled: phase === 'launch' });
+    await act(async () => { render(<AuthProvider><Probe /></AuthProvider>); });
+    if (phase === 'refresh') {
+      expect(clearNativeBadge).not.toHaveBeenCalled();
+      api.getMe.mockResolvedValueOnce({ id: 'fixture-customer', cancelled: true });
+      await act(async () => { await authApi.refreshCustomer(); });
+    }
+    expect(clearNativeBadge).toHaveBeenCalledTimes(1);
+    expect(authApi.customer.cancelled).toBe(true);
+  });
+
   it('clears the badge before waiting for native sign-out cleanup', async () => {
     stubLocalStorage({ waves_token: 'fixture-token', waves_refresh_token: 'fixture-refresh' });
     api.getMe.mockResolvedValueOnce({ id: 'fixture-customer' });
@@ -164,8 +177,9 @@ describe('session epoch guards', () => {
 
     // ...and the stalled property-A response finally lands. Last-response-
     // wins would repaint identity A while every request authenticates as B.
-    await act(async () => { slowMe.resolve({ id: 'cust-a' }); });
+    await act(async () => { slowMe.resolve({ id: 'cust-a', cancelled: true }); });
     expect(screen.getByTestId('customer-id').textContent).toBe('cust-b');
+    expect(clearNativeBadge).not.toHaveBeenCalled();
   });
 
   it('does NOT supersede an in-flight switch on a same-customer token rotation from another tab', async () => {
