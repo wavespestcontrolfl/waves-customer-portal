@@ -539,7 +539,11 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
   // leads for calls the promoted extractor identified as non-sales
   // (codex r4 P2). Null call_nature leaves V1's verdict alone.
   if (has(v2Extraction.call_nature)) {
-    winner('call_type', mapCallNatureToLegacy(v2Extraction.call_nature));
+    // A vendor call V2 cleared of spam is a non-lead 'other' in the legacy
+    // enum, not 'spam' (codex r3 P2): is_spam=false beside call_type='spam'
+    // would hand every legacy reader a contradictory record.
+    const clearedVendor = v2ContentNotSpam && v2Extraction.call_nature === 'vendor_or_partner';
+    winner('call_type', clearedVendor ? 'other' : mapCallNatureToLegacy(v2Extraction.call_nature));
     const v2IsLead = v2Extraction.call_nature === 'new_lead';
     if (merged.is_lead !== v2IsLead) adopt('is_lead', v2IsLead);
   }

@@ -111,7 +111,7 @@ const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-c
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { validateAddress, buildAddressLines } = require('./address-validation');
+const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -7544,6 +7544,9 @@ const CallRecordingProcessor = {
           try {
             v2AddressValidation = await validateAddress({
               addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
+              // A call's service address is in Florida; the pin keeps a
+              // spoken fragment unresolved instead of matched out of state.
+              administrativeArea: SERVICE_STATE,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -7618,6 +7621,10 @@ const CallRecordingProcessor = {
       // A NULL call_nature stays out of the hold: the schema reserves null
       // for truly indeterminate calls, where legacy creation behavior stands.
       'other',
+      // A vendor / referral partner is never a customer, whether V1 called
+      // the call spam or V2 cleared it (codex r3 P2): the cleared call keeps
+      // its summary and disposition, not a customer row.
+      'vendor_or_partner',
     ]);
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'

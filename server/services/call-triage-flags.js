@@ -1571,7 +1571,8 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const onFileZip = zip5Of(knownCustomer.addressZip);
   const onFileKey = streetCompareKey(onFileStreet);
   const onFileHouse = streetHouseNum(onFileStreet);
-  const onFileNameWord = streetNameOnly(onFileStreet).split(' ').filter(Boolean)[0] || '';
+  const onFileNameTokens = streetNameOnly(onFileStreet).split(' ').filter(Boolean);
+  const onFileUnit = String(knownCustomer.addressLine2 || '').trim();
 
   const street = [sa.street_line_1, sa.line1, sa.street].map((v) => String(v || '').trim()).find(Boolean) || '';
   const unit = [sa.street_line_2, sa.line2, sa.unit, sa.apt].map((v) => String(v || '').trim()).find(Boolean) || '';
@@ -1584,24 +1585,28 @@ function restatesOnFileAddress(sa, knownCustomer) {
   if (city && (!onFileCity || city !== onFileCity)) return false;
   if (zip && (!onFileZip || zip !== onFileZip)) return false;
   // A unit we cannot compare is new information (condo tower, second unit).
-  if (unit && !String(knownCustomer.addressLine2 || '').trim()) return false;
-  if (unit && unitKey(unit) !== unitKey(knownCustomer.addressLine2)) return false;
+  if (unit && !onFileUnit) return false;
+  if (unit && unitKey(unit) !== unitKey(onFileUnit)) return false;
+  // A unit spoken inside the raw text is compared the same way, BEFORE the
+  // structured street can answer (codex r2 P1, r3 P1): the extractor often
+  // fills street_line_1 and leaves "... Apt 5B" only in raw_text, and that
+  // is a new door against an on-file Apt 4B. A unit the file cannot compare
+  // is new information.
+  const rawUnit = (String(raw).toLowerCase().match(/(?:\b(?:apt|apartment|unit|ste|suite)\.?|#)\s*([a-z0-9]+(?:-[a-z0-9]+)?)/) || [])[1] || '';
+  if (rawUnit && !onFileUnit) return false;
+  if (rawUnit && unitKey(rawUnit) !== unitKey(onFileUnit)) return false;
 
   if (street) return streetCompareKey(street) === onFileKey;
   if (raw && /\d{2,}/.test(raw)) {
     // The parser could not split a numbered address: accept only when the
-    // spoken text carries the on-file house number AND the street's first
-    // word. A raw remark with no number ("I'm in Parrish") is judged on
-    // the locality components below.
-    const rawKey = String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-    // A unit spoken inside the raw text is compared like a structured one
-    // (codex r2 P1): "... Apt 5B" against an on-file Apt 4B is a new door,
-    // and a unit the file cannot compare is new information.
-    const rawUnit = (String(raw).toLowerCase().match(/(?:\b(?:apt|apartment|unit|ste|suite)\.?|#)\s*([a-z0-9]+(?:-[a-z0-9]+)?)/) || [])[1] || '';
-    if (rawUnit && !String(knownCustomer.addressLine2 || '').trim()) return false;
-    if (rawUnit && unitKey(rawUnit) !== unitKey(knownCustomer.addressLine2)) return false;
-    return !!onFileHouse && !!onFileNameWord
-      && new RegExp(`\\b${onFileHouse}\\b`).test(rawKey) && rawKey.includes(onFileNameWord);
+    // spoken text carries the on-file house number AND every word of the
+    // on-file street name, each as a whole token (codex r3 P1: a substring
+    // test let an on-file "W Lake Dr" accept any raw street containing a
+    // "w"). A raw remark with no number ("I'm in Parrish") is judged on the
+    // locality components below.
+    const rawTokens = new Set(String(raw).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(Boolean));
+    return !!onFileHouse && onFileNameTokens.length > 0
+      && rawTokens.has(onFileHouse) && onFileNameTokens.every((t) => rawTokens.has(t));
   }
   // A bare community name locates nothing we can compare.
   if (community && !city && !zip) return false;

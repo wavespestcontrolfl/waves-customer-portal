@@ -140,16 +140,20 @@ function deriveStatus(result, county) {
   return { status: STATUSES.VALIDATED_ACCEPT, ...base };
 }
 
-// Florida-only portal: every service address is in FL, so the request pins
-// administrativeArea. Without it a partial street went wherever Google
+// Florida-only portal: a CALL's service address is in FL, so that call site
+// pins administrativeArea. Without it a partial street went wherever Google
 // found a match — a house number plus a street name matched a same-numbered
 // ZIP in New Jersey, a bare street name matched a Nevada street — and came
 // back out_of_service_area or missing_component with an out-of-state
 // normalized address (2026-09-02..08 audit). Pinning the state keeps a
-// fragment unresolved instead of wrong.
+// fragment unresolved instead of wrong. The shared default stays UNPINNED
+// (codex r3 P2): the cancellation flow validates a customer's stated moving
+// address precisely to tell an out-of-area move from an in-area transfer,
+// and a Georgia address submitted with a Florida state would be corrected
+// toward Florida or come back indeterminate instead of out_of_service_area.
 const SERVICE_STATE = 'FL';
 
-async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = SERVICE_STATE } = {}) {
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null } = {}) {
   const lines = (addressLines || []).filter(Boolean);
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
@@ -200,4 +204,4 @@ function buildAddressLines(serviceAddress) {
   return [line1, line2].filter(Boolean);
 }
 
-module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION };
+module.exports = { validateAddress, deriveStatus, buildAddressLines, STATUSES, VERSION, SERVICE_STATE };

@@ -10,7 +10,7 @@ const { decideDisposition } = require('../services/call-disposition');
 const { adoptV2PrimaryFields } = require('../utils/extraction-compat');
 const { sameSpokenFirstName } = require('../utils/name-match');
 const { missedCallEligible } = require('../services/missed-call-bell');
-const { repeatCallerPlan, REPEAT_THRESHOLD } = require('../services/repeat-caller-bell');
+const { repeatCallerPlan, callerKey, REPEAT_THRESHOLD, LEASE_MS } = require('../services/repeat-caller-bell');
 const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
 
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
@@ -134,6 +134,17 @@ describe('finding 5/6 — repeat callers and spoken-name variants', () => {
     expect(repeatCallerPlan([at(1), at(30), at(200)], now)).toBeNull(); // third call outside 3h
     expect(repeatCallerPlan([at(1), at(30, { repeat_caller_alerted_at: '2026-09-06T17:30:00Z' }), at(90)], now)).toBeNull();
     expect(repeatCallerPlan([at(1), at(30, { booked: true }), at(90)], now)).toBeNull();
+    // codex r3: a live lease is another worker delivering; a stale one is a dead worker's and is reclaimable
+    expect(repeatCallerPlan([at(1), at(30, { repeat_caller_claim: new Date(now - 60000).toISOString() }), at(90)], now)).toBeNull();
+    expect(repeatCallerPlan([at(1), at(30, { repeat_caller_claim: new Date(now - LEASE_MS - 1000).toISOString() }), at(90)], now)).not.toBeNull();
+  });
+
+  test('repeat-caller identity is the full E.164 number, not a ten-digit suffix (r3 P2)', () => {
+    expect(callerKey('+19415550100')).toBe('19415550100');
+    expect(callerKey('9415550100')).toBe('19415550100');
+    expect(callerKey('+449415550100')).toBe('449415550100');
+    expect(callerKey('+449415550100')).not.toBe(callerKey('+19415550100'));
+    expect(callerKey('anonymous')).toBeNull();
   });
 });
 
@@ -160,6 +171,13 @@ describe('finding 7 — a V2 not-spam verdict overrides the V1 spam call', () =>
   test('property manager / vendor with is_spam_content=false is NOT spam (audit #20, #37)', () => {
     const { merged } = adoptV2PrimaryFields({ ...v1Spam }, v2({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: false, spam_kind: 'not_spam' }, recommended_disposition: 'callback_task_created' }));
     expect(merged.is_spam).toBe(false);
+  });
+  test('the cleared vendor call is legacy call_type other, not spam (r3 P2)', () => {
+    const { merged } = adoptV2PrimaryFields({ ...v1Spam }, v2({ call_nature: 'vendor_or_partner', spam_verdict: { is_spam_content: false, spam_kind: 'not_spam' } }));
+    expect(merged.call_type).toBe('other');
+    expect(merged.is_lead).toBe(false);
+    const kept = adoptV2PrimaryFields({ ...v1Spam }, v2({ call_nature: 'vendor_or_partner', spam_verdict: null })).merged;
+    expect(kept.call_type).toBe('spam');
   });
   test('a hard-spam nature keeps the discard even with a stray not-spam verdict', () => {
     const { merged } = adoptV2PrimaryFields({ ...v1Spam }, v2({ call_nature: 'spam_solicitation', spam_verdict: { is_spam_content: false, spam_kind: 'not_spam' } }));
@@ -222,6 +240,17 @@ describe('codex round 1', () => {
     expect(statesNewAddress(raw('500 Sample Tower Blvd #4B'), condo)).toBe(false);
     expect(statesNewAddress(raw('500 sample tower, unit 4-b'), condo)).toBe(false);
     expect(statesNewAddress(raw('500 sample tower apt 4b'), { ...condo, addressLine2: null })).toBe(true);
+    // codex r3: the structured street must not answer before the raw unit is compared
+    expect(statesNewAddress(v2({ property: { service_address: { street_line_1: '500 Sample Tower Blvd', raw_text: '500 Sample Tower Blvd Apt 5B' } } }), condo)).toBe(true);
+    expect(statesNewAddress(v2({ property: { service_address: { street_line_1: '500 Sample Tower Blvd', raw_text: '500 Sample Tower Blvd Apt 4B' } } }), condo)).toBe(false);
+  });
+
+  test('raw street names match as whole tokens, so a directional prefix cannot vouch for another street (r3 P1)', () => {
+    const lake = { hasAddress: true, addressLine1: '123 W Lake Dr', addressLine2: null, addressCity: 'Sarasota', addressZip: '34240' };
+    const raw = (raw_text) => v2({ property: { service_address: { raw_text } } });
+    expect(statesNewAddress(raw('123 New Palm Ave'), lake)).toBe(true);
+    expect(statesNewAddress(raw('123 Wrong Road'), lake)).toBe(true);
+    expect(statesNewAddress(raw('123 w lake, same place'), lake)).toBe(false);
   });
 
   test('the shadow bridge applies the same relationship rule as routing (P2)', () => {
