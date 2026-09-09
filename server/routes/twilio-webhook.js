@@ -69,17 +69,25 @@ async function hasOutboundHistory(phone) {
   if (digits.length !== 10) return false;
   const last10 = (col) => `right(regexp_replace(coalesce(${col}, ''), '\\D', '', 'g'), 10) = ?`;
   try {
+    // internal_alert AND admin_alert are operator alerts, never
+    // customer-facing (twilio.js isInternalAdminAlertType) — in both stores.
+    const notInternal = (col) => function notInternalAlert() { this.whereNotIn(col, ['internal_alert', 'admin_alert']).orWhereNull(col); };
     const sent = await db('sms_log')
       .where({ direction: 'outbound' })
       .whereIn('status', ['queued', 'sent', 'delivered'])
       .whereRaw(last10('to_phone'), [digits])
-      .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
+      .where(notInternal('message_type'))
       .first('id');
     if (sent) return true;
+    // Unified fallback: a send whose legacy log write was lost. A later
+    // bounce rewrites delivery_status, so a failed/undelivered/blocked row
+    // is not evidence either (null = never updated = accepted at send).
     const unified = await db('messages')
       .join('conversations', 'conversations.id', 'messages.conversation_id')
       .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
       .whereRaw(last10('conversations.contact_phone'), [digits])
+      .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
+      .where(notInternal('messages.message_type'))
       .first('messages.id');
     if (unified) return true;
     const suppressed = await db('messaging_suppression')
@@ -397,8 +405,13 @@ router.post('/sms', async (req, res) => {
     // unsubscribed" text back from a Waves line and a suppression row for
     // the vendor's number (audit 2026-09-09). Fails OPEN to eligible on a
     // query error so a real STOP is always honored. The AI assistant line
-    // texts strangers by design, so every sender on it stays eligible.
-    const complianceEligible = Boolean(customer) || isAiNumber || await hasOutboundHistory(From);
+    // texts strangers by design, so every sender on it stays eligible. A
+    // stored service contact (spouse / tenant / manager slot) is a known
+    // recipient whose sends may sit on the account's conversation with a
+    // null contact_phone — the relationship check covers them (codex r2).
+    const complianceEligible = Boolean(customer) || isAiNumber
+      || Boolean(await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => true))
+      || await hasOutboundHistory(From);
     const optCommand = complianceEligible ? detectSmsOptCommand(Body) : { action: null };
 
     if (optCommand.action === 'opt_out') {

@@ -5,7 +5,7 @@
 const state = { results: [], fail: false, tables: [] };
 jest.mock('../models/db', () => {
   const q = {
-    where: jest.fn(() => q), whereIn: jest.fn(() => q), whereRaw: jest.fn(() => q),
+    where: jest.fn(() => q), whereIn: jest.fn(() => q), whereNotIn: jest.fn(() => q), whereRaw: jest.fn(() => q),
     whereNot: jest.fn(() => q), orWhereNull: jest.fn(() => q), join: jest.fn(() => q),
     first: jest.fn(async () => { if (state.fail) throw new Error('db down'); return state.results.shift() ?? null; }),
   };
