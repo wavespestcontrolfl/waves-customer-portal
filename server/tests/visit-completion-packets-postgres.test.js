@@ -290,6 +290,14 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await request(path, { auth })).status).toBe(200);
     expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).body.code).toBe('visit_members_changed');
     await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: assignedMember.status, technician_id: fixture.techId });
+    // A rescheduled sibling the frozen visit kept is history too: it is
+    // outside the technician's current scope, so it must not gate the
+    // closeout as a "current" member, and it is not one of the forms.
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: 'rescheduled' });
+    expect((await request(path, { auth })).status).toBe(200);
+    expect((await request(path, { auth })).body.members.map((member) => member.status)).toContain('rescheduled');
+    expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).body.code).toBe('visit_members_changed');
+    await mockPg('scheduled_services').where({ id: assignedMember.id }).update({ status: assignedMember.status });
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
     if (fullBehavior) {
       expect((await request(`/api/admin/dispatch/${fixture.serviceIds[0]}/completion-status`, { auth })).status).toBe(409);
@@ -673,13 +681,20 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
   });
 
-  test('a retained cancelled child with a cleared assignment does not block the live member', async () => {
-    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ status: 'cancelled', technician_id: null });
+  // A cancelled child loses its assignment; a rescheduled child keeps a
+  // stale date and window while it awaits re-placement. Neither is this
+  // visit's work, so neither reaches the ownership or compatibility checks.
+  test.each([
+    ['cancelled', { status: 'cancelled', technician_id: null }],
+    ['rescheduled', { status: 'rescheduled', scheduled_date: '2000-01-01', window_start: '14:00', window_end: '16:00' }],
+  ])('a retained %s child does not block the live member', async (status, changes) => {
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update(changes);
+    expect(await saveVisitCompletionPacket(submission())).toMatchObject({ status: 409, body: { code: 'visit_members_changed' } });
     const input = submission({ items: submission().items.filter((item) => item.serviceId === fixture.serviceIds[0]) });
     expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { state: 'records_saved' } });
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(1);
     const packet = await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId }).first();
-    expect(packet.payload.retainedMembers).toEqual([{ serviceId: fixture.serviceIds[1], status: 'cancelled' }]);
+    expect(packet.payload.retainedMembers).toEqual([{ serviceId: fixture.serviceIds[1], status }]);
   });
 
   test('a member another runner finished first is accepted instead of failing the packet', async () => {

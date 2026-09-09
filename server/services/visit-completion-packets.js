@@ -15,7 +15,7 @@ const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { parseETDateTime } = require('../utils/datetime-et');
-const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { TERMINAL_ROW_STATUSES, RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
 function failure(status, code, error) {
@@ -51,7 +51,11 @@ function packetRequest({ visitId, idempotencyKey, items }) {
 
 function packetSnapshot(request, actor, members, existing) {
   if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
-  const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
+  // Terminal rows (recorded or non-performed) and a rescheduled child the
+  // frozen visit kept are history: never a form, never the technician's
+  // work here, never part of the shared property / date / technician check.
+  const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status)
+    || RETAINED_HISTORY_STATUSES.includes(member.status))
     .map((member) => ({ serviceId: member.id, status: member.status }));
   // The packet-level request hash still covers the original photo bytes (a
   // save-time replay must resend the same photos); each member's attempt hash

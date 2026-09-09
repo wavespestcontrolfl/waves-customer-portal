@@ -20,6 +20,16 @@ const TERMINAL_ROW_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 // (recurring-appointment-seeder.js:834) — its date/window are stale, so it
 // never JOINS a visit; it is not terminal for member counting.
 const JOIN_INELIGIBLE_STATUSES = [...TERMINAL_ROW_STATUSES, 'rescheduled'];
+// Non-performed history a FROZEN visit keeps as a member: once visit activity
+// has frozen the group, handleChildStopChanged preserves a child that is
+// cancelled / skipped / no-showed / rescheduled instead of splitting it out.
+// The closeout (route access, packet snapshot, VisitCloseoutSheet) works on
+// the live members and treats these rows as recorded history — a
+// rescheduled child is awaiting re-placement elsewhere, so it is never one
+// of this visit's forms and never gates access to the others.
+// CLIENT PAIRING: client/src/components/admin/VisitCloseoutSheet.jsx
+// RETAINED_STATUSES mirrors this list.
+const RETAINED_HISTORY_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
 
 // scheduled_services statuses that count as an upcoming visit for
 // customer-facing context (context-aggregator, comms drafting).
@@ -32,6 +42,7 @@ const OPEN_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 module.exports = {
   TERMINAL_ROW_STATUSES,
   JOIN_INELIGIBLE_STATUSES,
+  RETAINED_HISTORY_STATUSES,
   UPCOMING_SERVICE_STATUSES,
   OPEN_INVOICE_STATUSES,
 };

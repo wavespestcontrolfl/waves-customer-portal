@@ -5,10 +5,11 @@ import { CompletionPanel, createCompletionIdempotencyKey } from '../../pages/adm
 import { adminFetch } from '../../utils/admin-fetch';
 import { getCompletionResumeBody, putCompletionResumeBody, deleteCompletionResumeBody } from '../../lib/completion-resume-store';
 
-// A frozen visit retains its terminal children as history (the server's
-// TERMINAL_ROW_STATUSES); they never need a form. A completed member is only
+// A frozen visit retains its non-performed children as history (the server's
+// RETAINED_HISTORY_STATUSES — keep the two in sync); they never need a form
+// and the day schedule does not list them. A completed member is only
 // history before a packet exists — once one does, it is a recorded member.
-const RETAINED_STATUSES = ['cancelled', 'skipped', 'no_show'];
+const RETAINED_STATUSES = ['cancelled', 'skipped', 'no_show', 'rescheduled'];
 const liveMembers = (detail) => detail.members.filter((member) => !RETAINED_STATUSES.includes(member.status)
   && (detail.packet || member.status !== 'completed'));
 

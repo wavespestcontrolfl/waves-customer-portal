@@ -51,6 +51,7 @@ it('retained terminal members need no form and one live member can close the vis
       { ...services[0], status: 'on_site' },
       { id: 'gone', serviceType: 'Lawn Care', status: 'cancelled' },
       { id: 'done', serviceType: 'Mosquito', status: 'completed' },
+      { id: 'moved', serviceType: 'Irrigation', status: 'rescheduled' },
     ] };
   });
   mount();
@@ -59,6 +60,7 @@ it('retained terminal members need no form and one live member can close the vis
   await screen.findByText('1 of 1 forms ready. Saved forms and photos stay on this device until the visit is recorded.');
   expect(screen.queryByText('Lawn Care')).not.toBeInTheDocument();
   expect(screen.queryByText('Mosquito')).not.toBeInTheDocument();
+  expect(screen.queryByText('Irrigation')).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Complete visit' }));
   await screen.findByText('Visit closeout is complete.');
   const [, options] = adminFetch.mock.calls.find(([, opts]) => opts?.method === 'POST');

@@ -10,12 +10,13 @@ const { completionOwnershipError } = require('../services/complete-scheduled-ser
 const { saveVisitCompletionPacket, runVisitCompletionPacketEffects } = require('../services/visit-completion-packets');
 const { dateOnly } = require('../services/visit-groups');
 const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
-const { TERMINAL_ROW_STATUSES } = require('../services/visit-context/statuses');
-
-// A frozen visit retains cancelled / skipped / no-show children as history;
-// the closeout works on its live and recorded members (the saver's own
-// retainedMembers rule), so those rows never gate access to it.
-const RETAINED_HISTORY_STATUSES = TERMINAL_ROW_STATUSES.filter((status) => status !== 'completed');
+// A frozen visit retains cancelled / skipped / no-show / rescheduled children
+// as history; the closeout works on its live and recorded members (the
+// saver's own retainedMembers rule), so those rows never gate access to it.
+// A rescheduled child in particular is outside the technician's current
+// scope and the day schedule, so counting it as current would 404 the whole
+// closeout for the technician (codex #4026: retained rescheduled history).
+const { RETAINED_HISTORY_STATUSES } = require('../services/visit-context/statuses');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireTechOrAdmin, noStore);
