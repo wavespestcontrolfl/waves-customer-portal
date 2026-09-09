@@ -406,13 +406,16 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
   // link-visible scope (sending / sent / viewed while unexpired, accepted /
   // declined always; GH codex P1 r6 + uncapped P1 r19), so a SERVER anchor
   // is never delivered beside an unverified price the link would show.
+  // Fixed sent/viewed holds remain blockers after expiry so the query cannot
+  // silently drop a promised property before the validity check runs.
   let query = database('estimates')
     .where({ estimate_group_id: estimate.estimate_group_id })
     .whereNot({ id: estimate.id })
     .whereNull('archived_at')
     .where((q) => q
       .where((publishable) => publishable.whereIn('status', ['draft', 'scheduled', 'send_failed']).whereNull('price_locked_at'))
-      .orWhere((visible) => applyLinkVisibleSiblingScope(visible)));
+      .orWhere((visible) => applyLinkVisibleSiblingScope(visible))
+      .orWhere((fixed) => fixed.whereIn('status', ['sent', 'viewed']).whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)));
   if (forUpdate) query = query.forUpdate();
   const siblings = await query.select('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data');
   for (const sibling of siblings) {
