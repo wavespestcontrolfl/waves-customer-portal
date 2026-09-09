@@ -16,7 +16,7 @@ const row = (overrides = {}) => ({
   scheduled_date: '2026-08-30', first_name: 'MUST NOT LEAK', phone: '+15550000000', address_line1: '1 Private Way',
   ...overrides,
 });
-const photos = [{ id: 'p2', s3_key: 'k2', mime_type: 'image/jpeg', photo_order: 1, zone: null }, { id: 'p1', s3_key: 'k1', mime_type: 'image/png', photo_order: 0, zone: 'front' }, { id: 'p0', s3_key: 'pending/x', photo_order: 2 }];
+const photos = [{ id: 'p2', s3_key: 'k2', mime_type: 'image/jpeg', photo_order: 1, zone: null }, { id: 'p1', s3_key: 'k1', mime_type: 'image/png', photo_order: 0, zone: 'front' }];
 const sig = (level) => ({ level, evidence: 'e', confidence: 'moderate' });
 const analysis = (overrides = {}) => ({
   status: 'complete', reason: null, provider: 'gemini', model: 'gemini-3.8-flash', fallbackUsed: false, failures: [], latencyMs: 4200,
@@ -37,7 +37,7 @@ describe('fixture export shape', () => {
     expect(c).toMatchObject({ assessmentId: 'a1', customerId: 'c1', serviceId: 's1', visitDate: '2026-08-30', month: 8, season: 'peak' });
     expect(c.confirmed).toEqual({ turf_density: 75, weed_suppression: 85, color_health: 80, fungus_control: 75, thatch_level: 60, stress_damage: 55 });
     expect(c.legacyAi.turf_density).toBe(70);
-    expect(c.photos).toEqual([{ id: 'p1', s3Key: 'k1', mimeType: 'image/png', zone: 'front' }, { id: 'p2', s3Key: 'k2', mimeType: 'image/jpeg', zone: null }]); // pending/ dropped, ordered
+    expect(c.photos).toEqual([{ id: 'p1', s3Key: 'k1', mimeType: 'image/png', zone: 'front' }, { id: 'p2', s3Key: 'k2', mimeType: 'image/jpeg', zone: null }]); // ordered
     expect(c.context.priorSummary).toHaveLength(400);
     // No names, phones, addresses — and no legacy observation text (it can echo technician context).
     expect(JSON.stringify(c)).not.toMatch(/MUST NOT LEAK|\+1555|Private Way|LOCKBOX|Smith|legacy obs/);
@@ -50,6 +50,14 @@ describe('fixture export shape', () => {
     expect(evalLib.scrubPriorSummary('  ', ['x'])).toBeNull();
     expect(evalLib.scrubPriorSummary(null)).toBeNull();
     expect(evalLib.scrubPriorSummary('Fine lawn.', [null, 'A'])).toBe('Fine lawn.');
+    // A summary that repeats an access credential is omitted whole — the scrubber does not know codes.
+    for (const text of ['Lawn improved; gate code 4471 for the side gate.', 'The lockbox is 2288, treat the back first.']) expect(evalLib.scrubPriorSummary(text, ['Jane'])).toBeNull();
+    expect(evalLib.fixtureCase(row(), [], { priorSummary: 'Use gate code 4471.' }).context.priorSummary).toBeNull();
+    // A failed upload (a pending/ key) makes the whole case photo-less and flagged: never a partial replay.
+    const partial = evalLib.fixtureCase(row(), [...photos, { id: 'p3', s3_key: 'pending/a1/3.jpg', photo_order: 2 }], {});
+    expect(partial).toMatchObject({ incompletePhotos: true, photos: [] });
+    expect(evalLib.fixtureCase(row(), photos, {})).toMatchObject({ incompletePhotos: false });
+    expect(evalLib.fixtureCase(row(), photos, {}).photos).toHaveLength(2);
     expect(evalLib.fixtureCase(row({ scheduled_date: null, composite_scores: null }), []).visitDate).toBe('2026-09-01');
   });
 
@@ -165,6 +173,10 @@ describe('scoring', () => {
     // turf: |70-75| = 5 and |80-75| = 5 → MAE 5, bias (−5 + 5)/2 = 0
     expect(summary.mae.vsConfirmed.turf_density).toEqual({ mae: 5, bias: 0, n: 2 });
     expect(summary.mae.vsLegacyAi.turf_density).toEqual({ mae: 5, bias: 5, n: 2 });
+    // No priced leg is an unknown spend, never $0.
+    const unpriced = evalLib.summarize([evalLib.scoreResult(testCase, analysis({ model: 'gemini-override' }), { adjust: (s) => s })]);
+    expect(unpriced.costUsd).toEqual({ total: null, perRun: null, priced: 0 });
+    expect(evalLib.renderMarkdown(unpriced)).toMatch(/est\. cost \$n\/a/);
     expect(summary.mae.vsConfirmed.color_health).toEqual({ mae: 0, bias: 0, n: 1 }); // a2 color 8 → 80 = confirmed 80; a1 undeterminable
     expect(summary.undeterminableRate.color_health).toBe(0.5);
     expect(summary.causeNamedBelowModerate).toBe(2);
@@ -201,6 +213,10 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
         expect(error).toHaveBeenLastCalledWith(expect.stringContaining(`${flag} needs a positive whole number`));
       }
       expect(exit).toHaveBeenCalledTimes(6);
+      // --thinking reaches the Gemini leg only, so it cannot be combined with a forced fallback.
+      expect(() => parseArgs(['node', 'x', '--run', 'f.json', '--force-fallback', '--thinking', 'HIGH'])).toThrow('exit 2');
+      expect(error).toHaveBeenLastCalledWith(expect.stringContaining('--thinking has no effect with --force-fallback'));
+      expect(parseArgs(['node', 'x', '--run', 'f.json', '--force-fallback'])).toMatchObject({ forceFallback: true, thinking: null });
     } finally { exit.mockRestore(); error.mockRestore(); }
   });
 
@@ -226,6 +242,14 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     // The visit's gauge reading rides along: the assessment's service record (back-link, else the scheduled service's latest record) → turf_height_readings.
     expect(src).toMatch(/loadVisitTurfHeight\(row, knex\),\s*\]\);/);
     expect(src).toMatch(/turfHeightIn: turfHeight,/);
+    // A visit with a failed upload is out of the population (a partial replay is not comparable to full-set scores).
+    expect(src).toMatch(/\.whereNotExists\(function \(\) \{ this\.select\(1\)\.from\('lawn_assessment_photos as p'\)\.whereRaw\('p\.assessment_id = la\.id'\)\.andWhere\('p\.s3_key', 'like', 'pending\/%'\); \}\)/);
+    // The grass type is what the route could have known at the visit: a profile untouched since before the assessment,
+    // else customers.lawn_type (never written by /assess) — never the profile /assess captured from this assessment's own read.
+    expect(src).toMatch(/grassType: await loadVisitGrassType\(row, knex\),/);
+    expect(src).toMatch(/const profilePredates = profile\?\.grass_type && assessedAt && profile\.updated_at && new Date\(profile\.updated_at\) < assessedAt;/);
+    expect(src).toMatch(/'la\.created_at'/);
+    expect(src).not.toMatch(/grassType: grassCtx\.grassTypeLabel/);
     expect(src).toMatch(/knex\('turf_height_readings'\)\.where\(\{ service_record_id: serviceRecordId \}\)\.first\('manual_height_in'\)/);
     expect(src).toMatch(/knex\('service_records'\)\.where\(\{ scheduled_service_id: row\.service_id \}\)\.orderBy\('created_at', 'desc'\)\.first\('id'\)/);
     // The script is a module for tests and a program for operators.
@@ -238,6 +262,7 @@ describe('runner', () => {
     evalLib.fixtureCase(row({ id: 'a1' }), photos, {}),
     evalLib.fixtureCase(row({ id: 'a2', scheduled_date: '2026-07-01' }), [{ id: 'p9', s3_key: 'broken', photo_order: 0 }], {}),
     evalLib.fixtureCase(row({ id: 'a3' }), [], {}),
+    evalLib.fixtureCase(row({ id: 'a4' }), [...photos, { id: 'p4', s3_key: 'pending/a4/3.jpg', photo_order: 2 }], {}),
   ];
 
   test('replays every case `repeat` times with numbered zones and the visit context, skips unreadable or photo-less cases', async () => {
@@ -254,7 +279,7 @@ describe('runner', () => {
     expect(calls[0].thinkingLevel).toBe('LOW');
     expect(out.results.map((r) => [r.assessmentId, r.repeatIndex])).toEqual([['a1', 0], ['a1', 1]]);
     expect(out.results[0].inputHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(out.skipped.sort((a, b) => a.assessmentId.localeCompare(b.assessmentId))).toEqual([{ assessmentId: 'a2', reason: 'photo read failed: NoSuchKey' }, { assessmentId: 'a3', reason: 'no stored photos' }]);
+    expect(out.skipped.sort((a, b) => a.assessmentId.localeCompare(b.assessmentId))).toEqual([{ assessmentId: 'a2', reason: 'photo read failed: NoSuchKey' }, { assessmentId: 'a3', reason: 'no stored photos' }, { assessmentId: 'a4', reason: 'incomplete stored photo set' }]);
     expect(out.summary.runs).toBe(2);
   });
 });

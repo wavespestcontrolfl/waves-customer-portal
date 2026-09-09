@@ -89,6 +89,11 @@ function parseArgs(argv) {
     if (!spec) { console.error(`unknown argument: ${argv[i]}`); process.exit(2); }
     args[spec.key] = spec.value ? spec.parse(argv[++i]) : true;
   }
+  // analyzeVisit passes thinkingLevel to the Gemini leg only (the Astra
+  // fallback runs at its fixed reasoning effort), so on a forced-fallback run
+  // the level would change nothing while labelling every result with it —
+  // a thinking-level comparison built on that would be wrong (Codex #4153 r9).
+  if (args.forceFallback && args.thinking) { console.error('--thinking has no effect with --force-fallback (only the Gemini leg takes a thinking level) — drop one of them'); process.exit(2); }
   return args;
 }
 
@@ -125,8 +130,11 @@ async function exportFixture(args) {
       .leftJoin('scheduled_services as ss', 'ss.id', 'la.service_id')
       .where('la.confirmed_by_tech', true)
       .whereExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'not like', 'pending/%'); })
+      // A visit with a failed upload (a `pending/` key) was scored on the full
+      // set: a partial replay is not comparable, so the case is out.
+      .whereNotExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'like', 'pending/%'); })
       .modify((q) => { if (hasRunTable) q.whereNotExists(function () { this.select(1).from('lawn_assessment_runs as r').whereRaw('r.assessment_id = la.id'); }); })
-      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date', ...(hasServiceRecordColumn ? ['la.service_record_id'] : []))
+      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.created_at', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date', ...(hasServiceRecordColumn ? ['la.service_record_id'] : []))
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC, la.created_at DESC');
     // Selection is the library's tested mechanism: the explicit ids plus the
     // deterministic sample, or the whole population with --all.
@@ -148,7 +156,7 @@ async function exportFixture(args) {
         loadVisitTurfHeight(row, knex),
       ]);
       cases.push(evalLib.fixtureCase(row, photos, {
-        grassType: grassCtx.grassTypeLabel || null,
+        grassType: await loadVisitGrassType(row, knex),
         irrigation,
         turfHeightIn: turfHeight,
         // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
@@ -162,6 +170,24 @@ async function exportFixture(args) {
   } finally {
     await knex.destroy();
   }
+}
+
+// The grass type the route could have known AT THE VISIT. /assess auto-captures
+// the model's own grass read into customer_turf_profiles after scoring, so the
+// current profile may BE this assessment's outcome: the profile counts only
+// when it has not been touched since before the assessment was created
+// (updated_at earlier than la.created_at); otherwise the legacy
+// customers.lawn_type (never written by /assess) or nothing — the same
+// fallback order the route's loader uses, minus anything that cannot be
+// proven to predate the visit (Codex #4153 r8).
+async function loadVisitGrassType(row, knex) {
+  const { grassTypeLabel, normalizeGrassType } = require(path.join(REPO, 'server/services/lawn-grass-context'));
+  const assessedAt = row.created_at ? new Date(row.created_at) : null;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('grass_type', 'updated_at').catch(() => null);
+  const profilePredates = profile?.grass_type && assessedAt && profile.updated_at && new Date(profile.updated_at) < assessedAt;
+  const customer = profilePredates ? null : await knex('customers').where({ id: row.customer_id }).first('lawn_type');
+  const grassType = profilePredates ? profile.grass_type : normalizeGrassType(customer?.lawn_type) || null;
+  return grassType ? grassTypeLabel(grassType) : null;
 }
 
 // The gauge reading the visit's completion recorded: turf_height_readings

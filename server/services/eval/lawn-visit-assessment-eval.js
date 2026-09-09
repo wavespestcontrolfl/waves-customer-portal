@@ -28,6 +28,7 @@
 const { applySeasonalAdjustment } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores, contextHash } = require('../lawn-visit-assessment');
 const { scrubCustomerText, SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
+const { containsReportAccessCode } = require('../service-report/technician-report-copy');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
 // USD per 1M tokens, standard tier, checked 2026-09-08. Thinking is billed at
@@ -83,6 +84,12 @@ function fixtureCase(row, photos = [], context = {}) {
   const composite = parseJson(row.composite_scores, {}) || {};
   const visitDate = dateString(row.scheduled_date) || dateString(row.service_date) || '';
   const month = Number(visitDate.slice(5, 7)) || null;
+  // A photo whose upload failed is stored under a `pending/` key, but the
+  // scores were computed from the full submitted set — a replay on the rest
+  // would compare a partial-input answer against full-input scores, so the
+  // case is exported photo-less and skipped, never replayed partially
+  // (Codex #4153 r8).
+  const incompletePhotos = photos.some((photo) => photo && String(photo.s3_key || '').startsWith('pending/'));
   return {
     assessmentId: row.id,
     customerId: row.customer_id,
@@ -92,8 +99,9 @@ function fixtureCase(row, photos = [], context = {}) {
     season: row.season || null,
     confirmed: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(row[key])])),
     legacyAi: Object.fromEntries(SCORE_KEYS.map((key) => [key, numberOrNull(composite[key])])),
-    photos: photos
-      .filter((photo) => photo && photo.s3_key && !String(photo.s3_key).startsWith('pending/'))
+    incompletePhotos,
+    photos: (incompletePhotos ? [] : photos)
+      .filter((photo) => photo && photo.s3_key)
       .sort((a, b) => (a.photo_order ?? 0) - (b.photo_order ?? 0))
       .map((photo) => ({ id: photo.id, s3Key: photo.s3_key, mimeType: photo.mime_type || 'image/jpeg', zone: photo.zone || null })),
     context: {
@@ -142,6 +150,10 @@ function scrubPriorSummary(text, customerNames = []) {
     out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'), 'the customer');
   }
   out = out.replace(/\b(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+the customer\b/g, 'the customer').replace(/\bthe customer(?:\s+the customer)+\b/g, 'the customer').trim();
+  // The scrubber does not know access codes; a summary that repeats a gate /
+  // garage / lockbox credential (the report's detector) is omitted whole —
+  // no credential ever enters a fixture file (Codex #4153 r8).
+  if (containsReportAccessCode(out)) return null;
   return out ? out.slice(0, 400) : null;
 }
 
@@ -344,7 +356,9 @@ function summarize(results = []) {
       output: results.reduce((sum, r) => sum + (Number(r.usage?.output_tokens) || 0), 0),
       reasoning: results.reduce((sum, r) => sum + (Number(r.usage?.reasoning_tokens) || 0), 0),
     },
-    costUsd: { total: round(costs.reduce((sum, v) => sum + v, 0), 4), perRun: round(mean(costs), 4), priced: costs.length },
+    // No priced leg (a registry override selecting a model PRICES_PER_M does
+    // not list) is an UNKNOWN spend, never $0 (Codex #4153 r8).
+    costUsd: { total: costs.length ? round(costs.reduce((sum, v) => sum + v, 0), 4) : null, perRun: costs.length ? round(mean(costs), 4) : null, priced: costs.length },
     repeatVariance: variance,
   };
 }
@@ -390,6 +404,7 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
   async function worker() {
     while (queue.length) {
       const testCase = queue.shift();
+      if (testCase.incompletePhotos) { skipped.push({ assessmentId: testCase.assessmentId, reason: 'incomplete stored photo set' }); continue; }
       let photos;
       try {
         photos = await Promise.all(testCase.photos.map(async (photo) => ({ ...(await deps.loadPhoto(photo.s3Key)), zone: photo.zone })));
