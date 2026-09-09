@@ -36,8 +36,13 @@ describe("useEmailInbox search (F0579)", () => {
     const wrapper = ({ children }) => <MemoryRouter initialEntries={["/admin/communications"]}>{children}</MemoryRouter>;
     const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    // Searching from page 2: the page reset must ride the same commit as
+    // the query, or the list asks for page 1 of the OLD query first.
+    act(() => { result.current.setPage(2); });
+    await act(async () => { await Promise.resolve(); });
     const before = inboxCalls().length;
     expect(before).toBeGreaterThan(0);
+    expect(inboxCalls()[before - 1]).toContain("page=2");
 
     act(() => { result.current.setSearch("p"); });
     act(() => { result.current.setSearch("pr"); });
@@ -49,5 +54,6 @@ describe("useEmailInbox search (F0579)", () => {
     const after = inboxCalls();
     expect(after.length).toBe(before + 1);
     expect(after[after.length - 1]).toContain("search=price");
+    expect(after[after.length - 1]).toContain("page=1");
   });
 });
