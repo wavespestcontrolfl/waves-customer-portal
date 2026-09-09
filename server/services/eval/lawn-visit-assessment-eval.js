@@ -112,6 +112,14 @@ function fixtureCase(row, photos = [], context = {}) {
     context: {
       grassType: context.grassType || null,
       irrigation: context.irrigation || null,
+      // Every context field the exporter could NOT prove visit-time is
+      // omitted AND named here with its reason, so a replay that ran without
+      // it is never silent about it (Codex #4153 r13/r14): the report counts
+      // them. Also a prior summary this module itself withheld.
+      omitted: [
+        ...(Array.isArray(context.omitted) ? context.omitted : []),
+        ...(context.priorSummary && nameCollidesWithVocabulary(context.priorSummary, context.customerNames) ? [{ field: 'priorSummary', reason: 'customer_name_is_lawn_vocabulary' }] : []),
+      ],
       // The gauge reading the visit's completion recorded (turf_height_readings
       // via the assessment's service record), in the same 0.5–8 in range the
       // route accepts — the prompt uses it to tell scalping from other stress,
@@ -148,8 +156,23 @@ function customerNameTokens(customerNames) {
   }
   return [...tokens].sort((a, b) => b.length - a.length);
 }
+// A customer name that is also lawn vocabulary ("Brown", "Green", "Moss",
+// "Fields") cannot be scrubbed without rewriting agronomic evidence ("brown
+// patches" → "the customer patches"), and cannot be left in: the summary is
+// omitted whole (Codex #4153 r14).
+const LAWN_VOCABULARY = new Set(('brown green gray grey white black yellow patch patches moss rose bush field fields lawn lawns grass hill hills wood woods stone rock sand marsh dew rain storm frost weed weeds '
+  + 'spring summer fall winter shade sun sunny root roots leaf leaves bloom flower flowers plant garden gardener meadow grove park lake brook river ash oak pine palm cypress maple hedge thorn berry '
+  + 'bug bugs worm worms moth chinch grub sedge clover spurge drought water sprinkler mow edge turf blade blades soil clay').split(/\s+/));
+function nameCollidesWithVocabulary(text, customerNames = []) {
+  const summary = String(text || '').toLowerCase();
+  return [...customerNameTokens(customerNames)].some((token) => {
+    const lower = token.toLowerCase();
+    return (LAWN_VOCABULARY.has(lower) || SUMMARY_CAUSE_RE.test(lower)) && new RegExp(`(?<![\\p{L}\\p{N}])${lower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu').test(summary);
+  });
+}
 function scrubPriorSummary(text, customerNames = []) {
   if (!text) return null;
+  if (nameCollidesWithVocabulary(text, customerNames)) return null;
   let out = scrubCustomerText(String(text));
   for (const token of customerNameTokens(customerNames)) {
     out = out.replace(new RegExp(`(?<![\\p{L}\\p{N}])${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'giu'), 'the customer');
@@ -371,6 +394,8 @@ function summarize(results = []) {
     undeterminableRate,
     causeNamedBelowModerate: complete.reduce((sum, r) => sum + r.causeNamedBelowModerate.length, 0),
     findingsPerRun: round(mean(complete.map((r) => r.findings.length))),
+    // Runs that replayed without context the exporter could not prove visit-time, per field.
+    contextOmitted: contextOmissions(results),
     latencyMs: { p50: percentile(latencies, 50), p95: percentile(latencies, 95) },
     tokens: {
       input: results.reduce((sum, r) => sum + (Number(r.usage?.input_tokens) || 0), 0),
@@ -386,11 +411,25 @@ function summarize(results = []) {
 }
 
 const unpricedNote = (summary) => (summary.costUsd.unpriced ? `, ${summary.costUsd.unpriced} with an unpriced leg — spend unknown` : '');
+function contextOmissions(results) {
+  const byField = {};
+  let runs = 0;
+  for (const r of results) {
+    const omitted = Array.isArray(r.contextOmitted) ? r.contextOmitted : [];
+    if (omitted.length) runs += 1;
+    for (const entry of omitted) byField[entry.field] = (byField[entry.field] || 0) + 1;
+  }
+  return { runs, byField };
+}
+const omittedNote = (summary) => (summary.contextOmitted?.runs
+  ? `context omitted (not provably visit-time) in ${summary.contextOmitted.runs} run(s): ${Object.entries(summary.contextOmitted.byField).map(([field, n]) => `${field} ×${n}`).join(', ')}`
+  : 'no context omitted');
 function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment eval' } = {}) {
   const lines = [`## ${title}`, ''];
   lines.push(`runs ${summary.runs} · cases ${summary.cases} · unavailable ${summary.unavailable} (${fmtRate(summary.unavailableRate)}) · findings/run ${summary.findingsPerRun ?? 'n/a'} · cause named below moderate: ${summary.causeNamedBelowModerate}`);
   lines.push(`latency p50 ${summary.latencyMs.p50 ?? 'n/a'} ms · p95 ${summary.latencyMs.p95 ?? 'n/a'} ms · tokens in ${summary.tokens.input} / out ${summary.tokens.output} / reasoning ${summary.tokens.reasoning} · est. cost $${summary.costUsd.total ?? 'n/a'} ($${summary.costUsd.perRun ?? 'n/a'} per run, ${summary.costUsd.priced} priced${unpricedNote(summary)})`);
-  lines.push(`answered by: ${Object.entries(summary.byProvider).map(([k, v]) => `${k} ×${v}`).join(', ') || 'n/a'}`, '');
+  lines.push(`answered by: ${Object.entries(summary.byProvider).map(([k, v]) => `${k} ×${v}`).join(', ') || 'n/a'}`);
+  lines.push(omittedNote(summary), '');
   lines.push('| metric | MAE vs confirmed | bias | n | MAE vs legacy AI | bias | n | not determinable |');
   lines.push('|---|---|---|---|---|---|---|---|');
   for (const key of SCORE_KEYS) {
@@ -441,7 +480,7 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
       const visionContext = contextFor(testCase);
       for (let i = 0; i < repeat; i += 1) {
         const analysis = await deps.analyzeVisit({ photos, photoZones, visionContext, thinkingLevel });
-        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext }) });
+        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
         log(`${testCase.assessmentId} run ${i + 1}/${repeat}: ${analysis.status}${analysis.status === 'complete' ? ` via ${analysis.provider}${analysis.fallbackUsed ? ' (fallback)' : ''}` : ` (${analysis.reason})`} ${analysis.latencyMs} ms`);
       }
     }
@@ -460,6 +499,8 @@ module.exports = {
   contextFor,
   costUsd,
   scrubPriorSummary,
+  nameCollidesWithVocabulary,
+  contextOmissions,
   billedLegs,
   sumUsage,
   legsCostUsd,

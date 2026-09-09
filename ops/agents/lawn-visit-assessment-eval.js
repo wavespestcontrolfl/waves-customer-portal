@@ -151,23 +151,29 @@ async function exportFixture(args) {
       const visitDate = evalLib.dateString(row.scheduled_date) || evalLib.dateString(row.service_date);
       const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
       // Each case's photos load with the case — one small query per exported row.
-      const [photos, irrigation, customer, prior, turfHeight] = await Promise.all([
+      const [photos, irrigation, customer, prior, turfHeight, grass] = await Promise.all([
         knex('lawn_assessment_photos').where({ assessment_id: row.id }).orderBy('photo_order').select('id', 's3_key', 'mime_type', 'photo_order', 'zone'),
         loadVisitIrrigation(row, knex),
         knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
         loadPriorSummary({ customerId: row.customer_id, serviceId: row.service_id, scheduledService, visitDate, propertyHistoryEnabled }, knex).catch((err) => { console.error(`warning: prior-visit summary failed for ${row.id}: ${err.message}`); return null; }),
         loadVisitTurfHeight(row, knex),
+        loadVisitGrassType(row, knex),
       ]);
+      const priorProvenance = await visitTimePriorSummary(row, prior, knex);
       cases.push(evalLib.fixtureCase(row, photos, {
-        grassType: await loadVisitGrassType(row, knex),
-        irrigation,
+        grassType: grass.value,
+        irrigation: irrigation.value,
         turfHeightIn: turfHeight,
         // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
-        priorSummary: prior,
+        priorSummary: priorProvenance.value,
         customerNames: [customer?.first_name, customer?.last_name],
+        // Every field the ledger could not prove visit-time, with why (the fixture and the report carry it).
+        omitted: [grass, irrigation, priorProvenance].filter((entry) => entry.omitted).map((entry) => ({ field: entry.field, reason: entry.omitted })),
       }));
     }
     const fixture = { generatedAt: new Date().toISOString(), propertyHistory: propertyHistoryEnabled, population: all.length, cases };
+    const omittedCases = cases.filter((c) => c.context.omitted.length).length;
+    console.error(`context omitted (not provably visit-time) in ${omittedCases} of ${cases.length} case(s)${omittedCases ? `: ${Object.entries(cases.flatMap((c) => c.context.omitted).reduce((acc, o) => ({ ...acc, [o.field]: (acc[o.field] || 0) + 1 }), {})).map(([f, n]) => `${f} ×${n}`).join(', ')}` : ''}`);
     console.error(`exported ${cases.length} case(s) of ${all.length} confirmed assessments with photos · prior summary ${propertyHistoryEnabled ? 'property-scoped (GATE_LAWN_PROPERTY_HISTORY on)' : 'legacy customer-wide (GATE_LAWN_PROPERTY_HISTORY off)'} · photos ${cases.reduce((n, c) => n + c.photos.length, 0)} · zone-labeled ${cases.reduce((n, c) => n + c.photos.filter((p) => p.zone).length, 0)}`);
     process.stdout.write(`${JSON.stringify(fixture, null, 2)}\n`);
   } finally {
@@ -175,55 +181,61 @@ async function exportFixture(args) {
   }
 }
 
-// The grass type the route could have known AT THE VISIT. /assess auto-captures
-// the model's own grass read into customer_turf_profiles after scoring — and
-// touches the row's updated_at even when COALESCE keeps an existing value —
-// so the timestamp cannot tell a pre-existing value from this assessment's
-// outcome (Codex #4153 r8, r13). What can: the capture only ever FILLS a
-// blank, so a profile row that already EXISTED before the assessment
-// (created_at earlier than la.created_at — intake and estimates create it
-// with the grass) is the value the route read; a row this or a later
-// assessment created is that capture. Otherwise the legacy
-// customers.lawn_type (never written by /assess), or nothing.
-async function loadVisitGrassType(row, knex) {
-  const { grassTypeLabel, normalizeGrassType } = require(path.join(REPO, 'server/services/lawn-grass-context'));
-  const profile = await visitTimeProfile(row, knex);
-  const customer = profile?.grass_type ? null : await knex('customers').where({ id: row.customer_id }).first('lawn_type');
-  const grassType = profile?.grass_type || normalizeGrassType(customer?.lawn_type) || null;
-  return grassType ? grassTypeLabel(grassType) : null;
-}
-
-// The customer's turf profile when it provably existed before this
-// assessment; null otherwise.
+// ── Visit-time provenance ─────────────────────────────────────────────
+// No legacy assessment stored the context its call received, so the export
+// supplies a profile-derived field ONLY where the ledger PROVES it unchanged
+// since the visit, and otherwise omits it and says so ({ value: null,
+// omitted: <reason> } → the fixture's context.omitted, the run report's
+// count). The provable condition for customer_turf_profiles is "untouched
+// since before the assessment": every writer of the row — the /assess grass
+// capture (this assessment's own included: a pre-existing-but-blank grass
+// filled by this very call is outcome, Codex #4153 r14), a confirm's field
+// checks, an admin edit (admin-customer-turf-profile.js writes no ledger
+// row) — bumps updated_at, so updated_at < la.created_at is exactly "no
+// writer since". The same-assessment touch therefore omits (recorded), never
+// silently biases. customers.lawn_type is proven the same way on
+// customers.updated_at (Codex #4153 r8, r11, r13, r14).
+function proven(field, value) { return { field, value, omitted: null }; }
+function omitted(field, reason) { return { field, value: null, omitted: reason }; }
 async function visitTimeProfile(row, knex) {
   const assessedAt = row.created_at ? new Date(row.created_at) : null;
-  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('grass_type', 'irrigation_type', 'irrigation_inches_per_week', 'created_at').catch(() => null);
-  if (!profile || !assessedAt || !profile.created_at || !(new Date(profile.created_at) < assessedAt)) return null;
-  return profile;
+  if (!assessedAt) return { profile: null, reason: 'assessment_has_no_created_at' };
+  const profile = await knex('customer_turf_profiles').where({ customer_id: row.customer_id, active: true }).first('grass_type', 'irrigation_type', 'irrigation_inches_per_week', 'updated_at').catch(() => null);
+  if (!profile) return { profile: null, reason: 'no_profile' };
+  if (!profile.updated_at || !(new Date(profile.updated_at) < assessedAt)) return { profile: null, reason: 'profile_touched_since_visit' };
+  return { profile, reason: null };
 }
-
-// The irrigation line the route could have known AT THE VISIT. Both of its
-// sources live on customer_turf_profiles (irrigation_type,
-// irrigation_inches_per_week); the only assessment writer of those fields is
-// a confirm's protocol field checks (persistProtocolFieldChecks), which also
-// stamp the same inches on the confirming assessment row. So the profile's
-// irrigation is visit-time when the profile existed before this assessment
-// AND no assessment of this customer created at or after it recorded
-// irrigation checks — the assessment ledger proves it where the profile's
-// updated_at (touched by every grass capture) cannot (Codex #4153 r11, r13).
+async function loadVisitGrassType(row, knex) {
+  const { grassTypeLabel, normalizeGrassType } = require(path.join(REPO, 'server/services/lawn-grass-context'));
+  const { profile, reason } = await visitTimeProfile(row, knex);
+  if (profile?.grass_type) return proven('grassType', grassTypeLabel(profile.grass_type));
+  const customer = await knex('customers').where({ id: row.customer_id }).first('lawn_type', 'updated_at');
+  const lawnType = normalizeGrassType(customer?.lawn_type);
+  if (!lawnType) return omitted('grassType', reason || 'profile_has_no_grass');
+  const assessedAt = row.created_at ? new Date(row.created_at) : null;
+  if (!assessedAt || !customer.updated_at || !(new Date(customer.updated_at) < assessedAt)) return omitted('grassType', 'customer_row_touched_since_visit');
+  return proven('grassType', grassTypeLabel(lawnType));
+}
 // Formatted as lawn-grass-context's loadIrrigationContext formats it.
 async function loadVisitIrrigation(row, knex) {
-  const profile = await visitTimeProfile(row, knex);
-  if (!profile) return null;
-  const hasInches = await knex.schema.hasColumn('lawn_assessments', 'irrigation_inches_per_week');
-  if (hasInches) {
-    const later = await knex('lawn_assessments').where({ customer_id: row.customer_id }).where('created_at', '>=', row.created_at).whereNotNull('irrigation_inches_per_week').first('id');
-    if (later) return null;
-  }
+  const { profile, reason } = await visitTimeProfile(row, knex);
+  if (!profile) return omitted('irrigation', reason);
   const parts = [];
   if (profile.irrigation_type) parts.push(String(profile.irrigation_type).replace(/_/g, ' '));
   if (profile.irrigation_inches_per_week != null) parts.push(`${profile.irrigation_inches_per_week} in/wk`);
-  return parts.length ? parts.join(', ') : null;
+  return parts.length ? proven('irrigation', parts.join(', ')) : omitted('irrigation', 'profile_has_no_irrigation');
+}
+// The previous visit's ai_summary as the live call received it: Knowledge
+// Bridge overwrites ai_summary (and bumps updated_at) when a predecessor's
+// recommendations are regenerated, so the summary is visit-time only when
+// the row that holds it has not been touched since before this assessment
+// (Codex #4153 r14).
+async function visitTimePriorSummary(row, summary, knex) {
+  if (!summary) return omitted('priorSummary', 'no_prior_summary');
+  const assessedAt = row.created_at ? new Date(row.created_at) : null;
+  const holder = await knex('lawn_assessments').where({ customer_id: row.customer_id, ai_summary: summary }).whereNot({ id: row.id }).orderBy('updated_at', 'desc').first('updated_at');
+  if (!assessedAt || !holder?.updated_at || !(new Date(holder.updated_at) < assessedAt)) return omitted('priorSummary', 'predecessor_touched_since_visit');
+  return proven('priorSummary', summary);
 }
 
 // The gauge reading the visit's completion recorded: turf_height_readings

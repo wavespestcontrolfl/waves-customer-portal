@@ -53,6 +53,16 @@ describe('fixture export shape', () => {
     // A summary that repeats an access credential is omitted whole — the scrubber does not know codes.
     for (const text of ['Lawn improved; gate code 4471 for the side gate.', 'The lockbox is 2288, treat the back first.']) expect(evalLib.scrubPriorSummary(text, ['Jane'])).toBeNull();
     expect(evalLib.fixtureCase(row(), [], { priorSummary: 'Use gate code 4471.' }).context.priorSummary).toBeNull();
+    // A customer name that is lawn vocabulary cannot be scrubbed without rewriting evidence: the summary is omitted, and said so.
+    expect(evalLib.nameCollidesWithVocabulary('Brown patches along the drive improved.', ['Pat', 'Brown'])).toBe(true);
+    expect(evalLib.nameCollidesWithVocabulary('Turf thinned along the drive.', ['Pat', 'Brown'])).toBe(false);
+    expect(evalLib.scrubPriorSummary('Brown patches along the drive improved.', ['Pat', 'Brown'])).toBeNull();
+    const collided = evalLib.fixtureCase(row(), [], { priorSummary: 'Brown patches along the drive improved.', customerNames: ['Pat', 'Brown'] });
+    expect(collided.context.priorSummary).toBeNull();
+    expect(collided.context.omitted).toEqual([{ field: 'priorSummary', reason: 'customer_name_is_lawn_vocabulary' }]);
+    // The exporter's own omissions ride along, and an unproven field is never silently absent.
+    expect(evalLib.fixtureCase(row(), [], { omitted: [{ field: 'grassType', reason: 'profile_touched_since_visit' }] }).context.omitted).toEqual([{ field: 'grassType', reason: 'profile_touched_since_visit' }]);
+    expect(evalLib.fixtureCase(row(), [], {}).context.omitted).toEqual([]);
     // A failed upload (a pending/ key) makes the whole case photo-less and flagged: never a partial replay.
     const partial = evalLib.fixtureCase(row(), [...photos, { id: 'p3', s3_key: 'pending/a1/3.jpg', photo_order: 2 }], {});
     expect(partial).toMatchObject({ incompletePhotos: true, photos: [] });
@@ -198,6 +208,12 @@ describe('scoring', () => {
     // A partially priced chain sits outside the total and is disclosed next to it.
     const partial = evalLib.summarize([a1, evalLib.scoreResult(testCase, analysis({ failures: [{ provider: 'gemini', model: 'gemini-override', reason: 'x', usage: { input_tokens: 5, output_tokens: 5 } }] }), { adjust: (s) => s })]);
     expect(partial.costUsd).toEqual({ total: 0.0255, perRun: 0.0255, priced: 1, unpriced: 1 });
+    // Omitted context is counted per field and disclosed in the report.
+    const omittedCase = { ...testCase, context: { ...testCase.context, omitted: [{ field: 'grassType', reason: 'profile_touched_since_visit' }, { field: 'irrigation', reason: 'no_profile' }] } };
+    const omittedSummary = evalLib.summarize([{ ...a1, contextOmitted: omittedCase.context.omitted }, a2]);
+    expect(omittedSummary.contextOmitted).toEqual({ runs: 1, byField: { grassType: 1, irrigation: 1 } });
+    expect(evalLib.renderMarkdown(omittedSummary)).toMatch(/context omitted \(not provably visit-time\) in 1 run\(s\): grassType ×1, irrigation ×1/);
+    expect(evalLib.renderMarkdown(summary)).toMatch(/no context omitted/);
     expect(summary.mae.vsConfirmed.color_health).toEqual({ mae: 0, bias: 0, n: 1 }); // a2 color 8 → 80 = confirmed 80; a1 undeterminable
     expect(summary.undeterminableRate.color_health).toBe(0.5);
     expect(summary.causeNamedBelowModerate).toBe(2);
@@ -265,23 +281,30 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     expect(src).toMatch(/const hasRunTable = await knex\.schema\.hasTable\('lawn_assessment_runs'\);/);
     expect(src).toMatch(/\.modify\(\(q\) => \{ if \(hasRunTable\) q\.whereNotExists\(function \(\) \{ this\.select\(1\)\.from\('lawn_assessment_runs as r'\)\.whereRaw\('r\.assessment_id = la\.id'\); \}\); \}\)/);
     // The visit's gauge reading rides along: the assessment's service record (back-link, else the scheduled service's latest record) → turf_height_readings.
-    expect(src).toMatch(/loadVisitTurfHeight\(row, knex\),\s*\]\);/);
     expect(src).toMatch(/turfHeightIn: turfHeight,/);
     // A visit with a failed upload is out of the population (a partial replay is not comparable to full-set scores).
     expect(src).toMatch(/\.whereNotExists\(function \(\) \{ this\.select\(1\)\.from\('lawn_assessment_photos as p'\)\.whereRaw\('p\.assessment_id = la\.id'\)\.andWhere\('p\.s3_key', 'like', 'pending\/%'\); \}\)/);
     // The grass type is what the route could have known at the visit: a profile untouched since before the assessment,
     // else customers.lawn_type (never written by /assess) — never the profile /assess captured from this assessment's own read.
-    expect(src).toMatch(/grassType: await loadVisitGrassType\(row, knex\),/);
+    expect(src).toMatch(/loadVisitTurfHeight\(row, knex\),\s*loadVisitGrassType\(row, knex\),\s*\]\);/);
+    expect(src).toMatch(/grassType: grass\.value,\s*irrigation: irrigation\.value,/);
     // Provenance is proven by the ledger, not by the profile's updated_at (touched by every grass capture): the profile
     // must have EXISTED before the assessment, and irrigation is out when any assessment at or after this one recorded it.
-    expect(src).toMatch(/if \(!profile \|\| !assessedAt \|\| !profile\.created_at \|\| !\(new Date\(profile\.created_at\) < assessedAt\)\) return null;/);
-    expect(src).not.toMatch(/profile\.updated_at/);
-    expect(src).toMatch(/\.where\('created_at', '>=', row\.created_at\)\.whereNotNull\('irrigation_inches_per_week'\)\.first\('id'\)/);
+    // Provenance: a profile-derived field is supplied only when the profile was UNTOUCHED since before the assessment
+    // (every writer — grass capture, field checks, admin edit — bumps updated_at); customers.lawn_type likewise on the
+    // customer row; the prior summary only when its holder row is untouched since (regeneration bumps it). Every
+    // unproven field is omitted AND recorded in the fixture (context.omitted) — never silently absent.
+    expect(src).toMatch(/if \(!profile\.updated_at \|\| !\(new Date\(profile\.updated_at\) < assessedAt\)\) return \{ profile: null, reason: 'profile_touched_since_visit' \};/);
+    expect(src).toMatch(/if \(!assessedAt \|\| !customer\.updated_at \|\| !\(new Date\(customer\.updated_at\) < assessedAt\)\) return omitted\('grassType', 'customer_row_touched_since_visit'\);/);
+    expect(src).toMatch(/\.where\(\{ customer_id: row\.customer_id, ai_summary: summary \}\)\.whereNot\(\{ id: row\.id \}\)\.orderBy\('updated_at', 'desc'\)\.first\('updated_at'\)/);
+    expect(src).toMatch(/omitted: \[grass, irrigation, priorProvenance\]\.filter\(\(entry\) => entry\.omitted\)\.map\(\(entry\) => \(\{ field: entry\.field, reason: entry\.omitted \}\)\),/);
+    expect(src).toMatch(/context omitted \(not provably visit-time\) in/);
+    expect(src).not.toMatch(/profile\.created_at/);
     expect(src).toMatch(/'la\.photos'/);
     expect(src).toMatch(/'la\.created_at'/);
     expect(src).not.toMatch(/grassType: grassCtx\.grassTypeLabel/);
     // Irrigation follows the same provenance rule (its sources are the turf profile a confirm's field checks write).
-    expect(src).toMatch(/loadVisitIrrigation\(row, knex\),/);
+    expect(src).toMatch(/loadVisitIrrigation\(row, knex\),\s*knex\('customers'\)/);
     expect(src).not.toMatch(/loadIrrigationContext\(/);
     // The read-only promise: dotenv (server/config) loads BEFORE the ledger gates are cleared, and the gates are verified
     // before and after every import the replay uses.
