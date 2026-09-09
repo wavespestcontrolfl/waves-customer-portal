@@ -216,6 +216,9 @@ const analysis = (overrides = {}) => ({
     expect(await visit.completePipeline(assessment.id, db.knex)).toEqual(['recommendations', 'report', 'notification']);
     expect((await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id }).first()).pipeline_completed_at).toBeNull();
     const cols = await db.knex('lawn_assessments').columnInfo();
+    // A generation lease left behind by a failed run ({}) is not a delivered recommendation.
+    await db.knex('lawn_assessments').where({ id: assessment.id }).update({ recommendations: '{}' });
+    expect(await visit.completePipeline(assessment.id, db.knex)).toContain('recommendations');
     const delivered = { recommendations: JSON.stringify({ summary: 's' }), ...(cols.report_auto_generated ? { report_auto_generated: true } : {}), ...(cols.notification_sent ? { notification_sent: true } : {}) };
     await db.knex('lawn_assessments').where({ id: assessment.id }).update(delivered);
     // A completed delivery is never resumed, however old its claim.

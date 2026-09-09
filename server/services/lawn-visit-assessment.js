@@ -1026,10 +1026,19 @@ async function completePipeline(assessmentId, knex) {
     return [];
   }
 }
+// A COMPLETED recommendations payload — a summary or at least one
+// recommendation. Knowledge Bridge registers a generation lease in the same
+// column and lifts it on failure, leaving `{}` behind: valid JSON, nothing
+// delivered (Codex #4150 r15).
+function completedRecommendations(value) {
+  const parsed = parseJsonObject(value);
+  if (!parsed) return false;
+  return (typeof parsed.summary === 'string' && parsed.summary.trim().length > 0) || (Array.isArray(parsed.recommendations) && parsed.recommendations.length > 0);
+}
 function deliveryGaps(row) {
   if (!row) return ['assessment'];
   const gaps = [];
-  if (!parseJsonObject(row.recommendations)) gaps.push('recommendations');
+  if (!completedRecommendations(row.recommendations)) gaps.push('recommendations');
   if (!(row.report_auto_generated === true || row.report_id)) gaps.push('report');
   if (!row.service_id && !row.notification_sent) gaps.push('notification');
   return gaps;
@@ -1577,6 +1586,7 @@ module.exports = {
   claimPipeline,
   completePipeline,
   deliveryGaps,
+  completedRecommendations,
   PIPELINE_STALE_MS,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
