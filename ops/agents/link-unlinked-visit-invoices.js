@@ -61,9 +61,13 @@ function invoiceBillsVisitApplication(invoice, svc) {
     return KNOWN_FAMILIES.has(family) && family !== visitFamily;
   };
   if (isCompositeService(invoice.service_type) || otherFamily(invoice.service_type)) return false;
+  const visitLabel = norm(svc.service_type);
+  // A same-family invoice label that names a different application (termite
+  // foam or inspection over a bait-station line) contradicts the bill; when
+  // the invoice carries a label it must name the visit's own application.
+  if (norm(invoice.service_type) && norm(invoice.service_type) !== visitLabel) return false;
   const items = parseLines(invoice).filter((li) => lineAmount(li) > 0);
   if (items.some((li) => isCompositeService(li.description) || otherFamily(li.description))) return false;
-  const visitLabel = norm(svc.service_type);
   let evidence = false;
   for (const li of items) {
     const desc = String(li.description || '');
