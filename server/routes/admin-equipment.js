@@ -8,12 +8,15 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const equipmentService = require('../services/equipment-maintenance');
 const { etDateString } = require('../utils/datetime-et');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
+// Job margins belong to the owner-only Costs workspace, including legacy
+// writers and the dashboard's copy of the margin summary.
+router.use(['/job-costs', '/dashboard'], requireAdmin);
 
 // =========================================================================
 // EQUIPMENT CRUD

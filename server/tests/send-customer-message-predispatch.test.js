@@ -129,7 +129,7 @@ test.each([
   suppression.checkSuppression.mockReset().mockReturnValue({ ok: true });
 });
 
-test.each([{ channel: 'push' }, { audience: 'customer' }, { purpose: 'appointment' }, { entryPoint: 'other' }])(
+test.each([{ channel: 'push' }, { audience: 'customer' }, { purpose: 'appointment' }, { entryPoint: 'other' }, { metadata: { appOnly: true } }])(
   'a handoff guard cannot silently cross another routing contract: %j', async fields => {
     const result = await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', ...fields, withSmsHandoff: jest.fn() });
     // The existing channel contract rejects lead push before hook validation.

@@ -3738,6 +3738,10 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
+                service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
+                request_status_version: claimMeta.request_status_version,
+                request_updated_at: claimMeta.request_updated_at } : {}),
               useCustomerChannel: claimMeta.useCustomerChannel === true,
               bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
@@ -3897,14 +3901,21 @@ function initScheduledJobs() {
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
             // parked decisions stay parked — we do NOT reopen them here.
-            const retryAt = smsResult.nextAllowedAt
+            // Native-provider retries share this three-attempt rail. Grow
+            // the provider's minimum delay after each failed replay and add
+            // jitter; held lookups and other channels retain their timing.
+            const nativeRetryMs = smsResult.code === 'APP_PROVIDER_RETRY'
+              ? Math.max(60000, Number(smsResult.retryAfterMs) || 60000)
+                * (2 ** (Number(claimMeta.scheduled_sms_attempts) || 1)) * (1 + Math.random() * 0.2)
+              : null;
+            const retryAt = nativeRetryMs ? new Date(completedAt.getTime() + nativeRetryMs) : smsResult.nextAllowedAt
               ? new Date(smsResult.nextAllowedAt)
               : new Date(Date.now() + 15 * 60 * 1000);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
@@ -4089,6 +4100,16 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MIN — Retry queued service report v1 email deliveries
   // =========================================================================
+  // Saved visit packets outlive their creation gate. Resume through the
+  // canonical member and effect claims after a process restart.
+  cron.schedule('2-57/5 * * * *', async () => {
+    try {
+      await runExclusive('visit-closeout-resume', () => require('./visit-completion-packets').resumePendingVisitCompletions());
+    } catch (err) {
+      logger.error(`[visit-closeout] resume sweep failed (${err.name || 'Error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { processDueServiceReportDeliveries } = require('./service-report/delivery-queue');
@@ -4317,17 +4338,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // EVERY 2 MINUTES — Call-alert durable retry (owner ruling
   // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
   // post-call timer is in-memory and the sweep window is 24h, so a Gmail
   // hang must never be able to starve it (hook P1).
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
-    try {
-      await require('./missed-call-bell').sweepMissedCalls();
-    } catch (err) {
-      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
-    }
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
+      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
+    ]);
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller'][index]} sweep failed: ${result.reason.message}`);
+    });
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -6296,16 +6319,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:23AM — IB thread retention purge (GATE_IB_THREADS lane, owner
-  // default 365 days / IB_THREAD_RETENTION_DAYS). Hard-deletes idle
-  // ib_threads; turns ride the FK cascade. No-op while the gate is off —
-  // nothing writes threads then, and pre-existing rows still age out.
+  // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
+  // (default 365); tasks use their stored 30-day expiry. The sweep runs with
+  // either write gate off so pre-existing conversation data still ages out.
   // =========================================================================
   cron.schedule('23 4 * * *', async () => {
     try {
       await runExclusive('ib-thread-retention', async () => {
         const { purgeExpiredThreads } = require('./intelligence-bar/threads');
         await purgeExpiredThreads();
+        const deletedTasks = await require('./intelligence-bar/tasks').purgeExpiredTasks();
+        if (deletedTasks) logger.info(`IB retention removed ${deletedTasks} expired task(s)`);
       });
     } catch (err) {
       logger.error(`IB thread retention purge failed: ${err.message}`);

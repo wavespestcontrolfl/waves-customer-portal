@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
+const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 const { etDateString } = require('../utils/datetime-et');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -238,6 +239,11 @@ function buildCanonicalScheduledServiceQuery(knex, customerId, opts = {}) {
     )
     .where({ 'scheduled_services.customer_id': customerId })
     .whereNotNull('scheduled_services.track_view_token');
+  // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the tracker for the
+  // house the customer is viewing. The pin/ETA logic below already prefers
+  // the visit's own stamped geocode, so a secondary property's visit maps to
+  // that property without further change.
+  if (opts.scope) applyPropertyPredicate(q, opts.scope);
 
   if (requireUnexpiredToken) {
     q.where('scheduled_services.track_token_expires_at', '>=', nowIso);
@@ -288,6 +294,38 @@ function canonicalQueryOptions(opts = {}) {
 
 async function findCanonicalScheduledService(customerId, opts = {}) {
   return buildCanonicalScheduledServiceQuery(db, customerId, canonicalQueryOptions(opts)).first();
+}
+
+// The house being viewed drives the pin, the ETA and the rain chip: when the
+// saved-property scope resolves to a NON-primary property, its coordinates
+// and address replace the customer row's primary mirror (codex #4207 r1 P1).
+// A secondary without a geocode yields NO pin rather than the primary's — the
+// same "never the wrong house" posture as the stamped-address branch below.
+// The visit's own stamped geocode still wins where that branch runs.
+function scopedLocationCustomer(customer, scope, visit = null) {
+  const property = scope?.enabled && scope.scoped ? scope.property : null;
+  if (!property || property.is_primary === true) return customer;
+  // The visit's own stamped geocode is the most precise location for THIS
+  // stop (rental / secondary bookings geocode at booking) — it wins over
+  // the property row, and the property row over nothing. Without this, an
+  // en-route visit (computeStopsAhead null → the later stamped override
+  // never runs) at a property with no geocode would lose its live map.
+  // The saved-property row is the address of record for a secondary house —
+  // no per-field fallback to the customer's (primary) address.
+  const visitLat = finiteNumber(visit?.lat);
+  const visitLng = finiteNumber(visit?.lng);
+  const coords = visitLat != null && visitLng != null
+    ? { latitude: visitLat, longitude: visitLng }
+    : { latitude: property.latitude ?? null, longitude: property.longitude ?? null };
+  return {
+    ...customer,
+    ...coords,
+    address_line1: property.address_line1 ?? null,
+    address_line2: property.address_line2 ?? null,
+    city: property.city ?? null,
+    state: property.state ?? null,
+    zip: property.zip ?? null,
+  };
 }
 
 async function enrichScheduledWithTechStatus(tracker, service, customer) {
@@ -362,13 +400,15 @@ router.get('/maps-key', (req, res) => {
 // =========================================================================
 router.get('/active', async (req, res, next) => {
   try {
-    const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true });
+    const scope = await resolveSessionScope(req);
+    const canonical = await findCanonicalScheduledService(req.customerId, { activeOnly: true, scope });
     if (canonical) {
+      const locationCustomer = scopedLocationCustomer(req.customer, scope, canonical);
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
-      const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      const formatted = formatScheduledTracker(canonical, tech, locationCustomer);
       await attachTechPhoto(formatted, tech);
-      await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
-      await attachRainChance(formatted, canonical, req.customer);
+      await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
+      await attachRainChance(formatted, canonical, locationCustomer);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -392,9 +432,9 @@ router.get('/active', async (req, res, next) => {
             service_address_line1: canonical.service_address_line1,
             service_address_zip: canonical.service_address_zip,
             service_address_city: canonical.service_address_city,
-            customer_address_line1: req.customer?.address_line1,
-            customer_zip: req.customer?.zip,
-            customer_city: req.customer?.city,
+            customer_address_line1: locationCustomer?.address_line1,
+            customer_zip: locationCustomer?.zip,
+            customer_city: locationCustomer?.city,
           });
           if (diverges) formatted.customerLocation = null;
         }
@@ -423,10 +463,10 @@ router.get('/active', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted });
+      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
     }
 
-    return res.json({ tracker: null });
+    return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
   } catch (err) { next(err); }
 });
 
@@ -435,13 +475,15 @@ router.get('/active', async (req, res, next) => {
 // =========================================================================
 router.get('/today', async (req, res, next) => {
   try {
-    const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true });
+    const scope = await resolveSessionScope(req);
+    const canonical = await findCanonicalScheduledService(req.customerId, { todayOnly: true, scope });
     if (canonical) {
+      const locationCustomer = scopedLocationCustomer(req.customer, scope, canonical);
       const tech = canonical.technician_id ? await db('technicians').where({ id: canonical.technician_id }).first() : null;
-      const formatted = formatScheduledTracker(canonical, tech, req.customer);
+      const formatted = formatScheduledTracker(canonical, tech, locationCustomer);
       await attachTechPhoto(formatted, tech);
-      await enrichScheduledWithTechStatus(formatted, canonical, req.customer);
-      await attachRainChance(formatted, canonical, req.customer);
+      await enrichScheduledWithTechStatus(formatted, canonical, locationCustomer);
+      await attachRainChance(formatted, canonical, locationCustomer);
       // "N stops before yours" (GATE_STOPS_AWAY) — bare counts only,
       // fail-soft null. routeProgress feeds the route-dots strip.
       const stops = await computeStopsAhead(db, canonical.id);
@@ -465,9 +507,9 @@ router.get('/today', async (req, res, next) => {
             service_address_line1: canonical.service_address_line1,
             service_address_zip: canonical.service_address_zip,
             service_address_city: canonical.service_address_city,
-            customer_address_line1: req.customer?.address_line1,
-            customer_zip: req.customer?.zip,
-            customer_city: req.customer?.city,
+            customer_address_line1: locationCustomer?.address_line1,
+            customer_zip: locationCustomer?.zip,
+            customer_city: locationCustomer?.city,
           });
           if (diverges) formatted.customerLocation = null;
         }
@@ -496,10 +538,10 @@ router.get('/today', async (req, res, next) => {
           } catch { /* map is best-effort; the count renders without it */ }
         }
       }
-      return res.json({ tracker: formatted });
+      return res.json({ tracker: formatted, propertyScope: resolvedScopePayload(scope) });
     }
 
-    return res.json({ tracker: null });
+    return res.json({ tracker: null, propertyScope: resolvedScopePayload(scope) });
   } catch (err) { next(err); }
 });
 
@@ -542,6 +584,7 @@ router.post('/demo/advance', async (req, res, next) => {
 router._test = {
   buildCanonicalScheduledServiceQuery,
   canonicalQueryOptions,
+  scopedLocationCustomer,
   isFreshTechStatusTimestamp,
   formatScheduledTracker,
 };
