@@ -873,3 +873,306 @@ test('ended coverage, a non-renewable bond, a prospective offering, a City suffi
   }
   expect(score('E8', 'Waves is a franchise of Orkin.').forbidden.franchise).toBe(true);
 });
+
+test('prospective coverage and a former franchise assert nothing; treatment and control verbs are service evidence (GitHub review r12 follow-up)', () => {
+  expect(score('E5', 'Waves plans to serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves will begin serving Sarasota and Charlotte counties next year.').right).toBe(0);
+  expect(score('E5', 'Waves serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E8', 'Waves was formerly a franchise but is now independently owned.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
+  expect(score('E8', 'Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves controls mosquitoes and rodents.')).toMatchObject({ expected: { mosquito: true, rodent: true } });
+  expect(score('E6', 'Waves eliminates termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves does not treat termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls ants but not rodents.').expected.rodent).toBe(false);
+  expect(score('E6', 'Orkin controls termites.').expected.termite).toBe(false);
+  // A past or prospective guard binds to its own predicate (#4155 r1).
+  expect(score('E5', 'Waves service plans cover Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to serve Hillsborough, but currently serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves formerly served Tampa but now serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves service plans include fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves formerly offered insulation but now offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E8', 'Waves was formerly independently owned but is now a franchise.').forbidden.franchise).toBe(true);
+  // Explanatory prose is not service evidence; a technician subject in its own clause is.
+  expect(score('E6', 'Waves has a guide explaining how technicians eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites.').expected.termite).toBe(true);
+});
+
+test('a future marker after the county and an explanatory context after the verb assert nothing (#4155 r2)', () => {
+  // Prospective coverage worded after the county.
+  expect(score('E5', 'Waves will serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County starting next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Sarasota County beginning in 2027.').expected.sarasota).toBe(false);
+  expect(score('E5', 'Waves serves Charlotte County in the future.').expected.charlotte).toBe(false);
+  expect(score('E6', 'Waves offers fumigation starting next year.').forbidden.fumigation_offered).toBe(false);
+  // The trailing guard stays in its clause and ignores a noun phrase.
+  expect(score('E5', 'Waves serves Manatee County, but will add Hillsborough next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves has served Manatee County since 2015.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves began serving Manatee County in 2015.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County; call soon for a quote.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County, so book your next year of service today.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  // Explanatory context after the treatment verb.
+  expect(score('E6', 'Our technicians eliminate termites in a how-to guide for homeowners.').expected.termite).toBe(false);
+  expect(score('E6', 'The team eliminates termites in an educational video.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls mosquitoes in a blog post.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves removes rodents in an instructional article.').expected.rodent).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves controls mosquitoes and rodents.')).toMatchObject({ expected: { mosquito: true, rodent: true } });
+  expect(score('E6', 'Waves eliminates termites, but read our guide on prevention.').expected.termite).toBe(true);
+});
+
+test('a guard stops at a coordinated finite predicate; "plans on" is prospective; a company-qualified technician subject counts (#4155 r3)', () => {
+  // Trailing guards never cross "and <finite verb>".
+  expect(score('E5', 'Waves serves Manatee County and will add Hillsborough next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County and plans to expand next year.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation and plans to expand next year.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves controls mosquitoes and provides educational resources.').expected.mosquito).toBe(true);
+  expect(score('E5', 'Waves plans to serve Sarasota and Manatee County next year.').expected.manatee).toBe(false);
+  // Leading guards never cross one either.
+  expect(score('E8', 'Waves was formerly family-owned and is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves was formerly a franchise but is now independently owned.').forbidden.franchise).toBe(false);
+  expect(score('E5', 'Waves formerly served Tampa and now serves Manatee County.').expected.manatee).toBe(true);
+  // "plans on" is as prospective as "plans to".
+  expect(score('E6', 'Waves plans on offering fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves is planning on offering fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves plans on serving Manatee County.').expected.manatee).toBe(false);
+  // Company-qualified technician subjects.
+  for (const text of ["Waves' technicians eliminate termites.", 'Waves technicians eliminate termites.', 'Waves Pest Control technicians eliminate termites.']) {
+    expect(score('E6', text).expected.termite).toBe(true);
+  }
+  expect(score('E6', "Waves Pest Control's technicians control mosquitoes.").expected.mosquito).toBe(true);
+  expect(score('E6', "Orkin's technicians eliminate termites.").expected.termite).toBe(false);
+});
+
+test('bare future tense is prospective, every franchise wording carries the former-status guard, and a treatment verb honors exclusions and trailing hedges (#4155 r4)', () => {
+  expect(score('E5', 'Waves will serve Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves will continue to serve Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will always serve Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves will offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves will continue to offer fumigation.').forbidden.fumigation_offered).toBe(true);
+  for (const text of ['Waves formerly operated as a franchise.', 'Waves was once part of a franchise.', 'Waves previously joined a franchise but is now independent.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  for (const text of ['Waves operates as a franchise.', 'Waves is part of the Orkin franchise.', 'Waves formerly operated on its own and is now part of a franchise.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(true);
+  }
+  for (const text of ['Waves controls all pests besides termites.', 'Waves controls ants, with the exception of termites.', 'Waves controls every pest except termites.']) {
+    expect(score('E6', text).expected.termite).toBe(false);
+  }
+  expect(score('E6', 'Waves controls rodents other than mice.').expected.rodent).toBe(true);
+  expect(score('E6', 'Our technicians eliminate termites, allegedly.').expected.termite).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites, reportedly.').expected.termite).toBe(false);
+  expect(score('E6', 'Our technicians eliminate termites, and they say so on the site.').expected.termite).toBe(true);
+});
+
+test('a continuation is current, "used to operate" is former, topic objects and competitor antecedents are not treatment, "not only" is affirmative, and every fumigation wording is guarded (#4155 r5)', () => {
+  expect(score('E5', 'Waves plans to continue serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves intends to keep serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to serve Manatee County.').expected.manatee).toBe(false);
+  expect(score('E8', 'Waves used to operate as a franchise.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves used to be a franchise.').forbidden.franchise).toBe(false);
+  for (const text of ['Waves manages termite information on its website.', 'Waves controls the termite section of its website.', 'Waves handles termite questions from readers.']) {
+    expect(score('E6', text).expected.termite).toBe(false);
+  }
+  expect(score('E6', 'Waves treats termite infestations.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves controls termite problems in homes.').expected.termite).toBe(true);
+  expect(score('E6', 'According to Orkin, its technicians eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'According to Orkin, they eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Unlike Orkin, Waves eliminates termites.').expected.termite).toBe(true);
+  expect(score('E6', 'In Sarasota, its technicians eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves not only controls termites but also mosquitoes.')).toMatchObject({ expected: { termite: true, mosquito: true } });
+  expect(score('E6', 'Waves controls not only termites but mosquitoes.')).toMatchObject({ expected: { termite: true, mosquito: true } });
+  expect(score('E6', 'Waves controls termites but not mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Fumigation: coming next year').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation: yes').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves is considering providing tenting services.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves provides tenting services.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves tents homes starting next year.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves tents homes.').forbidden.fumigation_offered).toBe(true);
+});
+
+test('the pest is the treatment verb\'s own object, and an ended franchise relationship is not current (#4155 r6)', () => {
+  expect(score('E6', 'Waves prevents technicians from eliminating termites.').expected.termite).toBe(false);
+  for (const text of ['Waves manages the termite portion of its website.', 'Waves controls termite-related search terms.', 'Waves handles termite-related search terms.', 'Waves manages termite information on its website.']) {
+    expect(score('E6', text).expected.termite).toBe(false);
+  }
+  expect(score('E6', 'Waves treats termites, ants and roaches.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves controls ants, roaches and termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves eliminates subterranean and drywood termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves eliminates termites in Sarasota homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves offers termite control and mosquito treatments.')).toMatchObject({ expected: { termite: true, mosquito: true } });
+  expect(score('E6', 'Waves offers termite and rodent control.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves removes rats and mice from attics.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves controls rodents other than mice.').expected.rodent).toBe(true);
+  for (const text of ['Waves stopped operating as a franchise.', 'Waves ceased operating as a franchise.', 'Waves operated as a franchise until 2024.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  expect(score('E8', 'Waves has operated as a franchise since 2020.').forbidden.franchise).toBe(true);
+});
+
+test('"going to" is prospective, a guard stops at a subordinate or sequenced predicate, ended ranges and a former franchisee assert nothing, a bare "but" or reversing "from" excludes the pest, and an offering keeps any service noun (#4155 r7)', () => {
+  expect(score('E5', 'Waves is going to serve Manatee County.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves is going to offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves is considering growth as it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves is considering growth as it offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves plans to expand while it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E8', 'Waves was formerly local, then became a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves was formerly local and later became a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves was a franchise from 2020 to 2024.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves operated as a franchise between 2020 and 2024.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves has been a franchise from 2020 to the present.').forbidden.franchise).toBe(true);
+  for (const text of ['Waves was formerly a franchisee of Orkin.', 'Waves used to be a franchisee of Orkin.', 'Waves stopped being a franchisee of Orkin.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  expect(score('E8', 'Waves is a franchisee of Orkin.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves controls everything but termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves removes all pests but rodents.').expected.rodent).toBe(false);
+  expect(score('E6', 'Waves removes termites from its service list.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from being eliminated.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from entering your home.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves removes rodents from attics.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves offers mice exclusion.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves offers mosquito fogging.').expected.mosquito).toBe(true);
+  expect(score('E6', 'Waves offers termite baiting.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves handles termite-related search terms.').expected.termite).toBe(false);
+});
+
+test('years read against frozen_on, an ended status survives descriptive modifiers, "being a franchise" needs a status predicate, and a protecting "from" complement asserts nothing (#4155 r8)', () => {
+  expect(score('E5', 'Waves serves Manatee County in 2027.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County until 2027.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves served Manatee County until 2024.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves offers fumigation in 2027.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers fumigation until 2027.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E8', 'Waves is a franchise until 2027.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves ceased operating as a locally owned pest control franchise.').forbidden.franchise).toBe(false);
+  for (const text of ['Waves is considering being a franchise.', 'Waves avoids being a franchise.', 'Waves denied being a franchise.']) {
+    expect(score('E8', text).forbidden.franchise).toBe(false);
+  }
+  expect(score('E8', 'Waves has been a franchise from 2020 to the present.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves prevents termites from dying.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from being killed.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termites from damaging your home.').expected.termite).toBe(true);
+});
+
+test('a fronted clause hands back to the subject, a quantity is no date, the copula skips no preposition, a hyphenated qualifier before a service head counts, a generic third party owns its pronoun, "prevents" governs no service noun, and a label continuation is current (#4155 r9)', () => {
+  expect(score('E5', 'While it plans to expand, Waves serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Although Waves formerly served Tampa, it serves Manatee County today.').expected.manatee).toBe(true);
+  expect(score('E8', 'Though formerly independent, Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Despite formerly being independent, Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves offers fumigation for 2030-square-foot homes.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves provides tenting for 2030-square-foot houses.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves offers fumigation in 2030.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E8', 'Waves has been a vendor to franchise businesses for years.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves has been a franchise for years.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves offers termite-specific treatments.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves performs mosquito-specific treatments.').expected.mosquito).toBe(true);
+  expect(score('E6', 'Waves offers rodent-focused exclusion services.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves hires a vendor. Its technicians control mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves hires a vendor. They control mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves is a family company. Its technicians control mosquitoes.').expected.mosquito).toBe(true);
+  expect(score('E6', 'Waves prevents termite extermination.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves prevents termite infestations.').expected.termite).toBe(true);
+  for (const text of ['Fumigation: will continue', 'Fumigation: will remain available', 'Fumigation: will always be offered']) {
+    expect(score('E6', text).forbidden.fumigation_offered).toBe(true);
+  }
+  expect(score('E6', 'Fumigation: will start next year').forbidden.fumigation_offered).toBe(false);
+});
+
+test('a year before a noun is a quantity, a planned withdrawal implies current service, modifiers may precede a service head, and a harm noun must end the phrase (#4155 r10)', () => {
+  expect(score('E5', 'Waves serves Manatee County for 2030 residents.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation for 2030 businesses.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County in 2027 and beyond.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves plans to stop serving Manatee County next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will discontinue service to Manatee County next year.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves plans to stop offering fumigation next year.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves stopped serving Manatee County.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves offers termite-focused integrated pest management.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves offers termite-specific residential treatments.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves manages termite infestation data for its research partners.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls mosquito population data.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves treats termite infestations in homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves handles termite infestation treatment.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves handles termite control services.').expected.termite).toBe(true);
+});
+
+test('a fronted clause hands back to any Waves alias, research contexts are not treatment, a withdrawal verb must govern the service predicate, and a future year may close a range (#4155 r11)', () => {
+  expect(score('E5', 'While it plans to expand, the business serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'While it plans to expand, our company serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E6', 'Though formerly independent, the business is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves eliminates termites in laboratory trials.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves controls mosquitoes for a research study.').expected.mosquito).toBe(false);
+  expect(score('E6', 'In laboratory trials, Waves eliminates termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves eliminates termites using research-backed methods.').expected.termite).toBe(true);
+  expect(score('E5', 'Waves plans to stop advertising before serving Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves plans to stop marketing and offer fumigation next year.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves plans to stop its residential service to Manatee County next year.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County in 2027–2028.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County in 2027-28.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves offers fumigation during 2027/2028.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County for 2030-square-foot homes.').expected.manatee).toBe(true);
+});
+
+test('a quantity qualifier after a year is no date, bare "future" is prospective only in a prospective construction, simulated treatment asserts nothing, and a former-status guard stops at a later transition (#4155 r12)', () => {
+  expect(score('E5', 'Waves serves Manatee County for 2030 or more residents.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves offers fumigation for 2030 and more homes.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County in 2027 or later.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves has a future-ready team serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves focuses on the future while serving Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Future plans include serving Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves lists Manatee County among its future service areas.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves manages termite infestations in a computer simulation.').expected.termite).toBe(false);
+  expect(score('E6', 'In a computer simulation, Waves manages termite infestations.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves removes rodents in a training exercise.').expected.rodent).toBe(false);
+  expect(score('E6', 'Waves manages termite infestations in homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves stopped using old systems before operating as a franchise, which it remains today.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves was previously local before it became a franchise, a status it retains today.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves was formerly a franchise before becoming independent.').forbidden.franchise).toBe(false);
+});
+
+test('editorial objects are not treatment, adjectival "former" is an ended status, a "that" complement hands back, month-qualified dates read against frozen_on, a topic noun keeps a coordinated service head, and a past year needs a date boundary (#4155 r13)', () => {
+  expect(score('E6', 'Waves removes the word termites from its logo.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves removes the mosquito image from its website banner.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves removes termites from homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves is a former franchise.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves is a former franchisee of Orkin.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves is an ex-franchise.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E5', 'Waves will confirm that it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will announce that it will serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County in December 2026.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves served Manatee County until August 2026.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County until December 2026.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves was a franchise until March 2026.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves offers termite information and inspections.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves offers rodent education and exclusion services.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves offers termite information and advice.').expected.termite).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County for up to 2025 residents.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves is a franchise with up to 2025 locations.').forbidden.franchise).toBe(true);
+  expect(score('E5', 'Waves served Manatee County until 2025.').expected.manatee).toBe(false);
+});
+
+test('a wh-complement hands back to a Waves alias, `as` after the pest opens a classification, a trailing endpoint dates a record rather than the status, and `they` after a people subject is those people (#4155 r14)', () => {
+  expect(score('E5', 'Waves plans to explain why it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to show how well it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will describe where it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves plans to explain why it will serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E6', 'Waves treats termites as a keyword.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves treats termites as pests.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves treats mosquitoes as a search term.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves targets termites as a keyword in its search ads.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves treats termites as well as rodents.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves treats termites as needed.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves treats termites as a core service.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves treats termites as part of its pest control program.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves is a franchise with financial records through 2024.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves is a franchise with revenue data from 2020 to 2024.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Waves operated as a franchise until 2024, per its records.').forbidden.franchise).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County with service records through 2024.').expected.manatee).toBe(true);
+  expect(score('E6', 'Homeowners call Waves. They remove rodents themselves.').expected.rodent).toBe(false);
+  expect(score('E6', 'Homeowners call Waves. They remove rodents.').expected.rodent).toBe(false);
+  expect(score('E6', 'Residents rely on Waves, and they control mosquitoes.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Many homeowners in Sarasota use Waves. They eliminate termites.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves serves homeowners. They eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Homeowners call Waves. Its technicians eliminate termites.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves technicians eliminate termites. They remove rodents too.').expected.rodent).toBe(true);
+});

@@ -197,13 +197,13 @@ NEVER: send a generic template, promise pricing, book without availability check
     {
       type: 'custom',
       name: 'update_lead_pipeline',
-      description: `Update the lead's pipeline stage and record an activity. Stages: new_lead → contacted → estimate_sent → estimate_viewed → follow_up → won/lost. Also triggers the PipelineManager which handles automatic stage transitions.`,
+      description: `Update the lead's pipeline stage and record an activity. Stages: contacted → estimate_sent → estimate_viewed → follow_up → won/lost. Also triggers the PipelineManager which handles automatic stage transitions.`,
       input_schema: {
         type: 'object',
         properties: {
           customer_id: { type: 'string', format: 'uuid', description: 'Customer UUID' },
           lead_id: { type: 'string', description: 'Lead UUID' },
-          stage: { type: 'string', description: 'New pipeline stage' },
+          stage: { type: 'string', enum: ['contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'won', 'lost'], description: 'New pipeline stage' },
           note: { type: 'string', description: 'Activity note explaining the transition' },
         },
         required: ['customer_id', 'stage'],

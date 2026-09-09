@@ -850,10 +850,7 @@ export function EmailInbox({ active, mailbox, editor }) {
       <div style={{ marginBottom: 16 }}>
         <input
           value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            setPage(1);
-          }}
+          onChange={(e) => setSearch(e.target.value)}
           placeholder="Search emails..."
           style={{
             padding: "8px 14px",
