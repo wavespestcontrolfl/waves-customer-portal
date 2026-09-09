@@ -349,6 +349,7 @@ export default function useEmailInbox(active, clearDraftResult) {
     selectedEmail,
     thread,
     openEmail,
+    closeEmail,
     handleStar,
     removeEmail,
     handleReclassify,

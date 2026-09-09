@@ -59,7 +59,7 @@ async function compose() {
   return dialog;
 }
 async function open(message) {
-  fireEvent.click(await screen.findByText(message.subject));
+  fireEvent.click(await screen.findByRole("button", { name: `Open email: ${message.subject}` }));
   return screen.findByRole("textbox", { name: "Reply" });
 }
 
