@@ -146,6 +146,12 @@ describe('conservative historical repair evidence', () => {
   ])('refuses %s as application evidence for %s', (description, service_type) => {
     expect(invoiceBillsVisitApplication({ line_items: [{ description, amount: 100 }] }, { service_type })).toBe(false);
   });
+  test.each([false, true])('a matching line cannot hide another same-family application (reverse=%s)', (reverse) => {
+    const line_items = ['Termite Bait Station Service', 'Termite Foam Service']
+      .map((description) => ({ description, amount: 100 }));
+    if (reverse) line_items.reverse();
+    expect(invoiceBillsVisitApplication({ line_items }, { service_type: 'Termite Bait Station Service' })).toBe(false);
+  });
   test('propagates closeout lookup failures rather than reporting a packet exclusion', async () => {
     assertScheduledInvoiceNotPacketOwned.mockRejectedValueOnce(new Error('lookup failed'));
     await expect(run(fixture())).rejects.toThrow('lookup failed');
