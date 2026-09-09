@@ -74,6 +74,30 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).toContain('your formal proposal is ready');
   });
 
+  test('measured and multi-unit lines print their quantity × rate basis with the unit label (GH codex P0 on #4305)', () => {
+    const measured = {
+      ...AUTHORED_PROPOSAL,
+      buildings: [{
+        name: '600 Sample Plaza Dr',
+        note: null,
+        lineItems: [
+          { description: 'Slab perimeter treatment', quantity: 14768, unit: 'sqft', unitPrice: 0.0755, frequency: 'quarterly', taxable: false },
+          { description: 'Bait station service', quantity: 1, unit: 'each', unitPrice: 45, frequency: 'quarterly', taxable: false },
+          { description: 'Door sweep install', quantity: 3, unitPrice: 150, frequency: 'one_time', taxable: false },
+          { description: 'Inspection', quantity: 1, unitPrice: 95, frequency: 'one_time', taxable: false },
+        ],
+      }],
+    };
+    const html = renderPage('proposal-basis-token', BASE_ESTIMATE, { proposal: measured });
+    expect(html).toContain('<span class="proposal-line-basis">14,768 sq ft × $0.0755</span>');
+    expect(html).toContain('1,114.98');
+    expect(html).toContain('<span class="proposal-line-basis">1 each × $45.00</span>');
+    expect(html).toContain('<span class="proposal-line-basis">3 × $150.00</span>');
+    // A unit-less single line keeps the bare description, as before.
+    expect(html).not.toContain('1 × $95.00');
+    expect(html).not.toContain('&times;');
+  });
+
   test('commercial inclusions carry no residential guarantee claims', () => {
     const html = renderPage('proposal-claims-token', BASE_ESTIMATE, { proposal: AUTHORED_PROPOSAL });
     const included = html.slice(html.indexOf('What your commercial pest service includes'));
