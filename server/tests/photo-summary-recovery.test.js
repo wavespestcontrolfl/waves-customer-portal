@@ -4,7 +4,7 @@
  */
 const {
   PENDING_KEY, stripPhotoSummaryForRecovery, hasPendingPhotoSummary,
-  restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered,
+  restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered, expectedImageHashesFor,
 } = require('../services/service-report/photo-summary-recovery');
 
 describe('strip / restore', () => {
@@ -35,12 +35,30 @@ describe('strip / restore', () => {
 });
 
 describe('completionPhotosFullyRecovered', () => {
-  test('needs at least uploaded + failed after-photos; no closeout record means nothing to wait for', () => {
-    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 1, failed: 2 } }, 3)).toBe(true);
-    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 1, failed: 2 } }, '3')).toBe(true);
-    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 1, failed: 2 } }, 2)).toBe(false);
-    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 0, failed: 1 } }, 0)).toBe(false);
-    expect(completionPhotosFullyRecovered({}, 0)).toBe(true);
-    expect(completionPhotosFullyRecovered(null, 0)).toBe(true);
+  test('with expected hashes: every distinct submitted image needs a row; counts are irrelevant', () => {
+    const notes = { completionPhotos: { uploaded: 2, failed: 1, expectedImageHashes: ['a', 'b'] } };
+    expect(completionPhotosFullyRecovered(notes, { afterPhotoCount: 2, presentImageHashes: ['a', 'b'] })).toBe(true);
+    expect(completionPhotosFullyRecovered(notes, { afterPhotoCount: 3, presentImageHashes: ['a', 'a', 'c'] })).toBe(false);
+    expect(completionPhotosFullyRecovered(notes, { afterPhotoCount: 0, presentImageHashes: [] })).toBe(false);
+    expect(completionPhotosFullyRecovered(notes, { presentImageHashes: ['b', 'a', null] })).toBe(true);
+  });
+
+  test('legacy notes without hashes fall back to uploaded + failed <= after-photo rows', () => {
+    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 1, failed: 2 } }, { afterPhotoCount: 3 })).toBe(true);
+    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 1, failed: 2 } }, { afterPhotoCount: '3' })).toBe(true);
+    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 1, failed: 2 } }, { afterPhotoCount: 2 })).toBe(false);
+    expect(completionPhotosFullyRecovered({ completionPhotos: { uploaded: 0, failed: 1, expectedImageHashes: [] } }, { afterPhotoCount: 0 })).toBe(false);
+    expect(completionPhotosFullyRecovered({}, { afterPhotoCount: 0 })).toBe(true);
+    expect(completionPhotosFullyRecovered(null, {})).toBe(true);
+  });
+});
+
+describe('expectedImageHashesFor', () => {
+  test('hashes the submitted bytes, dedupes identical images, skips empty and undecodable entries', () => {
+    const decode = (data) => { if (data === 'bad') throw new Error('nope'); return { buffer: Buffer.from(data) }; };
+    const hash = (buf) => `h:${buf.toString()}`;
+    expect(expectedImageHashesFor([{ data: 'x' }, { data: 'x' }, { data: 'y' }, { data: 'bad' }, { data: '' }, null], { decode, hash }))
+      .toEqual(['h:x', 'h:y']);
+    expect(expectedImageHashesFor(undefined, { decode, hash })).toEqual([]);
   });
 });

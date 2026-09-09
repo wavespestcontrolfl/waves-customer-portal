@@ -42,16 +42,19 @@ const {
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
-const { stripPhotoSummaryForRecovery } = require('../services/service-report/photo-summary-recovery');
+const { stripPhotoSummaryForRecovery, expectedImageHashesFor } = require('../services/service-report/photo-summary-recovery');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
 const { buildServiceRecordCompletionTimingFields } = require('../services/service-report/service-record-timing');
 const {
+  MAX_COMPLETION_PHOTO_DATA_URL_BYTES,
   cleanupUploadedServicePhotoObjects,
+  decodeDataUrlPhoto,
   promoteStagedServicePhotos,
   uploadServicePhotoDataUrls,
 } = require('../services/service-photos');
+const { hashBuffer } = require('../services/service-report/photo-chain');
 const {
   recordLawnProtocolCompletion,
   normalizeCompletionForStructuredNotes,
@@ -6718,6 +6721,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           uploaded: completionPhotoUploadResult.uploaded,
           failed: completionPhotoUploadResult.failed,
           uploadedAt: new Date().toISOString(),
+          // Distinct image hashes closeout submitted: /photos/reconcile
+          // restores the parked photo summary only once every one has a
+          // row (uploads dedupe by hash, so raw counts would overstate).
+          ...(completionPhotoUploadResult.failed > 0 ? {
+            expectedImageHashes: expectedImageHashesFor(completionPhotos, {
+              decode: (dataUrl) => decodeDataUrlPhoto(dataUrl, { maxBytes: MAX_COMPLETION_PHOTO_DATA_URL_BYTES }),
+              hash: hashBuffer,
+            }),
+          } : {}),
         },
       };
       const photoNotes = { ...latestNotes, ...completionPhotosDelta };

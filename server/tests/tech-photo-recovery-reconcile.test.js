@@ -25,6 +25,7 @@ function mockChain(table) {
     whereIn: jest.fn(() => c),
     orderBy: jest.fn(() => c),
     count: jest.fn(() => { state.count = true; return c; }),
+    select: jest.fn(async () => (tables[table] || []).filter((r) => !state.where || Object.entries(state.where).every(([k, v]) => r[k] === v))),
     first: jest.fn(async () => {
       const rows = (tables[table] || []).filter((r) => !state.where || Object.entries(state.where).every(([k, v]) => r[k] === v));
       if (state.count) return { n: String(rows.length) };
@@ -255,6 +256,49 @@ describe('POST /:id/photos/reconcile — parked photo summary', () => {
     await withServer(async (baseUrl) => {
       expect((await (await reconcile(baseUrl)).json()).photoSummary).toEqual({ pending: false, restored: false });
       expect(updates).toEqual([{ table: 'service_records', where: { id: 'rec-1' }, patch: { pdf_storage_key: null } }]);
+    });
+  });
+});
+
+describe('POST /:id/photos/reconcile — distinct expected image hashes', () => {
+  const SUMMARY = 'Two after photos show the treated bed line.';
+  const parked = () => ({ typedReportSnapshot: { photoSummary: null, photoSummaryPendingRecovery: SUMMARY } });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    updates.length = 0;
+    updateError = null;
+    for (const k of Object.keys(tables)) delete tables[k];
+    tables.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1' }];
+    tables.service_report_pdf_jobs = [];
+    tables.tree_shrub_assessments = [];
+  });
+
+  test('the same image submitted twice plus one failed image: recovery completes with two distinct rows', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 2, failed: 1, expectedImageHashes: ['aaa', 'bbb'] } } }];
+    tables.service_photos = [
+      { id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' },
+      { id: 'p2', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'bbb' },
+    ];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).photoSummary).toEqual({ pending: true, restored: true });
+    });
+  });
+
+  test('enough rows but the wrong image is still photos_still_missing', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'pest', service_data: parked(),
+      structured_notes: { completionPhotos: { uploaded: 1, failed: 1, expectedImageHashes: ['aaa', 'bbb'] } } }];
+    tables.service_photos = [
+      { id: 'p1', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'aaa' },
+      { id: 'p2', service_record_id: 'rec-1', photo_type: 'after', image_sha256: 'ccc' },
+    ];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('photos_still_missing');
+      expect(updates).toHaveLength(0);
     });
   });
 });

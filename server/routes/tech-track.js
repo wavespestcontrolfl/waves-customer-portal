@@ -873,11 +873,14 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
     const serviceData = parseJsonColumn(record.service_data);
     let photoSummary = { pending: false, restored: false };
     if (hasPendingPhotoSummary(serviceData)) {
-      const afterCount = await db('service_photos')
+      const afterRows = await db('service_photos')
         .where({ service_record_id: record.id, photo_type: 'after' })
-        .count('* as n')
-        .first();
-      if (!completionPhotosFullyRecovered(parseJsonColumn(record.structured_notes), afterCount?.n)) {
+        .select('image_sha256');
+      const recovered = completionPhotosFullyRecovered(parseJsonColumn(record.structured_notes), {
+        afterPhotoCount: afterRows.length,
+        presentImageHashes: afterRows.map((row) => row.image_sha256),
+      });
+      if (!recovered) {
         return res.status(409).json({ error: 'Closeout photos are still missing', code: 'photos_still_missing' });
       }
       restorePhotoSummaryAfterRecovery(serviceData);

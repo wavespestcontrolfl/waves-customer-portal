@@ -44,16 +44,38 @@ function restorePhotoSummaryAfterRecovery(serviceData) {
   return { changed: true, serviceData };
 }
 
-// structured_notes.completionPhotos records how many closeout photos were
-// submitted (uploaded + failed). Recovery is complete when at least that many
-// 'after' photo rows exist on the record; the attachment route dedupes by
-// image hash, so a retried upload never double-counts.
-function completionPhotosFullyRecovered(structuredNotes, afterPhotoCount) {
+// structured_notes.completionPhotos records what closeout submitted. Uploads
+// dedupe by image hash (the same image selected twice is one row), so the
+// authoritative check is the set of DISTINCT expected image hashes recorded
+// at closeout (expectedImageHashes): recovery is complete when every one has
+// an 'after' row on the record. Older records without that list fall back to
+// the count rule (uploaded + failed <= after-photo rows).
+function completionPhotosFullyRecovered(structuredNotes, { afterPhotoCount = 0, presentImageHashes = [] } = {}) {
   const notes = structuredNotes && typeof structuredNotes === 'object' ? structuredNotes : null;
   const completion = notes && notes.completionPhotos && typeof notes.completionPhotos === 'object' ? notes.completionPhotos : null;
   if (!completion) return true;
+  const expected = Array.isArray(completion.expectedImageHashes)
+    ? completion.expectedImageHashes.filter((h) => typeof h === 'string' && h) : null;
+  if (expected && expected.length) {
+    const present = new Set((presentImageHashes || []).filter(Boolean));
+    return expected.every((hash) => present.has(hash));
+  }
   const submitted = Number(completion.uploaded || 0) + Number(completion.failed || 0);
   return Number(afterPhotoCount || 0) >= submitted;
+}
+
+// Distinct image hashes of the photos closeout submitted — computed from the
+// submitted bytes so a photo whose upload failed is still expected.
+function expectedImageHashesFor(photos = [], { decode, hash }) {
+  const out = new Set();
+  for (const photo of Array.isArray(photos) ? photos : []) {
+    if (!photo || !photo.data) continue;
+    try {
+      const decoded = decode(photo.data);
+      if (decoded && decoded.buffer) out.add(hash(decoded.buffer));
+    } catch { /* undecodable submissions never uploaded either; nothing to expect */ }
+  }
+  return [...out];
 }
 
 module.exports = {
@@ -62,4 +84,5 @@ module.exports = {
   hasPendingPhotoSummary,
   restorePhotoSummaryAfterRecovery,
   completionPhotosFullyRecovered,
+  expectedImageHashesFor,
 };
