@@ -2219,6 +2219,11 @@ Saved customer turf area seeds only a proven matching service property. A visit-
 
 Exact assigned protocol versions remain usable after archival; unassigned selection still requires an active protocol. Catalog formulation distinguishes spreader granules from weighed spray concentrates. Selected default products keep their bookkeeping and safety metadata, with plan blocks still suppressing unverified quantities. The editable visit area travels in the existing `lawnProtocolCompletion.treatedSqft` field to the completion planner, protocol record and nutrient writer; square footage stays an integer and never updates the saved profile.
 
+
+## 2026-09-08 — Simplify Customer directory labels and contact display
+
+The owner replaced the historical services column with WaveGuard Tier, showing the stored Bronze, Silver, Gold, or Platinum tier and leaving other cells blank. The directory no longer displays the contact line beneath customer names. Outreach & Upsells is now Opportunities; its existing view key and actions stay the same. This supersedes the earlier directory column and navigation copy decisions without changing stored tier values, pricing, or membership rules.
+
 ## 2026-09-08 — Record the Tech shared-foundation proof
 
 The accepted Tech migration reuses shared field/action accessibility and explicit touch density with Tech-owned tokens and the Today / Visit / Complete workflow. Recap text and actual rates use explicit, visit-scoped recovery; pending photos remain in memory while their dialog stays open. The Intelligence Bar retains its separate UX scope. Synthetic Chromium/WebKit evidence covers the actual visit, photo and nested marking workflows; physical camera, keyboard and home-screen checks remain required before release. Source and reproduction details are in `docs/design/tech-foundation-acceptance-2026-09-08.md`.

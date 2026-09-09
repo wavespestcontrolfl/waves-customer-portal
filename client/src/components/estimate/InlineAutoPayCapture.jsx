@@ -44,7 +44,10 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // onReplace(setupIntentId) → Promise<boolean>: "Use a different payment
   // method" after a capture already succeeded — the parent retires the
   // saved intent and remounts this capture (keyed) on a fresh one.
-  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false },
+  // savedFor: what the replayed saved method is "already saved for" —
+  // "this plan" (estimate accept, default), "this visit" (one-time secure
+  // appointment), "Auto Pay" (standalone link). Copy only.
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, onReplace, prepay = false, savedFor = 'this plan' },
   ref,
 ) {
   const mountRef = useRef(null);
@@ -274,7 +277,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       </div>
       {replay ? (
         <div style={{ fontSize: 14, color: NAVY, fontWeight: 600, marginTop: 14 }}>
-          {`Your ${bank ? 'bank account' : 'card'} is already saved for this plan.`}
+          {`Your ${bank ? 'bank account' : 'card'} is already saved for ${savedFor}.`}
         </div>
       ) : null}
       <div ref={mountRef} style={{ marginTop: 14 }} />

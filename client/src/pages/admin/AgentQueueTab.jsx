@@ -45,7 +45,7 @@ export function StatTile({ label, value, tone }) {
   return (
     <div className="flex flex-col gap-1 px-4 py-3 border-hairline border-zinc-200 rounded-md bg-white min-w-[120px]">
       <span className="text-13 uppercase tracking-label text-ink-tertiary">{label}</span>
-      <span className={cn("text-24 font-medium tabular-nums", tone === "alert" && parseInt(value, 10) > 0 ? "text-alert-fg" : "text-ink-primary")}>
+      <span className={cn("text-22 font-medium tabular-nums", tone === "alert" && parseInt(value, 10) > 0 ? "text-alert-fg" : "text-ink-primary")}>
         {value}
       </span>
     </div>

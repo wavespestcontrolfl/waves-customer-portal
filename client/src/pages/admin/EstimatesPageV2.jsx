@@ -3019,8 +3019,8 @@ function MobileChipSheet({ label, value, options, onChange, title }) {
   );
 }
 
-// Status label color on mobile row. Draft = waves blue, alert = red,
-// accepted = zinc-900, others fall back to ink-tertiary for low emphasis.
+// Status label color on mobile row. Admin stays monochrome: alert = red,
+// accepted = zinc-900, in-flight = ink-secondary, others ink-tertiary.
 function mobileStatusClass(status) {
   if (status === "declined" || status === "expired") return "text-alert-fg";
   if (status === "accepted") return "text-zinc-900";
@@ -3030,7 +3030,7 @@ function mobileStatusClass(status) {
     status === "sent" ||
     status === "viewed"
   )
-    return "text-waves-blue";
+    return "text-ink-secondary";
   return "text-ink-tertiary";
 }
 

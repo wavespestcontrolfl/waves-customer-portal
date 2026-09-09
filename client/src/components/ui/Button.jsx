@@ -8,8 +8,8 @@ const BASE =
   'disabled:opacity-50 disabled:cursor-not-allowed';
 
 const SIZES = {
-  sm: 'h-11 md:h-7 px-3 text-11 rounded-xs',
-  md: 'h-11 md:h-9 px-4 text-12 rounded-sm',
+  sm: 'h-11 sm:h-7 px-3 text-11 rounded-xs',
+  md: 'h-11 sm:h-9 px-4 text-12 rounded-sm',
 };
 
 const VARIANTS = {
@@ -26,7 +26,13 @@ const VARIANTS = {
 // Links with button presentation reuse these exact variants without changing
 // their native navigation or introducing a second action implementation.
 export function buttonStyles({ variant = 'primary', size = 'md', density = 'legacy', className } = {}) {
-  return cn(BASE, density === 'legacy' ? cn('uppercase tracking-label', SIZES[size]) : cn('ui-action', CONTROL_DENSITIES[density]), VARIANTS[variant], className);
+  const hasVariant = Object.prototype.hasOwnProperty.call(VARIANTS, variant);
+  const hasSize = Object.prototype.hasOwnProperty.call(SIZES, size);
+  if (import.meta.env.DEV) {
+    if (!hasVariant) console.warn(`Button: unknown variant "${variant}" — rendering primary`);
+    if (!hasSize) console.warn(`Button: unknown size "${size}" — rendering md`);
+  }
+  return cn(BASE, density === 'legacy' ? cn('uppercase tracking-label', SIZES[hasSize ? size : 'md']) : cn('ui-action', CONTROL_DENSITIES[density]), VARIANTS[hasVariant ? variant : 'primary'], className);
 }
 
 export const Button = forwardRef(function Button(
