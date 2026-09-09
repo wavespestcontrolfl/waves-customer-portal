@@ -85,6 +85,7 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
           { description: 'Bait station service', quantity: 1, unit: 'each', unitPrice: 45, frequency: 'quarterly', taxable: false },
           { description: 'Door sweep install', quantity: 3, unitPrice: 150, frequency: 'one_time', taxable: false },
           { description: 'Inspection', quantity: 1, unitPrice: 95, frequency: 'one_time', taxable: false },
+          { description: 'Sub-cent rate', quantity: 1, unitPrice: 10.075, frequency: 'one_time', taxable: false },
         ],
       }],
     };
@@ -93,7 +94,11 @@ describe('SSR commercial proposal card (GATE_ESTIMATE_COMMERCIAL_GLASS)', () => 
     expect(html).toContain('1,114.98');
     expect(html).toContain('<span class="proposal-line-basis">1 each × $45.00</span>');
     expect(html).toContain('<span class="proposal-line-basis">3 × $150.00</span>');
-    // A unit-less single line keeps the bare description, as before.
+    // A unit-less quantity-one line with a fractional-cent rate still shows
+    // its reviewed rate, not only the rounded amount (GH codex P1 r2 on #4305).
+    expect(html).toContain('<span class="proposal-line-basis">1 × $10.075</span>');
+    expect(html).toContain('10.08');
+    // A unit-less single line at a whole-cent rate keeps the bare description, as before.
     expect(html).not.toContain('1 × $95.00');
     expect(html).not.toContain('&times;');
   });

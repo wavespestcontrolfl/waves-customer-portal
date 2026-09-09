@@ -3,7 +3,7 @@ import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_
 import { fmtMoney } from '../lib/money';
 import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { formatLineBasis } from '@proposal-bid';
+import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
@@ -418,7 +418,7 @@ export default function EstimateProposalDocument({ data, token }) {
                   }}>
                     <span style={{ minWidth: 0, color: INK }}>
                       {item.description || 'Service'}
-                      {(item.unit || Number(item.quantity) !== 1) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
+                      {showsLineBasis(item) ? <span style={{ display: 'block', color: MUTED }}>{formatLineBasis(item)}</span> : ''}
                     </span>
                     <span style={{ whiteSpace: 'nowrap', fontWeight: 700, color: NAVY, fontVariantNumeric: 'tabular-nums' }}>
                       {fmtMoney(item.amount)}
