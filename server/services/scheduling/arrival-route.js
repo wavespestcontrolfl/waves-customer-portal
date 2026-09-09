@@ -127,8 +127,11 @@ async function loadArrivalRouteContext({
 // combined holds that used separate hourly anchors.
 function groupRouteStops(rows) {
   const groups = new Map();
+  let previous;
   for (const row of currentOrder(rows)) {
     const key = row.visit_id || allocationKey(row) || row.id;
+    if (groups.has(key) && key !== previous) return null;
+    previous = key;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
@@ -177,7 +180,7 @@ function routeDriveMinutes(stops, origin) {
 
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
 function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
-  departureMin, returnByMin, bufferMinutes = 0, collectLegs }) {
+  departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true }) {
   if (!context) return unverified(null, 'this date');
   const { date, rows, now, grouped, activeTarget } = context;
   const capacity = capacityEnabled() || context.preserveCapacity;
@@ -191,9 +194,11 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     const delta = minuteOfDay(windowStart) - minuteOfDay(context.target.window_start);
     const members = context.visitMembers.map(member => {
       const planned = context.visitWindows?.find(window => window.id === member.id);
-      return { ...member, technician_id: target.technician_id,
+      const duration = member.id === target.id ? target.estimated_duration_minutes : workDuration(member);
+      return { ...member, ...(member.id === target.id ? target : {}), technician_id: target.technician_id,
+        route_order: member.route_order, estimated_duration_minutes: duration,
         window_start: planned?.window_start || hhmm(minuteOfDay(member.window_start) + delta),
-        window_end: planned?.window_end || hhmm(minuteOfDay(member.window_start) + delta + workDuration(member)) };
+        window_end: planned?.window_end || hhmm(minuteOfDay(member.window_start) + delta + duration) };
     });
     const group = groupRouteStops(members);
     if (members.some(member => !placementFitsShift(minuteOfDay(member.window_start), minuteOfDay(member.window_end)))) return unverified(target, date);
@@ -236,7 +241,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const groupedPending = capacity ? groupRouteStops(pending) : pending;
   if (!groupedPending) return unverified(target, date);
   const baseline = currentOrder(groupedPending);
-  const orders = capacity && (context.prospective || context.insertTarget || context.visitMembers)
+  const orders = capacity && allowInsertion && (context.prospective || context.insertTarget || context.visitMembers)
     ? Array.from({ length: baseline.length + 1 }, (_, i) => [...baseline.slice(0, i), target, ...baseline.slice(i)])
     : [currentOrder([...baseline, target])];
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
@@ -333,7 +338,7 @@ function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin
 
 async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
   const context = await loadArrivalRouteContext(options);
-  return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes });
+  return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
 }
 
 module.exports = {

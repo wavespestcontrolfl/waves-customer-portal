@@ -59,6 +59,7 @@ test('finds an insertion without changing the existing relative stop order', () 
   const fit = evaluateArrivalPlacement(input, options(600, 30));
   expect(fit.feasible).toBe(true);
   expect(fit.routeOrder).toEqual(['early', '__candidate__', 'late']);
+  expect(evaluateArrivalPlacement(input, { ...options(600, 30), allowInsertion: false }).feasible).toBe(false);
   expect(JSON.stringify(input.rows)).toBe(before);
 });
 
@@ -69,6 +70,9 @@ test('complete visits sum member work while sharing one arrival anchor', () => {
   expect(grouped[0].estimated_duration_minutes).toBe(70);
   expect(grouped[0].arrivalRange).toEqual({ startMin: 600, endMin: 720 });
   expect(groupRouteStops([members[0], { ...members[1], lat: 27.5 }])).toBeNull();
+  expect(groupRouteStops([members[0], stop('between', 600, 30, { route_order: 1.5 }), members[1]])).toBeNull();
+  const moving = members.map(member => ({ ...member, window_start: '16:00', window_end: '16:40' }));
+  expect(evaluateArrivalPlacement(context([], { prospective: false, target: moving[0], visitMembers: moving }), options(960, 90)).feasible).toBe(false);
 });
 
 test('existing blocked time interrupts work and travel', () => {
