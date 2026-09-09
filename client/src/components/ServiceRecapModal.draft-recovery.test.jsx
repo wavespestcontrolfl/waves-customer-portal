@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import ServiceRecapModal from './ServiceRecapModal';
 
@@ -13,6 +13,7 @@ const requestFor = () => vi.fn(async (path) => {
   if (path.endsWith('/draft')) throw new Error('Example AI unavailable.');
   return { ok: true };
 });
+beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe('recap interruption recovery', () => {
