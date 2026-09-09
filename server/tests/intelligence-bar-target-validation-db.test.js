@@ -163,6 +163,11 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect(await Context.resolve({ prompt: sharedFirstName, pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
     expect(await Context.resolve({ prompt: sharedFirstName, pageData: { customer_id: second } })).toMatchObject({ targets: [], ambiguous: true });
     expect(await Context.resolve({ prompt: sharedFirstName, pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+    // A reference longer than the stored name never resolves as a suffix match; an unbounded qualifier run stays a set (finished-commit P1s).
+    expect(await Context.resolve({ prompt: 'Update Synthetic Secondfixture Jr', pageData: {} })).toMatchObject({ targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt: 'Update Synthetic Secondfixture Jr', pageData: {}, selectedTarget: { customer_id: second } })).toMatchObject({ code: 'context_mismatch' });
+    expect(await Context.resolve({ prompt: 'Update all active residential lawn customers from this account', pageData: { customer_id: customerId } })).toMatchObject({ targets: [], ambiguous: true });
+    expect((await Context.resolve({ prompt: 'Update Synthetic Secondfixture', pageData: {}, selectedTarget: { customer_id: second.toUpperCase() } })).target.customer_id).toBe(second);
     // Account synonyms are sets, and a nameless request has no candidate to select (r5 P1).
     for (const prompt of ['Update all accounts', 'Text every client', 'Update the customer']) {
       expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: customerId } })).toMatchObject({ code: 'context_mismatch' });
