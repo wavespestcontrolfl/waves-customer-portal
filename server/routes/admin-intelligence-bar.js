@@ -1310,7 +1310,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
 
   if (task) {
-    const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name });
+    const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name })
+      || (toolUse.name === 'block_sender' ? await TaskContext.validateSenderBlock(params, taskContext) : null);
     if (invalidTarget) return { failed: true, modelResult: invalidTarget };
     params._ib_task_context = taskContext;
     if (toolUse.name === 'update_customer') {

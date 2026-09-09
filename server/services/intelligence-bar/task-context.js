@@ -31,10 +31,21 @@ const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|(?:repl
 // Direct read verbs resolve an exact full name ("Show John Smith details")
 // without becoming refusal hints: a read that names nobody stays a read.
 const READ_SELECTOR_SOURCE = 'show|find|get|look\\s+up|pull\\s+up|open|view|display|check|summarize|read';
+// The record nouns and their determiners a read verb may carry before naming
+// the customer: "show me the latest conversation with", "read the texts from".
+const READ_OBJECT_WORDS = 'the|my|our|all|any|recent|latest|last|open|past|full|entire|conversation|conversations|thread|threads|message|messages|text|texts|sms|call|calls|email|emails|history|notes|balance|balances|schedule|appointment|appointments|estimate|estimates|invoice|invoices|record|records|detail|details|activity|log|logs|timeline';
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
+// Function and temporal words never end a person reference's meaning: a bare
+// name before "tomorrow" or "and" is still a stated person, while a token
+// before an object noun ("flea" in "flea treatment") only modifies that noun.
+const FUNCTION_WORDS = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our',
+  'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when',
+  'to', 'for', 'as', 'from', 'with', 'and', 'or', 'by', 'using', 'on', 'at', 'in', 'of', 'about', 'regarding', 'via', 'through', 'after', 'before', 'during',
+  'until', 'since', 'over', 'into', 'off', 'up', 'out', 'whose', 'whom', 'which', 'if', 'while', 'because', 'so', 'but', 'not', 'no', 'please', 'now', 'later',
+  'again', 'still', 'also', 'then', 'just', 'only']);
 const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details',
   // every update_customer field (tools.js) and the contractions a request may open with
   'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
@@ -42,6 +53,8 @@ const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', '
   'on', 'at', 'in', 'of', 'about', 'regarding', 'via', 'through', 'after', 'before', 'during', 'until', 'since', 'over', 'into', 'off',
   'up', 'out', 'whose', 'whom', 'which', 'if', 'while', 'because', 'so', 'but', 'not', 'no', 'please', 'now', 'later', 'again', 'still', 'also', 'then', 'just', 'only',
   'account', 'accounts', 'profile', 'record', 'records',
+  // the record nouns a read verb may carry before naming its customer ("call history of", "text thread between")
+  'history', 'conversation', 'conversations', 'thread', 'threads', 'timeline', 'log', 'logs', 'activity',
   // record nouns that follow an action verb name a thing, never a person
   'appointment', 'appointments', 'property', 'properties', 'estimate', 'estimates', 'invoice', 'invoices', 'product', 'products',
   'call', 'calls', 'visit', 'visits', 'service', 'services', 'reservation', 'treatment', 'treatments', 'quote', 'reminder',
@@ -68,7 +81,9 @@ const recordKind = word => RECORD_KIND_ALIASES[word.toLowerCase()] || word.toLow
 // active residential lawn customers"); a deictic word ends the run, so "all of
 // this customer's fields" still names one account. The noun takes every
 // customer-reference synonym the resolver understands.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+)* (?:customer|account|client|profile|record)s?|all of (?:these|those))\b/;
+// A numeric count ("2 customers", "three accounts", "a few clients") and a
+// bare plural person noun ("update customers") are sets too.
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every|several|multiple|many|few|couple|dozen|\d+|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|fifty|hundred)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+)* (?:customer|account|client|profile|record)s?|all of (?:these|those)|customers|clients)\b/;
 // An independently requested operation starts at "and/then <action>".
 const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?:(?:also|then|please)\\s+)*(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
@@ -185,7 +200,10 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?)$`).test(before);
+  // A read may name its customer through a record noun and a preposition
+  // ("show me the conversation with", "read the messages from"), not only
+  // directly after the verb.
+  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE}|(?:${READ_SELECTOR_SOURCE})(?:\\s+me)?(?:\\s+(?:${READ_OBJECT_WORDS}))*(?:\\s+(?:with|from|of|to|between))?)$`).test(before);
 }
 
 async function namedCustomers(prompt) {
@@ -221,14 +239,26 @@ async function namedCustomers(prompt) {
   // modifies a non-person noun ("flea" in "flea treatment") is not a person
   // reference, and a request that resolved nobody keeps the plain
   // unresolved-name handling.
+  // Every occurrence of a name token is its own reference ("forward Alice
+  // Jones's estimate to Alice Missing" states two people), a run continues
+  // through a non-name word that continues a matched customer's own name
+  // ("Alice Link Jr" is compared whole against Alice Link), and a bare name
+  // is kept before a function or temporal word.
+  const acceptedNames = accepted.map(customer => `${normalizeName(customer.first_name)} ${normalizeName(customer.last_name)}`.trim().split(' '));
+  const continuesName = run => acceptedNames.some(full => full.length >= run.length && run.every((word, index) => word === full[index]));
+  const objectNoun = word => NON_PERSON_NAMES.has(word) && !FUNCTION_WORDS.has(word);
   const personReferences = clause => {
     const clauseWords = normalizeName(clause).split(' ');
-    return explicitSingleNames(clause).map(token => {
-      const start = clauseWords.indexOf(token);
+    return explicitSingleNames(clause).flatMap(token => clauseWords.flatMap((word, start) => {
+      if (word !== token) return [];
       const run = [token];
-      for (let i = start + 1; i < clauseWords.length && run.length < 5 && !NON_PERSON_NAMES.has(clauseWords[i]) && !AFTER_SINGLE_NAME.has(clauseWords[i]); i++) run.push(clauseWords[i]);
-      return run;
-    }).filter(run => run.length > 1 || !NON_PERSON_NAMES.has(clauseWords[clauseWords.indexOf(run[0]) + 1] || ''));
+      for (let i = start + 1; i < clauseWords.length && run.length < 5; i++) {
+        const next = clauseWords[i];
+        if ((NON_PERSON_NAMES.has(next) || AFTER_SINGLE_NAME.has(next)) && !continuesName([...run, next])) break;
+        run.push(next);
+      }
+      return run.length > 1 || !objectNoun(clauseWords[start + 1] || '') ? [run] : [];
+    }));
   };
   const resolvesReference = run => accepted.some(customer => {
     const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);
@@ -399,6 +429,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     // An explicitly named customer that did not resolve keeps the request
     // target-specific: broad customer-row readers stay refused until it does.
     namesRequested: nameHint,
+    // A phone or email literal in the target clause identifies one customer
+    // even when no send/read recipient grammar captured it.
+    contactRequested: [...targetClause(prompt).matchAll(CONTACT_LITERAL_RE)].length > 0,
     reviewReference: reviewReference || null,
     bulkLeadRequest: !nameHint && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
@@ -543,7 +576,7 @@ const BROAD_CUSTOMER_ROW_READERS = new Set([
   'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
   'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
   'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
-  'get_my_route', 'get_payout_details',
+  'get_my_route', 'get_payout_details', 'export_payouts',
 ]);
 
 // Readers that confine themselves to the task's read scope (readCustomerIds).
@@ -572,10 +605,14 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   // reader that carries its own selector or record identifier.
   if (context.ambiguous) return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
   const input = { ...params };
-  if ((context.targets?.length || context.namesRequested) && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
+  // A request about one customer — a resolved target, an unresolved name, or
+  // a phone/email literal that identifies the customer — never widens into
+  // a reader that lists every customer.
+  const customerSpecific = Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
+  if (customerSpecific && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
     return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
   }
-  if ((context.targets?.length || context.namesRequested) && ACTOR_WIDE_READERS.has(toolName)) {
+  if (customerSpecific && ACTOR_WIDE_READERS.has(toolName)) {
     return { error: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.', code: 'customer_scope_required' };
   }
   if (context.namesRequested && !context.targets?.length
@@ -632,4 +669,20 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   return invalid || { input };
 }
 
-module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+// A sender block inside a customer-scoped task may only target the task
+// customer's own saved address. A domain-wide filter affects every sender at
+// that domain and cannot be bound to one customer, so it is refused there.
+async function validateSenderBlock(params, context) {
+  if (!context?.targets?.length) return null;
+  if (String(params.domain || '').trim()) {
+    return { error: 'A domain-wide block affects every sender at that domain and cannot be proposed inside a task for a specific customer. Block the customer\'s own address instead.', code: 'target_relationship_mismatch' };
+  }
+  const email = normalizeEmail(params.email_address);
+  const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
+  if (!email || !owners.some(owner => normalizeEmail(owner.email) === email)) {
+    return { error: 'Use the task customer\'s own email address for this block', code: 'target_clarification_required' };
+  }
+  return null;
+}
+
+module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

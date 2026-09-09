@@ -438,6 +438,21 @@ describe("Email draft and navigation preservation", () => {
     expect(screen.queryByText(staleText, { exact: true })).not.toBeInTheDocument();
   });
 
+  it("releases the send guard when authentication fails before the send handler runs", async () => {
+    sendResponse = () => response({ error: "Admin authentication required" }, 401);
+    mount(); const dialog = await compose();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith(expect.stringContaining("not authorized to send email")));
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true })).toBeEnabled();
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
+    expect(JSON.parse(sessionStorage.getItem("waves_admin_email_drafts_v1")).attempts).toEqual({});
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving); expect(leaving.defaultPrevented).toBe(false);
+    sendResponse = null;
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true }));
+    await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(2));
+  });
+
   it("retains a failed compose and clears it only after a confirmed send", async () => {
     sendResponse = () => response({ error: "Synthetic send failure", status: "failed" }, 502);
     const view = mount(); const dialog = await compose();

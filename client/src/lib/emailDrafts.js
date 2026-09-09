@@ -5,10 +5,17 @@ const emptyDrafts = () => ({ compose: { to: "", subject: "", body: "" }, replies
 let activeSession = null;
 const warnBeforeDraftUnload = (event) => { event.preventDefault(); event.returnValue = ""; };
 
+const UNRESOLVED_SEND_STATUSES = new Set(["running", "outcome_unknown", "provider_accepted"]);
+
 function syncUnloadWarning(session) {
   const unsavedText = !session.saved && (Object.values(session.drafts.compose).some(Boolean)
     || Object.values(session.drafts.replies).some(Boolean));
-  if (unsavedText || Object.values(session.sending).some(Boolean)) window.addEventListener("beforeunload", warnBeforeDraftUnload);
+  // An unresolved send attempt lives only in this tab's session storage: it is
+  // the sole record preventing a duplicate send, so leaving must warn until
+  // the attempt is reconciled, not just while the request is in flight.
+  const unresolvedSend = Object.values(session.sending).some(Boolean)
+    || Object.values(session.attempts).some((attempt) => UNRESOLVED_SEND_STATUSES.has(attempt?.status));
+  if (unsavedText || unresolvedSend) window.addEventListener("beforeunload", warnBeforeDraftUnload);
   else window.removeEventListener("beforeunload", warnBeforeDraftUnload);
 }
 
@@ -33,6 +40,7 @@ export function loadEmailDrafts(userId) {
     }
   } catch { /* An unavailable/corrupt store must not prevent opening the inbox. */ }
   activeSession = { userId, drafts, attempts, replyRevisions: {}, saved: true, sending: { compose: false, reply: false }, listeners: new Set() };
+  syncUnloadWarning(activeSession);
   return activeSession;
 }
 

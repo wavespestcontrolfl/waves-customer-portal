@@ -70,6 +70,14 @@ export default function useEmailEditor(userId) {
           body: payload.body.replace(/\n/g, "<br>"),
         }),
       });
+      // Router-level authentication/authorization answers before the send
+      // handler runs: the email definitively never reached Gmail, so release
+      // the guard instead of locking the composer behind reconciliation.
+      if (response.status === 401 || response.status === 403) {
+        updateEmailSendAttempt(draftSession, key, null, attempt.id);
+        window.alert(SEND_ERRORS[kind] + "Your session is not authorized to send email. Sign in again and retry.");
+        return;
+      }
       const result = await response.json();
       if (result.status === "failed") {
         updateEmailSendAttempt(draftSession, key, null, attempt.id);
