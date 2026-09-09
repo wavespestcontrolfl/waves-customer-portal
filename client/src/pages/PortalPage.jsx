@@ -4112,11 +4112,11 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices, payment problems and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
-        Emailed receipt copies and important billing notices keep their current delivery methods. So do messages with attachments, review requests, conversations, security codes and marketing.
+        Existing emailed receipt copies continue. Messages with attachments, review requests, conversations, security codes and marketing keep their current delivery methods.
       </details>
       <p style={{ margin: '8px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         {prefs.smsEnabled === false ? 'Text backup is currently off. ' : 'Text backup remains subject to your text preferences. '}
