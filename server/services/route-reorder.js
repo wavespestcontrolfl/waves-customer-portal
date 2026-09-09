@@ -16,8 +16,9 @@
  *     freezes the run's every day (fail closed).
  *   - Today is never touched (band starts tomorrow; the 8am day-open plus the
  *     72h clock already exclude it — the band floor makes it structural).
- *   - >25 geocoded stops for one tech-day = Google Routes cap → the tech-day
- *     is SKIPPED AND LOGGED, never silently truncated.
+ *   - >25 geocoded stops for one tech-day = Google Routes cap → distance
+ *     optimization is SKIPPED AND LOGGED, never silently truncated. A wholly
+ *     in-process chronological repair does not call Google or use its cap.
  *
  * Zero communication sends: route_order controls the board and the tracker's
  * day-of stops-ahead count. Nothing here changes dates, arrival promises,
@@ -338,12 +339,6 @@ async function runRouteReorder(opts = {}, conn = db) {
             continue;
           }
           const withCoords = techStops.filter((s) => parseFloat(s.lat) && parseFloat(s.lng));
-          if (withCoords.length > GOOGLE_WAYPOINT_CAP) {
-            // Google Routes cap — skip and SAY SO; never silently truncate.
-            logger.warn(`[route-reorder] ${dateStr} tech ${techId}: ${withCoords.length} geocoded stops exceeds the ${GOOGLE_WAYPOINT_CAP}-waypoint cap — day skipped, not truncated`);
-            summary.skipped.push({ ...entryBase, reason: 'OVER_WAYPOINT_CAP', geocoded: withCoords.length });
-            continue;
-          }
           if (withCoords.length < 2) {
             summary.skipped.push({ ...entryBase, reason: 'TOO_FEW_GEOCODED_STOPS', geocoded: withCoords.length });
             continue;
@@ -362,14 +357,16 @@ async function runRouteReorder(opts = {}, conn = db) {
           }
 
           const RouteOptimizer = require('./route-optimizer');
-          // Baseline = the CURRENT running order, so "saved" means saved vs
-          // what the tech would actually drive today, not vs an arbitrary
-          // query order. ALL of the tech's stops go in (like the trusted
-          // /optimize path) — optimizeRoute routes the geocoded ones and
-          // appends coordless stops at the end, so the whole day gets a
-          // consistent route_order sequence.
+          // Baseline = the current running order. Every stop must survive
+          // the repair or optimizer; neither path may silently truncate it.
           const ordered = currentOrder(techStops);
           const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered) : null;
+          if (!repair && withCoords.length > GOOGLE_WAYPOINT_CAP) {
+            // The pure repair never reaches Google's waypoint-limited API.
+            logger.warn(`[route-reorder] ${dateStr} tech ${techId}: ${withCoords.length} geocoded stops exceeds the ${GOOGLE_WAYPOINT_CAP}-waypoint cap — day skipped, not truncated`);
+            summary.skipped.push({ ...entryBase, reason: 'OVER_WAYPOINT_CAP', geocoded: withCoords.length });
+            continue;
+          }
           if (opts.repairOnly && !repair) {
             summary.skipped.push({ ...entryBase, reason: 'NO_SAFE_INSERTION' });
             continue;
