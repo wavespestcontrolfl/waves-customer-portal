@@ -825,7 +825,7 @@ const TwilioService = {
         }
         if (options.explicitPushOnly) {
           if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
-          if (pushed.retryable) return { success: false, appRetryable: true, error: pushed.reason };
+          if (pushed.retryable) return { success: false, appRetryable: true, error: pushed.reason, retryAfterMs: pushed.retryAfterMs };
           if (pushed.pending) return { success: false, appPending: true, error: pushed.reason };
           return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
         }

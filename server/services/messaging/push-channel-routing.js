@@ -433,6 +433,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         minUpdatedAt: heartbeatCutoff(),
       });
     if (!delivered) {
+      if (explicitPushOnly && appNotification?.push?.retryable) {
+        return { delivered: false, retryable: true, reason: 'native_provider_retryable',
+          retryAfterMs: appNotification.push.retryAfterMs || 60000 };
+      }
       logger.info(`[push-routing] ${messageType}: no device accepted delivery — falling back to SMS`);
       return { delivered: false };
     }

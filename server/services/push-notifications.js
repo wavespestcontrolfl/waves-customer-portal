@@ -75,7 +75,8 @@ async function sendSubscription(sub, notification) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
-    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
+      ...(result.retryable ? { retryable: true, retryAfterMs: result.retryAfterMs } : {}) };
   }
 
   // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
@@ -86,7 +87,8 @@ async function sendSubscription(sub, notification) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
-    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
+      ...(result.retryable ? { retryable: true, retryAfterMs: result.retryAfterMs } : {}) };
   }
 
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
@@ -283,12 +285,15 @@ class PushNotificationService {
 }
 
 function summarize(results, subscriptions) {
+  const retryable = results.filter((result) => result.retryable);
   return {
     subscriptions,
     sent: results.filter((r) => r.sent).length,
     expired: results.filter((r) => r.expired).length,
     failed: results.filter((r) => r.failed).length,
     skipped: results.filter((r) => r.skipped).length,
+    ...(retryable.length ? { retryable: retryable.length,
+      retryAfterMs: Math.max(60000, ...retryable.map((result) => Number(result.retryAfterMs) || 0)) } : {}),
     results,
   };
 }
