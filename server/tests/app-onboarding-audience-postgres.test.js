@@ -144,6 +144,42 @@ const welcome = require('../services/new-recurring-welcome-sms');
     expect((await mockDatabase('sms_sequences').where({ id: rows[1].id }).first()).status).toBe('completed');
   });
 
+  test('a cancel-and-rebook inside the delay retires the queued row, and the rebooked visit delivers once', async () => {
+    await welcome.queueOneTimeWelcomeEmail(service);
+    // Original booking cancelled BEFORE the delayed processor reaches its row.
+    await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status: 'cancelled' });
+    const [rebooked] = await mockDatabase('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, is_recurring: false, status: 'confirmed', scheduled_date: '2030-01-09' }).returning('*');
+    expect(await welcome.queueOneTimeWelcomeEmail(rebooked)).toMatchObject({ queued: true });
+    const rows = await mockDatabase('sms_sequences').orderBy('created_at');
+    expect(rows.map(r => r.status)).toEqual(['cancelled', 'active']);
+    expect(rows[0].metadata).toMatchObject({ scheduled_service_id: serviceId, skip_reason: 'superseded_by_rebooking', superseded_by_service_id: rebooked.id });
+    expect(rows[1].metadata).toMatchObject({ scheduled_service_id: rebooked.id });
+    await mockDatabase('sms_sequences').update({ next_send_at: new Date(Date.now() - 1000) });
+    await Promise.all([welcome.processDueWelcomes(), welcome.processDueWelcomes()]);
+    expect(mockSendEmail).toHaveBeenCalledTimes(1);
+    expect(mockSendSms).not.toHaveBeenCalled();
+    expect((await mockDatabase('sms_sequences').orderBy('created_at')).map(r => r.status)).toEqual(['cancelled', 'completed']);
+  });
+
+  test('a second open booking does not retire the queued row: the guard still holds once per customer', async () => {
+    await welcome.queueOneTimeWelcomeEmail(service);
+    const [second] = await mockDatabase('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, is_recurring: false, status: 'confirmed', scheduled_date: '2030-01-09' }).returning('*');
+    expect(await welcome.queueOneTimeWelcomeEmail(second)).toMatchObject({ reason: 'already_sent' });
+    const rows = await mockDatabase('sms_sequences');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('active');
+    expect(rows[0].metadata).toMatchObject({ scheduled_service_id: serviceId });
+  });
+
+  test('a rebook does not retire a row already claimed for dispatch', async () => {
+    await welcome.queueOneTimeWelcomeEmail(service);
+    await mockDatabase('sms_sequences').update({ status: 'sending' });
+    await mockDatabase('scheduled_services').where({ id: serviceId }).update({ status: 'cancelled' });
+    const [rebooked] = await mockDatabase('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, is_recurring: false, status: 'confirmed', scheduled_date: '2030-01-09' }).returning('*');
+    expect(await welcome.queueOneTimeWelcomeEmail(rebooked)).toMatchObject({ reason: 'already_sent' });
+    expect((await mockDatabase('sms_sequences')).map(r => r.status)).toEqual(['sending']);
+  });
+
   test.each(['en_route', 'on_site'])('a same-day visit already %s at the delayed recheck still receives the email', async status => {
     await welcome.queueOneTimeWelcomeEmail(service);
     await mockDatabase('sms_sequences').update({ next_send_at: new Date(Date.now() - 1000) });

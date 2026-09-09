@@ -26,6 +26,7 @@ const { recordToolEvent } = require('./intelligence-bar/tool-events');
 const { LEAD_RESPONSE_AGENT_CONFIG } = require('./lead-response-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
+const { readSessionFrames } = require('./agent-control/session-stream');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -87,28 +88,10 @@ async function* streamSessionEvents(sessionId) {
     throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-
-    let currentEvent = null;
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim();
-      } else if (line.startsWith('data: ') && currentEvent) {
-        try {
-          yield { event: currentEvent, data: JSON.parse(line.slice(6)) };
-        } catch { /* skip */ }
-        currentEvent = null;
-      }
-    }
+  for await (const { event, data } of readSessionFrames(res.body)) {
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { continue; }
+    yield { event, data: parsed };
   }
 }
 
