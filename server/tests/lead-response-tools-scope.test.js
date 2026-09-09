@@ -125,6 +125,19 @@ test('intentional alert suppression does not report a tool failure or retry deli
   expect(mockSend).toHaveBeenCalledTimes(1);
 });
 
+test('a missing owner phone preserves a retryable draft until configuration recovers', async () => {
+  delete process.env.ADAM_PHONE;
+  const first = await executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Saved draft' }, context);
+  expect(first).toMatchObject({ queued: true, failed: true, retryable: true, alertStatus: 'not_configured' });
+  expect(mockSend).not.toHaveBeenCalled();
+  process.env.ADAM_PHONE = '+19415550101';
+  expect(await executeLeadTool('queue_for_adam', {}, context)).toMatchObject({
+    queued: true, replayed: true, activityId: first.activityId, alertStatus: 'sent',
+  });
+  expect(mockState.inserts).toBe(1);
+  expect(mockSend).toHaveBeenCalledTimes(1);
+});
+
 test('a concurrent replay reports pending delivery without treating the active claim as an outage', async () => {
   let started; let release;
   const delivering = new Promise(resolve => { started = resolve; });
