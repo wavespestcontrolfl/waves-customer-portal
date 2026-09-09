@@ -94,14 +94,16 @@ Routine durations resolve through the catalog's additive scheduling policy;
 new arrival labels start on the hour within 08:00–18:00 ET, last start 16:00.
 Reserve and accept recheck the full live route and eligibility under the shared
 date lock; a stale route or changed service allowance returns the existing
-409 `SLOT_UNAVAILABLE`. New combined allocations use version 2, per-service
+409 `SLOT_UNAVAILABLE`. When the combined-capacity gate and its prerequisite
+below are also enabled, new combined allocations use version 2, per-service
 work allowances and one shared arrival anchor. Version-1 holds retain their
 60-minute member contract through expiry or completion; existing appointments
 are not shortened by switching the gate. With strict opt-in
 `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
-`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
-per physical service program. Termite rental and bond billing riders fold into
-bait service; legacy supplements use the converter's physical-program rules.
+`GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections
+(created with scheduling capacity off) reserve 60 minutes per physical service
+program. Scheduling capacity does not enable this combined-service gate.
+Termite rental and bond billing riders fold into bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
@@ -109,7 +111,8 @@ remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
 and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
 the selection, technician and full occupancy under existing locks, then converts
-the hold into separate sequential 60-minute service windows with independent
+a version-1 hold into sequential 60-minute member windows, or a version-2 hold
+into catalog-sized member windows sharing the arrival anchor, with independent
 cadences. Missing or unmatched members abort the transaction. A stamped hold
 retains its capacity policy when the creation gate turns off. Shared-arrival
 reminder consumers use the persisted allocation, including with grouping off

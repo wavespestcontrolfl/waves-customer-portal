@@ -13,7 +13,7 @@ function estimateFor(keys) {
 }
 
 beforeEach(() => { process.env.GATE_SEPARATE_COMBO_VISITS = 'true'; });
-afterEach(() => { delete process.env.GATE_VISIT_COMBINED_CAPACITY; delete process.env.GATE_SEPARATE_COMBO_VISITS; });
+afterEach(() => { delete process.env.GATE_SCHEDULING_CAPACITY; delete process.env.GATE_VISIT_COMBINED_CAPACITY; delete process.env.GATE_SEPARATE_COMBO_VISITS; });
 
 describe('combined visit booking capacity', () => {
   test.each(['foam_recurring', 'foam recurring', 'Recurring Termite Foam Service'])('recurring foam identity %s retains its termite capability category', (identity) => {
@@ -34,6 +34,13 @@ describe('combined visit booking capacity', () => {
     const profile = resolveEstimateSlotProfile(estimate, { selectedFrequency: 'quarterly' });
     expect(profile.services.map((row) => row.service)).toEqual(['pest_control']);
     expect(profile.durationMinutes).toBe(60);
+    expect(profile.reservationServiceMix).toBeUndefined();
+  });
+
+  test.each([true, false])('scheduling capacity does not enable combined creation (separate visits %s)', separate => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    if (!separate) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+    const profile = resolveEstimateSlotProfile(estimateFor(services));
     expect(profile.reservationServiceMix).toBeUndefined();
   });
 

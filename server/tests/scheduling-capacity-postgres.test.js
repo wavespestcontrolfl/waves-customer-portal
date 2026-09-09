@@ -89,6 +89,7 @@ describeDb('scheduling capacity on PostgreSQL', () => {
   beforeEach(async () => {
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     for (const table of ['scheduled_services', 'estimates', 'tech_schedule_blocks', 'technician_capabilities',
       'schedule_blackout_dates', 'system_settings', 'audit_log']) await mockPg(table).del();
     await mockPg('estimates').insert(estimateIds.map(id => ({ id, customer_id: customerId, status: 'sent',
@@ -114,6 +115,39 @@ describeDb('scheduling capacity on PostgreSQL', () => {
     expect(booked).toMatchObject({ estimated_duration_minutes: duration, window_start: '10:00:00',
       window_end: `${expectedEnd}:00`, reservation_expires_at: null });
     expect((await mockPg('scheduled_services').where({ id: booked.id }).first()).route_order).toBe(1);
+  });
+
+  test('a technician disabled after the offer returns a recoverable reservation conflict', async () => {
+    await mockPg('technicians').where({ id: technicianId }).update({ field_dispatchable: false });
+    try {
+      await expect(reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) }))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', status: 409, reason: 'technician_unavailable' });
+      expect(await mockPg('scheduled_services')).toHaveLength(0);
+    } finally {
+      await mockPg('technicians').where({ id: technicianId }).update({ field_dispatchable: true });
+    }
+  });
+
+  test.each([20, 90])('changed single-service allowance of %i minutes rejects prepare and live commit', async duration => {
+    const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
+    const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
+    await mockPg('services').where({ service_key: 'pest_general_quarterly' }).update({
+      scheduling_duration_policy: { version: 1, default_duration_minutes: duration,
+        min_duration_minutes: duration, max_duration_minutes: duration },
+    });
+    try {
+      await expect(prepareReservationCommit(held.scheduledServiceId))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed' });
+      await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, preparedCapacity }))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed' });
+      expect(await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first())
+        .toMatchObject({ customer_id: null, estimated_duration_minutes: 30 });
+    } finally {
+      await mockPg('services').where({ service_key: 'pest_general_quarterly' }).update({
+        scheduling_duration_policy: { version: 1, default_duration_minutes: 30,
+          min_duration_minutes: 30, max_duration_minutes: 40 },
+      });
+    }
   });
 
   test('concurrent customers cannot both consume the final thirty minutes', async () => {
@@ -160,12 +194,12 @@ describeDb('scheduling capacity on PostgreSQL', () => {
     expect((await mockPg('scheduled_services').where({ id: current.scheduledServiceId }).first()).estimated_duration_minutes).toBe(30);
   });
 
-  test('acceptance checks a changed single-service selection against live capabilities', async () => {
+  test('acceptance refuses a changed single-service selection with a different allowance', async () => {
     const held = await reserveSlot({ estimateId: estimateIds[0], slotId: signedSlot(estimateIds[0]) });
     await mockPg('estimates').where({ id: estimateIds[0] }).update({ estimate_data: estimateData(['lawn_care']) });
     await mockPg('technician_capabilities').insert({ technician_id: technicianId, service_category: 'lawn', active: false });
     await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId }))
-      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
+      .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed' });
     expect((await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
   });
 

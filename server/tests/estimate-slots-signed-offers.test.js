@@ -94,6 +94,35 @@ describe('getAvailableSlots — signed offers', () => {
     estimateSlotAvailability._internals.clearCaches();
   });
 
+  test('capacity responses and cache hits omit internal catalog and route fields', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
+    const catalog = jest.spyOn(require('../services/slot-reservation'), 'catalogLinkForProfile')
+      .mockResolvedValue({ id: 'internal-catalog-id', default_duration_minutes: 30 });
+    require('../services/scheduling/find-time').findAvailableSlots.mockResolvedValueOnce({ slots: [{
+      date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Fixture' },
+      detour_minutes: 4, stops_that_day: 3, route_mode: 'arrival_windows',
+    }], total_feasible: 1 });
+    try {
+      for (const cacheHit of [false, true]) {
+        const result = await getAvailableSlots('est-signed-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+        expect(result.metadata.cacheHit).toBe(cacheHit);
+        const slots = [...result.primary, ...result.expander];
+        expect(slots.length).toBeGreaterThan(0);
+        expect(slots.every(slot => !Object.hasOwn(slot, 'routeMode'))).toBe(true);
+        expect(result.metadata.serviceProfile.services.every(service => !Object.hasOwn(service, 'catalogServiceId'))).toBe(true);
+        expect(splitSignedSlotId(slots[0].slotId)).not.toBeNull();
+      }
+    } finally {
+      catalog.mockRestore();
+      jest.useRealTimers();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
   test('every returned slot carries a live signature that verifies for THIS estimate only', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));

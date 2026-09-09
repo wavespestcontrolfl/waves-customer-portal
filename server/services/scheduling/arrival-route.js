@@ -366,7 +366,13 @@ async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, d
 }
 
 async function assertCapacityEligibility(conn, context, serviceTypes) {
-  await require('../technician-eligibility').assertAssignableTechnician(context.target.technician_id, { conn });
+  const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../technician-eligibility');
+  try {
+    await assertAssignableTechnician(context.target.technician_id, { conn });
+  } catch (error) {
+    if (error.code !== NOT_ASSIGNABLE) throw error;
+    throw capacityError('technician_unavailable');
+  }
   const members = serviceTypes?.map(service_type => ({ service_type }))
     || context.target.reservation_service_mix?.services?.map(service_type => ({ service_type }))
     || [context.target];

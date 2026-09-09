@@ -765,7 +765,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   // this axis while selectedFrequency stays the pest cadence (r14 P1).
   const mosquitoAxis = normalizeSelectionToken(cadences?.mosquito);
   const combinedPolicy = serviceMode !== 'one_time'
-    && (capacityEnabled() || process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
+    && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
   let recurringSelection = [];
   let services;
   if (serviceMode === 'one_time') {
@@ -863,8 +863,7 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
   for (const service of profile.services) {
     const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] });
     const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes);
-    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0),
-      ...(catalog ? { catalogServiceId: catalog.id } : {}) });
+    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
   }
   const capacity = profile.reservationServiceMix
     ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
@@ -1557,7 +1556,9 @@ function signCustomerFacingSlots(slots, estimateId) {
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
     });
-    return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    delete publicSlot.routeMode;
+    return publicSlot;
   });
 }
 

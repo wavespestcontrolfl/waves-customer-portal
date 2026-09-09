@@ -500,7 +500,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
       throw capacityError('service_selection_changed');
     }
     if (held.version === 2 && capacityEnabled() && held.services.some((key, index) =>
-      profile.services.find(service => service.service === key).durationMinutes > held.durations[index])) {
+      profile.services.find(service => service.service === key).durationMinutes !== held.durations[index])) {
       throw capacityError('service_duration_changed');
     }
     // Existing version-1 holds keep 60 minutes per member. Version-2 holds
@@ -509,7 +509,13 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
       services: held.services.map((key, index) => ({ ...profile.services.find(service => service.service === key),
         durationMinutes: held.version === 1 ? 60 : held.durations[index] })) };
   }
-  if (row?.reservation_policy_version === 2 || (capacityEnabled() && row?.reservation_expires_at)) {
+  if (row?.reservation_policy_version === 2) {
+    const heldDuration = Number(row.estimated_duration_minutes);
+    if (capacityEnabled() && profile.durationMinutes !== heldDuration) {
+      throw capacityError('service_duration_changed');
+    }
+    profile.durationMinutes = heldDuration;
+  } else if (capacityEnabled() && row?.reservation_expires_at) {
     profile.durationMinutes = Math.max(Number(row.estimated_duration_minutes) || 0,
       capacityEnabled() ? profile.durationMinutes : 0);
   }
