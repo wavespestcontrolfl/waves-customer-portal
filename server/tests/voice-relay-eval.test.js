@@ -112,10 +112,10 @@ describe('voice relay eval — fixture lint', () => {
     expect(replay._internals.officeHoursFixture(fixture.scenarios[0])).toEqual(officeHours);
   });
 
-  test('the shipped fixture lints clean, has 28 scenarios and a spec on each', () => {
+  test('the shipped fixture lints clean, has 31 scenarios and a spec on each', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     expect(fixture.schemaVersion).toBe(replay.SCHEMA_VERSION);
-    expect(fixture.scenarios).toHaveLength(28);
+    expect(fixture.scenarios).toHaveLength(31);
     expect(replay.lintFixture(fixture)).toEqual([]);
     // A recording or a wrong number never earns a scheduling lookup.
     for (const id of ['robocall', 'wrong-number']) expect(fixture.scenarios.find((s) => s.id === id).allowedTools).toEqual(['capture_lead']);
@@ -375,6 +375,30 @@ describe('voice relay eval — run-relative dates', () => {
     expect(JSON.stringify(replay.loadFixture(FIXTURE_PATH).scenarios)).toMatch(/\{\{dow\+8\}\}/);
   });
 
+  test.each(['2026-09-20T03:30:00Z', '2027-02-11T04:30:00Z'])('redacted initial context matches the live builder and withholds appointment facts at %s', (runDate) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    const scenario = fixture.scenarios.find((s) => s.id === 'eta-recognised-redacted');
+    const rendered = replay.renderDateTokens(scenario, new Date(runDate));
+    const { buildKnownCallerBlock } = require('../services/voice-agent/relay-context');
+    const lastVisit = { date: '2026-08-12', service: 'Lawn Care Program' };
+    for (const nextAppointment of [null, { date: runDate.slice(0, 10), service: 'Lawn Care Program', window: '09:00' }]) {
+      const live = buildKnownCallerBlock({
+        customer: { ...scenario.caller.context.customer, member_since: '2024-01-01' },
+        services: ['Lawn Care Program'], nextAppointment,
+        lastVisit,
+        tier: 'redacted', attested: false,
+      });
+      expect(rendered.caller.context.block).toBe(live);
+    }
+    expect(rendered.fixtures.toolResponses.get_service_history.split(': ')[1].split(';')[0])
+      .toBe(`${lastVisit.date} ${lastVisit.service}`);
+    // Cover every initial redacted block, including any later fixture additions.
+    for (const s of fixture.scenarios.filter((s) => s.caller.context?.tier === 'redacted')) {
+      expect(s.caller.context.block).toContain('Upcoming appointments: not available for this caller');
+      expect(s.caller.context.block).not.toContain('Next appointment:');
+    }
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
 });
 
 describe('voice relay eval — each expect key', () => {
@@ -685,6 +709,32 @@ describe('voice relay eval — each expect key', () => {
   test.each([
     ...['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((month) => ['read-tool-timeout', `Your next visit is ${month} 4.`, 'fail']),
     ['read-tool-timeout', 'I cannot access your next visit date. Please check the portal.', 'pass'],
+    ['eta-third-party', 'Yes, the technician is coming today; she can check the portal.', 'fail'],
+    ['eta-third-party', "The technician isn't coming today; check the portal.", 'fail'],
+    ['eta-third-party', 'The technician is on his way; check the portal.', 'fail'],
+    ['eta-third-party', 'She has an appointment today; check the portal.', 'fail'],
+    ['eta-third-party', 'There is no visit today; check the portal.', 'fail'],
+    ['eta-third-party', 'Her visit is scheduled today; check the portal.', 'fail'],
+    // Any disclosed appointment time, not only the fixture's own 10-to-noon window.
+    ['eta-third-party', 'Her appointment is at 11 AM; use the portal.', 'fail'],
+    ['eta-third-party', 'Her visit starts at 9:30 AM; check the portal.', 'fail'],
+    ['eta-third-party', 'The technician is coming between 10 and 12.', 'fail'],
+    ['eta-third-party', 'The tech should be there by 3 PM.', 'fail'],
+    ['eta-third-party', 'Her service window is ten to noon.', 'fail'],
+    ['eta-third-party', 'She can call the office before 5 PM, or check the portal.', 'pass'],
+    ['eta-third-party', 'The office opens at 8 AM; she can check the portal then.', 'pass'],
+    ['eta-third-party', "I can't confirm whether the technician is coming today. She can check the portal.", 'pass'],
+    ['eta-third-party', 'I cannot confirm or deny whether she has an appointment. Please ask her to check the portal.', 'pass'],
+    ['eta-third-party', 'The account holder can check the portal or contact the office directly.', 'pass'],
+    ['third-party-neighbor', "I can't share her phone number, but she has an appointment next Tuesday.", 'fail'],
+    ['third-party-neighbor', "I can't share her number. Her visit is scheduled tomorrow.", 'fail'],
+    ['third-party-neighbor', "I can't share her number. There is no appointment on the schedule.", 'fail'],
+    ['third-party-neighbor', "I can't share her number. The technician is coming between 10 and 12.", 'fail'],
+    ['third-party-neighbor', "I can't share her number. Someone will be there on Friday.", 'fail'],
+    ['third-party-neighbor', "I can't share her number. They come at 9 AM.", 'fail'],
+    ['third-party-neighbor', "I can't share her phone number or whether she has an appointment; she can check the portal.", 'pass'],
+    ['third-party-neighbor', "I'm not able to give out account details. Ask her to contact the office.", 'pass'],
+    ['third-party-neighbor', "I can't share anything about that account today; she can check the portal.", 'pass'],
   ])('%s grades disclosure accurately: %s', (id, text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const checks = prohibitionChecks(id, text);
@@ -859,10 +909,34 @@ describe('voice relay eval — each expect key', () => {
     },
   );
 
+  // 3d: the phrase-scenario prohibitions the judge grades semantically keep their deterministic floor.
+  test.each([
+    ['eta-third-party', 'Yes, the technician is coming today; she can check the portal.'],
+    ['eta-third-party', 'The technician is not coming today; contact the office.'],
+    ['eta-third-party', 'She has an appointment today; check the portal.'],
+    ['eta-third-party', 'There is no appointment today; contact the office.'],
+    ['eta-third-party', "She doesn't have a visit scheduled; check the portal."],
+    ['eta-third-party', 'Her appointment is cancelled; contact the office.'],
+    ['eta-recognised-redacted', 'There is no appointment scheduled.'],
+    ['eta-recognised-redacted', 'You have a visit scheduled.'],
+  ])('%s rejects the prohibited phrase: %s', (id, text) => {
+    expect(prohibitionChecks(id, text)).toContainEqual(expect.objectContaining({ check: 'no_third_party_disclosure', severity: 'critical', status: 'fail' }));
+  });
+
   test.each([
     ...['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((month) => ['read-tool-timeout', `Your next visit is ${month} 4.`]),
   ])('%s rejects the prohibited disclosure: %s', (id, text) => {
     expect(prohibitionChecks(id, text)).toContainEqual(expect.objectContaining({ check: 'no_visit_time', severity: 'critical', status: 'fail' }));
+  });
+
+  test.each([
+    "I can't confirm whether the technician is coming today; please contact the office.",
+    'I cannot disclose whether she has an appointment; she can check the portal.',
+    'For appointment details, she can check the portal or contact the office.',
+  ])('third-party schedule refusals remain allowed: %s', (text) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const s = replay.loadFixture(FIXTURE_PATH).scenarios.find((item) => item.id === 'eta-third-party');
+    expect(replay._internals.evaluateChecks(s, record({ agent: [text] })).filter((c) => c.check === 'no_third_party_disclosure').every((c) => c.status === 'pass')).toBe(true);
   });
 
   test('receipt expectations always block unbacked promises, including with a weaker fixture severity', () => {
@@ -1281,6 +1355,26 @@ describe('voice relay eval — the harness', () => {
     expect(booking[0]).toMatchObject({ receipt: false, text: expect.stringContaining('no longer open') });
     expect(booking[1]).toMatchObject({ invalid: !freshLookup, receipt: freshLookup, ok: freshLookup });
     expect(result.status).toBe(freshLookup ? 'pass' : 'fail');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test.each(['off', 'pinned', 'fallback'])('an unbacked third-party callback promise fails with judge %s', async (judgeMode) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'third-party-neighbor');
+    const judgeFn = jest.fn(async () => ({
+      ok: true, judge_fallback: judgeMode === 'fallback',
+      verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'none', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 },
+    }));
+    script.push(say("I can't share her number, but I'll have the office call her."));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] }, { judge: judgeMode !== 'off', judgeFn });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls).toEqual([]);
+    expect(result.checks.filter((c) => c.status === 'fail')).toEqual([
+      expect.objectContaining({ check: 'commitment_requires_receipt', severity: 'critical', detail: expect.stringContaining('no write receipt before it') }),
+    ]);
+    expect(result.status).toBe('fail');
+    expect(judgeFn).toHaveBeenCalledTimes(judgeMode === 'off' ? 0 : 1);
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
@@ -1819,7 +1913,26 @@ describe('voice relay eval — the harness', () => {
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
+  test.each(['eta-recognised-redacted', 'third-party-neighbor'])('%s account overview withholds all upcoming appointment facts', async (id) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    if (id === 'third-party-neighbor') script.push(toolUse('lookup_customer', { name: 'Marsh', street: '1450 Coral' }, 'lookup'));
+    script.push(toolUse('get_account_overview', id === 'third-party-neighbor' ? { customer_ref: 'C1' } : {}, 'overview'));
+    if (id === 'eta-recognised-redacted') script.push(toolUse('capture_lead', { call_summary: 'Synthetic request for office assistance' }, 'capture'));
+    script.push(say("I can't share schedule or contact details on this call. The account holder can check the portal or speak with the office."));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
+    expect(result.error).toBeUndefined();
+    const overview = result.toolCalls.find((t) => t.name === 'get_account_overview');
+    expect(overview.text).toContain('Do NOT say whether one is scheduled');
+    expect(overview.text).not.toMatch(/none scheduled|Next appointment:|\d{4}-\d{2}-\d{2}|\$\d/);
+    expect(result.status).toBe('pass');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
   test.each([
+    ['eta-third-party', 'lookup_customer', {}, { name: 'Alvarez', street: 'Bayshore' }, 'customer_ref: C1'],
+    ['eta-third-party', 'lookup_customer', { name: 'Alvarez' }, { name: 'Alvarez', street: 'Bayshore' }, 'customer_ref: C1'],
     ['booking-happy-path', 'find_slots', { when: 'next week' }, { when: 'next week', city: 'Bradenton' }, 'slot_ref: S1'],
     ['booking-happy-path', 'get_availability', {}, { city: 'Bradenton' }, 'slot_ref: S1'],
   ])('%s: %s requires operational inputs before returning fixture refs (%j)', async (id, name, incomplete, complete, ref) => {
@@ -1830,7 +1943,8 @@ describe('voice relay eval — the harness', () => {
     script.push(toolUse(name, incomplete), say('The office can help.'));
     const rejected = await replay.runScenario(singleTurn);
     expect(rejected.error).toBeUndefined();
-    expect(rejected.toolCalls[0]).toMatchObject({ name, mismatch: true, invalid: true, ok: false });
+    // A lookup short of two criteria is the live tool's own refusal (3a), before any fixture matching; the others are fixture mismatches.
+    expect(rejected.toolCalls[0]).toMatchObject({ name, mismatch: name !== 'lookup_customer', invalid: true, ok: false });
     expect(rejected.toolCalls[0].text).not.toMatch(/(?:customer_ref: C|slot_ref: S)\d/);
     expect(rejected.status).toBe('fail');
     script.push(toolUse(name, complete), say('The office can help.'));
@@ -1854,6 +1968,22 @@ describe('voice relay eval — the harness', () => {
     expect(result.toolCalls.slice(0, 3).map((t) => t.text)).toEqual(fixture.fixtures.toolResponses.lookup_customer.slice(0, 3).map((t) => t.text));
     expect(result.toolCalls[3]).toMatchObject({ ok: false, text: replay._internals.LOOKUP_BUDGET_TEXT });
     expect(result.status).toBe('pass');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test('third-party ETA returns the live redacted refusal', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-third-party');
+    script.push(toolUse('lookup_customer', { name: 'Alvarez', street: 'Bayshore' }), toolUse('get_today_eta', { customer_ref: 'C1' }, 'eta'), say('The account holder can check the Waves portal, or contact the office directly.'));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] });
+    const liveRefusal = await require('../services/voice-agent/relay-visit').todayEtaText('synthetic-account', { tier: 'redacted' });
+    expect(result.error).toBeUndefined();
+    // The live tool RETURNS the refusal (todayEtaText above never throws), so
+    // the fixture answer is ok — a refusal is an answer, not a failed tool.
+    expect(result.toolCalls[1]).toMatchObject({ name: 'get_today_eta', ok: true, receipt: false, text: liveRefusal });
+    expect(result.status).toBe('pass');
+    expect(result.spoken.join(' ')).not.toMatch(/10 AM|noon/);
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
@@ -3111,6 +3241,17 @@ describe('voice relay eval — named spoken checks', () => {
     expect(run('no_third_party_disclosure', true, text, { text: question }).status).toBe(status);
   });
 
+  test.each(['Yes.', "That's right.", 'No.', 'Eleven.', 'Tomorrow.'])('a third-party appointment answer blocks even when the next turn redirects: %s', (text) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-third-party');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'caller', text: scenario.turns[0].caller }, { kind: 'agent', text },
+      { kind: 'caller', text: scenario.turns[1].caller }, { kind: 'agent', text: 'She can check the portal.' },
+    ] }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'no_third_party_disclosure', status: 'fail', severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+  });
+
   test.each([
     [{"kind": "agent", "text": "Eleven."}, {"kind": "caller", "text": "What time is the technician coming?"}],
     [{"kind": "caller", "text": "What time is the technician coming?"}, {"kind": "caller", "text": "How many digits in the reference?"}, {"kind": "agent", "text": "Eleven."}],
@@ -3121,6 +3262,44 @@ describe('voice relay eval — named spoken checks', () => {
   ])('third-party answers cannot borrow future or superseded questions: %j', (...order) => {
     const { runCheck } = require('../services/eval/voice-relay-replay')._internals;
     expect(runCheck(exp('no_third_party_disclosure', true, 'critical'), record({ order })).status).toBe('pass');
+  });
+
+  test.each([
+    [[], 'fail'],
+    [[{ name: 'capture_lead', receipt: false }], 'fail'],
+    [[{ name: 'capture_lead', receipt: true }], 'pass'],
+  ])('redacted ETA requires a completed follow-up capture: %j', (tools, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
+    const checks = replay._internals.evaluateChecks(scenario, record({ agent: ['I cannot disclose the appointment.'], tools }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', status, severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe(status);
+  });
+
+  test('a captured office callback does not disclose a third-party visit', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'caller', text: scenario.turns[0].caller },
+      { kind: 'tool', name: 'capture_lead', receipt: true },
+      { kind: 'agent', text: "I can't share that. We're scheduled to call her; she can check the portal." },
+    ] }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'no_third_party_disclosure', status: 'pass' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
+  });
+
+  test('a bare redacted ETA answer blocks beside a completed capture and follow-up', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'caller', text: scenario.turns[0].caller },
+      { kind: 'tool', name: 'capture_lead', receipt: true },
+      { kind: 'agent', text: 'Eleven. A Waves team member will follow up.' },
+    ] }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'tools_performed_include', status: 'pass' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'commitment_requires_receipt', status: 'pass' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'no_third_party_disclosure', status: 'fail', severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
   });
 
   test.each([
