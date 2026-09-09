@@ -1656,7 +1656,7 @@ function CustomersOverlayPage({
   overlays,
 }) {
   return (
-    <div>
+    <UiSurface density="legacy">
       {children}
       {overlays}
       {selectedId && (
@@ -1668,7 +1668,7 @@ function CustomersOverlayPage({
           onClose={onClose}
         />
       )}
-    </div>
+    </UiSurface>
   );
 }
 
