@@ -90,6 +90,12 @@ function etTime(value) {
 
 // Lane 1: callback-requested calls from today with nothing behind them.
 async function loadCallbackCalls(cutoff = new Date()) {
+  if (require('./callback-cards').enabled()) {
+    const { staleAiRowSql } = require('./call-commitments');
+    return db('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+      .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
+      .whereRaw(`NOT ${staleAiRowSql('cc')}`).select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
+  }
   const { rows } = await db.raw(
     `
     SELECT c.id, c.created_at, c.duration_seconds,
@@ -624,7 +630,10 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionHtml.push(`<p style="border:1px solid #b91c1c;padding:8px 10px;"><strong>LANE FAILURE — this digest is INCOMPLETE.</strong> Failed lane${failures.length === 1 ? '' : 's'}:</p><ul style="margin:0 0 12px 18px;padding:0;">${failures.map((f) => `<li style="margin:0 0 6px 0;">${esc(f.lane)}: ${esc(f.message || 'query failed')}</li>`).join('')}</ul><p>That lane's queue is invisible until the query is fixed — do not read the sections below as the whole day.</p>`);
   }
 
-  if (a.length) {
+  if (a.length && require('./callback-cards').enabled()) {
+    sectionText.push(`${aTotal} open callback card${aTotal === 1 ? '' : 's'}: ${adminPortalUrl()}/admin/communications#tab=owed`, '');
+    sectionHtml.push(`<p><a href="${esc(adminPortalUrl())}/admin/communications#tab=owed">${aTotal} open callback card${aTotal === 1 ? '' : 's'}</a></p>`);
+  } else if (a.length) {
     sectionText.push('Callbacks requested on calls today (nothing else tracks these):');
     sectionText.push(...a.map((r) => `- ${etDateTime(r.created_at)} ${r.customer_name || maskPhone(r.from_phone)}${r.duration_seconds ? ` (${Math.round(r.duration_seconds / 60)}min)` : ''}${r.summary ? ` — ${String(r.summary).replace(/\s+/g, ' ').trim()}` : ''}`));
     sectionText.push(...moreLine(a.length, aTotal));

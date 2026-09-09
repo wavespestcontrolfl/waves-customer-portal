@@ -137,7 +137,7 @@ export default function OwedTabV2() {
     if (busyId) return;
     setBusyId(row.id);
     try {
-      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action }) });
+      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
     } catch (err) {
       setState((s) => ({ ...s, error: err.message || "That change did not save." }));

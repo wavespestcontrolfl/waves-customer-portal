@@ -1432,6 +1432,18 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Call cards escalate at their deadline; the daily watchdog retains the
+  // other kinds and takes callbacks back when their replacement is off.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('callback-cards', () => require('./callback-cards').notifyDueCallbacks(require('../models/db')));
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 20 7 * * *', async () => {
     try {

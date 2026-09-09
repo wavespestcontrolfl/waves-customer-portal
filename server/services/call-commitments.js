@@ -37,6 +37,7 @@
 
 const crypto = require('crypto');
 const logger = require('./logger');
+const { gateEnvValue } = require('../config/feature-gates');
 const MODELS = require('../config/models');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -685,6 +686,9 @@ async function recordCallCommitments({
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
+    if (!result.ownershipLost && gateEnvValue('GATE_CALLBACK_CARD')) {
+      await require('./callback-cards').prepareCallbackCards(conn, { callId: call.id });
+    }
     return summary;
   } catch (err) {
     logger.warn(`[call-commitments] recording failed for call ${call?.id}: ${err.message}`);
@@ -1133,6 +1137,24 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
+      if (gateEnvValue('GATE_CALLBACK_CARD')) {
+        if (!phone) return null;
+        // A child-leg connection plus reviewed extraction of a real
+        // conversation is proof. Ringing the staff phone, voicemail, and
+        // an unrelated/queued text are not fulfillment of this promise.
+        const connected = await conn('call_log').where('direction', 'outbound')
+          .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+          .whereRaw("metadata->>'relatedCommitmentId' = ?", [commitment.id])
+          .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+          .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+          .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+          .modify((b) => {
+            phoneWhere(b, 'to_phone', phone);
+            if (customerId) b.where('customer_id', customerId);
+          }).orderBy('created_at', 'asc').first('id', 'created_at');
+        return connected ? { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+          matched_at: connected.created_at, strength: 'direct', basis: 'callback_customer_conversation' } : null;
+      }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
       // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound
@@ -1358,7 +1380,8 @@ function implicitDueAt(row) {
   const from = basis ? new Date(basis) : null;
   if (!from || Number.isNaN(from.getTime())) return null;
   if (row.kind === 'send_estimate') return new Date(from.getTime() + OVERDUE_IMPLICIT_ESTIMATE_HOURS * 60 * 60 * 1000);
-  if (row.kind === 'callback') return endOfETDay(from);
+  if (row.kind === 'callback') return gateEnvValue('GATE_CALLBACK_CARD')
+    ? (row.callback_due_at ? new Date(row.callback_due_at) : null) : endOfETDay(from);
   return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
 }
 
@@ -1375,10 +1398,12 @@ function isOverdue(row, now = new Date()) {
 function effectiveDueSql(cc = 'cc', cl = 'cl') {
   const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
   const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
+  const callbackDue = gateEnvValue('GATE_CALLBACK_CARD') ? `${cc}.callback_due_at`
+    : `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
   return `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
     + ` WHEN ${cc}.party <> 'waves' THEN NULL`
     + ` WHEN ${cc}.kind = 'send_estimate' THEN (${basis}) + interval '${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours'`
-    + ` WHEN ${cc}.kind = 'callback' THEN (((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`
+    + ` WHEN ${cc}.kind = 'callback' THEN ${callbackDue}`
     + ` WHEN ${cc}.kind IN (${promptKinds}) THEN (${basis}) + interval '${OVERDUE_IMPLICIT_DAYS} days'`
     + ' ELSE NULL END';
 }
@@ -1404,7 +1429,7 @@ function selectOverdue(rows, { now = new Date() } = {}) {
   return (rows || []).filter((r) => isOverdue(r, now));
 }
 
-async function listOpenCommitments(conn, { party = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
+async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1420,6 +1445,7 @@ async function listOpenCommitments(conn, { party = null, customerId = null, lead
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
+      if (kind) b.where('cc.kind', kind);
       if (customerId) b.where('cl.customer_id', customerId);
       if (leadId) {
         b.where(function leadScope() {

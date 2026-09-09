@@ -1172,7 +1172,10 @@ router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
-    const { to, fromNumber, customerId, source: rawSource, relatedCallId } = req.body;
+    const { to, fromNumber, customerId, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
+    if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
+      return res.status(400).json({ error: 'Invalid callback id' });
+    }
     if (!to) return res.status(400).json({ error: 'to number required' });
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
@@ -1192,8 +1195,8 @@ router.post('/call', async (req, res, next) => {
     // garbage input fails loudly rather than silently dialing as main).
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
-    const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
-    const metadata = relatedCallId ? { relatedCallId } : null;
+    const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
+    const metadata = relatedCommitmentId ? { relatedCommitmentId } : relatedCallId ? { relatedCallId } : null;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
     const toLast10 = normalizePhoneLast10(to);
@@ -1233,13 +1236,39 @@ router.post('/call', async (req, res, next) => {
     // Step 1 (services/call-bridge.js — shared with the tech portal's
     // "Call from my line"): call the admin first; on press-1, dial the
     // customer with the main line as caller ID.
-    const bridged = await placeBridgeCall({
+    const originate = () => placeBridgeCall({
       to, bridgePhone: adminPhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
     });
+    const bridged = relatedCommitmentId ? await db.transaction(async (trx) => {
+      if (!require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
+      // The existing bridge interlock covers the one owner phone across
+      // cards, including ambiguous provider errors and simultaneous taps.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', ['callback-card-bridge']);
+      const promise = await trx('call_commitments').where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' }).forUpdate().first();
+      const original = promise?.call_log_id ? await trx('call_log').where({ id: promise.call_log_id }).first() : null;
+      const target = original?.direction === 'outbound' ? original.to_phone : original?.from_phone;
+      if (!promise || promise.status !== 'open' || !original || normalizePhone(target) !== normalizePhone(to)
+        || (original.customer_id || null) !== (customer?.id || null)) {
+        throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
+      }
+      if (!req.body.expected_at || new Date(req.body.expected_at).getTime() !== new Date(promise.updated_at).getTime()) {
+        throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
+      }
+      const active = await require('../services/call-bridge').activeBridgeCall({ source, fromPhone: from, customerId: customer?.id });
+      if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
+      metadata.relatedCallId = promise.call_log_id;
+      const result = await originate();
+      await trx('call_commitments').where({ id: promise.id }).update({ assigned_to: req.technicianId, updated_at: new Date() });
+      await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
+        action: 'callback_called', resource_type: 'call_commitment', resource_id: promise.id,
+        metadata: { call_log_id: result.callLogId }, critical: true, trx });
+      return result;
+    }) : await originate();
 
     res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId });
   } catch (err) {
     if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
+    if (err.status === 409) return res.status(409).json({ error: err.message });
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'outbound',

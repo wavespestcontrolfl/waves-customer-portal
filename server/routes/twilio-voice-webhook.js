@@ -3114,6 +3114,7 @@ router.post('/outbound-admin-prompt', async (req, res) => {
 // =========================================================================
 router.post('/outbound-connect', async (req, res) => {
   try {
+    const { isEnabled } = require('../config/feature-gates');
     const customerNumber = req.query.customerNumber || req.body.customerNumber;
     const callerIdNumber = req.query.callerIdNumber || req.body.callerIdNumber || TWILIO_NUMBERS.mainLine.number;
     const rawCallLogId = req.query.callLogId || req.body.callLogId;
@@ -3158,6 +3159,9 @@ router.post('/outbound-connect', async (req, res) => {
       recordingStatusCallback: '/api/webhooks/twilio/recording-status',
       recordingStatusCallbackEvent: 'completed',
       ...voicemailText.dial,
+      ...(!voicemailText.dial.action && rawCallLogId && isEnabled('callCommitments')
+        && require('../services/callback-cards').enabled()
+        ? { action: `/api/webhooks/twilio/outbound-dial-complete?callLogId=${encodeURIComponent(rawCallLogId)}` } : {}),
     });
     dial.number(voicemailText.number, customerNumber);
     res.type('text/xml').send(twiml.toString());
@@ -3349,6 +3353,24 @@ router.post('/outbound-amd', async (req, res) => {
 // (action-less) <Dial> did.
 router.post('/outbound-dial-complete', async (req, res) => {
   const twiml = new VoiceResponse();
+  // Capture the signed CUSTOMER leg for linked callback promises. This
+  // also accepts in-flight callbacks after rollback; it never closes work.
+  const id = String(req.query.callLogId || '');
+  const duration = Number(req.body?.DialCallDuration);
+  const status = String(req.body?.DialCallStatus || '');
+  const sid = String(req.body?.DialCallSid || '');
+  if (CALL_LOG_ID_SHAPE.test(id) && ['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(status)
+    && /^CA[a-f0-9]{32}$/i.test(sid) && Number.isFinite(duration) && duration >= 0) {
+    const leg = JSON.stringify({ status, sid, duration_seconds: duration, ended_at: new Date().toISOString() });
+    try {
+      await db('call_log').where({ id, direction: 'outbound', twilio_call_sid: req.body.CallSid })
+        .whereRaw("metadata->>'relatedCommitmentId' IS NOT NULL")
+        .whereRaw("metadata->'customer_leg' IS NULL")
+        .update({ metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_leg}', ?::jsonb)", [leg]), updated_at: new Date() });
+    } catch {
+      return res.status(503).type('text/xml').send('<Response><Hangup/></Response>');
+    }
+  }
   try {
     const callLogId = req.query.callLogId;
     let detected = false;

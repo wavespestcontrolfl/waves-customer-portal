@@ -5,7 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');

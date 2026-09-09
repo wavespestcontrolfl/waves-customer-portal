@@ -79,6 +79,7 @@ async function runCallCommitmentsWatchdog({ now = new Date() } = {}) {
 async function runInner({ now = new Date() } = {}) {
   const today = require('../utils/datetime-et').etDateString(now);
   let rows = await listAllOpenWaves(now);
+  if (require('./callback-cards').enabled()) rows = rows.filter((r) => r.kind !== 'callback');
   // A promise a later record already kept must not ring: nothing stamps
   // fulfillment unless someone opens the queue or the panel, so refresh the
   // candidate calls here — the same cheap indexed lookups the queue route
@@ -103,7 +104,8 @@ async function runInner({ now = new Date() } = {}) {
     refreshed += r.fulfilled || 0;
   }
   if (refreshed > 0) rows = await listAllOpenWaves(now);
-  const candidates = selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id) && !unverifiedCalls.has(r.call_log_id));
+  const candidates = selectOverdue(rows, { now }).filter((r) => !(r.kind === 'callback' && require('./callback-cards').enabled())
+    && !isInternalTestCustomerId(r.customer_id) && !unverifiedCalls.has(r.call_log_id));
   const unverified = unverifiedCalls.size;
   // The snapshot is minutes old by now (one refresh per candidate call):
   // a promise the office marked done or dismissed meanwhile must not ring.

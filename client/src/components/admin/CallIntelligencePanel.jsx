@@ -145,7 +145,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
   };
 
   const patchCommitment = (id, payload) =>
-    adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(payload) });
+    adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ ...payload, expected_at: state.data?.commitments?.find((row) => row.id === id)?.updated_at }) });
 
   const view = state.data;
   // Off gate: reads still render what was recorded; writes are not offered.

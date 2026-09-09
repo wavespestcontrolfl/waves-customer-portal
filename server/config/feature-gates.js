@@ -1301,6 +1301,7 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
