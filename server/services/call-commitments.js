@@ -1145,6 +1145,24 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
+      if (require('./callback-cards').enabled()) {
+        if (!phone) return null;
+        // A child-leg connection plus reviewed extraction of a real
+        // conversation is proof. Ringing the staff phone, voicemail, and
+        // an unrelated/queued text are not fulfillment of this promise.
+        const connected = await conn('call_log').where('direction', 'outbound')
+          .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+          .whereRaw("metadata->>'relatedCommitmentId' = ?", [commitment.id])
+          .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+          .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+          .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+          .modify((b) => {
+            phoneWhere(b, 'to_phone', phone);
+            if (customerId) b.where('customer_id', customerId);
+          }).orderBy('created_at', 'asc').first('id', 'created_at');
+        return connected ? { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+          matched_at: connected.created_at, strength: 'direct', basis: 'callback_customer_conversation' } : null;
+      }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
       // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound

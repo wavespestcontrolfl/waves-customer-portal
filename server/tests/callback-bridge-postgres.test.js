@@ -1,0 +1,159 @@
+// Opt-in: real two-connection PostgreSQL pool, synthetic rows, mocked transport.
+const run = process.env.CALLBACK_BRIDGE_POSTGRES === '1' ? describe : describe.skip;
+jest.setTimeout(30000);
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../config', () => ({ twilio: { accountSid: `AC${'0'.repeat(32)}`, authToken: 'synthetic-auth' } }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => null) }));
+jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => null) }));
+jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => null) }));
+const mockCreate = jest.fn();
+jest.mock('twilio', () => Object.assign(
+  jest.fn(() => ({ calls: { create: (...args) => mockCreate(...args) } })), jest.requireActual('twilio'),
+));
+
+run('callback bridge on PostgreSQL', () => {
+  const { randomUUID, randomBytes, randomInt } = require('node:crypto');
+  const db = require('../models/db');
+  const numbers = require('../config/twilio-numbers');
+  const gates = require('../config/feature-gates').gates;
+  const phone = '+15555550176', cell = '+15555550177';
+  const from = `+1555555${randomInt(1000, 10000)}`;
+  const claimKey = `callback-card-bridge:${from}`;
+  const callIds = [], commitmentIds = [];
+  let conn, handler, customerId, staffId, originalGates, originalFrom;
+
+  beforeAll(() => {
+    if (process.env.WAVES_LOCAL_DEV !== '1' || !/^\/waves_qa_[a-f0-9]+$/.test(new URL(process.env.DATABASE_URL).pathname)) {
+      throw new Error('Callback bridge tests require the managed synthetic QA database');
+    }
+    conn = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    db.mockImplementation((...args) => conn(...args));
+    db.raw = conn.raw.bind(conn);
+    db.transaction = conn.transaction.bind(conn);
+    originalGates = { commitments: gates.callCommitments, card: process.env.GATE_CALLBACK_CARD };
+    gates.callCommitments = true;
+    process.env.GATE_CALLBACK_CARD = 'true';
+    originalFrom = numbers.mainLine.number;
+    numbers.mainLine.number = from;
+    const router = require('../routes/admin-communications');
+    handler = router.stack.find((r) => r.route?.path === '/call').route.stack.at(-1).handle;
+  });
+  beforeEach(async () => {
+    customerId = randomUUID(); staffId = randomUUID();
+    await conn('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Callback', email: `${customerId}@example.invalid`, phone });
+    await conn('technicians').insert({ id: staffId, name: 'Synthetic Callback Staff', email: `${staffId}@example.invalid`, phone: cell, role: 'technician', employment_status: 'active' });
+    mockCreate.mockReset().mockImplementation(async () => {
+      // Provider work must be able to borrow this same bounded pool.
+      await conn('call_log').whereIn('id', callIds).count('id');
+      return { sid: `CA${randomBytes(16).toString('hex')}`, status: 'queued' };
+    });
+  });
+  afterEach(async () => {
+    callIds.push(...await conn('call_log').where({ from_phone: from, direction: 'outbound' }).pluck('id'));
+    await conn('call_commitments').whereIn('id', commitmentIds).del();
+    await conn('call_log').whereIn('id', callIds).del();
+    await conn('sms_send_claims').where({ claim_key: claimKey }).del();
+    await conn('customers').where({ id: customerId }).del();
+    await conn('technicians').where({ id: staffId }).del();
+    callIds.length = commitmentIds.length = 0;
+    process.env.GATE_CALLBACK_CARD = 'true';
+  });
+  afterAll(async () => {
+    gates.callCommitments = originalGates.commitments;
+    if (originalGates.card === undefined) delete process.env.GATE_CALLBACK_CARD;
+    else process.env.GATE_CALLBACK_CARD = originalGates.card;
+    numbers.mainLine.number = originalFrom;
+    await conn.destroy();
+  });
+
+  async function seed({ linked = true, sourcePhone = phone } = {}) {
+    const callId = randomUUID(), id = randomUUID(), ago = new Date(Date.now() - 3600000);
+    callIds.push(callId); commitmentIds.push(id);
+    await conn('call_log').insert({ id: callId, customer_id: linked ? customerId : null, direction: 'inbound',
+      from_phone: sourcePhone, to_phone: from, status: 'completed', created_at: ago, updated_at: ago });
+    const [row] = await conn('call_commitments').insert({ id, call_log_id: callId, commitment_key: `fixture:${id}`,
+      party: 'waves', kind: 'callback', status: 'open', source: 'ai', last_seen_generation: 1,
+      description: 'Synthetic callback', callback_due_at: new Date(Date.now() + 3600000), created_at: ago, updated_at: ago }).returning('*');
+    return row;
+  }
+  async function invoke(row, patch = {}) {
+    let status = 200, json;
+    await handler({ body: { to: phone, customerId, relatedCommitmentId: row.id, expected_at: row.updated_at.toISOString(), ...patch },
+      technicianId: staffId, techRole: 'technician' }, {
+      status(value) { status = value; return this; }, json(value) { json = value; return this; },
+    }, (err) => { status = err.status || 500; json = { error: err.message }; });
+    return { status, json };
+  }
+
+  test('two simultaneous attempts place one staff-first bridge with a two-connection pool', async () => {
+    const row = await seed();
+    const attempts = await Promise.all([invoke(row), invoke(row)]);
+    expect(attempts.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({ to: cell, from }));
+    const call = await conn('call_log').where({ id: attempts.find((r) => r.status === 200).json.callLogId }).first();
+    expect(call.metadata).toMatchObject({ relatedCommitmentId: row.id, relatedCallId: row.call_log_id });
+    const current = await conn('call_commitments').where({ id: row.id }).first();
+    expect(current.assigned_to).toBe(staffId);
+    expect((await invoke(current)).status).toBe(409);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['gate', 'version', 'extraction', 'staff_phone'])('%s refusal cannot contact the provider', async (reason) => {
+    const row = await seed();
+    if (reason === 'gate') process.env.GATE_CALLBACK_CARD = 'false';
+    if (reason === 'version') await conn('call_commitments').where({ id: row.id }).update({ updated_at: new Date() });
+    if (reason === 'extraction') {
+      const id = randomUUID(); commitmentIds.push(id);
+      await conn('call_commitments').insert({ id, call_log_id: row.call_log_id, commitment_key: 'waves:send_report',
+        party: 'waves', kind: 'send_report', description: 'Newer extraction', source: 'ai', last_seen_generation: 2 });
+    }
+    if (reason === 'staff_phone') await conn('technicians').where({ id: staffId }).update({ phone: from });
+    expect((await invoke(row)).status).toBe(409);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('provider failure retains the claim only when ambiguous=%s', async (ambiguous) => {
+    const row = await seed();
+    mockCreate.mockRejectedValueOnce(Object.assign(new Error('Synthetic provider failure'), { status: ambiguous ? 503 : 400, code: ambiguous ? 20500 : 21219 }));
+    expect((await invoke(row)).status).not.toBe(200);
+    expect(await conn('sms_send_claims').where({ claim_key: claimKey })).toHaveLength(ambiguous ? 1 : 0);
+    const call = await conn('call_log').where({ from_phone: from, direction: 'outbound' }).first();
+    expect(call.status).toBe(ambiguous ? 'initiated' : 'failed');
+  });
+
+  test.each(require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS)('accepts the original caller in the selected customer’s %s field', async (column) => {
+    const contact = '+15555550175';
+    await conn('customers').where({ id: customerId }).update({ [column]: contact });
+    const row = await seed({ sourcePhone: contact });
+    expect((await invoke(row, { to: contact })).status).toBe(200);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('another known customer phone cannot replace the original caller', async () => {
+    const row = await seed();
+    await conn('customers').where({ id: customerId }).update({ secondary_phone: '+15555550175' });
+    expect((await invoke(row, { to: '+15555550175' })).status).toBe(409);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  test('a source without a customer keeps that association even if the phone now matches one', async () => {
+    const row = await seed({ linked: false });
+    const result = await invoke(row, { customerId: undefined });
+    expect(result.status).toBe(200);
+    expect((await conn('call_log').where({ id: result.json.callLogId }).first()).customer_id).toBeNull();
+  });
+
+  test.each(['conversation', 'voicemail', 'short', 'unrelated'])('fulfillment requires the matching customer conversation: %s', async (evidence) => {
+    const row = await seed();
+    const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: evidence === 'voicemail' } },
+      metadata: { relatedCommitmentId: evidence === 'unrelated' ? randomUUID() : row.id,
+        customer_leg: { status: 'completed', duration_seconds: evidence === 'short' ? 59 : 90 } } }).returning('id');
+    const source = await conn('call_log').where({ id: row.call_log_id }).first();
+    const proof = await require('../services/call-commitments').resolveFulfillment(conn, row, source);
+    if (evidence === 'conversation') expect(proof).toMatchObject({ record_id: outbound.id, basis: 'callback_customer_conversation' });
+    else expect(proof).toBeNull();
+  });
+});
