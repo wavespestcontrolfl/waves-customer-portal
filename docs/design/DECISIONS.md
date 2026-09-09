@@ -2223,3 +2223,39 @@ Exact assigned protocol versions remain usable after archival; unassigned select
 ## 2026-09-08 — Simplify Customer directory labels and contact display
 
 The owner replaced the historical services column with WaveGuard Tier, showing the stored Bronze, Silver, Gold, or Platinum tier and leaving other cells blank. The directory no longer displays the contact line beneath customer names. Outreach & Upsells is now Opportunities; its existing view key and actions stay the same. This supersedes the earlier directory column and navigation copy decisions without changing stored tier values, pricing, or membership rules.
+
+
+## 2026-09-08 — One evidence-based lawn assessment per visit
+
+The owner approved a single multimodal call over up to six numbered visit photos,
+with optional front/back/side labels supplied by the technician. The diagnostic
+rubric and curated agronomy stay shared with the staff diagnostic tool. Planned
+products are excluded from perception and enter deterministic reconciliation at
+confirmation; technician notes are quoted reference data, never instructions.
+
+`TEXT_POLICIES.lawnVisitAssessment` uses the Gemini vision tier first and the
+OpenAI frontier tier (GPT-6 Astra at approval) as its fallback. This is the
+owner-approved exception to the Claude-fallback convention for this lane only.
+Providers run sequentially. The existing dispatcher owns image labels, thinking
+controls, validation failures and token accounting for every billed leg.
+
+`GATE_LAWN_VISIT_ASSESSMENT` remains off until the technician review flow and
+representative live evaluation are ready. The intended route records one run per
+assessment with immutable input provenance, findings, native severity, raw and
+seasonally adjusted scores, photo references and provider usage. Unknown scores
+remain NULL. An unavailable analysis retains the visit and photos; confirmation
+and customer delivery wait until the technician supplies every required score.
+A run keeps its confirmation semantics when the gate changes mid-visit.
+
+The technician provides one overall review: keep or allowlisted rename, added
+field evidence and applied products. Stable finding IDs preserve those decisions
+on follow-up confirmations. Customer labels and prose are derived server-side,
+confidence-gated and re-evaluated after each review; technician notes never enter
+customer copy or replay fixtures. Photo zone claims come only from technician
+labels. Customer report presentation remains a later stage.
+
+The input hash covers the composed rubric and response schema, rendered user
+prompt, context values, and numbered image bytes, MIME types and zones. A replay
+with omitted inputs must declare those omissions and cannot claim exact original
+input reproduction. Database changes are additive, retaining every published
+migration unchanged.
