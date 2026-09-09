@@ -69,11 +69,11 @@ function wireDayCapCounts(rows = []) {
   return builder;
 }
 
-async function build(serviceKey = '') {
+async function build(serviceKey = '', extra = {}) {
   return buildBookingAvailability({
     lat: 27.4, lng: -82.4, duration: 60,
     rangeFrom: D, rangeTo: D,
-    config: CONFIG, today: new Date(), serviceKey,
+    config: CONFIG, today: new Date(), serviceKey, ...extra,
   });
 }
 
@@ -84,6 +84,22 @@ describe('buildBookingAvailability — gap fan-out', () => {
     jest.clearAllMocks();
     wireDayCapCounts([]);
     listOccupiedWindows.mockResolvedValue([]);
+  });
+
+  test('capacity keeps only evaluated morning starts on an empty route with afternoon blocks', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      // Finder rejected 13:00–18:00 due to a technician block, which the
+      // appointment-only occupancy reader does not expose to this builder.
+      findAvailableSlots.mockResolvedValue({ slots: [gapSlot('09:00', {
+        stops_that_day: 0, latest_start_min: 540,
+      })], total_feasible: 1 });
+      expect(startTimes(await build('', { expandOpenDays: true }))).toEqual(['09:00']);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
   });
 
   test('passes every selected service category to the capacity finder', async () => {
