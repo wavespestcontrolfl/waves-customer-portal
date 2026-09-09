@@ -40,6 +40,9 @@ export default function TurfHeightReviewPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [resolving, setResolving] = useState(null);
+  // Per-row confirm failures: two rows confirmed back-to-back must not let
+  // one success wipe the other's failure (UI audit F0558, Codex r2).
+  const [rowErrors, setRowErrors] = useState({});
 
   const load = useCallback(() => {
     setLoading(true);
@@ -59,7 +62,17 @@ export default function TurfHeightReviewPage() {
         method: "PATCH",
         body: JSON.stringify({ status: "verified" }),
       });
-      if (r.ok) setItems((prev) => prev.filter((it) => it.id !== id));
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        setRowErrors((prev) => ({ ...prev, [id]: b.error || `Could not confirm reading (HTTP ${r.status})` }));
+        return;
+      }
+      setRowErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      setItems((prev) => prev.filter((it) => it.id !== id));
+    } catch {
+      // UI audit F0558: a rejected PATCH used to escape the click handler
+      // unhandled while the row silently stayed put.
+      setRowErrors((prev) => ({ ...prev, [id]: "Could not confirm reading — check your connection and try again." }));
     } finally {
       setResolving(null);
     }
@@ -77,7 +90,7 @@ export default function TurfHeightReviewPage() {
       </p>
 
       {loading && <div style={{ color: M.muted }}>Loading…</div>}
-      {error && <div style={{ color: M.red }}>{error}</div>}
+      {error && <div role="alert" style={{ color: M.red }}>{error}</div>}
       {!loading && !error && items.length === 0 && (
         <div style={{ background: M.card, border: `1px solid ${M.line}`, borderRadius: 12, padding: 28, textAlign: "center", color: M.muted }}>
           Nothing to review — every captured reading agrees with its gauge photo.
@@ -113,6 +126,9 @@ export default function TurfHeightReviewPage() {
               style={{ background: M.ink, color: "#fff", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", opacity: resolving === it.id ? 0.6 : 1 }}>
               {resolving === it.id ? "…" : "Confirm reading"}
             </button>
+            {rowErrors[it.id] && (
+              <div role="alert" style={{ flexBasis: "100%", color: M.red, fontSize: 13 }}>{rowErrors[it.id]}</div>
+            )}
           </div>
         ))}
       </div>

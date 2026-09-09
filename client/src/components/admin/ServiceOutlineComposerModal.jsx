@@ -306,9 +306,9 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
   const staleReasons = activeOutline?.staleReasons || estimate?.lawnServiceOutline?.staleReasons || [];
 
   return createPortal(
-    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-zinc-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true">
-      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl max-sm:pb-[env(safe-area-inset-bottom)] sm:rounded-md">
-        <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
+    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-zinc-950/45 md:items-center md:p-4" role="dialog" aria-modal="true">
+      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl md:rounded-md max-md:box-border max-md:h-full max-md:max-h-full max-md:max-w-none max-md:rounded-none max-md:pt-[env(safe-area-inset-top)] max-md:pb-[env(safe-area-inset-bottom)] max-md:pl-[env(safe-area-inset-left)] max-md:pr-[env(safe-area-inset-right)]">
+        <div className="flex shrink-0 items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">
               <Sprout size={18} strokeWidth={1.75} className="text-emerald-700" />
@@ -341,12 +341,12 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
               </div>
             )}
           </div>
-          <button type="button" onClick={onClose} className="inline-flex h-9 w-9 items-center justify-center rounded-xs border border-zinc-300 text-zinc-600 hover:bg-zinc-50" aria-label="Close">
+          <button type="button" onClick={onClose} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xs border border-zinc-300 text-zinc-600 hover:bg-zinc-50" aria-label="Close">
             <X size={16} strokeWidth={1.75} />
           </button>
         </div>
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[280px_minmax(0,1fr)_300px]">
+        <div className="min-h-0 flex-1 overflow-y-auto lg:grid lg:overflow-hidden lg:grid-cols-[280px_minmax(0,1fr)_300px]">
           <aside className="border-b border-zinc-200 bg-zinc-50 p-4 lg:border-b-0 lg:border-r">
             <div className="space-y-4">
               <label className="block">
@@ -397,7 +397,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
             </div>
           </aside>
 
-          <div className="min-h-0 overflow-y-auto px-5 py-4">
+          <div className="px-5 py-4 lg:min-h-0 lg:overflow-y-auto">
             {loading && <div className="text-sm text-zinc-500">Building outline preview...</div>}
             {!loading && outline?.title && (
               <article>
@@ -490,7 +490,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
           </aside>
         </div>
 
-        <div className="flex flex-col gap-2 border-t border-zinc-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-end">
+        <div className="grid shrink-0 grid-cols-2 gap-2 border-t border-zinc-200 bg-white px-5 py-3 md:flex md:flex-wrap md:items-center md:justify-end">
           <Button type="button" variant="secondary" onClick={() => saveDraft()} disabled={saving || loading}>
             {saving ? "Saving..." : "Save Draft"}
           </Button>

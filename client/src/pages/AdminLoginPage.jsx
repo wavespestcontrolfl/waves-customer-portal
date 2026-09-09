@@ -81,7 +81,7 @@ export default function AdminLoginPage() {
       // dashboard. Defaults to /admin for the normal admin sign-in.
       const next = searchParams.get('next');
       const techNext = isInternalPath(next)
-        && (next === '/tech' || next.startsWith('/tech/'));
+        && /^\/tech(?:[/?#]|$)/i.test(next);
       const destination = data.user?.role === 'technician'
         ? (techNext ? next : '/tech')
         : (isInternalPath(next) ? next : '/admin');

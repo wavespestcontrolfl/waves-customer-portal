@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useId } from "react";
+import { lazy, Suspense, useState, useEffect, useCallback, useId, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { Library, Percent, Plus, Sprout } from "lucide-react";
@@ -7,6 +7,7 @@ import { DiscountsSection } from "./DiscountsTabs";
 import useIsMobile from "../../hooks/useIsMobile";
 import MobileServiceLibrary from "../../components/admin/MobileServiceLibrary";
 import { SERVICE_CATEGORIES as CATEGORIES } from "../../constants/serviceCategories";
+import { omitUnchangedDurationFields } from "../../lib/serviceLibraryPayload";
 
 const LawnProtocolCommandCenterPage = lazy(() =>
   import("./LawnProtocolCommandCenterPage"),
@@ -245,6 +246,7 @@ function Field({ label, children, half, htmlFor }) {
 }
 
 function ServiceForm({ svc, onSave, onCancel, isNew }) {
+  const originalService = useRef(svc);
   const rawFormId = useId().replace(/:/g, "");
   const fieldId = (key) => `${rawFormId}-${key}`;
   const jsonForEdit = (value) => {
@@ -280,7 +282,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
     setSaving(true);
     setError("");
     try {
-      const payload = { ...form };
+      const payload = isNew ? { ...form } : omitUnchangedDurationFields(form, originalService.current);
       if (isNew && !closeoutTouched) {
         CLOSEOUT_REQUIREMENT_FIELDS.forEach((key) => delete payload[key]);
       }

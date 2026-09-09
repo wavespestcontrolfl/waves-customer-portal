@@ -72,6 +72,7 @@ const REASON_LABELS = {
 // Human-readable occupancy names for property-role proposal rows.
 const OCCUPANCY_LABELS = {
   owner_occupied: "owner-occupied",
+  family_occupied: "family-occupied",
   rental_investment: "rental",
   commercial: "commercial",
   seasonal: "seasonal",
