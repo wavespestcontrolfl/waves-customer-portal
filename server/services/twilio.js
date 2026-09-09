@@ -151,7 +151,7 @@ async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
         `Recipient: ${maskPhone(to)}`,
         `Body length: ${body?.length || 0}`,
       ].join("\n"),
-      link: "/admin/sms-templates",
+      link: "/admin/communications#tab=templates",
       originalMessageType: "sms_guard_blocked",
       originalToMasked: maskPhone(to),
     });

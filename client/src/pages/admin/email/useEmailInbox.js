@@ -6,12 +6,21 @@ import useEmailResource from "./useEmailResource";
 const DISCONNECTED = { connected: false };
 const EMPTY_INBOX = { emails: [], total: 0 };
 const EMPTY_BLOCKED = { blocked: [] };
+const SEARCH_DEBOUNCE_MS = 300;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DOMAIN_RE = /^(?!-)(?:[a-z0-9-]{1,63}\.)+[a-z]{2,63}$/i;
 
 export default function useEmailInbox(active, clearDraftResult) {
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
+  // The inbox request follows the search box after a pause, the way the
+  // SMS and call searches do, instead of one request per keystroke.
+  const [searchQuery, setSearchQuery] = useState("");
+  useEffect(() => {
+    if (search === searchQuery) return undefined;
+    const timer = setTimeout(() => setSearchQuery(search), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [search, searchQuery]);
   const [page, setPage] = useState(1);
   const [showArchived, setShowArchived] = useState(false);
   const [tab, setTab] = useState("inbox");
@@ -50,7 +59,7 @@ export default function useEmailInbox(active, clearDraftResult) {
     is_archived: showArchived,
   });
   if (filter !== "all") params.set("category", filter);
-  if (search) params.set("search", search);
+  if (searchQuery) params.set("search", searchQuery);
   const [status, loadStatus] = useEmailResource(
     "/api/admin/email/oauth/status",
     null,
@@ -110,12 +119,16 @@ export default function useEmailInbox(active, clearDraftResult) {
     if (active) loadStatus();
   }, [active, loadStatus]);
   useEffect(() => {
+    if (active && status?.connected) loadEmails();
+  }, [active, status?.connected, loadEmails]);
+  // Stats and the digest do not follow the list's filters; a search or
+  // page change reloads the list alone.
+  useEffect(() => {
     if (active && status?.connected) {
       loadStats();
-      loadEmails();
       loadDigest();
     }
-  }, [active, status?.connected, loadStats, loadEmails, loadDigest]);
+  }, [active, status?.connected, loadStats, loadDigest]);
   useEffect(() => {
     if (active && tab === "blocked") loadBlocked();
   }, [active, tab, loadBlocked]);

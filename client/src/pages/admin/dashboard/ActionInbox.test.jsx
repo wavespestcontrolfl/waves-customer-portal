@@ -1,9 +1,23 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import ActionInbox from "./ActionInbox";
+
+// Rows are router links now, so the card needs a router around it.
+function Probe() {
+  return <output data-testid="location">{useLocation().pathname}</output>;
+}
+const render = (ui) =>
+  rtlRender(
+    <MemoryRouter initialEntries={["/admin/dashboard"]}>
+      <Routes>
+        <Route path="*" element={<>{ui}<Probe /></>} />
+      </Routes>
+    </MemoryRouter>,
+  );
 
 const ALERTS = [
   {
@@ -58,6 +72,26 @@ describe("ActionInbox", () => {
     // fmtMoneyCompact renders $3.1k for the expiring-estimates value.
     expect(screen.getByText("$3.1k")).toBeInTheDocument();
     expect(screen.getByText("1 critical")).toBeInTheDocument();
+  });
+
+  it("navigates in-app instead of reloading the page (F0565)", () => {
+    render(<ActionInbox alerts={ALERTS} />);
+    fireEvent.click(screen.getByText(/5 invoices overdue/));
+    expect(screen.getByTestId("location").textContent).toBe("/admin/invoices");
+  });
+
+  it("keeps absolute URLs as plain anchors and renders href-less rows as text", () => {
+    render(
+      <ActionInbox
+        alerts={[
+          { id: "ext", kind: "action", severity: "warn", label: "External", href: "https://example.test/x" },
+          { id: "none", kind: "action", severity: "warn", label: "No destination" },
+        ]}
+      />,
+    );
+    const links = screen.getAllByRole("link");
+    expect(links.map((a) => a.getAttribute("href"))).toEqual(["https://example.test/x"]);
+    expect(screen.getByText(/No destination/).closest("a")).toBeNull();
   });
 
   it("still renders alerts that predate the kind field (treated as watch-state)", () => {
