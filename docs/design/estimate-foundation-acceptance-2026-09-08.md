@@ -46,7 +46,7 @@ cd ..
 npm run build
 ```
 
-The browser script can also take `http://127.0.0.1:<worktree-client-port>`. It verifies the checkout stamp, blocks external/socket requests, and fulfills API requests locally. Its synthetic in-memory records test the UI's persistence protocol, not the database implementation. The `--baseline` option captures comparison renders; the saved baseline was captured from `d331b202d` before presentation edits.
+The browser script can also take `http://127.0.0.1:<worktree-client-port>`. It verifies the checkout stamp, blocks external/socket requests, and fulfills API requests locally. Its synthetic in-memory records test the UI's persistence protocol, not the database implementation. The `--baseline` option changes only the output directory; it runs the same workflow, font checks, request/error checks and geometry assertions as the current mode. It requires a checkout supporting the exercised controls. The original local baseline captured from `d331b202d` used the earlier, limited capture mode and is historical evidence, not a pass of this complete runner.
 
 Reports and screenshots live in `.tmp/estimate-foundation/current/` and `baseline/`. Desktop and phone creation, service, pricing, review, conflict, reopened-estimate, and send-review renders were visually inspected. The original local `.tmp/estimate-foundation/review.html` gallery was a separate inspection aid; this runner produces the report and screenshots, and does not regenerate that gallery.
 
