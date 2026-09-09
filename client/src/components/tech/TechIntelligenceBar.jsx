@@ -155,14 +155,14 @@ export default function TechIntelligenceBar() {
           onFocus={() => setExpanded(true)}
           placeholder="Ask anything..."
           style={{
-            flex: 1, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`,
-            borderRadius: 8, color: D.text, fontSize: 14, fontFamily: "'Nunito Sans', sans-serif",
+            flex: 1, minWidth: 0, minHeight: 48, padding: '8px 10px', background: D.bg, border: `1px solid ${D.border}`,
+            borderRadius: 8, color: D.text, fontSize: 16, fontFamily: "'Nunito Sans', sans-serif",
             outline: 'none', boxSizing: 'border-box',
           }}
         />
         {!loading && (
           <button onClick={() => fileInputRef.current?.click()} title="Attach a photo" aria-label="Attach a photo" style={{
-            width: 32, height: 32, borderRadius: 8, background: 'transparent',
+            width: 48, height: 48, borderRadius: 8, background: 'transparent',
             border: `1px solid ${D.border}`, color: D.muted, cursor: attachmentsLoading ? 'not-allowed' : 'pointer',
             opacity: attachmentsLoading ? 0.45 : 1,
             display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, padding: 0,
