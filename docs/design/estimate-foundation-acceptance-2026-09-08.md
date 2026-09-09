@@ -39,6 +39,7 @@ Save/generate actions retain their labels and geometry while pending. Errors and
 Use Node 20 with the existing dependencies and frontend-only managed startup from this worktree:
 
 ```sh
+npx playwright install --with-deps chromium webkit
 node scripts/qa/estimate-foundation.cjs
 cd client
 npm test -- --run

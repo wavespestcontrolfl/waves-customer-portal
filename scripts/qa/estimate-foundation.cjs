@@ -28,8 +28,9 @@ const source = {
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), baseline, passed: false, scenarios: [], screenshots: [] };
-  const server = await previewServer(root, process.argv.find((arg) => arg.startsWith('http://')));
+  let server;
   try {
+    server = await previewServer(root, process.argv.find((arg) => arg.startsWith('http://')));
     for (const [device, viewport] of [['desktop', { width: 1440, height: 1000 }], ['mobile', { width: 390, height: 844 }]]) {
       const browser = device === 'desktop' ? await launchBrowser() : await webkit.launch({ headless: true });
       try {
@@ -238,7 +239,7 @@ async function main() {
     report.failure = { name: error.name, message: error.message };
     throw error;
   } finally {
-    try { await server.close(); }
+    try { await server?.close(); }
     catch (error) {
       report.passed = false;
       report.cleanupFailure = { name: error.name, message: error.message };
