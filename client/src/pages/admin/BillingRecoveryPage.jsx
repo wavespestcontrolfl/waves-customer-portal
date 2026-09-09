@@ -195,6 +195,7 @@ export default function BillingRecoveryPage() {
   const [freeNote, setFreeNote] = useState("");
 
   const load = useCallback(async () => {
+    setActionError(null);
     setLoading(true);
     setError(null);
     try {
@@ -265,6 +266,7 @@ export default function BillingRecoveryPage() {
   const visibleAging = !loading && !error ? aging : null;
   const agingBuckets = aging?.aging || {};
   const showFree = (visit) => {
+    setActionError(null);
     setFreeFor(visit);
     setFreeReason(FREE_REASONS[0]);
     setFreeNote("");
