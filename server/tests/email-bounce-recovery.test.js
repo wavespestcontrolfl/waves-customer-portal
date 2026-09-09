@@ -10,6 +10,9 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionFor: jest.fn(),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/visit-completion-summary', () => ({
+  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
+}));
 
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
@@ -214,6 +217,43 @@ describe('attemptRecovery codex-fix behaviors', () => {
     delete process.env.EMAIL_RECOVERY_MIN_CONFIDENCE;
   });
   afterEach(() => { process.env = { ...orig }; });
+
+  test.each([
+    ['sends a visit summary recovery through the locked handoff', { ok: true }, 1, 'resent'],
+    ['suppresses a visit summary recovery whose original recipient is no longer authorized', { ok: false, reason: 'visit_summary_recipient_changed' }, 0, 'recipient_unauthorized'],
+  ])('%s', async (_label, fence, sends, finalStatus) => {
+    const summary = require('../services/visit-completion-summary');
+    summary.retrySummaryThroughHandoff.mockImplementationOnce(async (message, dispatch) => {
+      expect(message.id).toBe('orig1');
+      if (fence.ok) await dispatch();
+      return fence;
+    });
+    emailLib.loadTemplateByKey.mockResolvedValue(undefined);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'pm_1' });
+    const mockDb = orderedDb({
+      // The bounced address is the customer's own email, so the still-on-file gate passes.
+      first: (table) => (table === 'customers' ? { id: 'c1', email: 'jane@gmial.com' } : null),
+      returning: (table) => {
+        if (table === 'email_bounce_recoveries') return [{ id: 'rec1' }];
+        if (table === 'email_messages') return [{ id: 'msg1', status: 'queued', from_email_snapshot: 'contact@wavespestcontrol.com', from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', subject_snapshot: 'S' }];
+        return [];
+      },
+    });
+    db.mockImplementation(mockDb);
+    const res = await recovery.attemptRecovery(
+      { id: 'orig1', recipient_type: 'customer', recipient_id: 'c1', recipient_email_snapshot: 'jane@gmial.com', template_key: 'service.visit_summary', suppression_group_key_snapshot: 'service_operational', categories: ['email_template'], trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001' },
+      { event: 'bounce', type: 'bounce' },
+    );
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(sends);
+    expect(mockDb._calls.filter((c) => c.table === 'email_bounce_recoveries').pop().data).toMatchObject({ status: finalStatus });
+    if (fence.ok) {
+      expect(res).toMatchObject({ resent: true });
+    } else {
+      expect(res).toEqual({ skipped: 'visit_summary_recipient_changed' });
+      expect(mockDb._calls.some((c) => c.table === 'email_messages' && c.data.status === 'blocked')).toBe(true);
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    }
+  });
 
   test('links the ledger BEFORE publishing the provider id (delivery-race fix)', async () => {
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);
