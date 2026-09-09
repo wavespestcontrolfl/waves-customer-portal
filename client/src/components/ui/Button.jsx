@@ -1,8 +1,9 @@
 import React, { forwardRef } from 'react';
 import { cn } from './cn';
+import { CONTROL_DENSITIES, useUiDensity } from './UiSurface';
 
 const BASE =
-  'inline-flex items-center justify-center uppercase font-medium tracking-label ' +
+  'ui-control inline-flex items-center justify-center font-medium ' +
   'select-none transition-colors u-focus-ring ' +
   'disabled:opacity-50 disabled:cursor-not-allowed';
 
@@ -22,29 +23,31 @@ const VARIANTS = {
     'bg-alert-fg text-white hover:bg-alert-hover active:bg-alert-hover border-hairline border-alert-fg',
 };
 
-export const Button = forwardRef(function Button(
-  { variant = 'primary', size = 'md', className, type = 'button', ...rest },
-  ref
-) {
-  // Same silent-undefined pattern as Badge: an unknown variant or size
-  // rendered a bare <button>. Fall back and warn in dev.
+// Links with button presentation reuse these exact variants without changing
+// their native navigation or introducing a second action implementation.
+export function buttonStyles({ variant = 'primary', size = 'md', density = 'legacy', className } = {}) {
   const hasVariant = Object.prototype.hasOwnProperty.call(VARIANTS, variant);
   const hasSize = Object.prototype.hasOwnProperty.call(SIZES, size);
   if (import.meta.env.DEV) {
     if (!hasVariant) console.warn(`Button: unknown variant "${variant}" — rendering primary`);
     if (!hasSize) console.warn(`Button: unknown size "${size}" — rendering md`);
   }
+  return cn(BASE, density === 'legacy' ? cn('uppercase tracking-label', SIZES[hasSize ? size : 'md']) : cn('ui-action', CONTROL_DENSITIES[density]), VARIANTS[hasVariant ? variant : 'primary'], className);
+}
+
+export const Button = forwardRef(function Button(
+  { variant = 'primary', size = 'md', density, loading, disabled, className, type = 'button', ...rest },
+  ref
+) {
+  const resolvedDensity = useUiDensity(density);
   return (
     <button
       ref={ref}
       type={type}
-      className={cn(
-        BASE,
-        SIZES[hasSize ? size : 'md'],
-        VARIANTS[hasVariant ? variant : 'primary'],
-        className
-      )}
+      className={buttonStyles({ variant, size, density: resolvedDensity, className: cn(loading !== undefined && 'ui-pending-action gap-2', className) })}
       {...rest}
+      disabled={disabled || loading}
+      aria-busy={loading === undefined ? rest['aria-busy'] : loading || undefined}
     />
   );
 });

@@ -256,6 +256,35 @@ it('clears the previous property and customer identity when starting the next es
   expect(saved.clientDraftId).not.toBe(SOURCE.id);
 });
 
+it('starts the next customer with no prior-customer notes or discounts while retaining selected services', async () => {
+  const original = fetchMock.getMockImplementation();
+  fetchMock.mockImplementation((url, options) => String(url).endsWith('/edit-source')
+    ? Promise.resolve(jsonResponse({ ...SOURCE, notes: 'Only for the first customer.', inputs: {
+      ...SOURCE.inputs, manualDiscountPreset: '__custom__', manualDiscountType: 'FIXED',
+      manualDiscountValue: '25', manualDiscountLabel: 'Customer-specific credit',
+      manualDiscountInternalReason: 'First customer only', serviceSpecificDiscountKeys: ['first-customer-credit'],
+    } }))
+    : original(url, options));
+  function Session() {
+    const [editId, setEditId] = useState(SOURCE.id);
+    return <EstimateToolViewV2 editEstimateId={editId} onStartNew={() => setEditId('')} />;
+  }
+  render(<MemoryRouter><Session /></MemoryRouter>);
+  await screen.findByDisplayValue('Only for the first customer.');
+  fireEvent.click(screen.getByRole('button', { name: 'Next estimate (keep services)', exact: true }));
+  expect(screen.getByLabelText('Customer-visible notes')).toHaveValue('');
+  expect(screen.getByLabelText('Type')).toHaveValue('NONE');
+  expect(screen.getByLabelText('Amount')).toHaveValue(null);
+  expect(screen.getByLabelText('Label (shown on estimate)')).toHaveValue('');
+  expect(screen.getByLabelText('Internal reason')).toHaveValue('');
+  expect(screen.getByRole('checkbox', { name: 'Pest Control', exact: true })).toBeChecked();
+  change('Customer name', 'QA Next customer');
+  change('Home Sq Ft', '2000');
+  const saved = await generateAndSave();
+  expect(saved.notes).toBe('');
+  expect(saved.estimateData.inputs.serviceSpecificDiscountKeys).toEqual([]);
+});
+
 it('resolves the live customer phone before messaging from a reopened estimate', async () => {
   const base = fetchMock.getMockImplementation();
   fetchMock.mockImplementation((url, options) => String(url).endsWith('/estimates-summary')
