@@ -427,7 +427,8 @@ const VISIT_ANSWER_RE = new RegExp(`^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x
 
 // A negative appointment fact is still private. Only a refusal to disclose
 // excuses it; "she has no visit" and "the tech isn't coming" must both fail.
-const DISCLOSURE_REFUSAL_RE = /\b(?:whether|if)\b|\b(?:cannot|can[\x27\u2019]t|unable|not able|won[\x27\u2019]t)\s+(?:to\s+)?(?:confirm|verify|say|tell|share|disclose|provide|give)(?:\s+(?:you|her|him|them|that|this|the|his|their|your|any|an?|details?|information|time|timing|status|existence|of|about|for|on|when))*\s*$/i;
+const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
+const DISCLOSURE_REFUSAL_RE = new RegExp(`\\b(?:whether|if)\\b|\\b(?:cannot|can[\\x27\\u2019]t|unable|not able|won[\\x27\\u2019]t)\\s+(?:to\\s+)?${DISCLOSURE_VERB}(?:\\s+or\\s+${DISCLOSURE_VERB})*(?:\\s+(?:you|her|him|them|that|this|the|his|their|your|any|an?|details?|information|time|timing|status|existence|of|about|for|on|when|what|which))*\\s*$`, 'i');
 const VISIT_INQUIRY_RE = /\b(?:check|see|view|confirm|tell(?:\s+(?:you|her|him|them))?)\s+when\b|\b(?:ask|contact)\s+(?:the )?(?:office|account holder)\s+when\b/i;
 const isVisitInquiry = (prefix) => VISIT_INQUIRY_RE.test(prefix) && !/\b(?:i|we)\s+(?:can|could|will|would)\s+(?:tell|confirm)\b/i.test(prefix);
 const VISIT_AUTHORITY_RE = /^\s*only\s+the account holder\s+can\s+(?:confirm|verify|check)\b/i;
@@ -474,6 +475,9 @@ function no_third_party_disclosure(value, record, { spoken }) {
       const time = [...TIME_ANYWHERE_RES, RELATIVE_DAY_RE, /\btoday\b/i].some((re) => [...sentence.matchAll(new RegExp(re.source, 'gi'))].some((m) => {
         // A comma can set off a time after its subject: "her visit, at 11".
         const prefix = sentence.slice(0, m.index).replace(/,\s*((?:at|from|between)\s+)?$/i, ' $1').split(VISIT_CLAUSE_BOUNDARY_RE).pop();
+        // A time can directly modify the visit noun: "her 11 AM appointment".
+        const qualifiesVisit = new RegExp(`^\\s+${VISIT_NOUN}`, 'i').test(sentence.slice(m.index + m[0].length));
+        if (qualifiesVisit) return !DISCLOSURE_REFUSAL_RE.test(prefix);
         let context = prefix;
         let subject = [...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop();
         if (!subject) {
