@@ -374,15 +374,15 @@ async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'search_field_intelligence': return await searchFieldIntelligence(input);
-      case 'query_customers': return await queryCustomers(input);
+      case 'query_customers': return await queryCustomers(input, actionContext.readCustomerIds);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
-      case 'get_schedule_view': return await getScheduleView(input);
+      case 'get_schedule_view': return await getScheduleView(input, actionContext.readCustomerIds);
       case 'query_revenue': return await queryRevenue(input);
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
       case 'create_customer': return await createCustomer(input);
-      case 'update_customer': return await updateCustomer(input.customer_id, input.updates);
+      case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -403,7 +403,7 @@ async function executeTool(toolName, input, actionContext = {}) {
 
 // ─── READ IMPLEMENTATIONS ───────────────────────────────────────
 
-async function queryCustomers(input) {
+async function queryCustomers(input, readCustomerIds = []) {
   const { filters = {}, search, sort_by, sort_dir, limit: rawLimit = 50 } = input;
   const limit = Math.max(1, Math.min(Math.trunc(rawLimit), 200));
   const offset = Math.max(0, Math.trunc(input.offset || 0));
@@ -463,6 +463,10 @@ async function queryCustomers(input) {
   }
 
   // Free text search
+  // Inside a customer-scoped task every customer list — searched, filtered or
+  // bare — may only return that customer; a genuinely unscoped request
+  // arrives with an empty scope and stays broad.
+  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
   if (search) {
     const s = `%${search}%`;
     query = query.where(function () {
@@ -610,7 +614,7 @@ async function findOverdueCustomers(input) {
 
 
 async function getCustomerDetail(customerId) {
-  const customer = await db('customers').where('id', customerId).first();
+  const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
   if (!customer) return { error: 'Customer not found' };
 
   const services = await db('service_records')
@@ -621,7 +625,7 @@ async function getCustomerDetail(customerId) {
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', etDateString())
-    .whereNotIn('status', ['cancelled'])
+    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
     .orderBy('scheduled_date', 'asc')
     .limit(10);
 
@@ -696,8 +700,9 @@ async function getCustomerDetail(customerId) {
       type: s.service_type,
       status: s.status,
       time_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+      property_id: s.property_id || null,
       service_address: formatAddress(effectiveServiceAddress(s, customer)),
-      property_id: s.property_id,
+      location_provenance: s.service_address_line1 ? 'appointment_snapshot' : 'account_fallback',
     })),
     recent_invoices: invoices.map(i => ({
       id: i.id,
@@ -709,7 +714,10 @@ async function getCustomerDetail(customerId) {
 }
 
 
-async function getScheduleView(input) {
+// readCustomerIds: a customer-scoped task confines the schedule to its
+// resolved customers so a date-wide read cannot expose other customers'
+// names, phones, addresses or notes to the model.
+async function getScheduleView(input, readCustomerIds = []) {
   const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
   const offset = Math.max(0, Math.trunc(input.offset || 0));
 
@@ -729,6 +737,7 @@ async function getScheduleView(input) {
       'technicians.name as tech_name',
     )
     .whereNotIn('scheduled_services.status', ['cancelled']);
+  if (readCustomerIds.length) query = query.whereIn('scheduled_services.customer_id', readCustomerIds);
 
   if (date) {
     query = query.where('scheduled_services.scheduled_date', date);
@@ -770,7 +779,8 @@ async function getScheduleView(input) {
     has_more: fetched.length > 200,
     next_offset: fetched.length > 200 ? offset + 200 : null,
     date: date || null,
-    coverage: 'Requested date range; cancelled appointments excluded',
+    coverage: readCustomerIds.length ? 'Requested date range for the task customer only; cancelled appointments excluded'
+      : 'Requested date range; cancelled appointments excluded',
   };
 }
 
@@ -1083,7 +1093,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates) {
+async function updateCustomer(customerId, updates, expectedVersion) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
@@ -1169,6 +1179,16 @@ async function updateCustomer(customerId, updates) {
         err.customerNoLongerLive = true;
         throw err;
       }
+      if (expectedVersion) {
+        // Compare Postgres' full-precision version while holding the same row
+        // lock as the domain write; JS Date equality loses microseconds.
+        const current = await trx('customers').where('id', customerId).first(trx.raw('updated_at::text AS version'));
+        if (current.version !== expectedVersion) {
+          const err = new Error('Customer changed since this action was prepared. Review a fresh proposal.');
+          err.previewChanged = true;
+          throw err;
+        }
+      }
       const lockedMerged = { ...lockedBefore, ...clean };
       // Close the inferred-monthly vector (#3140 resolution): billing_mode
       // is not an IB-updatable field, so a tier/rate write that leaves the
@@ -1248,6 +1268,7 @@ async function updateCustomer(customerId, updates) {
       }
     });
   } catch (e) {
+    if (e?.previewChanged) return { error: e.message, preview_changed: true };
     if (e && e.customerNoLongerLive) {
       return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
     }
@@ -1749,7 +1770,7 @@ function cancelPlanServiceInput(input) {
     note: input.note || '',
     // Pinned at proposal time by the pending-action layer; the commit
     // refuses (preview_changed) when the live facts no longer match it.
-    previewFingerprint: input.preview_fingerprint || null,
+    previewFingerprint: input._approved_cancel_plan_fingerprint || null,
   };
 }
 
