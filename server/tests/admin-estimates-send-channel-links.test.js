@@ -217,7 +217,8 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
 
   test.each([
     ['an ordinary', {}],
-    ['a shorter-fixed', { estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough: '2026-09-22' } }) }],
+    // A near-today hold, derived so the case never lapses (AGENTS.md test-date rule).
+    ['a shorter-fixed', { estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough: new Date(Date.now() + 14 * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) } }) }],
   ])('%s group anchor stays viewable through the longest fixed sibling hold (GH codex P1 r2 on #4309)', async (_name, anchorOverrides) => {
     const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group', ...anchorOverrides });
     const sibling = { id: 'synthetic-fixed-sibling', status: 'sent', pricing_authority: 'SERVER',

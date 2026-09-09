@@ -4230,6 +4230,16 @@ router.put('/:id/proposal', async (req, res, next) => {
     // and this UPDATE must not persist a term no billing path enforces
     // (codex #3297 r4c).
     if (savingPaymentTerm) updateQuery.where({ bill_by_invoice: true });
+    // The published group entry link must keep outliving the group's longest
+    // fixed hold across saves (pre-push codex P1 on #4309): a save that
+    // rewrites this row's expiry takes the longer of its own hold and the
+    // siblings' (read under the group lock held above), and a hold that grew
+    // here is pushed forward onto the group's published members below.
+    let entryExpiry = expiryUpdate;
+    if (groupId && (authoredExpiry || hadFixedValidity)) {
+      const groupHold = await longestGroupFixedValidity(trx, estimate);
+      if (groupHold && (!entryExpiry || groupHold > entryExpiry)) entryExpiry = groupHold;
+    }
     const count = await updateQuery.update({
       estimate_data: JSON.stringify(nextData),
       category: 'COMMERCIAL',
@@ -4242,13 +4252,23 @@ router.put('/:id/proposal', async (req, res, next) => {
       monthly_total: totals.monthlyEquivalent,
       annual_total: totals.annualRecurring,
       onetime_total: totals.oneTime,
-      ...(authoredExpiry || hadFixedValidity ? { expires_at: expiryUpdate } : {}),
+      ...(authoredExpiry || hadFixedValidity ? { expires_at: entryExpiry } : {}),
       ...(revivingBid ? { status: estimate.viewed_at ? 'viewed' : estimate.sent_at ? 'sent' : 'draft' } : {}),
       ...(revivingBid && ['expired_unviewed', 'expired_viewed', 'expired_unsent'].includes(estimate.disposition)
         ? { disposition: null, disposition_source: null, disposition_at: null, disposition_note: null } : {}),
       updated_at: db.fn.now(),
     });
     if (!count) return { updatedCount: 0 };
+    if (groupId && authoredExpiry) {
+      await trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .whereNull('price_locked_at')
+        .whereIn('status', ['sent', 'viewed'])
+        .where('expires_at', '<', authoredExpiry)
+        .update({ expires_at: authoredExpiry, updated_at: db.fn.now() });
+    }
     // The version THIS write committed, read under the same lock: the editor
     // keys its next save and its delivery review on it, so a save that lands
     // in the window before the editor's reload cannot be adopted as if it

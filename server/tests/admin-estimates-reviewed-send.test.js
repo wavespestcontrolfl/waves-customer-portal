@@ -253,6 +253,14 @@ describe('commercial bid authoring', () => {
       expect(row).toEqual(before);
     }
   });
+  test('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309)', async () => {
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
+    const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(res.statusCode).toBe(200);
+    const siblingExtension = mutations.find(({ patch }) => !patch.estimate_data && patch.expires_at);
+    expect(new Date(siblingExtension.patch.expires_at).toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+  });
   test('an older editor omitting validity preserves the saved price hold', async () => {
     gateEnvValue.mockReturnValue(false);
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };
