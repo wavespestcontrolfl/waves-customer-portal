@@ -1,3 +1,5 @@
+import { clearNativeBadge } from '../native/nativeBadge';
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const REFRESH_LOCK_NAME = 'waves-customer-refresh';
 const REFRESH_LEASE_KEY = 'waves_refresh_lease';
@@ -63,6 +65,7 @@ export class ApiClient {
   }
 
   setTokens(token, refreshToken) {
+    if (!sameRequestSession(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = token;
     this.refreshToken = refreshToken;
@@ -77,6 +80,7 @@ export class ApiClient {
   }
 
   clearTokens() {
+    void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = null;
     this.refreshToken = null;
@@ -87,6 +91,7 @@ export class ApiClient {
   }
 
   adoptTokens(token, refreshToken) {
+    if (this.token && !sameRequestSession(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = token || null;
     this.refreshToken = refreshToken || null;

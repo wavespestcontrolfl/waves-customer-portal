@@ -107,6 +107,30 @@ import { Textarea,
   TD,
   cn,
 } from "../ui";
+
+// Invoice status tone, shared by the Overview list and the Billing table.
+// alert-fg is reserved for overdue (header contract); paid/prepaid read
+// strong; draft and void are neutral, not alarms. Nothing flips a stored
+// status to 'overdue' — the late-payment checker treats a sent/viewed
+// invoice as overdue by due_date (created_at when due_date is null) past a
+// 7-day grace, so this mirrors that predicate on the raw rows.
+const OVERDUE_GRACE_MS = 7 * 86400000;
+export function invoiceStatusTone(inv, now = Date.now()) {
+  const status = inv?.status;
+  if (status === "paid" || status === "prepaid") return "strong";
+  if (status === "overdue") return "alert";
+  if (status === "sent" || status === "viewed") {
+    const ref = inv.due_date || inv.created_at;
+    const t = ref ? new Date(ref).getTime() : NaN;
+    if (Number.isFinite(t) && t <= now - OVERDUE_GRACE_MS) return "alert";
+  }
+  return "neutral";
+}
+const INVOICE_STATUS_TEXT = {
+  alert: "text-alert-fg",
+  strong: "text-zinc-900",
+  neutral: "text-ink-secondary",
+};
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
@@ -3177,16 +3201,17 @@ export function BillingLanePanelV2({ customerId, billingMode, tier, monthlyRate,
       {" "}
       <CardBody className="p-4">
         {" "}
-        <div className="ui-label text-ink-secondary mb-1">
+        <label htmlFor={`billing-mode-${customerId}`} className="block ui-label text-ink-secondary mb-1">
           How this customer pays
-        </div>{" "}
+        </label>{" "}
         <div className="flex items-center gap-2 flex-wrap">
           {" "}
           <Select
+            id={`billing-mode-${customerId}`}
             value={mode}
             disabled={!canEdit || saving}
             onChange={(e) => save(e.target.value)}
-            className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1.5 bg-white"
+            className="min-w-0 max-w-full"
           >
             {BILLING_LANE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
@@ -6323,13 +6348,7 @@ function CustomerProfileBilling({
                 </TD>{" "}
                 <TD>
                   {" "}
-                  <Badge
-                    tone={
-                      inv.status === "paid" || inv.status === "prepaid"
-                        ? "strong"
-                        : "alert"
-                    }
-                  >
+                  <Badge tone={invoiceStatusTone(inv)}>
                     {inv.status}
                   </Badge>{" "}
                 </TD>{" "}
@@ -7662,9 +7681,6 @@ function CustomerBillingSummary({
           <SectionTitle>Prepaid Plans</SectionTitle>
           {data.prepaidPlans.map((plan) => {
             const active = plan.remainingVisits > 0;
-            const badgeStyle = active
-              ? { background: "#DCFCE7", color: "#166534" }
-              : { background: "#F4F4F5", color: "#52525B" };
             return (
               <div
                 key={plan.seriesParentId}
@@ -7675,16 +7691,9 @@ function CustomerBillingSummary({
                     {plan.serviceType}
                     {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
                   </div>
-                  <span
-                    className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
-                    style={{
-                      height: 18,
-                      padding: "0 8px",
-                      ...badgeStyle,
-                    }}
-                  >
+                  <Badge tone={active ? "strong" : "neutral"}>
                     {active ? "Active" : "Used"}
-                  </span>
+                  </Badge>
                 </div>
                 <div className="text-11 text-ink-secondary mt-1">
                   {plan.usedVisits} of {plan.paidVisits} used
@@ -7718,7 +7727,7 @@ function CustomerBillingSummary({
               <span
                 className={cn(
                   "font-medium uppercase tracking-label text-10",
-                  inv.status === "paid" ? "text-zinc-900" : "text-alert-fg",
+                  INVOICE_STATUS_TEXT[invoiceStatusTone(inv)],
                 )}
               >
                 {inv.status}
