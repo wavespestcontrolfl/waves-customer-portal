@@ -1128,3 +1128,25 @@ test('a quantity qualifier after a year is no date, bare "future" is prospective
   expect(score('E6', 'Waves was previously local before it became a franchise, a status it retains today.').forbidden.franchise).toBe(true);
   expect(score('E6', 'Waves was formerly a franchise before becoming independent.').forbidden.franchise).toBe(false);
 });
+
+test('editorial objects are not treatment, adjectival "former" is an ended status, a "that" complement hands back, month-qualified dates read against frozen_on, a topic noun keeps a coordinated service head, and a past year needs a date boundary (#4155 r13)', () => {
+  expect(score('E6', 'Waves removes the word termites from its logo.').expected.termite).toBe(false);
+  expect(score('E6', 'Waves removes the mosquito image from its website banner.').expected.mosquito).toBe(false);
+  expect(score('E6', 'Waves removes termites from homes.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves is a former franchise.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves is a former franchisee of Orkin.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves is an ex-franchise.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E5', 'Waves will confirm that it serves Manatee County.').expected.manatee).toBe(true);
+  expect(score('E5', 'Waves will announce that it will serve Manatee County next year.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County in December 2026.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves served Manatee County until August 2026.').expected.manatee).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County until December 2026.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves was a franchise until March 2026.').forbidden.franchise).toBe(false);
+  expect(score('E6', 'Waves offers termite information and inspections.').expected.termite).toBe(true);
+  expect(score('E6', 'Waves offers rodent education and exclusion services.').expected.rodent).toBe(true);
+  expect(score('E6', 'Waves offers termite information and advice.').expected.termite).toBe(false);
+  expect(score('E5', 'Waves serves Manatee County for up to 2025 residents.').expected.manatee).toBe(true);
+  expect(score('E6', 'Waves is a franchise with up to 2025 locations.').forbidden.franchise).toBe(true);
+  expect(score('E5', 'Waves served Manatee County until 2025.').expected.manatee).toBe(false);
+});
