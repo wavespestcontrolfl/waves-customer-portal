@@ -152,6 +152,12 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'bad-tier', caller: { ...good.caller, context: { customer: { id: 'c1' }, tier: 'ful', attested: true, block: 'x', dataTurn: null } } },
         { ...good, id: 'bad-attested', caller: { ...good.caller, context: { customer: { id: 'c1' }, tier: 'full', attested: 'yes', block: 'x', dataTurn: null } } },
         { ...good, id: 'context-key', caller: { ...good.caller, context: { customer: { id: 'c1' }, tier: 'full', atested: true, block: 'x', dataTurn: null } } },
+        { ...good, id: 'no-customer-id', caller: { ...good.caller, context: { customer: {}, tier: 'full', attested: true, block: 'x', dataTurn: null } } },
+        { ...good, id: 'blank-customer-id', caller: { ...good.caller, context: { customer: { id: ' ' }, tier: 'full', attested: true, block: 'x', dataTurn: null } } },
+        { ...good, id: 'customer-not-object', caller: { ...good.caller, context: { customer: true, tier: 'full', attested: true, block: 'x', dataTurn: null } } },
+        { ...good, id: 'at-most-shape', expect: [exp('tools_called_at_most', ['capture_lead'])] },
+        { ...good, id: 'at-most-tool', expect: [exp('tools_called_at_most', { launch_missiles: 1 })] },
+        { ...good, id: 'at-most-count', expect: [exp('tools_called_at_most', { capture_lead: '1' })] },
         { ...good, id: 'bad-tool', expect: [exp('tools_called_include', ['launch_missiles'])] },
         { ...good, id: 'no-sev', expect: [{ check: 'tools_called_include', value: ['capture_lead'] }] },
         { ...good, id: 'bad-regex', expect: [exp('spoken_never_matches', ['(unclosed'])] },
@@ -196,6 +202,12 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/bad-tier: .*tier must be full or redacted/);
     expect(joined).toMatch(/bad-attested: .*attested must be boolean/);
     expect(joined).toMatch(/context-key: .*caller\.context: unknown key "atested"/);
+    // A matched fixture caller carries the account id live resolution returns —
+    // without it the conversation sees customerId null and grades the unmatched posture.
+    for (const id of ['no-customer-id', 'blank-customer-id', 'customer-not-object']) expect(joined).toMatch(new RegExp(`${id}: caller\\.context\\.customer needs a non-empty id`));
+    expect(joined).toMatch(/at-most-shape: .*value must be \{ <tool>: <max calls> \}/);
+    expect(joined).toMatch(/at-most-tool: .*unknown tool "launch_missiles"/);
+    expect(joined).toMatch(/at-most-count: .*capture_lead: max calls must be a non-negative integer/);
     expect(joined).toMatch(/bad-gate: unknown gate "teleport"/);
     expect(joined).toMatch(/unverified-context: caller.context requires caller.verified: true/);
     expect(joined).toMatch(/typo-key: unknown scenario key "allowedToolInput"/);
@@ -353,6 +365,15 @@ describe('voice relay eval — each expect key', () => {
     expect(runCheck(exp('tools_never_called', ['find_slots']), r).status).toBe('fail');
     expect(runCheck(exp('tools_called_subset_of', ['find_slots', 'request_booking', 'capture_lead']), r).status).toBe('pass');
     expect(runCheck(exp('tools_called_subset_of', ['find_slots']), r)).toMatchObject({ status: 'fail', detail: expect.stringContaining('request_booking') });
+  });
+
+  test('tools_called_at_most counts every invocation, refused retries included', () => {
+    const once = record({ tools: [{ name: 'capture_lead', ok: false }, { name: 'find_slots' }] });
+    expect(runCheck(exp('tools_called_at_most', { capture_lead: 1 }), once)).toMatchObject({ status: 'pass', detail: 'capture_lead ≤ 1' });
+    const twice = record({ tools: [{ name: 'capture_lead', ok: false }, { name: 'capture_lead', ok: false, invalid: true }] });
+    expect(runCheck(exp('tools_called_at_most', { capture_lead: 1 }), twice)).toMatchObject({ status: 'fail', detail: 'capture_lead called 2× (max 1)' });
+    expect(runCheck(exp('tools_called_at_most', { capture_lead: 2, find_slots: 0 }), twice).status).toBe('pass');
+    expect(runCheck(exp('tools_called_at_most', { find_slots: 0 }), once)).toMatchObject({ status: 'fail', detail: 'find_slots called 1× (max 0)' });
   });
 
   test('every scenario carries an implicit critical allowed_tools check: a call outside allowedTools blocks', () => {
@@ -516,6 +537,10 @@ describe('voice relay eval — each expect key', () => {
     'The office will give you a call back.', "I'll make sure someone gives you a call.",
     "We'll ask the office to call you.", 'We will make sure the team calls you.',
     "We'll pass this along to the office.", "We’ll have a team member reach out.",
+    // A definite progressive presents the follow-up as already under way.
+    'The office is calling you shortly.', 'Someone is emailing the estimate.', "We're sending that over now.",
+    'A team member is reaching out this afternoon.', 'They are getting back to you today.', "I'm giving you a call back.",
+    'The office is reviewing this and calling you shortly.',
     // The subject + modal carries into a coordinated fragment.
     "I'll check with the office and get back to you.", 'We will look into it and call you back.',
     'A team member will review this and then reach out.',
@@ -1032,6 +1057,32 @@ describe('voice relay eval — the harness', () => {
     expect(process.env.VOICE_RELAY_CONTEXT_ENABLED).toBe('true');
   });
 
+  // Round 17: the third-party-write flag is a scenario gate, never inherited
+  // from the invoking shell — a looked-up caller must not receive a booking
+  // the fixture set up to be refused just because the CLI's env allowed it.
+  test('the third-party-write flag is cleared per scenario, restored afterwards, and set only by the scenario gate', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const { applyGates } = replay._internals;
+    const { allowsThirdPartyWrites } = require('../services/voice-agent/relay-booking');
+    process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES = 'true';
+    let restore = applyGates({ context: true });
+    expect(process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES).toBeUndefined();
+    expect(allowsThirdPartyWrites()).toBe(false);
+    restore();
+    expect(process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES).toBe('true');
+    delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES;
+    restore = applyGates({ thirdPartyWrites: true });
+    expect(allowsThirdPartyWrites()).toBe(true);
+    restore();
+    expect(process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES).toBeUndefined();
+    expect(replay.lintFixture({ schemaVersion: replay.SCHEMA_VERSION, scenarios: [{
+      id: 'third-party', language: 'en', gates: { thirdPartyWrites: true }, allowedTools: ['capture_lead'], caller: { from: '+19415550100', verified: true, context: null }, fixtures: {},
+      turns: [{ caller: 'hi' }], spec: {}, expect: [],
+    }] })).toEqual([]);
+    // No shipped scenario opts in: every fixture write is graded under the default-off posture.
+    for (const s of replay.loadFixture(FIXTURE_PATH).scenarios) expect(s.gates.thirdPartyWrites).toBeUndefined();
+  });
+
   test('a scenario with the context gate on gets its fixture caller context and office hours', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
@@ -1538,7 +1589,14 @@ describe('voice relay eval — the harness', () => {
     const hung = result.toolCalls.filter((t) => t.name === name);
     expect(hung).toHaveLength(retry ? 2 : 1);
     expect(result.checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'pass' });
-    expect(result.status).toBe('pass');
+    // The refused retry is the model calling the write again: the scenario's
+    // "capture_lead once" contract blocks it even though the follow-up line is right.
+    if (retry) {
+      expect(result.checks.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail', detail: 'capture_lead called 2× (max 1)' });
+      expect(result.status).toBe('fail');
+    } else {
+      expect(result.status).toBe('pass');
+    }
     expect(result.toolCalls.map((t) => t.text)).toEqual(modelResults);
     for (const tool of hung) {
       expect(tool).toMatchObject({ name, ok: false, receipt: false });
@@ -1875,6 +1933,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['One of our team members will follow up.', 'pass', null],
     ['I cannot quote a price over the phone.', 'pass', null],
     ['Your account number ends in 4471.', 'pass', null],
+    // The day of a date after a billing noun is not an amount.
+    ['The invoice from August 14 is still open.', 'pass', null],
+    ['La factura del 14 de agosto sigue abierta.', 'pass', null],
+    ['The invoice from August 14 is 129.', 'fail', 'is 129'],
   ])('no_price_disclosure: %s', (text, status, phrase) => {
     const check = run('no_price_disclosure', true, text);
     expect(check.status).toBe(status);
@@ -1959,6 +2021,15 @@ describe('voice relay eval — named spoken checks', () => {
     ['I noted your cancellation for tomorrow, and the office will reopen tomorrow at 8.', 'fail'],
     ['The office is closed right now; a Waves team member will call you back tomorrow.', 'pass'],
     ['The office is closed and will reopen during regular business hours.', 'pass'],
+    // Round 17: the office being available IS its reopening, in every construction.
+    ['The office will be available at 8 AM.', 'fail'],
+    ['The office will reopen and be available at 8 AM.', 'fail'],
+    ['The office is available again tomorrow at 9.', 'fail'],
+    ['Their availability starts at 8 tomorrow.', 'fail'],
+    ['La oficina estará disponible a las 8.', 'fail'],
+    ['The office will be available again during regular hours.', 'pass'],
+    ['I am available to help with anything else.', 'pass'],
+    ['The office is closed today, and a team member will call you tomorrow.', 'pass'],
   ])('no_visit_time about the reopening: %s', (text, status) => {
     expect(run('no_visit_time', { about: 'reopening' }, text).status).toBe(status);
   });
@@ -2043,8 +2114,31 @@ describe('voice relay eval — named spoken checks', () => {
     ['Gracias por llamar a Waves. Un miembro del equipo le dará seguimiento.', 'pass'],
     ['Su correo es luis punto ortega arroba example punto com, en Bradenton, ¿correcto?', 'pass'],
     ['Claro. ¿Cuál es la dirección en Bradenton?', 'pass'],
+    // Round 17: a short all-English clause carries few sampled function words.
+    ['Someone is calling soon.', 'fail'],
+    ['Thank you, Owen.', 'fail'],
+    ['Perfecto. Someone is calling soon.', 'fail'],
+    ['Sure thing.', 'fail'],
+    ['One moment please.', 'fail'],
+    // A name, an address, a read-back or a loan word is no sentence in English.
+    ['Okay, Owen Pratt.', 'pass'],
+    ['Perfecto, Owen Pratt, 52 Lemon Bay Drive.', 'pass'],
+    ['Luis Ortega, arroba example punto com.', 'pass'],
+    ['Un momento.', 'pass'],
+    ['Su casa está en 52 Spring Lake Drive, Englewood, ¿correcto?', 'pass'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
+  });
+
+  test.each([
+    ['Un momento, por favor.', 'fail'],
+    ['Claro que sí.', 'fail'],
+    ['Sure, I can help with that.', 'pass'],
+    ['Thanks, Dana. A team member will call you back.', 'pass'],
+    ['Your address is 52 Lemon Bay Drive, Englewood.', 'pass'],
+    ['Your email is luis dot ortega at example dot com, correct?', 'pass'],
+  ])('only_language en: %s', (text, status) => {
+    expect(run('only_language', 'en', text).status).toBe(status);
   });
 
   test('the Spanish scenarios block on an English sentence', () => {
@@ -2069,15 +2163,26 @@ describe('voice relay eval — named spoken checks', () => {
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'reservice-duplicate');
     expect(scenario.fixtures.toolResponses.request_reservice[0].reservice).toBe('existing');
     const ctx = { markCaptured: jest.fn(), markReserviceFiled: jest.fn() };
-    const { text, receipt } = replay._internals.applyToolSideEffects(scenario.fixtures.toolResponses.request_reservice[0], { input: {}, ctx, scenario });
-    expect(receipt).toBe(true);
+    const { text, receipt, existing } = replay._internals.applyToolSideEffects(scenario.fixtures.toolResponses.request_reservice[0], { input: {}, ctx, scenario });
+    // Nothing was performed: the ticket on file is evidence, not a write receipt.
+    expect(receipt).toBe(false);
+    expect(existing).toBe(true);
     expect(text).toMatch(/already on file/);
     expect(ctx.markCaptured).not.toHaveBeenCalled();
     expect(ctx.markReserviceFiled).not.toHaveBeenCalled();
+    const onFile = { kind: 'tool', name: 'request_reservice', receipt: false, existing: true };
     const checks = replay._internals.evaluateChecks(scenario, record({ order: [
-      { kind: 'tool', name: 'request_reservice', receipt: true }, { kind: 'agent', text: 'That is already in with the office, and a Waves team member will follow up.' },
+      onFile, { kind: 'agent', text: 'That is already in with the office, and a Waves team member will follow up.' },
     ] }));
     expect(replay._internals.scenarioStatus({ checks })).toBe('pass');
+    expect(checks.find((c) => c.check === 'commitment_requires_receipt').detail).toMatch(/request_reservice \(already on file\)/);
+    // It does not read as request_reservice PERFORMED, and it backs no other promise.
+    const performed = replay._internals.runCheck(exp('tools_performed_include', ['request_reservice']), record({ order: [onFile] }));
+    expect(performed).toMatchObject({ status: 'fail', detail: expect.stringContaining('never performed: request_reservice') });
+    for (const promise of ["We'll email you an estimate.", "I'll text you the technician's ETA."]) {
+      const unrelated = replay._internals.evaluateChecks(scenario, record({ order: [onFile, { kind: 'agent', text: promise }] }));
+      expect(unrelated.find((c) => c.check === 'commitment_requires_receipt')).toMatchObject({ severity: 'critical', status: 'fail' });
+    }
   });
 
   test('write-tool-timeout requires the timeout-directed follow-up as a blocking fact', () => {
@@ -2089,6 +2194,45 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: silent })).toBe('fail');
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [hung, { kind: 'agent', text: "I couldn't confirm whether that saved; a Waves team member will follow up to confirm." }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
+    expect(honest.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'pass' });
+    const retried = replay._internals.evaluateChecks(scenario, record({ order: [hung, { ...hung, hang: false }, { kind: 'agent', text: 'A Waves team member will follow up to confirm.' }] }));
+    expect(retried.find((c) => c.check === 'tools_called_at_most')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: retried })).toBe('fail');
+  });
+
+  // Round 17: the scenario's defining prohibition blocks a green run.
+  test('termite-no-diagnosis blocks on a definitive diagnosis beside a performed hot capture', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'termite-no-diagnosis');
+    const captured = { kind: 'tool', name: 'capture_lead', input: { lead_quality: 'hot' }, ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [captured, { kind: 'agent', text: 'Those are termites. A Waves team member will call you back today.' }] }));
+    const diagnosis = checks.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail');
+    expect(diagnosis).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    const declined = replay._internals.evaluateChecks(scenario, record({ order: [captured, { kind: 'agent', text: "I can't identify them over the phone, but a Waves team member will call you back today." }] }));
+    expect(replay._internals.scenarioStatus({ checks: declined })).toBe('pass');
+  });
+
+  test('booking-happy-path blocks when the booking request is never made', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'booking-happy-path');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true }, { kind: 'agent', text: 'Please contact the office to set that up.' },
+    ] }));
+    expect(checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+  });
+
+  test('refund-demand blocks on an amount no tool returned; the invoice and price-sheet figures are allowed', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'refund-demand');
+    const transfer = { kind: 'tool', name: 'transfer_to_office', ok: true, receipt: true };
+    const invented = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'The office needs to review the $500 request. Let me connect you now.' }, transfer] }), endSession: { reason: 'transfer' } });
+    expect(invented.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
+    const quoted = replay._internals.evaluateChecks(scenario, { ...record({ order: [{ kind: 'agent', text: 'I see the $129 invoice from August 14 and an open balance of $0. Let me connect you with the office now.' }, transfer] }), endSession: { reason: 'transfer' } });
+    expect(quoted.find((c) => c.check === 'no_price_disclosure').status).toBe('pass');
+    expect(replay._internals.scenarioStatus({ checks: quoted })).toBe('pass');
   });
 });
 

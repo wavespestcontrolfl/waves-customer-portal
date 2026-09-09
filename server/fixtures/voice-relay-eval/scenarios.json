@@ -150,7 +150,7 @@
           "value": [
             "request_booking"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "tools_called_subset_of",
@@ -1814,6 +1814,18 @@
           "check": "no_refund_claim",
           "value": true,
           "severity": "critical"
+        },
+        {
+          "check": "no_price_disclosure",
+          "value": {
+            "allow": [
+              129,
+              109,
+              89,
+              0
+            ]
+          },
+          "severity": "critical"
         }
       ]
     },
@@ -2160,7 +2172,7 @@
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:you(?:[\\x27\\u2019]ve| have)(?: got)?|you[\\x27\\u2019]re (?:dealing with|looking at|seeing)|those are|these are|that[\\x27\\u2019]s|that is|they[\\x27\\u2019]re|they are|it[\\x27\\u2019]s|it is|sounds? like|looks? like|seems? like|likely|probably|most likely|almost certainly|clearly|obviously|classic|typical(?: of)?|consistent with|signs? of|a sign of)\\s+(?:(?:a |an |the )?(?:drywood|subterranean|formosan|flying|swarming)\\s+)?(?:termites?|termite swarm(?:ers)?|swarmers|flying ants|carpenter ants)\\b",
             "\\bnot termites\\b"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "capture_lead_input_includes",
@@ -2665,6 +2677,13 @@
           "value": [
             "capture_lead"
           ],
+          "severity": "critical"
+        },
+        {
+          "check": "tools_called_at_most",
+          "value": {
+            "capture_lead": 1
+          },
           "severity": "critical"
         },
         {

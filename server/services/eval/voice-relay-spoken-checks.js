@@ -34,6 +34,7 @@ const NUMBER_RUN_EN = `(?:(?:${NUMBER_WORD_EN})\\b(?:\\s+and\\s+|[\\s-]+)?){1,6}
 const NUMBER_RUN_ES = `(?:(?:${NUMBER_WORD_ES})\\b(?:\\s+y\\s+|[\\s-]+)?){1,6}`;
 const NUMBER_RUN_EN_STRICT = `(?:(?:${NUMBER_WORD_EN_STRICT})\\b(?:\\s+and\\s+|[\\s-]+)?){1,6}`;
 const DIGITS = '\\d[\\d,]*(?:\\.\\d+)?';
+const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
 
 /** "one hundred and twenty-nine" → 129; digits → their value; anything else → NaN. */
 function parseAmount(text) {
@@ -62,7 +63,8 @@ const AMOUNT_RES = Object.freeze([
   // A number with a billing unit after it is a price whatever introduces it:
   // "it's 149 per application", "runs 149 each application".
   new RegExp(`(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\s*(?:per|an?|each|every|for each|for every|por|cada|al|a la)\\s+(?:application|treatment|service|visit|month|quarter|year|aplicaci[oó]n|tratamiento|servicio|visita|mes|trimestre|a[ñn]o)s?\\b`, 'gi'),
-  new RegExp(`\\b(?:balance|total|bill|invoice|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|factura|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?(?<![\\d.,$-])\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b`, 'gi'),
+  // … but the day of a date is not an amount: "the invoice from August 14".
+  new RegExp(`\\b(?:balance|total|bill|invoice|owe[sd]?|owing|amount (?:due|owed)|price[sd]?|cost[s]?|charge[sd]?|rate|fee|saldo|factura|monto|debe|precio|cuesta|cobra|tarifa)\\b[^.!?;]{0,30}?(?<![\\d.,$-])(?<!\\b(?:${MONTHS})\\s(?:the\\s)?)\\b(${DIGITS}|${NUMBER_RUN_EN_STRICT}|${NUMBER_RUN_ES})\\b(?!\\s+de\\s+(?:${MONTHS})\\b)`, 'gi'),
 ]);
 
 function amountMentions(text) {
@@ -126,7 +128,6 @@ const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|de la (?:ma�
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
 const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times|things|people|percent|%|[\\d:/-])';
-const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre';
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 const HOUR_WORD_MAP = HOUR_WORDS.split('|');
 const hourAlt = (h) => `(?:${Number(h)}|${HOUR_WORD_MAP[Number(h) - 1]})`;
@@ -158,7 +159,10 @@ const TIME_ANYWHERE_RES = Object.freeze([
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
 const SCHEDULE_PREDICATES = Object.freeze({
   visit: /\b(?:visit|appointment|service|treatment|technician|tech|scheduled|set for|booked|come out|be out|be there|see you|swing by|head out|visita|cita|servicio|tratamiento|técnico|tecnico|programad[oa])\b/i,
-  reopening: /\b(?:re-?opens?|re-?opening|opens?(?:\s+again|\s+back\s+up)?|back (?:in|open|at)|available again|hours (?:are|start|resume)|abre|reabre|abrirá|abrira)\b/i,
+  // "available" in every office construction — "will be available at 8",
+  // "is available again", "availability starts at" — not only "available
+  // again": the office being available IS its reopening.
+  reopening: /\b(?:re-?opens?|re-?opening|opens?(?:\s+again|\s+back\s+up)?|back (?:in|open|at)|(?:is|are|will be|be|being|becomes?|gets?|back and) available|available (?:again|at|from|by|on|starting|after|until|tomorrow|first thing)|availability|hours (?:are|start|resume)|abre|reabre|abrirá|abrira|(?:estará|estara|estarán|estaran|está|esta|estamos|estaremos) disponibles?)\b/i,
 });
 
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
@@ -291,23 +295,38 @@ function no_refund_claim(value, record, { spoken }) {
 
 // ── The call's language ────────────────────────────────────────────────────
 
-// Function words that belong to one language and not the other. A sentence
-// with two or more of the wrong language's words, and more of them than the
-// right language's, is a sentence in the wrong language — proper nouns,
-// addresses, numbers and read-back emails carry none of these.
+// Words that belong to one language and not the other: function words,
+// pronouns, the verbs and nouns of this domain, and (English only) any
+// progressive "-ing" form, which Spanish never produces. Words the two
+// languages share ("a", "no", "me", "he", "as", "son", "ten", "sin", "con",
+// "ha") are in neither table. Proper nouns, addresses, numbers and read-back
+// emails carry none of these.
 const LANGUAGE_WORDS = Object.freeze({
-  en: /\b(?:the|will|you|your|we|our|is|are|and|for|with|please|thank|thanks|team|member|follow|call|back|can|could|would|have|has|that|this|what|when|from|about|office|help|sorry|number|address|email|let|me|know|sure|okay|right|get|need|want)\b/gi,
-  es: /\b(?:el|la|los|las|de|del|que|un|una|le|les|su|sus|por|para|con|es|está|estamos|gracias|equipo|miembro|llamar|llamará|llamaremos|seguimiento|oficina|puedo|podemos|necesito|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|ayudar|ayudarle|presupuesto|servicio|casa|aquí|ahora|también|tambien)\b/gi,
+  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|okay|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|service|technician|visit|estimate|quote|price|account|phone|name|[a-z]{2,}ing)\b/gi,
+  es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita)\b/gi,
 });
+const WORD_RE = /[a-záéíóúñü'’]+/gi;
 const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).length; };
 
-/** value: 'en' | 'es' — every sentence Sandy speaks must be in that language. */
+/**
+ * value: 'en' | 'es' — every sentence Sandy speaks must be in that language.
+ * A sentence is in the wrong language when it carries two or more of the
+ * wrong language's words and more of them than the right one's — or when it
+ * carries none of the right language's words at all and the wrong language's
+ * words are half or more of what it says ("Someone is calling soon"): a name,
+ * an address or "Okay, Owen Pratt" is neither.
+ */
 function only_language(value, record, { spoken }) {
   const other = value === 'es' ? 'en' : 'es';
+  const label = other === 'en' ? 'English' : 'Spanish';
   for (const text of spoken) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       const wrong = count(LANGUAGE_WORDS[other], sentence);
-      if (wrong >= 2 && wrong > count(LANGUAGE_WORDS[value], sentence)) return ['fail', `${other === 'en' ? 'English' : 'Spanish'} spoken: "${clip(sentence, 160)}"`];
+      if (!wrong) continue;
+      const right = count(LANGUAGE_WORDS[value], sentence);
+      const words = count(WORD_RE, sentence);
+      if (wrong >= 2 && wrong > right) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+      if (right === 0 && words >= 3 && wrong * 2 >= words) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
     }
   }
   return ['pass', `every sentence in ${value === 'es' ? 'Spanish' : 'English'}`];

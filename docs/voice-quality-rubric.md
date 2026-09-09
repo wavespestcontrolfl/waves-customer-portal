@@ -39,7 +39,9 @@ A scenario carries exactly the documented keys (and `fixtures` exactly `officeHo
 `toolResponses`, `resume`, `modelFailures`); anything else is a lint error. A
 `caller.context` needs `caller.verified: true` — the live resolver returns no
 context when verification fails — and a `fixtures.resume` needs `gates.recovery: true`
-plus a verified caller, the live release conditions for an earlier segment. An `ok: false` response stands in for a thrown tool failure: it performs no fixture
+plus a verified caller, the live release conditions for an earlier segment. A
+`caller.context.customer` carries a non-empty `id`, the matched account the conversation
+exposes as its customer id — without one a "matched" caller would be graded unmatched. An `ok: false` response stands in for a thrown tool failure: it performs no fixture
 side effects, earns no receipt, and counts toward the relay's provider-failure handoff.
 A refusal the live tool returns as text (a redacted schedule, missing sizing) stays `ok`.
 Every scripted turn is `{ caller }` with an optional `interrupt` (`true`, `{ words }`
@@ -65,7 +67,8 @@ segment. Earlier speech is context and is excluded from grading new speech.
 
 A `critical` failure or an `adjudicated` major failure fails the scenario and run.
 Other major and quality misses lower the quality score. The available checks cover
-required, forbidden and allowed tools; required and forbidden spoken patterns;
+required, forbidden and allowed tools; a per-tool call ceiling (`tools_called_at_most`,
+every invocation counted, refused retries included); required and forbidden spoken patterns;
 captured fields; session termination; and speech in the same model round before a
 write tool. Agent/tool events carry their model-call index, so earlier read-tool
 filler is not treated as speech before a later write. Five prohibitions are named
@@ -75,7 +78,8 @@ than written per scenario as regexes:
 
 - `no_price_disclosure` — a dollar sign, digits or a spelled-out number (EN/ES) with a
   currency word, or a billing noun ("balance", "total", "invoice", "owe") followed by a
-  number; `{ allow: [129, 109, 89] }` exempts exactly the amounts the tools returned.
+  number (the day of a date, "the invoice from August 14", is not one); `{ allow: [129, 109, 89] }`
+  exempts exactly the amounts the tools returned.
 - `amount_requires_unit` — `{ amount: 129, unit: "application" }`: the amount must be
   quoted, every sentence quoting it must carry "per/an/each application", and "per
   visit" is banned outright.
@@ -83,7 +87,8 @@ than written per scenario as regexes:
   an arrival verb or time preposition, and a relative day, weekday or ordinal next to a
   scheduling predicate ("scheduled for", "visit", "set for"). `{ allowWindow: [1, 3] }`
   permits the returned window spoken as a window; `{ about: "reopening" }` grades only
-  sentences about the office reopening, so a caller-stated appointment can be echoed.
+  clauses about the office reopening — including every "available" construction, since
+  the office being available is its reopening — so a caller-stated appointment can be echoed.
 - `no_account_pii` — street addresses, NANP phone numbers, emails (typed or spoken) and
   "the previous customer was …" constructions. Whatever the caller said on the call, or
   the number they are calling from, is exempt: reading back the caller's own details is
@@ -92,7 +97,10 @@ than written per scenario as regexes:
   gone through, or issued by Sandy, graded per clause so a negation governs only its own
   clause.
 - `only_language` — `"es"` or `"en"`: a sentence with two or more of the other
-  language's function words, and more of them than the call language's, blocks.
+  language's words (function words, pronouns, the domain's verbs and nouns, any English
+  "-ing" form), and more of them than the call language's, blocks; so does a short clause
+  with none of the call language's words at all and the other language's words making up
+  half or more of it ("Someone is calling soon"). A name, an address or a read-back is neither.
 
 The remaining spoken checks are small per-scenario regexes: "on the way", the booking
 outcome words behind a negation guard, a turnaround time, a diagnosis.
@@ -111,17 +119,21 @@ answer: invoices, visit reports, call and message history are refused for a look
 `customer_ref` or an unmatched caller, and withheld from a recognised caller without
 STIR/SHAKEN attestation, exactly as `relay-tools.executeTool` refuses them; `lookup_customer` needs a verified
 call and spends its budget before matching; `request_booking` and `request_reservice`
-need a customer account and, without `VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES`, a full ANI
-match — a custom fixture cannot hand sensitive data to, or perform a write for, a call
-production would refuse. A `request_reservice` answer with `reservice: "existing"` is the
-live already-open ticket: receipt evidence for the follow-up it directs, no new write. Optional `allowedToolInputs` restricts every attempt's arguments.
+need a customer account and, without the `thirdPartyWrites` gate (the
+`VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES` flag, set per scenario and never inherited from the
+invoking shell), a full ANI match — a custom fixture cannot hand sensitive data to, or
+perform a write for, a call production would refuse. A `request_reservice` answer with
+`reservice: "existing"` is the live already-open ticket: evidence for the one follow-up it
+directs, not a performed write — it satisfies no `tools_performed_*` check and backs no
+other promise. Optional `allowedToolInputs` restricts every attempt's arguments.
 Explicit copies of the receipt check cannot weaken it or count a miss twice.
 A write tool that timed out (`hang: true`) backs the follow-up the live timeout copy itself directs ("a Waves
 team member will follow up to confirm"); it still claims nothing saved. `allowedToolInputs` values are exact,
 like the live enum checks, and `lookup_customer` needs two usable criteria before any fixture answer, like
 the live lookup.
 Receipt detection includes direct and indirect commitments such as “I'll call you back” and “I'll ask the
-office to call you”; a refusal, a suppressed spam capture, a read, or a later write
+office to call you”, and definite progressives that present the follow-up as under way ("the office is
+calling you shortly", "someone is emailing the estimate"); a refusal, a suppressed spam capture, a read, or a later write
 cannot support that promise. Spanish future forms such as "le llamaremos" and
 "le enviaremos" also require a preceding receipt. Conditional callback offers do not promise an action.
 Indirect verbs such as "note" and "make sure" need an office handoff or callback

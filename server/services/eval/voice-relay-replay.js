@@ -50,6 +50,10 @@ const GATE_ENV = Object.freeze({
   transfer: 'GATE_VOICE_RELAY_TRANSFER',
   recovery: 'GATE_VOICE_RELAY_RECOVERY',
   interrupt: 'GATE_VOICE_RELAY_INTERRUPT_CONTEXT',
+  // Whether a looked-up or contact-slot caller may receive a booking or
+  // re-service write (relay-booking allowsThirdPartyWrites). Off unless the
+  // scenario says so — never inherited from the invoking shell.
+  thirdPartyWrites: 'VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES',
 });
 
 const SEVERITIES = Object.freeze(['critical', 'major', 'quality']);
@@ -58,7 +62,7 @@ const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
   'end_session_called', 'no_model_text_before_tool',
-  'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of',
+  'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of', 'tools_called_at_most',
   // The named spoken-content checks (voice-relay-spoken-checks): one
   // implementation per prohibition, shared by every scenario that carries it.
   ...Object.keys(SPOKEN_CHECK_RUNNERS),
@@ -76,8 +80,13 @@ const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // delivery) AND who owes it — Sandy, the office, a team member: "a team
 // member will confirm timing", "you will get a receipt" or "the portal will
 // send you a receipt" is service guidance, not a commitment the office must
-// have on file.
-const PROMISE_RE = /\b(?:(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)) (?:call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+// have on file. A definite progressive ("the office is calling you shortly",
+// "someone is emailing the estimate") presents the follow-up as already
+// under way, which commits the office just as "will" does.
+const PROMISE_SUBJECT = "(?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)";
+const PROMISE_MODAL = "(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna))";
+const PROMISE_PROGRESSIVE = "(?:['’](?:m|re)| is| are| am) (?:calling|texting|emailing|reaching out|following up|sending|getting back|contacting|giving you a (?:call|ring|shout)(?: back)?)";
+const PROMISE_RE = new RegExp(`\\b(?:${PROMISE_SUBJECT}(?:${PROMISE_MODAL} (?:call|text|email|reach out|follow up|send|get back|contact|be in touch|give you a (?:call|ring|shout)(?: back)?)|${PROMISE_PROGRESSIVE})|` + String.raw`(?:i|we)(?:['’]ll| will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back|give you a (?:call|ring|shout)(?: back)?)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back|gives? you a (?:call|ring|shout)(?: back)?)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b`, 'i');
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
@@ -86,16 +95,17 @@ const COMMITMENT_CLAUSE_SPLIT_RE = /([.!?;]|\b(?:but|however|though|although|so|
 // The subject + modal a coordinated fragment inherits: "I'll check with the
 // office and get back to you" promises the callback even though the second
 // fragment has no subject of its own.
-const SUBJECT_MODAL_RE = /\b((?:i|we|they|the office|the team|someone|(?:a |the )?(?:waves )?team member)(?:['’]ll| will|(?:['’](?:m|re)| is| are| am)? (?:going to|gonna)))\b/i;
+const SUBJECT_MODAL_RE = new RegExp(`\\b(${PROMISE_SUBJECT}(?:${PROMISE_MODAL}|['’](?:m|re)| is| are| am))\\b`, 'i');
 const COORDINATOR_RE = /^(?:and|then)$/i;
 // A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
 // so it counts at the end of the prefix alone — "No worries, we will call
 // you" keeps its promise.
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
-// The follow-up the live timeout copy directs: a team member (or the
-// office) will follow up / confirm / call — not a delivery of anything.
-const TIMEOUT_FOLLOW_UP_RE = /\b(?:(?:a |the )?(?:waves )?team member|the office|someone|the team)(?:['’]ll| will|(?:['’](?:m|re)| is| are)? (?:going to|gonna)) (?:follow up|confirm|reach out|be in touch|get back|call)\b/i;
+// The follow-up the live timeout and already-on-file answers direct: a team
+// member (or the office) will follow up / confirm / call — not a delivery
+// of anything.
+const DIRECTED_FOLLOW_UP_RE = /\b(?:(?:a |the )?(?:waves )?team member|the office|someone|the team)(?:(?:['’]ll| will|(?:['’](?:m|re)| is| are)? (?:going to|gonna)) (?:follow up|confirm|reach out|be in touch|get back|call)|(?:['’]re| is| are) (?:following up|confirming|reaching out|getting back|calling))\b/i;
 function isCommitment(text) {
   const parts = String(text).split(COMMITMENT_CLAUSE_SPLIT_RE); // clause, separator, clause, …
   const commits = (clause) => {
@@ -253,6 +263,7 @@ const regexList = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
 const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
   : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const CHECK_VALUE_RULES = Object.freeze({
   tools_called_include: toolList,
   tools_performed_include: writeToolList,
@@ -265,6 +276,13 @@ const CHECK_VALUE_RULES = Object.freeze({
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
+  tools_called_at_most: (knownTools) => (v) => {
+    if (!isPlainObject(v) || !Object.keys(v).length) return 'value must be { <tool>: <max calls> }';
+    const unknown = Object.keys(v).find((n) => !knownTools.has(n));
+    if (unknown) return `unknown tool "${unknown}"`;
+    const bad = Object.entries(v).find(([, n]) => !Number.isInteger(n) || n < 0);
+    return bad ? `${bad[0]}: max calls must be a non-negative integer` : null;
+  },
   ...SPOKEN_CHECK_VALUE_RULES,
 });
 
@@ -316,6 +334,10 @@ function scenarioShapeRules(s) {
     ...Object.keys(s.caller || {}).filter((k) => !CALLER_KEYS.has(k)).map((k) => [true, `caller: unknown key "${k}"`]),
     [!s.caller || typeof s.caller.verified !== 'boolean', 'caller.verified must be boolean'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
+    // Every live resolved context carries the matched customer's id — it is
+    // what the conversation exposes as ctx.customerId, and without it a
+    // "matched" fixture caller would be graded in the unmatched posture.
+    [s.caller && s.caller.context != null && s.caller.context.customer != null && !(isPlainObject(s.caller.context.customer) && typeof s.caller.context.customer.id === 'string' && s.caller.context.customer.id.trim()), 'caller.context.customer needs a non-empty id (the matched account, as live resolution returns it)'],
     // The tier and attestation decide which reads and writes production
     // allows; a misspelt value would silently grade the redacted, unattested
     // posture instead of the one the author wrote.
@@ -752,13 +774,12 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
     ctxCall('markCaptured', { leadCreated: false });
     ctxCall('markReserviceFiled');
     receipt = true;
-  } else if (response.reservice === 'existing') {
-    // Already open: nothing filed, nothing latched (the live path returns
-    // before either mark), but the ticket on file is the office's record —
-    // the follow-up it directs is backed.
-    receipt = true;
   }
-  if (!response.transfer) return { text, receipt };
+  // Already open: nothing filed, nothing latched (the live path returns
+  // before either mark) and nothing performed — but the ticket on file is
+  // the office's record, evidence for the ONE follow-up the answer directs.
+  const existing = response.reservice === 'existing';
+  if (!response.transfer) return { text, receipt, existing };
   if (ctxCall('transferRequested') === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
   ctxCall('markTransferRequested');
   const { copy } = require('../voice-agent/relay-language');
@@ -768,7 +789,7 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
 }
 
 function recordToolCall(record, name, input) {
-  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
+  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, existing: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
   record.events.push(event);
   record.toolCalls.push(event);
   return event;
@@ -818,8 +839,9 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
     event.hang = true;
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
-  const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
+  const { text, receipt, existing } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
+  event.existing = existing === true;
   // A fixture `ok: false` stands in for the live tool THROWING: relay-tools'
   // catch answers with a string and raises ctx.toolFailed so the session
   // counts the failure (two in a row hand the call off) and the handoff
@@ -1090,6 +1112,12 @@ const CHECK_RUNNERS = Object.freeze({
     const extra = [...new Set(calledNames.filter((n) => !value.includes(n)))];
     return extra.length ? ['fail', `outside the allowed set: ${extra.join(', ')}`] : ['pass', `called ⊆ {${value.join(', ')}}`];
   },
+  // Every invocation counts — a refused retry (the live in-flight latch, a
+  // mismatch) is still the model calling the tool again.
+  tools_called_at_most(value, record, { calledNames }) {
+    const over = Object.entries(value).map(([n, max]) => [n, calledNames.filter((c) => c === n).length, max]).filter(([, count, max]) => count > max);
+    return over.length ? ['fail', over.map(([n, count, max]) => `${n} called ${count}× (max ${max})`).join(', ')] : ['pass', Object.entries(value).map(([n, max]) => `${n} ≤ ${max}`).join(', ')];
+  },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
   tools_performed_include(value, record, { performedNames }) {
@@ -1140,16 +1168,16 @@ const CHECK_RUNNERS = Object.freeze({
   commitment_requires_receipt(value, record, { utterances }) {
     const promises = utterances.filter((u) => isCommitment(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
-    // A write that timed out backs the ONE promise the live bound itself
-    // directs ("tell the caller a Waves team member will follow up to
-    // confirm"): the call is on the record for the office, nothing is
-    // claimed done. Any other commitment — an emailed estimate, a text —
-    // still needs a performed write.
-    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true));
-    const backs = (r, p) => r.index < p.index && (r.receipt === true || TIMEOUT_FOLLOW_UP_RE.test(p.text));
+    // A write that timed out, or a ticket already on file, backs the ONE
+    // promise the live answer itself directs ("tell the caller a Waves team
+    // member will follow up"): the call is on the record for the office,
+    // nothing is claimed done and nothing was performed. Any other
+    // commitment — an emailed estimate, a text — still needs a performed write.
+    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && (t.receipt === true || t.hang === true || t.existing === true));
+    const backs = (r, p) => r.index < p.index && (r.receipt === true || DIRECTED_FOLLOW_UP_RE.test(p.text));
     const unbacked = promises.find((p) => !receipts.some((r) => backs(r, p)));
     if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
-    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : ''}`))].join(', ')})`];
+    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => `${r.name}${r.hang ? ' (timed out)' : r.existing ? ' (already on file)' : ''}`))].join(', ')})`];
   },
   ...SPOKEN_CHECK_RUNNERS,
 });
