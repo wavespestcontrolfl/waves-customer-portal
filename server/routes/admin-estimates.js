@@ -2483,7 +2483,15 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   assertBidSendDate(estimate, now());
   let nextExpiresAt = estimateExpiresAt(now, estimate);
-  if (estimate.estimate_group_id && !hasFixedBidValidity(estimate)) {
+  // Group ENTRY access is independent of the anchor's own price
+  // eligibility: whether the anchor is ordinary or carries a shorter fixed
+  // hold, its token must outlive the group's longest fixed date so the link
+  // keeps assembling the property group. A longer viewability window cannot
+  // let a fixed property be accepted past its own date: authored proposals
+  // are never self-accepted publicly (PUT /:token/accept refuses them; the
+  // office finalizes), and each property's fixed date still governs sends,
+  // extensions and the bid-form exports (pre-push codex P1).
+  if (estimate.estimate_group_id) {
     const groupHold = await longestGroupFixedValidity(db, estimate);
     if (groupHold && groupHold > nextExpiresAt) nextExpiresAt = groupHold;
   }

@@ -215,8 +215,11 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('an ordinary group anchor stays viewable through the longest fixed sibling hold (GH codex P1 r2 on #4309)', async () => {
-    const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group' });
+  test.each([
+    ['an ordinary', {}],
+    ['a shorter-fixed', { estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough: '2026-09-22' } }) }],
+  ])('%s group anchor stays viewable through the longest fixed sibling hold (GH codex P1 r2 on #4309)', async (_name, anchorOverrides) => {
+    const anchor = estimateRow({ estimate_group_id: 'synthetic-fixed-group', ...anchorOverrides });
     const sibling = { id: 'synthetic-fixed-sibling', status: 'sent', pricing_authority: 'SERVER',
       estimate_data: { proposal: { enabled: true, validThrough: '2099-12-21' } } };
     const updates = [];
