@@ -27,23 +27,6 @@ function af(path, opts = {}) {
     return r.json();
   });
 }
-const sCard = {
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)"
-};
-const sBadge = (bg, c) => ({
-  fontSize: 10,
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color: c,
-  fontWeight: 500,
-  display: "inline-block"
-});
 const fmt = n => n != null ? "$" + Number(n).toLocaleString(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2
@@ -1672,14 +1655,13 @@ function AnalyticsTab({
 }) {
   return <>
       {/* Cost of Ownership Table */}
-      <div style={{
-      ...sCard,
+      <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
         {" "}
         <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -1688,192 +1670,163 @@ function AnalyticsTab({
         <div style={{
         overflowX: "auto"
       }}>
-          <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-            <thead>
-              <tr style={{
+          <Table className="min-w-[840px]">
+            <THead>
+              <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                <th style={{
+                <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Equipment
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Category
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Age (mo)
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Purchase
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Maintenance
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Monthly
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "center",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Condition
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {costs.map(c => <tr key={c.equipment_id} style={{
+                </TH>
+              </TR>
+            </THead>
+            <TBody>
+              {costs.map(c => <TR key={c.equipment_id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                  <td style={{
-                padding: "8px",
+                  <TD style={{
                 color: "#27272A"
               }}>
-                    <EquipmentCategoryIcon category={c.category} /> {c.equipment_name}
+                    <EquipmentCategoryIcon category={c.category} />{" "}
+                    {c.equipment_name}
                     {c.asset_tag && <span style={{
                   color: "#71717A",
-                  fontSize: 10,
+                  fontSize: 14,
                   marginLeft: 6
                 }}>
                         {c.asset_tag}
                       </span>}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#71717A"
               }}>
                     {c.category}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                     {c.age_months}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                     {fmt(c.purchase_price)}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                     {fmt(c.total_maintenance)}
-                  </td>
-                  <td style={{
-                padding: "8px",
-                color: "#A16207",
-                textAlign: "right",
-                fontWeight: 500
+                  </TD>
+                  <TD style={{
+                color: "#52525B",
+                textAlign: "right"
               }}>
                     {fmt(c.monthly_cost)}
-                  </td>
-                  <td style={{
-                padding: "8px"
-              }}>
+                  </TD>
+                  <TD>
                     <ConditionBar rating={c.condition_rating} />
-                  </td>
-                </tr>)}
-            </tbody>
+                  </TD>
+                </TR>)}
+            </TBody>
             {costs.length > 0 && <tfoot>
-                <tr style={{
+                <TR style={{
               borderTop: `2px solid ${"#E4E4E7"}`
             }}>
-                  <td style={{
-                padding: "8px",
-                color: "#09090B",
-                fontWeight: 700
+                  <TD style={{
+                color: "#09090B"
               }} colSpan={3}>
                     Totals
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                     {fmt(costs.reduce((s, c) => s + c.purchase_price, 0))}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                     {fmt(costs.reduce((s, c) => s + c.total_maintenance, 0))}
-                  </td>
-                  <td style={{
-                padding: "8px",
-                color: "#A16207",
-                fontWeight: 700,
+                  </TD>
+                  <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                     {fmt(costs.reduce((s, c) => s + c.monthly_cost, 0))}
-                  </td>
-                  <td />
-                </tr>
+                  </TD>
+                  <TD />
+                </TR>
               </tfoot>}
-          </table>
+          </Table>
         </div>{" "}
-      </div>
+      </Card>
       {/* Monthly Cost Trend - SVG Bar Chart */}
-      {monthlyCosts.length > 0 && <div style={{
-      ...sCard,
+      {monthlyCosts.length > 0 && <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
             Maintenance Cost Trend (Last 6 Months)
           </div>{" "}
           <CostBarChart data={monthlyCosts} />{" "}
-        </div>}
+        </Card>}
 
       {/* Reliability Ranking */}
-      {reliability.length > 0 && <div style={{
-      ...sCard,
+      {reliability.length > 0 && <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -1883,116 +1836,96 @@ function AnalyticsTab({
         overflowX: "auto"
       }}>
             {" "}
-            <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-              {" "}
-              <thead>
-                {" "}
-                <tr style={{
+            <Table className="min-w-[640px]">
+              <THead>
+                <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                  {" "}
-                  <th style={{
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Equipment
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Incidents
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Downtime (hrs)
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Jobs Affected
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Revenue Impact
-                  </th>{" "}
-                </tr>{" "}
-              </thead>{" "}
-              <tbody>
-                {reliability.map(r => <tr key={r.id} style={{
+                  </TH>
+                </TR>
+              </THead>
+              <TBody>
+                {reliability.map(r => <TR key={r.id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                    {" "}
-                    <td style={{
-                padding: "8px",
+                    <TD style={{
                 color: "#27272A"
               }}>
                       <EquipmentCategoryIcon category={r.category} /> {r.name}{" "}
                       <span style={{
                   color: "#71717A",
-                  fontSize: 10
+                  fontSize: 14
                 }}>
                         {r.asset_tag}
                       </span>
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                    </TD>
+                    <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                       {r.incident_count}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
-                color: "#991B1B",
-                textAlign: "right",
-                fontWeight: 500
+                    </TD>
+                    <TD style={{
+                color: "#C8312F",
+                textAlign: "right"
               }}>
                       {parseFloat(r.total_downtime_hours).toFixed(1)}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                    </TD>
+                    <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                       {r.total_jobs_affected}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
-                color: "#A16207",
+                    </TD>
+                    <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                       {fmt(r.total_revenue_impact)}
-                    </td>{" "}
-                  </tr>)}
-              </tbody>{" "}
-            </table>{" "}
+                    </TD>
+                  </TR>)}
+              </TBody>
+            </Table>{" "}
           </div>{" "}
-        </div>}
+        </Card>}
 
       {/* Fleet Mileage Summary */}
-      {mileageSummary && mileageSummary.vehicles && mileageSummary.vehicles.length > 0 && <div style={{
-      ...sCard,
+      {mileageSummary && mileageSummary.vehicles && mileageSummary.vehicles.length > 0 && <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
             {" "}
             <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -2002,184 +1935,147 @@ function AnalyticsTab({
         overflowX: "auto"
       }}>
               {" "}
-              <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-                {" "}
-                <thead>
-                  {" "}
-                  <tr style={{
+              <Table className="min-w-[768px]">
+                <THead>
+                  <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                    {" "}
-                    <th style={{
+                    <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Vehicle
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Total Miles
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Business Miles
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Fuel Cost
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       IRS Deduction
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Jobs
-                    </th>{" "}
-                  </tr>{" "}
-                </thead>{" "}
-                <tbody>
-                  {mileageSummary.vehicles.map(v => <tr key={v.id} style={{
+                    </TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {mileageSummary.vehicles.map(v => <TR key={v.id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                      {" "}
-                      <td style={{
-                padding: "8px",
+                      <TD style={{
                 color: "#27272A"
               }}>
                         {v.name}{" "}
                         <span style={{
                   color: "#71717A",
-                  fontSize: 10
+                  fontSize: 14
                 }}>
                           {v.asset_tag}
                         </span>
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(parseFloat(v.total_miles)))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#18181B",
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(parseFloat(v.business_miles)))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#A16207",
+                      </TD>
+                      <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                         {fmt(v.total_fuel_cost)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#15803D",
-                textAlign: "right",
-                fontWeight: 700
+                      </TD>
+                      <TD style={{
+                color: "#18181B",
+                textAlign: "right"
               }}>
                         {fmt(v.total_irs_deduction)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                         {v.total_jobs}
-                      </td>{" "}
-                    </tr>)}
-                </tbody>
+                      </TD>
+                    </TR>)}
+                </TBody>
                 {mileageSummary.fleet_totals && <tfoot>
-                    {" "}
-                    <tr style={{
+                    <TR style={{
               borderTop: `2px solid ${"#E4E4E7"}`
             }}>
-                      {" "}
-                      <td style={{
-                padding: "8px",
-                color: "#09090B",
-                fontWeight: 700
+                      <TD style={{
+                color: "#09090B"
               }}>
                         Fleet Totals
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(mileageSummary.fleet_totals.total_miles))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#18181B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(mileageSummary.fleet_totals.business_miles))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#A16207",
-                fontWeight: 700,
+                      </TD>
+                      <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                         {fmt(mileageSummary.fleet_totals.total_fuel_cost)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#15803D",
-                fontWeight: 700,
+                      </TD>
+                      <TD style={{
+                color: "#18181B",
                 textAlign: "right"
               }}>
                         {fmt(mileageSummary.fleet_totals.total_irs_deduction)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                         {mileageSummary.fleet_totals.total_jobs}
-                      </td>{" "}
-                    </tr>{" "}
+                      </TD>
+                    </TR>
                   </tfoot>}
-              </table>{" "}
+              </Table>{" "}
             </div>{" "}
-          </div>}
+          </Card>}
 
       {/* Upcoming Maintenance (Next 30 Days) */}
-      {dueSchedules.length > 0 && <div style={{
-      ...sCard
-    }}>
+      {dueSchedules.length > 0 && <Card className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -2189,119 +2085,93 @@ function AnalyticsTab({
         overflowX: "auto"
       }}>
             {" "}
-            <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-              {" "}
-              <thead>
-                {" "}
-                <tr style={{
+            <Table className="min-w-[640px]">
+              <THead>
+                <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                  {" "}
-                  <th style={{
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Equipment
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Task
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Due
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Priority
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Est Cost
-                  </th>{" "}
-                </tr>{" "}
-              </thead>{" "}
-              <tbody>
-                {dueSchedules.map(s => <tr key={s.id} style={{
+                  </TH>
+                </TR>
+              </THead>
+              <TBody>
+                {dueSchedules.map(s => <TR key={s.id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`,
               background: s.is_overdue ? "rgba(239,68,68,0.08)" : "transparent"
             }}>
-                    {" "}
-                    <td style={{
-                padding: "8px",
+                    <TD style={{
                 color: "#27272A"
               }}>
-                      <EquipmentCategoryIcon category={s.category} /> {s.equipment_name}
+                      <EquipmentCategoryIcon category={s.category} />{" "}
+                      {s.equipment_name}
                       {s.asset_tag && <span style={{
                   color: "#71717A",
-                  fontSize: 10,
+                  fontSize: 14,
                   marginLeft: 4
                 }}>
                           {s.asset_tag}
                         </span>}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                    </TD>
+                    <TD style={{
                 color: "#27272A"
               }}>
                       {s.task_name}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
-                color: s.is_overdue ? "#991B1B" : "#27272A"
+                    </TD>
+                    <TD style={{
+                color: s.is_overdue ? "#C8312F" : "#27272A"
               }}>
-                      {s.is_overdue && <span style={{
-                  ...sBadge("#991B1B", "#FFFFFF"),
-                  marginRight: 4
-                }}>
-                          OVERDUE
-                        </span>}
+                      {s.is_overdue && <Badge tone="neutral">OVERDUE</Badge>}
                       {s.next_due_at ? new Date(s.next_due_at).toLocaleDateString() : "--"}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px"
-              }}>
+                    </TD>
+                    <TD>
                       {" "}
-                      <span style={sBadge(s.priority === "critical" ? "#991B1B" : s.priority === "high" ? "#f97316" : "#18181B", "#FFFFFF")}>
-                        {s.priority}
-                      </span>{" "}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                      <Badge tone="neutral">{s.priority}</Badge>{" "}
+                    </TD>
+                    <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                       {s.estimated_cost ? fmt(s.estimated_cost) : "--"}
-                    </td>{" "}
-                  </tr>)}
-              </tbody>{" "}
-            </table>{" "}
+                    </TD>
+                  </TR>)}
+              </TBody>
+            </Table>{" "}
           </div>{" "}
-        </div>}
+        </Card>}
     </>;
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // SVG BAR CHART
 // ═══════════════════════════════════════════════════════════════════
-
 // ═══════════════════════════════════════════════════════════════════
 // SVG BAR CHART
 // ═══════════════════════════════════════════════════════════════════
