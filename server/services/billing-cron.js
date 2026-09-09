@@ -35,7 +35,10 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
 
-async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint }) {
+async function sendCustomerBillingSms({ customer, body, purpose = 'billing', messageType, entryPoint, paymentId, attemptPaymentId, retryCount = 0 }) {
+  const metadata = { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode,
+    ...(attemptPaymentId ? { notificationEventKey: `payment-problem:attempt:${attemptPaymentId}:${messageType}` } : {}),
+  };
   const sendResult = await sendCustomerMessage({
     to: customer.phone,
     body,
@@ -45,8 +48,24 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     customerId: customer.id,
     entryPoint,
     // RESOLVED lane AT SEND TIME (codex #3607 r2 + r5) — see autopay-sms-digest.js.
-    metadata: { original_message_type: messageType, billing_mode_at_send: resolveBillingLane(customer).mode },
+    metadata,
   });
+  if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'].includes(sendResult.code)
+    && sendResult.deferred && sendResult.nextAllowedAt) {
+    await db('sms_log').insert({
+      customer_id: customer.id, direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,
+      message_body: body, message_type: messageType, status: 'scheduled',
+      scheduled_for: new Date(sendResult.nextAllowedAt),
+      metadata: JSON.stringify({ ...metadata, entry_point: 'billing_failure_deferred',
+        payment_id: paymentId, attempt_payment_id: attemptPaymentId, retry_count: retryCount,
+        customer_id: customer.id, replay_purpose: 'payment_failure', original_block_code: sendResult.code,
+        refresh_customer_phone: true, resolve_from_by_customer: true,
+      }),
+    });
+    return { ...sendResult, scheduled: true };
+  }
   if (sendResult.blocked || sendResult.sent === false) {
     throw new Error(`billing SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
   }
@@ -510,6 +529,7 @@ const BillingCron = {
             purpose: 'payment_failure',
             messageType: 'autopay_charge_failed',
             entryPoint: 'monthly_billing_failure',
+            paymentId: err.paymentRecord?.id, attemptPaymentId: err.paymentRecord?.id,
           });
         } catch (smsErr) {
           logger.error(`[billing-cron] SMS notification failed: ${smsErr.message}`);
@@ -1072,6 +1092,7 @@ const BillingCron = {
               purpose: 'payment_failure',
               messageType: 'autopay_retry_final_failed',
               entryPoint: 'autopay_retry_final_failed',
+              paymentId: payment.id, attemptPaymentId: err.paymentRecord?.id, retryCount: newRetryCount,
             });
           } catch (smsErr) {
             logger.error(`[billing-cron] Final SMS failed: ${smsErr.message}`);
@@ -1258,6 +1279,7 @@ const BillingCron = {
               purpose: 'payment_failure',
               messageType: 'autopay_retry_failed',
               entryPoint: 'autopay_retry_failed',
+              paymentId: payment.id, attemptPaymentId: err.paymentRecord?.id, retryCount: newRetryCount,
             });
           } catch (smsErr) {
             logger.error(`[billing-cron] Retry SMS failed: ${smsErr.message}`);

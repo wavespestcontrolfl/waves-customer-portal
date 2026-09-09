@@ -2,43 +2,43 @@ const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
 
 class ApplicationLimitChecker {
-  async checkLimits(customerId, productId, proposedDate = new Date()) {
-    const product = await db('products_catalog').where({ id: productId }).first();
+  async checkLimits(customerId, productId, proposedDate = new Date(), database = db) {
+    const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
 
     const results = { allowed: true, warnings: [], blocks: [] };
-    const customer = await db('customers').where({ id: customerId }).first();
+    const customer = await database('customers').where({ id: customerId }).first();
     const county = this.getCounty(customer);
     const yearStart = this.getYearStart(proposedDate);
 
     // Product-specific history
     // Retracted rows (recap deselection corrections) never count toward
     // application limits.
-    const history = await db('property_application_history')
+    const history = await database('property_application_history')
       .where({ customer_id: customerId, product_id: productId })
       .where('application_date', '>=', yearStart)
       .whereNull('retracted_at')
       .orderBy('application_date', 'desc');
 
     // MOA group history
-    const moaHistory = product.moa_group ? await db('property_application_history')
+    const moaHistory = product.moa_group ? await database('property_application_history')
       .where({ customer_id: customerId, moa_group: product.moa_group })
       .whereNull('retracted_at')
       .orderBy('application_date', 'desc').limit(10) : [];
 
     // Get applicable limits
-    const productLimits = await db('product_limits').where({ product_id: productId });
-    const moaLimits = product.moa_group ? await db('product_limits')
+    const productLimits = await database('product_limits').where({ product_id: productId });
+    const moaLimits = product.moa_group ? await database('product_limits')
       .where({ match_type: 'moa_group', match_value: product.moa_group }) : [];
     const nitrogenLimits = this.isNitrogenFertilizer(product)
-      ? await db('product_limits').where({ match_type: 'nitrogen' }).where(function () {
+      ? await database('product_limits').where({ match_type: 'nitrogen' }).where(function () {
           this.whereNull('jurisdiction').orWhere('jurisdiction', county).orWhere('jurisdiction', 'all');
         }) : [];
 
     const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits];
 
     for (const limit of allLimits) {
-      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product);
+      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database);
 
       if (check.violated) {
         const entry = { type: limit.limit_type, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -56,7 +56,7 @@ class ApplicationLimitChecker {
     return results;
   }
 
-  async evaluateLimit(limit, history, moaHistory, proposedDate, product) {
+  async evaluateLimit(limit, history, moaHistory, proposedDate, product, database = db) {
     // product_limits.limit_value is a pg decimal — node-pg returns it as a
     // STRING ('14.0000'); coerce once so `< minDays + 7` etc. stay numeric.
     const limitValue = limit.limit_value == null ? null : Number(limit.limit_value);
@@ -133,7 +133,7 @@ class ApplicationLimitChecker {
         }
         const max = limitValue;
         if (consecutive >= max) {
-          const alternatives = await db('products_catalog')
+          const alternatives = await database('products_catalog')
             .where('category', product.category).whereNot('moa_group', product.moa_group)
             .where({ active: true }).select('name', 'moa_group').limit(3);
           const altNames = alternatives.map(a => `${a.name} (${a.moa_group})`).join(', ');

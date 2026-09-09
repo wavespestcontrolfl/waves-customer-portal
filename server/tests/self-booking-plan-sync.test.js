@@ -471,8 +471,11 @@ describe('self-booking plan sync helpers', () => {
     const schedule = read('routes', 'schedule.js');
     expect(schedule).toMatch(/'catalog_svc\.billing_type as catalog_billing_type'/);
     // 3 since codex #3591 r79 P2: the serviceDisplayName resolver re-runs
-    // the classifier with the joined catalog fields.
-    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(3);
+    // the classifier with the joined catalog fields. 6 since #4207
+    // (GATE_APP_PROPERTY_SCOPE): the per-property next-visit read and the
+    // all-properties coverage projection run the same resolver on their
+    // own rows, so each carries the joined field as well.
+    expect((schedule.match(/catalog_billing_type: s\.catalog_billing_type,/g) || []).length).toBe(6);
     expect(read('routes', 'admin-schedule.js')).toMatch(/catalog_billing_type: serviceRecord\?\.billing_type,/);
   });
 
