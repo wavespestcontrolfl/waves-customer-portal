@@ -10101,7 +10101,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
     const capacityHold = reservationRow || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow) ? existingAppointmentRow : null);
-    const preparedReservationCapacity = capacityHold && typeof slotReservation.prepareReservationCommit === 'function'
+    const preparedReservationCapacity = capacityHold
       ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
         ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
         serviceMode: treatAsOneTime ? 'one_time' : serviceMode,

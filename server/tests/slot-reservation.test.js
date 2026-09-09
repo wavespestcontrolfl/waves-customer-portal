@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/estimate-slot-availability', () => ({
   invalidateEstimate: jest.fn(),
+  async resolveCatalogSlotProfile(estimate, options) { return this.resolveEstimateSlotProfile(estimate, options); },
   resolveEstimateSlotProfile: jest.fn(() => ({
     durationMinutes: 90,
     serviceLabel: '4x Pest Control + 9x Lawn Care',

@@ -480,7 +480,6 @@ function notesWithServiceMix(existingNotes, serviceProfile = {}, fallback = '') 
 }
 
 async function resolveReservationServiceProfile(client, row, opts = {}) {
-  if (!estimateSlotAvailability.resolveEstimateSlotProfile) return null;
   let estimate = opts.estimate || null;
   if (!estimate && row?.source_estimate_id) {
     estimate = await client('estimates').where({ id: row.source_estimate_id }).first();
@@ -493,9 +492,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
     durationMinutes: opts.durationMinutes,
     preserveCombinedCapacity: opts.preserveCombinedCapacity,
   };
-  const profile = estimateSlotAvailability.resolveCatalogSlotProfile
-    ? await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, profileOptions, client)
-    : estimateSlotAvailability.resolveEstimateSlotProfile(estimate, profileOptions);
+  const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, profileOptions, client);
   const held = require('./combined-visit-capacity').capacityFromReservation(row);
   if (held) {
     const selected = profile.services.map(service => service.service);
@@ -802,14 +799,12 @@ async function reserveSlot({
         }
       }
 
-      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
-        ? await (estimateSlotAvailability.resolveCatalogSlotProfile || estimateSlotAvailability.resolveEstimateSlotProfile)(estimate, {
+      const serviceProfile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, {
           serviceMode,
           selectedFrequency,
           serviceCadences,
           durationMinutes,
-        }, trx)
-        : null;
+        }, trx);
       // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
       // is season-filtered for a seasonal mosquito selection, but the offer
       // HMAC does not bind the frequency — a list fetched under monthly12

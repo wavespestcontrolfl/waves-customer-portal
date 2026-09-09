@@ -113,6 +113,7 @@ jest.mock('../services/estimate-converter', () => ({
 }));
 jest.mock('../services/slot-reservation', () => ({
   reserveSlot: jest.fn(),
+  prepareReservationCommit: jest.fn(async () => null),
   releaseReservation: jest.fn(async () => ({ released: true })),
   commitReservation: jest.fn(),
 }));

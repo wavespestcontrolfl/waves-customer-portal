@@ -122,6 +122,49 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     }
   }, 30000);
 
+  describe('reservation capacity proofs', () => {
+    let gate;
+    const capacity = require('../services/scheduling/arrival-route');
+    const prepare = () => capacity.prepareArrivalCapacity({ serviceId: TARGET, date: DAY, technicianId: TECH,
+      windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60 });
+    beforeEach(async () => {
+      gate = process.env.GATE_SCHEDULING_CAPACITY;
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates', 'audit_log']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+    });
+    afterEach(() => {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    });
+    test('a changed live route invalidates a prepared proof', async () => {
+      const prepared = await prepare();
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ estimated_duration_minutes: 180 });
+      await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+    });
+    test('verified insertion persists its order and audit without fetching travel under the lock', async () => {
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 1 });
+      await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 2 });
+      expect((await findAvailableSlots({ ...OPTIONS, capacityPlacement: true })).slots.some(slot => slot.start_time === '09:00')).toBe(true);
+      expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(false);
+      const prepared = await prepare();
+      prepared.travel.preload = jest.fn(() => { throw new Error('network work under lock'); });
+      const fit = await capacity.verifyArrivalCapacity(prepared, { conn: mockConn });
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      await capacity.persistArrivalOrder(mockConn, fit, TARGET);
+      expect((await mockConn('scheduled_services').orderBy('route_order').pluck('id'))).toEqual([NORTH, TARGET, SOUTH]);
+      expect(await mockConn('audit_log').first('action', 'metadata')).toMatchObject({ action: 'schedule.capacity_verified', metadata: { route_order: [NORTH, TARGET, SOUTH], travel_source: 'conservative_model' } });
+      expect(prepared.travel.preload).not.toHaveBeenCalled();
+      expect(await mockConn('scheduled_services').where({ id: SOUTH }).first('window_start')).toEqual({ window_start: '10:00:00' });
+    });
+    test('a capability disabled after preparation refuses the unchanged route', async () => {
+      const prepared = await prepare();
+      await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'general', active: false });
+      await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
+    });
+  });
+
   test('ranks the nearby morning placement first, and picker/live-check/save agree without rewriting other promises', async () => {
     const offers = await findAvailableSlots(OPTIONS);
     expect(offers.slots[0]).toMatchObject({ start_time: '09:00', route_mode: 'arrival_windows' });
