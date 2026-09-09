@@ -4622,3 +4622,35 @@ describe('direct outreach serialization', () => {
     expect(global.__reviewLockHeld.has('review-send:direct-lock')).toBe(false);
   });
 });
+
+
+test.each([false, true])('failed approval persistence parks an existing scheduled row, or reports parking failure (%s)', async parkingFails => {
+  let parkedUnderLock = false;
+  const mock = makeMock({
+    customers: [{ id: 'pin-failure', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'bradenton' }],
+    review_requests: [{ id: 'queued-pin', customer_id: 'pin-failure', service_record_id: 'pin-service', token: 'pin-token',
+      status: 'pending', scheduled_for: new Date(Date.now() - 60000), approved_phone: null }],
+  }, { onUpdate: (table, patch) => {
+    if (table !== 'review_requests') return;
+    if (patch.approved_phone) throw new Error('pin write unavailable');
+    if (patch.status === 'suppressed') {
+      parkedUnderLock = global.__reviewLockHeld.has('review-send:pin-failure');
+      if (parkingFails) throw new Error('parking unavailable');
+    }
+  } });
+  db.mockImplementation(mock);
+  const gate = jest.spyOn(ReviewService, 'checkUnscheduledAskGates').mockResolvedValue({ allowed: true });
+  try {
+    await expect(ReviewService.create({ customerId: 'pin-failure', serviceRecordId: 'pin-service',
+      triggeredBy: 'admin', expectedPhone: '+12025550101' }))
+      .rejects.toThrow(parkingFails ? /parking the queued ask FAILED/ : /queued ask was parked/);
+  } finally { gate.mockRestore(); }
+  expect(parkedUnderLock).toBe(true);
+  expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  expect(mock.__state.rows.review_requests[0].status).toBe(parkingFails ? 'pending' : 'suppressed');
+  if (!parkingFails) {
+    mock.__state.rows.customers[0].phone = '+12025550999';
+    await ReviewService.processScheduled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  }
+});
