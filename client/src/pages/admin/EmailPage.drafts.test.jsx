@@ -481,7 +481,7 @@ describe("Email draft and navigation preservation", () => {
     const leaving = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(leaving); expect(leaving.defaultPrevented).toBe(true);
     mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
-    const send = within(screen.getByRole("dialog")).getByRole("button", { name: "Sending…", exact: true });
+    const send = within(screen.getByRole("dialog")).getByRole("button", { name: "Send", exact: true });
     expect(send).toBeDisabled(); fireEvent.click(send);
     expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(1);
     await act(async () => finish(response({ error: "Synthetic failure" }, 503)));
