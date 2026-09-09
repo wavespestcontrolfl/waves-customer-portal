@@ -21,8 +21,7 @@ async function main() {
     pageErrors: [],
     consoleErrors: [],
   };
-  const server = await previewServer(root, process.argv[2]);
-  let browser, safari;
+  let server, browser, safari;
   async function openPage(engine, viewport, coarse) {
     const context = await engine.newContext({
       viewport,
@@ -372,6 +371,7 @@ async function main() {
     report.scenarios.push({ name, passed: true });
   }
   try {
+    server = await previewServer(root, process.argv[2]);
     browser = await launchBrowser();
     for (const coarse of [false, true]) {
       for (const width of [390, 700, 820, 1024, 1440]) {
@@ -469,7 +469,7 @@ async function main() {
     const cleanup = await Promise.allSettled([
       Promise.resolve().then(() => browser?.close()),
       Promise.resolve().then(() => safari?.close()),
-      Promise.resolve().then(() => server.close()),
+      Promise.resolve().then(() => server?.close()),
     ]);
     const failures = cleanup.filter((result) => result.status === "rejected").map((result) => result.reason);
     if (failures.length) {

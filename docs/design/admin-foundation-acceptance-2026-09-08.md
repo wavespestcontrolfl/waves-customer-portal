@@ -40,6 +40,8 @@ The original [#4083](https://github.com/wavespestcontrolfl/waves-customer-portal
 
 Use Node 20 and the checkout's existing dependencies. Run frontend-only verification; no database or provider connection is needed.
 
+Provision both required browser engines once with `npx playwright install --with-deps chromium webkit` before running the browser proof. The npm package alone does not install the browser binaries.
+
 ```sh
 cd client
 npm test
