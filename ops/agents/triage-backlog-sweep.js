@@ -42,6 +42,7 @@ async function classify(database, { staleDays, advisoryDays }, ids = null) {
         EXISTS (SELECT 1 FROM scheduled_services s
           WHERE s.created_at > cl.created_at AND s.created_at < cl.created_at + interval '3 days'
             AND s.parent_service_id IS NULL AND s.recurring_parent_id IS NULL
+            AND s.followup_source_service_id IS NULL
             AND s.status IN ('pending', 'confirmed', 'en_route', 'on_site', 'completed')
             AND (s.source_call_log_id = cl.id OR (cl.customer_id IS NOT NULL AND s.customer_id = cl.customer_id))) AS booked_after
       FROM triage_items t JOIN call_log cl ON cl.id = t.call_log_id

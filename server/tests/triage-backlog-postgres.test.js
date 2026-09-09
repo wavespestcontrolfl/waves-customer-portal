@@ -75,6 +75,20 @@ jest.setTimeout(60000);
     await fixture({ reason, old: true });
     expect((await sweep({ execute: true, staleDays: 30, advisoryDays: 30 })).applied).toBe(1);
   });
+  test.each(['parent_service_id', 'recurring_parent_id', 'followup_source_service_id'])('child visits cannot stand in for a parent booking: %s', async childLink => {
+    const { call, card } = await fixture({ reason: 'address_unverified' });
+    const customerId = randomUUID();
+    await database('call_log').where({ id: call.id }).update({ customer_id: customerId });
+    const parent = { id: randomUUID(), customer_id: customerId, status: 'completed', created_at: new Date(call.created_at.getTime() - 86400000) };
+    const child = { id: randomUUID(), customer_id: customerId, status: 'pending', created_at: new Date(call.created_at.getTime() + 3600000), [childLink]: parent.id };
+    await database('scheduled_services').insert([parent, child]);
+    expect((await sweep()).plannedCards).toEqual([]);
+    expect((await sweep({ execute: true })).applied).toBe(0);
+    expect((await database('triage_items').where({ id: card.id }).first()).status).toBe('open');
+    // A real new parent booking in the same window still satisfies the coarse rule.
+    await database('scheduled_services').where({ id: child.id }).update({ [childLink]: null });
+    expect((await sweep({ execute: true })).applied).toBe(1);
+  });
 
   async function whileCallLocked(callId, operation, mutate) {
     const blocker = await database.transaction();
