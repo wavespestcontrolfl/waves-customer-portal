@@ -31,6 +31,7 @@ const db = require('../models/db');
 const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
+const { capacityEnabled } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1178,6 +1179,8 @@ function buildAsapCapacitySlotsForTechs({
 }
 
 async function buildAsapCapacitySlots(options = {}) {
+  // Full-route capacity requires a verified location and route simulation.
+  if (capacityEnabled()) return [];
   // Same pool as find-time: assignable staff only, so an office-only or
   // prospective row never produces an offer that reserveSlot then rejects.
   const techs = await applyAssignable(db('technicians'))

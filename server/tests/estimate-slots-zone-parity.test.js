@@ -236,3 +236,16 @@ test('a hold on another tech outside the zone keeps the existing hold coexistenc
   const out = await filterCollidingSlots([slot()], { ...RANGE, estimateZone: null });
   expect(out).toHaveLength(1);
 });
+
+
+test('capacity mode never manufactures ASAP offers outside the complete-route evaluator', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  try {
+    await expect(estimateSlotAvailability._internals.buildAsapCapacitySlots({ dateFrom: '2027-05-20',
+      dateTo: '2027-05-20', durationMinutes: 60 })).resolves.toEqual([]);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
+});
