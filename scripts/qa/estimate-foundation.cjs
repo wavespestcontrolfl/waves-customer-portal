@@ -41,12 +41,15 @@ async function main() {
         const context = await browser.newContext({ viewport, hasTouch: device === 'mobile', timezoneId: 'America/New_York', serviceWorkers: 'block' });
         const page = await context.newPage();
         page.setDefaultTimeout(15000);
+        page.setDefaultNavigationTimeout(60000);
         const state = { device, errors: [], consoleErrors: [], unmatched: [], reads: [], writes: [], geometry: [], passed: false };
         report.scenarios.push(state);
         const records = new Map([[source.id, structuredClone(source)]]);
         let failCreate = true;
         let releaseCreate;
         const pendingCreate = new Promise((resolve) => { releaseCreate = resolve; });
+        let releaseCalculation;
+        const pendingCalculation = new Promise((resolve) => { releaseCalculation = resolve; });
         let conflictRevision = false;
         await page.addInitScript(() => {
           localStorage.setItem('waves_admin_token', 'synthetic-local-token');
@@ -79,7 +82,10 @@ async function main() {
           else if (endpoint.includes('/estimates/customer-spend/')) response = { services: [] };
           else if (endpoint.endsWith('/group')) response = { estimates: [] };
           else if (endpoint === '/api/admin/estimator/turf-preview') response = { turfSf: 4000 };
-          else if (endpoint === '/api/admin/estimator/calculate-estimate') response = structuredClone(result);
+          else if (endpoint === '/api/admin/estimator/calculate-estimate') {
+            await pendingCalculation;
+            response = structuredClone(result);
+          }
           else if (endpoint.endsWith('/edit-source')) response = records.get(endpoint.split('/').at(-2));
           else if (endpoint.endsWith('/send-preview')) {
             const record = records.get(endpoint.split('/').at(-2));
@@ -146,7 +152,19 @@ async function main() {
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), 'Retain this unsaved note.');
         await screenshot('services', page.locator('#estimate-services'));
         await screenshot('pricing', page.locator('#estimate-pricing'));
-        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        const generate = page.getByRole('button', { name: 'Generate Estimate', exact: true });
+        const beforeGenerate = await generate.boundingBox();
+        try {
+          await generate.click();
+          const busyGenerate = page.locator('#estimate-review button[aria-busy="true"]');
+          await busyGenerate.waitFor();
+          assert.equal((await busyGenerate.innerText()).trim(), 'Generate Estimate');
+          assert.equal(await busyGenerate.isDisabled(), true);
+          const pendingGenerate = await busyGenerate.boundingBox();
+          assert.equal(pendingGenerate.width, beforeGenerate.width, 'Generate width must remain stable while pending');
+          assert.equal(pendingGenerate.height, beforeGenerate.height, 'Generate height must remain stable while pending');
+          state.pendingGenerate = { label: 'Generate Estimate', width: pendingGenerate.width, height: pendingGenerate.height };
+        } finally { releaseCalculation(); }
         const save = page.getByRole('button', { name: 'Save draft', exact: true });
         await save.waitFor();
         await screenshot('review', page.locator('#estimate-review'));
@@ -221,6 +239,8 @@ async function main() {
         await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
         const nextSaved = state.writes.filter((write) => write.endpoint === '/api/admin/estimates').at(-1).body;
         assert.equal(nextSaved.customerName, 'Next Example');
+        for (const key of ['customerId', 'propertyId', 'leadId']) assert.equal(nextSaved[key], null, `Next estimate clears ${key}`);
+        for (const key of ['address', 'customerPhone', 'customerEmail']) assert.equal(nextSaved[key], '', `Next estimate clears ${key}`);
         assert.equal(nextSaved.notes, '');
         assert.equal(nextSaved.estimateData.inputs.manualDiscountType, 'NONE');
         for (const key of ['manualDiscountPreset', 'manualDiscountValue', 'manualDiscountLabel', 'manualDiscountInternalReason']) {
@@ -234,7 +254,12 @@ async function main() {
             const visible = (node) => node.getBoundingClientRect().height > 0 && !node.closest('details:not([open])');
             const buttons = [...builder.querySelectorAll('button')].filter(visible);
             const controls = [...builder.querySelectorAll('input,select,textarea')].filter(visible);
-            const measurements = (node) => ({ name: node.getAttribute('aria-label') || node.labels?.[0]?.textContent.trim() || node.textContent.trim(), height: node.getBoundingClientRect().height, size: parseFloat(getComputedStyle(node).fontSize) });
+            const measurements = (node) => ({
+              name: (node.getAttribute('aria-labelledby') || '').split(/\s+/).map((id) => document.getElementById(id)?.textContent || '').join(' ').trim()
+                || node.getAttribute('aria-label')?.trim() || [...(node.labels || [])].map((label) => label.textContent.trim()).join(' ').trim()
+                || (node.tagName === 'BUTTON' ? node.textContent.trim() : ''),
+              height: node.getBoundingClientRect().height, size: parseFloat(getComputedStyle(node).fontSize),
+            });
             return {
               viewport: { width: innerWidth, height: innerHeight }, coarse: matchMedia('(any-pointer: coarse)').matches,
               overflow: document.documentElement.scrollWidth > innerWidth || builder.scrollWidth > builder.clientWidth,
