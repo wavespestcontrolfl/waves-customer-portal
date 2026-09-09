@@ -126,12 +126,24 @@ async function visitFacts(conn, id, lock = false) {
   const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback', 'followup_included', 'completed_at', 'actual_end_time');
   if (!visit) reject('Service not found.', 404);
   const catalog = visit.service_id ? await conn('services').where({ id: visit.service_id }).first('service_key') : null;
-  return { ...calendarRow(visit, ['scheduled_date']), service_key: visit.service_key_snapshot || catalog?.service_key || null, service_date: dateOnly(visit.scheduled_date) };
+  const record = await resolveServiceRecord(conn, visit, { scheduled_service_id: true });
+  return { ...calendarRow(visit, ['scheduled_date']), service_key: visit.service_key_snapshot || catalog?.service_key || null, service_date: dateOnly(visit.scheduled_date), backfilled: isBackfilledRecord(record.record) };
+}
+
+// A backdated quiet closeout freezes structured_notes.backfill into its service
+// record. Such a row's completed_at is ET noon of the service day, a day-scale
+// marker, and any surviving end stamp is the closeout wall clock, so none of
+// its instants can order it against another same-day service.
+function isBackfilledRecord(record) {
+  const notes = typeof record?.structured_notes === 'string' ? JSON.parse(record.structured_notes) : record?.structured_notes;
+  return notes?.backfill === true;
 }
 
 // Only a recorded completion or end instant proves when a service was done;
-// a start time cannot, because the visit may still be in progress.
+// a start time cannot, because the visit may still be in progress, and a
+// backfilled closeout records only the service day.
 function completionInstant(visit) {
+  if (visit.backfilled) return null;
   const value = visit.completed_at || visit.actual_end_time;
   return value ? new Date(value).getTime() : null;
 }
@@ -168,7 +180,7 @@ async function validateServiceEvidence(conn, data, visit, last) {
 function validateCutoff(cutoffAt, visit) {
   if (cutoffAt > new Date() || etDateString(cutoffAt) < visit.service_date) reject('The cutoff must be on or after the service date and no later than now.');
   const completed = completionInstant(visit);
-  if (etDateString(cutoffAt) === visit.service_date && (completed == null || cutoffAt.getTime() < completed)) reject('A same-day cutoff must follow the recorded completion time of the service.');
+  if (etDateString(cutoffAt) === visit.service_date && (completed == null || cutoffAt.getTime() < completed)) reject(visit.backfilled ? 'A backdated closeout records only its service day. Choose a cutoff on a later day.' : 'A same-day cutoff must follow the recorded completion time of the service.');
 }
 
 // Callbacks are corrective. Included follow-ups and always-free visit types
@@ -184,7 +196,7 @@ async function qualifyingReturn(conn, id, visit) {
   const returned = await visitFacts(conn, id, true);
   const sameScope = !!visit.service_key && ['customer_id', 'property_id', 'service_key'].every(key => returned[key] === visit[key]);
   if ([returned.id === visit.id, !sameScope, returned.status !== 'completed'].some(Boolean)) reject('The qualifying return must be a completed later service for the same property and service key.');
-  if (!returnedAfter(returned, visit)) reject('The qualifying return must be completed after the original service. Same-day services need recorded completion times that establish the order.');
+  if (!returnedAfter(returned, visit)) reject([returned, visit].some(row => row.backfilled) ? 'A backdated closeout records only its service day, so it cannot order a same-day return.' : 'The qualifying return must be completed after the original service. Same-day services need recorded completion times that establish the order.');
   return returned;
 }
 
