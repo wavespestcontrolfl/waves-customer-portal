@@ -156,8 +156,10 @@ export default function useEmailEditor(userId) {
             [email.id]: submittedCurrent ? "" : current.replies[email.id],
           },
         }));
+        const clearedRevision = draftSession.replyRevisions[email.id] || 0;
         await onSent(email);
-        return submittedCurrent;
+        // The thread refresh can be slow; a reply typed during it is newer too.
+        return submittedCurrent && (draftSession.replyRevisions[email.id] || 0) === clearedRevision;
       },
     );
   };
@@ -180,8 +182,9 @@ export default function useEmailEditor(userId) {
           setComposeForm(() => ({ to: "", subject: "", body: "" }));
           setShowCompose(false);
         }
+        const cleared = draftSession.drafts.compose;
         await onSent();
-        return submittedCurrent;
+        return submittedCurrent && draftSession.drafts.compose === cleared;
       },
     );
   };

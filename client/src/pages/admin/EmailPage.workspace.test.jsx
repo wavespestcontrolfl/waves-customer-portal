@@ -317,6 +317,20 @@ describe("Email workspace feedback and request ownership", () => {
     expect(screen.queryByText(/Reply sent/)).not.toBeInTheDocument();
   });
 
+  it("says a reply typed during the post-send thread refresh is still unsent", async () => {
+    let finishRefresh, threadCalls = 0;
+    overrides.set(`/api/admin/email/thread/${a.gmail_thread_id}`, () => ++threadCalls === 1 ? response({ thread: [a] }) : new Promise((resolve) => { finishRefresh = resolve; }));
+    mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply", exact: true }));
+    await waitFor(() => expect(finishRefresh).toBeDefined());
+    expect(reply).toHaveValue("");
+    fireEvent.change(reply, { target: { value: "Typed during refresh" } });
+    await act(async () => finishRefresh(await response({ thread: [a] })));
+    expect(await screen.findByText("Reply sent. Your newer edits are still here.")).toBeInTheDocument();
+    expect(reply).toHaveValue("Typed during refresh");
+  });
+
   it("clears a plain sent banner when a new reply is started in the same conversation", async () => {
     mount(); const reply = await open(a);
     fireEvent.change(reply, { target: { value: "First reply" } });
