@@ -209,3 +209,30 @@ test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed qu
   expect(updates.at(-1).held).toBe(true);
   expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
 });
+
+test.each([false, true])('a definite unsent retry does not trip its own reservation with real history (audit throw: %s)', async auditThrows => {
+  const original = db.getMockImplementation();
+  db.mockImplementation((...args) => {
+    const q = original(...args);
+    q.whereNotIn = () => q;
+    q.orderBy = () => q;
+    q.select = async () => [{ ...row }];
+    return q;
+  });
+  const outcome = { sent: false, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD' };
+  const send = jest.fn(async () => {
+    if (auditThrows) throw Object.assign(new Error('audit failed'), { providerOutcome: outcome });
+    return outcome;
+  });
+  if (auditThrows) await expect(dispatchScheduledSms(row, row.metadata, send)).rejects.toThrow('audit failed');
+  else expect(await dispatchScheduledSms(row, row.metadata, send)).toEqual(outcome);
+  expect(row.metadata.review_ask_reservation).toBeUndefined();
+  expect(updates.at(-1).held).toBe(true);
+  // The scheduler requeues, then reclaims this same row on its next attempt.
+  row.status = 'scheduled';
+  row.status = 'sending';
+  history.lastManualAskAt.mockImplementation(jest.requireActual('../services/review-ask-history').lastManualAskAt);
+  send.mockResolvedValue({ sent: true, providerMessageId: 'SM-retried' });
+  expect(await dispatchScheduledSms(row, row.metadata, send)).toMatchObject({ sent: true });
+  expect(send).toHaveBeenCalledTimes(2);
+});

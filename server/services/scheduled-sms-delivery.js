@@ -37,6 +37,13 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
 
 async function dispatchScheduledSms(msg, meta, send, purpose) {
   let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id || looksLikeReviewAsk(msg.message_body);
+  const clearUnsentReservation = async () => {
+    if (!reviewAsk) return;
+    await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation'"),
+    });
+    delete meta.review_ask_reservation;
+  };
   const dispatch = async () => {
     let result;
     try {
@@ -58,11 +65,13 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
         });
         return { ...result, sent: false, blocked: true, code: 'REVIEW_SEND_SUPPRESSED' };
       }
+      if (result.sent === false) await clearUnsentReservation();
       if (result.sent) await markScheduledSmsSent(msg, meta, result, reviewAsk);
       return result;
     } catch (err) {
       err.scheduledReviewAsk = reviewAsk;
-      if (result?.sent) err.providerOutcome = result;
+      if (result) err.providerOutcome = result;
+      if (err.providerOutcome?.sent === false) await clearUnsentReservation();
       const accepted = await acceptedScheduledSms(msg.id, err);
       if (accepted) {
         err.providerOutcome = accepted;
