@@ -166,6 +166,49 @@ test('a selection is bound to the request\'s own fresh candidates', async () => 
   }
 });
 
+test('numeric counts and bare plural person nouns are sets', async () => {
+  for (const prompt of ['Update 2 customers and this customer', 'Text three clients', 'Update customers', 'Remind a few accounts', 'Text a couple of the paused clients', 'Update 10 records']) {
+    expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+  }
+});
+
+test('every occurrence of a repeated name token is its own reference', async () => {
+  const jones = { id: B, first_name: 'Alice', last_name: 'Jones' };
+  rows.customers = [rows.customers[0], jones];
+  lookupRows = [jones];
+  for (const prompt of ["Forward Alice Jones's estimate to Alice Missing", 'Text Alice Jones and remind Alice Missing', 'Update Alice Missing then text Alice Jones']) {
+    expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  expect((await Context.resolve({ prompt: "Forward Alice Jones's estimate to Alice Jones", pageData: {} })).target).toMatchObject({ customer_id: B, provenance: 'current_request_lookup' });
+});
+
+test('a bare name before a function or temporal word is still a stated person', async () => {
+  const jones = { id: B, first_name: 'Alice', last_name: 'Jones' };
+  rows.customers = [rows.customers[0], jones];
+  lookupRows = [jones];
+  for (const prompt of ['Text Bob tomorrow and update Alice Jones', 'Text Bob today and update Alice Jones', 'Remind Bob next and text Alice Jones', 'Text Bob now and update Alice Jones']) {
+    expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  // A token that only modifies an object noun is not a person reference.
+  expect((await Context.resolve({ prompt: 'Schedule Bermuda sod for Alice Jones', pageData: {} })).target).toMatchObject({ customer_id: B });
+});
+
+test('a surname that is also a non-name word is compared as part of the whole reference', async () => {
+  const link = { id: B, first_name: 'Alice', last_name: 'Link' };
+  rows.customers = [rows.customers[0], link];
+  lookupRows = [link];
+  for (const prompt of ['Update Alice Link Jr', 'Text Alice Link Sr about the invoice']) {
+    expect(await Context.resolve({ prompt, pageData: {} })).toMatchObject({ target: null, targets: [], ambiguous: true });
+    expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: B } })).toMatchObject({ code: 'context_mismatch' });
+  }
+  for (const prompt of ['Update Alice Link', 'Text Alice Link about the invoice']) {
+    expect((await Context.resolve({ prompt, pageData: {} })).target).toMatchObject({ customer_id: B, provenance: 'current_request_lookup' });
+  }
+});
+
 test('a cohort noun keeps its set reading under any number of qualifiers', async () => {
   for (const prompt of ['Update all active residential lawn customers from this account', 'Text every overdue quarterly pest control client', 'Remind each of the paused monthly mosquito accounts']) {
     expect(await Context.resolve({ prompt, pageData: { customer_id: A } })).toMatchObject({ target: null, targets: [], ambiguous: true });
