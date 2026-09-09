@@ -38,6 +38,7 @@ export default function useEmailInbox(active, clearDraftResult) {
   const [threadState, setThreadState] = useState({ loading: false, error: false });
   const [messageState, setMessageState] = useState({ loading: false, error: false });
   const [selectionRetry, setSelectionRetry] = useState(0);
+  const selectionRetryRef = useRef(0);
   const [actionFeedback, setActionFeedback] = useState(null);
   const [pendingAction, setPendingAction] = useState(null);
   const pendingActionRef = useRef(null);
@@ -163,11 +164,13 @@ export default function useEmailInbox(active, clearDraftResult) {
   // Old bells/OAuth returns keep working through /admin/email's alias.
   // Observe query changes as well as mount so Back/Forward can select mail.
   useEffect(() => {
+    const retrying = selectionRetry !== selectionRetryRef.current;
+    selectionRetryRef.current = selectionRetry;
     const activated = active && !wasActiveRef.current;
     wasActiveRef.current = active;
     if (!active || !status?.connected) return;
     const id = searchParams.get("id");
-    if (id && id === selectedIdRef.current && !activated) return;
+    if (id && id === selectedIdRef.current && !activated && !retrying) return;
     if (id !== selectedIdRef.current) {
       if (id) setTab("inbox");
       selectedIdRef.current = null;

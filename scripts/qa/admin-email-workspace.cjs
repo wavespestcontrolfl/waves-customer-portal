@@ -105,7 +105,7 @@ async function main() {
     if (!baseline) assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, 'Page must fit the viewport');
     report.screenshots.push(file);
   }
-  const row = (page, mail = a) => page.getByRole('button', { name: `Open email: ${mail.subject}`, exact: true });
+  const row = (page, mail = a) => page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: mail.subject });
   async function inbox(page, route = '/admin/communications#tab=email') {
     await page.goto(`${server.baseUrl}${route}`);
     await row(page).waitFor();
@@ -133,12 +133,14 @@ async function main() {
         await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
         await page.getByText(a.subject, { exact: false }).first().waitFor();
         if (!baseline) {
-          await page.getByText('Email activity', { exact: true }).click();
+          const activity = page.locator('details').filter({ hasText: 'Email activity' });
+          assert.equal(await activity.getAttribute('open'), '');
+          assert.equal(await activity.getByText('Unread', { exact: true }).isVisible(), true);
+          assert.equal(await activity.evaluate((node) => Boolean(node.compareDocumentPosition(document.querySelector('[aria-label="Email inbox"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), true);
           await page.locator('dl dd').first().waitFor();
           assert.equal(await page.locator('dl').evaluate((node) => [...node.children].every((card) =>
             Math.abs(card.querySelector('dt').getBoundingClientRect().left - card.querySelector('dd').getBoundingClientRect().left) < 1)),
           true, 'Summary values must align with their labels');
-          await page.getByText('Email activity', { exact: true }).click();
         }
         await shot(page, `inbox-${width}`);
         await page.getByText(a.subject, { exact: false }).first().click();
@@ -151,6 +153,22 @@ async function main() {
         await page.close();
       });
     }
+    if (!baseline) await scenario('Retry a retained conversation after a channel refresh failure', async () => {
+      const { page, state } = await openPage(390);
+      await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
+      await page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject }).click();
+      await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Retain this reactivation draft');
+      await channel(page, 'SMS').click();
+      state.fail.add(`/admin/email/message/${a.id}`);
+      await channel(page, 'Email').click();
+      await page.getByText('The linked email is unavailable.', { exact: true }).waitFor();
+      state.fail.delete(`/admin/email/message/${a.id}`);
+      await page.getByRole('button', { name: 'Try again', exact: true }).click();
+      await page.getByText(a.body_text, { exact: true }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retain this reactivation draft');
+      await shot(page, 'reactivation-retry-390');
+      await page.close();
+    });
     if (!baseline) {
       await scenario('Older email dates stay Eastern in a UTC browser', async () => {
         const { page, state } = await openPage(1440, { timezone: 'UTC' });
@@ -296,7 +314,7 @@ async function main() {
         assert.equal(download.suggestedFilename(), 'Patio notes.pdf');
         assert.equal(await download.failure(), null);
         await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
-        await page.waitForFunction((label) => document.activeElement?.getAttribute('aria-label') === label, `Open email: ${a.subject}`);
+        await page.waitForFunction((subject) => document.activeElement?.textContent?.includes(subject), a.subject);
         assert.equal(new URL(page.url()).searchParams.has('id'), false);
         await page.close();
       });
@@ -314,7 +332,6 @@ async function main() {
         state.fail.add('/admin/email/stats'); state.fail.add('/admin/email/daily-digest');
         await page.getByRole('button', { name: 'Try again', exact: true }).click();
         await page.getByText('The email inbox is unavailable.', { exact: true }).waitFor();
-        await page.getByText('Email activity', { exact: true }).click();
         await page.getByText('Email counts are unavailable.', { exact: true }).waitFor();
         await shot(page, 'partial-data-390');
         state.fail.delete('/admin/email/inbox'); state.emails = [];
