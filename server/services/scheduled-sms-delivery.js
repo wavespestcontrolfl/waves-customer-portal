@@ -4,7 +4,7 @@ const { dispatchReviewAsk } = require('./review-ask-dispatch');
 const { requiresDurableFinalize } = require('./messaging/deferred-replay-registry');
 
 async function acceptedScheduledSms(id, err) {
-  if (err?.providerOutcome?.sent === true) return err.providerOutcome;
+  if (require('./sms-auto-send').isRealProviderSend(err?.providerOutcome)) return err.providerOutcome;
   const row = await db('sms_log').where({ direction: 'outbound' })
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(id)])
@@ -51,6 +51,13 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
         if (!reserved) throw new Error('Scheduled review claim lost before provider dispatch');
       }
       result = await send();
+      if (reviewAsk && result.sent && !require('./sms-auto-send').isRealProviderSend(result)) {
+        await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+          status: 'canceled', updated_at: new Date(),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation'"),
+        });
+        return { ...result, sent: false, blocked: true, code: 'REVIEW_SEND_SUPPRESSED' };
+      }
       if (result.sent) await markScheduledSmsSent(msg, meta, result, reviewAsk);
       return result;
     } catch (err) {

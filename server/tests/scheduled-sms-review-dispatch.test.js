@@ -200,3 +200,12 @@ test('an unpersisted completion rewrite never dispatches a stale bundled ask', a
   await expect(dispatchScheduledSms(row, row.metadata, send, 'service_complete')).rejects.toThrow('rewrite unavailable');
   expect(send).not.toHaveBeenCalled();
 });
+
+test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed queued asks do not record review delivery: %s', async providerMessageId => {
+  const result = await dispatchScheduledSms(row, row.metadata, async () => ({ sent: true, providerMessageId }));
+  expect(result).toMatchObject({ sent: false, blocked: true, code: 'REVIEW_SEND_SUPPRESSED' });
+  expect(row.status).toBe('canceled');
+  expect(row.metadata.review_ask_reservation).toBeUndefined();
+  expect(updates.at(-1).held).toBe(true);
+  expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
+});
