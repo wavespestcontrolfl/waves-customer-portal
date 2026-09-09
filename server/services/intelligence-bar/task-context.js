@@ -32,6 +32,14 @@ const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
+// Function and temporal words never end a person reference's meaning: a bare
+// name before "tomorrow" or "and" is still a stated person, while a token
+// before an object noun ("flea" in "flea treatment") only modifies that noun.
+const FUNCTION_WORDS = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our',
+  'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'let', 'what', 'there', 'here', 'who', 'he', 'she', 'how', 'where', 'when',
+  'to', 'for', 'as', 'from', 'with', 'and', 'or', 'by', 'using', 'on', 'at', 'in', 'of', 'about', 'regarding', 'via', 'through', 'after', 'before', 'during',
+  'until', 'since', 'over', 'into', 'off', 'up', 'out', 'whose', 'whom', 'which', 'if', 'while', 'because', 'so', 'but', 'not', 'no', 'please', 'now', 'later',
+  'again', 'still', 'also', 'then', 'just', 'only']);
 const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'status', 'billing', 'type', 'plan', 'frequency', 'autopay', 'balance', 'schedule', 'tags', 'tag', 'preferences', 'details',
   // every update_customer field (tools.js) and the contractions a request may open with
   'first', 'last', 'city', 'state', 'zip', 'waveguard', 'tier', 'pipeline', 'stage', 'source', 'monthly', 'rate', 'mode', 'membership',
@@ -54,7 +62,9 @@ const NON_PERSON_NAMES = new Set(['this', 'that', 'these', 'those', 'current', '
 // active residential lawn customers"); a deictic word ends the run, so "all of
 // this customer's fields" still names one account. The noun takes every
 // customer-reference synonym the resolver understands.
-const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+)* (?:customer|account|client|profile|record)s?|all of (?:these|those))\b/;
+// A numeric count ("2 customers", "three accounts", "a few clients") and a
+// bare plural person noun ("update customers") are sets too.
+const SET_QUANTIFIER_RE = /\b(?:both|(?:these|those|all|each|every|several|multiple|many|few|couple|dozen|\d+|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|fifty|hundred)(?: one)?(?: of)?(?: the| these| those| my| our)?(?: (?!(?:this|that|his|her|their)\b)[a-z-]+)* (?:customer|account|client|profile|record)s?|all of (?:these|those)|customers|clients)\b/;
 // An independently requested operation starts at "and/then <action>".
 const ACTION_CLAUSE_SPLIT = new RegExp(`\\b(?:and|then)\\s+(?:(?:also|then|please)\\s+)*(?=(?:${PERSON_ACTIONS}|revise|add|save|assign|draft|write|post|submit)\\b)`, 'i');
 const CONTACT_LITERAL_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|(?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4}(?!\d)/gi;
@@ -171,14 +181,26 @@ async function namedCustomers(prompt) {
   // modifies a non-person noun ("flea" in "flea treatment") is not a person
   // reference, and a request that resolved nobody keeps the plain
   // unresolved-name handling.
+  // Every occurrence of a name token is its own reference ("forward Alice
+  // Jones's estimate to Alice Missing" states two people), a run continues
+  // through a non-name word that continues a matched customer's own name
+  // ("Alice Link Jr" is compared whole against Alice Link), and a bare name
+  // is kept before a function or temporal word.
+  const acceptedNames = accepted.map(customer => `${normalizeName(customer.first_name)} ${normalizeName(customer.last_name)}`.trim().split(' '));
+  const continuesName = run => acceptedNames.some(full => full.length >= run.length && run.every((word, index) => word === full[index]));
+  const objectNoun = word => NON_PERSON_NAMES.has(word) && !FUNCTION_WORDS.has(word);
   const personReferences = clause => {
     const clauseWords = normalizeName(clause).split(' ');
-    return explicitSingleNames(clause).map(token => {
-      const start = clauseWords.indexOf(token);
+    return explicitSingleNames(clause).flatMap(token => clauseWords.flatMap((word, start) => {
+      if (word !== token) return [];
       const run = [token];
-      for (let i = start + 1; i < clauseWords.length && run.length < 5 && !NON_PERSON_NAMES.has(clauseWords[i]) && !AFTER_SINGLE_NAME.has(clauseWords[i]); i++) run.push(clauseWords[i]);
-      return run;
-    }).filter(run => run.length > 1 || !NON_PERSON_NAMES.has(clauseWords[clauseWords.indexOf(run[0]) + 1] || ''));
+      for (let i = start + 1; i < clauseWords.length && run.length < 5; i++) {
+        const next = clauseWords[i];
+        if ((NON_PERSON_NAMES.has(next) || AFTER_SINGLE_NAME.has(next)) && !continuesName([...run, next])) break;
+        run.push(next);
+      }
+      return run.length > 1 || !objectNoun(clauseWords[start + 1] || '') ? [run] : [];
+    }));
   };
   const resolvesReference = run => accepted.some(customer => {
     const first = normalizeName(customer.first_name), last = normalizeName(customer.last_name);

@@ -395,6 +395,18 @@ set quantifier and its noun is unbounded (`all active residential lawn
 customers` is a set; a deictic word still ends the run), and a selected
 customer id is lowercased before candidate matching.
 
-Validation: 159 target cases pass (135 unit and 24 rollback-only isolated
+The integration round on the cascade head found three more P1s and a P2 in
+the resolver, fixed in place: a numeric count or bare plural person noun
+(`Update 2 customers and this customer`, `Text three clients`, `Update
+customers`) is a set; every occurrence of a repeated name token is its own
+reference (`Forward Alice Jones's estimate to Alice Missing` states two
+people, so the unresolved one refuses the request); a bare name before a
+function or temporal word (`Text Alice tomorrow and update Bob Jones`) is
+still a stated person, while a token before an object noun (`Bermuda sod`)
+only modifies that noun; and a name run continues through a non-name word
+that continues a matched customer's own name, so `Update Alice Link Jr` is
+compared whole against Alice Link and refused.
+
+Validation: 165 target cases pass (141 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.

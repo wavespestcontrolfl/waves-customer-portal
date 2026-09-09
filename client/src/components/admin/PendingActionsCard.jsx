@@ -191,7 +191,11 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
           ...(decision === "confirm" && action.contract_hash ? { contract_hash: action.contract_hash } : {}),
         }),
       });
-      if (decision === "confirm" && body.success === false) {
+      if (decision === "confirm" && body.outcome === "outcome_unknown") {
+        // The provider accepted the request without confirming it: neither
+        // done nor failed. Reconcile before retrying, never resend blindly.
+        setStatus(action.id, "unknown", body.result?.warning || "The outcome is unknown. Check the record before retrying.");
+      } else if (decision === "confirm" && body.success === false) {
         setStatus(action.id, "failed", body.result?.error || "The action could not be completed");
       } else {
         // A committed action can still carry a partial-failure warning
@@ -213,6 +217,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     cancelling: "Cancelling…",
     confirmed: "✓ Done",
     cancelled: "Cancelled",
+    unknown: "Outcome unknown — check before retrying",
   };
 
   return (
@@ -227,7 +232,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     >
       {actions.map((action) => {
         const status = statusById[action.id] || action.resolvedStatus;
-        const settled = status === "confirmed" || status === "cancelled" || status === "failed";
+        const settled = status === "confirmed" || status === "cancelled" || status === "failed" || status === "unknown";
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
         const expired = !settled && !busy && remaining !== null && remaining <= 0;
@@ -278,7 +283,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             </div>
             )}
 
-            {(status === "failed" || (status === "confirmed" && (errorById[action.id] || action.resolvedWarning))) && (
+            {(status === "failed" || status === "unknown" || (status === "confirmed" && (errorById[action.id] || action.resolvedWarning))) && (
               <div
                 style={dark ? { fontSize: 14, color: D.red, marginBottom: 8 } : undefined}
                 className={dark ? undefined : "text-[14px] text-alert-fg mb-2"}
