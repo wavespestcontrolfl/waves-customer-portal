@@ -157,6 +157,18 @@ describe('completion review preview availability', () => {
     expect(screen.getByText(/An existing cadence keeps its schedule/)).toBeTruthy();
   });
 
+  it.each(['auto', 'tomorrow_8', 'custom'])('qualifies %s timing for new enrollment and preserves existing cadence expectations', async timing => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/send-time-preview')
+        ? { schedulerEnabled: true, reviewSequencesEnabled: true, smsSendWindowEnabled: true }
+        : { customer: {}, actions: [], available: false },
+    })));
+    await mount();
+    fireEvent.change(document.querySelector('option[value="custom"]').parentElement, { target: { value: timing } });
+    expect(screen.getByText(/For a new eligible enrollment:.*An existing cadence keeps its schedule/)).toBeTruthy();
+  });
+
   it.each([false, true])('records requested links without promising to move an existing cadence (unpaid invoice: %s)', async (unpaid) => {
     vi.stubGlobal('fetch', vi.fn(async (url) => ({
       ok: true,
