@@ -31,7 +31,7 @@ beforeEach(() => {
 });
 afterEach(() => { delete process.env.GATE_CUSTOMER_APP_NOTIFICATIONS; });
 
-test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('preserves an App-only event through %s', async (code) => {
+test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('preserves an App-only event through %s', async (code) => {
   sendCustomerMessage.mockResolvedValue({ sent: false, code, deferred: true, nextAllowedAt: '2026-09-09T13:00:00Z' });
   await RequestApp.send({ customerId: 'customer-1', request });
   const sent = sendCustomerMessage.mock.calls[0][0];
