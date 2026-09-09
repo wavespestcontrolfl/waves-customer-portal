@@ -605,7 +605,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // resolves to a CAUSE_LABELS label), plus the GENERIC cause words (insect/pest/disease),
 // so a stale/LLM summary like "most consistent with caterpillar activity" is replaced
 // even though the public finding label is already downgraded to a symptom.
-const SUMMARY_CAUSE_RE = /\b(chinch|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|rhizoctonia|take[-\s]?all|fungus|fungal|diseases?|leaf spots?|mold|mildew|insects?|pests?|grubs?|caterpillars?|worms?|armyworms?|sod\s?webworms?|nutsedge|crabgrass|dollarweed|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch|large patch(?:es)?|brown patch(?:es)?|gr[ae]y leaf|dollar spots?|rhizoctonia|take[-\s]?all|fungus|fungal|diseases?|leaf spots?|mold|mildew|insects?|pests?|grubs?|caterpillars?|worms?|armyworms?|sod\s?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|drought|water stress|chlorosis|iron deficiency|nitrogen deficiency|magnesium deficiency)\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -675,7 +675,7 @@ function classifyReleaseMode(contract = {}) {
 // GOVERNED_CAUSE must all cover the cause-mapped CONDITION_LABELS entries — when a new
 // cause label is added, update every one (else "<new cause> is confirmed" slips through
 // the moderate+ summary that the low-confidence gate never touches).
-const CONFIRMABLE_CONDITION = 'chinch(?:\\s*bugs?)?|fungus|fungal|diseases?|large patch(?:es)?|brown patch(?:es)?|gray leaf spots?|grey leaf spots?|leaf spots?|dollar spots?|mold|mildew|drought|water stress|grubs?|army\\s?worms?|sod\\s?webworms?|caterpillars?|worms?|insects?|pests?|infestations?';
+const CONFIRMABLE_CONDITION = 'chinch(?:\\s*bugs?)?|fungus|fungal|diseases?|large patch(?:es)?|brown patch(?:es)?|gray leaf spots?|grey leaf spots?|leaf spots?|dollar spots?|mold|mildew|drought|water stress|grubs?|army\\s?worms?|sod\\s?webworms?|caterpillars?|worms?|insects?|pests?|infestations?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?';
 
 // Downgrade any over-confident pest/disease/drought wording to suggestive form.
 // Safety net for LLM-authored copy; deterministic copy never says "confirmed".
@@ -831,6 +831,7 @@ module.exports = {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  SUMMARY_CAUSE_RE,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
   NO_VISIBLE_STRESS_FINDING,
