@@ -27,7 +27,7 @@
 
 const { applySeasonalAdjustment } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores, contextHash } = require('../lawn-visit-assessment');
-const { scrubCustomerText } = require('../lawn-diagnostic-report');
+const { scrubCustomerText, SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 
 // USD per 1M tokens, standard tier, checked 2026-09-08. Thinking is billed at
@@ -52,7 +52,13 @@ function dateString(value) {
 
 const SCORE_KEYS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
 const CONFIDENCE_RANK = { unknown: 0, low: 1, moderate: 2, high: 3 };
-const ANY_CAUSE = Object.values(CAUSE_PATTERNS);
+// The naming-discipline vocabulary is the production one: the naming gate's
+// species / condition patterns PLUS the report lane's governed-cause lexicon
+// (SUMMARY_CAUSE_RE — generic fungus / disease / insect / pest terms too), so
+// a low-confidence "fungal activity" or "insect damage" counts as a cause
+// named below moderate exactly as the customer egress treats it (Codex
+// #4153 r7).
+const ANY_CAUSE = [...Object.values(CAUSE_PATTERNS), SUMMARY_CAUSE_RE];
 
 const numberOrNull = (value) => {
   if (value == null || value === '') return null;
@@ -93,9 +99,18 @@ function fixtureCase(row, photos = [], context = {}) {
     context: {
       grassType: context.grassType || null,
       irrigation: context.irrigation || null,
+      // The gauge reading the visit's completion recorded (turf_height_readings
+      // via the assessment's service record), in the same 0.5–8 in range the
+      // route accepts — the prompt uses it to tell scalping from other stress,
+      // so a replay without it is not the production call (Codex #4153 r7).
+      turfHeightIn: turfHeightInRange(context.turfHeightIn),
       priorSummary: scrubPriorSummary(context.priorSummary, context.customerNames),
     },
   };
+}
+function turfHeightInRange(value) {
+  const n = numberOrNull(value);
+  return n != null && n >= 0.5 && n <= 8 ? n : null;
 }
 
 // The previous visit's ai_summary was written by a model that was given the
@@ -148,12 +163,14 @@ function hashKey(value) {
 }
 
 // The known-visit context the route would build for this visit — season and
-// month from the VISIT date, grass / irrigation on file, the previous visit's
-// summary. No technician notes (not stored) and never the planned products.
+// month from the VISIT date, grass / irrigation on file, the visit's gauge
+// reading, the previous visit's summary. No technician notes (not stored)
+// and never the planned products.
 function contextFor(testCase) {
   const context = { region: 'Southwest Florida' };
   if (testCase.month) { context.month = testCase.month; context.season = seasonOf(testCase.month); }
   if (testCase.context?.grassType) context.grassType = testCase.context.grassType;
+  if (testCase.context?.turfHeightIn != null) context.turfHeightIn = testCase.context.turfHeightIn;
   if (testCase.context?.irrigation) context.irrigation = testCase.context.irrigation;
   if (testCase.context?.priorSummary) context.priorSummary = testCase.context.priorSummary;
   return context;

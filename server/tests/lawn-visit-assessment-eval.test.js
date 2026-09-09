@@ -83,10 +83,15 @@ describe('fixture export shape', () => {
     expect(evalLib.selectCases(cases, {})).toHaveLength(5);
   });
 
-  test('the replay context is the visit-dated season plus what was on file — no products, no notes', () => {
-    const c = evalLib.fixtureCase(row({ scheduled_date: '2026-01-15' }), [], { grassType: 'Zoysia', irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.' });
-    expect(evalLib.contextFor(c)).toEqual({ region: 'Southwest Florida', month: 1, season: 'dormant', grassType: 'Zoysia', irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.' });
+  test('the replay context is the visit-dated season plus what was on file — the gauge reading included — no products, no notes', () => {
+    const c = evalLib.fixtureCase(row({ scheduled_date: '2026-01-15' }), [], { grassType: 'Zoysia', irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.', turfHeightIn: '3.50' });
+    expect(c.context.turfHeightIn).toBe(3.5);
+    expect(evalLib.contextFor(c)).toEqual({ region: 'Southwest Florida', month: 1, season: 'dormant', grassType: 'Zoysia', turfHeightIn: 3.5, irrigation: 'well, 0.5 in/wk', priorSummary: 'Prior.' });
     expect(evalLib.contextFor({ month: 7, context: {} })).toEqual({ region: 'Southwest Florida', month: 7, season: 'peak' });
+    // No reading, or one outside the route's 0.5–8 in acceptance range, omits the line exactly as /assess does.
+    expect(evalLib.fixtureCase(row(), [], {}).context.turfHeightIn).toBeNull();
+    for (const value of [0.25, 9, 'tall', null]) expect(evalLib.fixtureCase(row(), [], { turfHeightIn: value }).context.turfHeightIn).toBeNull();
+    expect(evalLib.contextFor(evalLib.fixtureCase(row(), [], { turfHeightIn: 9 }))).not.toHaveProperty('turfHeightIn');
   });
 });
 
@@ -111,6 +116,11 @@ describe('scoring', () => {
     expect(r.deltas.vsLegacyAi).toEqual({ turf_density: 0, weed_suppression: -5, fungus_control: 0, thatch_level: 0, stress_damage: 0 });
     expect(r.undeterminable).toEqual(['color_health']);
     expect(r.causeNamedBelowModerate).toEqual([{ finding_id: 'F2', name: 'Chinch bug damage', confidence: 'low', label: 'general lawn stress' }]);
+    // The vocabulary is the production governed-cause lexicon, generic classes included: a low "fungal activity",
+    // "disease pressure" or "insect damage" counts; a symptom-only name never does.
+    const low = (name) => ({ finding_id: 'F9', name, confidence: 'low', label: 'general lawn stress' });
+    expect(evalLib.causeNamedBelowModerate([low('Fungal activity'), low('Disease pressure in the shade'), low('Insect damage'), low('Irregular browning along the edge'), { ...low('Fungal activity'), confidence: 'moderate' }]).map((f) => f.name))
+      .toEqual(['Fungal activity', 'Disease pressure in the shade', 'Insect damage']);
     expect(r.costUsd).toBe(0.0255); // (9000 × 0.75 + 5000 × 3.75) / 1e6, reasoning billed as output
     expect(r.findings).toHaveLength(2);
     expect(r.findings[1]).toMatchObject({ can_determine: false, cannot_determine_reason: 'no close-up' });
@@ -210,6 +220,14 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     expect(src).toMatch(/loadPriorSummary\(\{ customerId: row\.customer_id, serviceId: row\.service_id, scheduledService, visitDate, propertyHistoryEnabled \}, knex\)/);
     expect(src).not.toMatch(/historyBeforeVisit\(/);
     expect(src).toMatch(/propertyHistory: propertyHistoryEnabled, population: all\.length, cases \}/);
+    // The legacy benchmark population never includes a run-backed row (its composite_scores are the new pipeline's own).
+    expect(src).toMatch(/const hasRunTable = await knex\.schema\.hasTable\('lawn_assessment_runs'\);/);
+    expect(src).toMatch(/\.modify\(\(q\) => \{ if \(hasRunTable\) q\.whereNotExists\(function \(\) \{ this\.select\(1\)\.from\('lawn_assessment_runs as r'\)\.whereRaw\('r\.assessment_id = la\.id'\); \}\); \}\)/);
+    // The visit's gauge reading rides along: the assessment's service record (back-link, else the scheduled service's latest record) → turf_height_readings.
+    expect(src).toMatch(/loadVisitTurfHeight\(row, knex\),\s*\]\);/);
+    expect(src).toMatch(/turfHeightIn: turfHeight,/);
+    expect(src).toMatch(/knex\('turf_height_readings'\)\.where\(\{ service_record_id: serviceRecordId \}\)\.first\('manual_height_in'\)/);
+    expect(src).toMatch(/knex\('service_records'\)\.where\(\{ scheduled_service_id: row\.service_id \}\)\.orderBy\('created_at', 'desc'\)\.first\('id'\)/);
     // The script is a module for tests and a program for operators.
     expect(src).toMatch(/if \(require\.main === module\) \{/);
   });

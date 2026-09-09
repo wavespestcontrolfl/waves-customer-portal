@@ -113,12 +113,20 @@ async function exportFixture(args) {
   const propertyHistoryEnabled = require(path.join(REPO, 'server/config/feature-gates')).gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
   const knex = knexFactory({ client: 'pg', connection: { connectionString: process.env.DATABASE_PUBLIC_URL, ssl: { rejectUnauthorized: false } }, pool: { min: 0, max: 2 } });
   try {
-    // Confirmed rows with at least one stored photo — the population the eval draws from.
+    // Confirmed rows with at least one stored photo — the population the eval
+    // draws from. A run-backed row (produced by the single call itself once
+    // the gate is on) is excluded: its composite_scores ARE the new pipeline's
+    // derived scores, so it would benchmark a replay against itself, not
+    // against the legacy two-model baseline (Codex #4153 r7). A database
+    // without the run table yet has no such rows.
+    const hasRunTable = await knex.schema.hasTable('lawn_assessment_runs');
+    const hasServiceRecordColumn = await knex.schema.hasColumn('lawn_assessments', 'service_record_id');
     const rows = await knex('lawn_assessments as la')
       .leftJoin('scheduled_services as ss', 'ss.id', 'la.service_id')
       .where('la.confirmed_by_tech', true)
       .whereExists(function () { this.select(1).from('lawn_assessment_photos as p').whereRaw('p.assessment_id = la.id').andWhere('p.s3_key', 'not like', 'pending/%'); })
-      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date')
+      .modify((q) => { if (hasRunTable) q.whereNotExists(function () { this.select(1).from('lawn_assessment_runs as r').whereRaw('r.assessment_id = la.id'); }); })
+      .select('la.id', 'la.customer_id', 'la.service_id', 'la.service_date', 'la.season', 'la.composite_scores', ...SCORE_COLUMNS.map((c) => `la.${c}`), 'ss.scheduled_date', ...(hasServiceRecordColumn ? ['la.service_record_id'] : []))
       .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC, la.created_at DESC');
     // Selection is the library's tested mechanism: the explicit ids plus the
     // deterministic sample, or the whole population with --all.
@@ -132,15 +140,17 @@ async function exportFixture(args) {
       const scheduledService = row.service_id ? await knex('scheduled_services').where({ id: row.service_id }).first() : null;
       const grassCtx = await loadCustomerGrassContext(row.customer_id, knex);
       // Each case's photos load with the case — one small query per exported row.
-      const [photos, irrigation, customer, prior] = await Promise.all([
+      const [photos, irrigation, customer, prior, turfHeight] = await Promise.all([
         knex('lawn_assessment_photos').where({ assessment_id: row.id }).orderBy('photo_order').select('id', 's3_key', 'mime_type', 'photo_order', 'zone'),
         loadIrrigationContext(row.customer_id, grassCtx, knex),
         knex('customers').where({ id: row.customer_id }).first('first_name', 'last_name'),
         loadPriorSummary({ customerId: row.customer_id, serviceId: row.service_id, scheduledService, visitDate, propertyHistoryEnabled }, knex).catch((err) => { console.error(`warning: prior-visit summary failed for ${row.id}: ${err.message}`); return null; }),
+        loadVisitTurfHeight(row, knex),
       ]);
       cases.push(evalLib.fixtureCase(row, photos, {
         grassType: grassCtx.grassTypeLabel || null,
         irrigation,
+        turfHeightIn: turfHeight,
         // Scrubbed in fixtureCase: the summary was written with the customer's name in the prompt.
         priorSummary: prior,
         customerNames: [customer?.first_name, customer?.last_name],
@@ -152,6 +162,22 @@ async function exportFixture(args) {
   } finally {
     await knex.destroy();
   }
+}
+
+// The gauge reading the visit's completion recorded: turf_height_readings
+// keys on the service record (one per completion), reached through the
+// assessment's own back-link or, for a row completed before the back-link
+// existed, the scheduled service's latest record. Null when the visit
+// recorded none — the route's visionContext omits the line the same way.
+async function loadVisitTurfHeight(row, knex) {
+  let serviceRecordId = row.service_record_id || null;
+  if (!serviceRecordId && row.service_id) {
+    const record = await knex('service_records').where({ scheduled_service_id: row.service_id }).orderBy('created_at', 'desc').first('id');
+    serviceRecordId = record?.id || null;
+  }
+  if (!serviceRecordId) return null;
+  const reading = await knex('turf_height_readings').where({ service_record_id: serviceRecordId }).first('manual_height_in').catch(() => null);
+  return reading?.manual_height_in ?? null;
 }
 
 // ── Phase 2: run ──────────────────────────────────────────────────────
