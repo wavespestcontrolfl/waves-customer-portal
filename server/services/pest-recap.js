@@ -281,9 +281,13 @@ async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, pro
  * track_state complete, optional customer SMS.
  */
 const sameIdentityKey = (a, b) => String(a ?? '') === String(b ?? '');
+// Calendar-day identity for scheduled_date on both sides: the context
+// serializes a driver Date as ISO, the lock reads the same driver value.
+const dateIdentity = (v) => (v == null ? '' : (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10));
 
 // True when the client's expected ownership identity no longer matches the
-// locked visit row. Only keys the client sent are compared; the address is
+// locked visit row. Only keys the client sent are compared (ownership,
+// catalog service, service type, calendar day); the address is
 // resolved the same way the context resolves it (stamped visit address
 // first, legacy primary fallback).
 function recapVisitIdentityChanged(expected, locked, customerRow) {
@@ -291,6 +295,8 @@ function recapVisitIdentityChanged(expected, locked, customerRow) {
   if ('propertyId' in expected && !sameIdentityKey(expected.propertyId, locked.property_id)) return true;
   if ('customerId' in expected && !sameIdentityKey(expected.customerId, locked.customer_id)) return true;
   if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
+  if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
+  if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
   if (!('address' in expected)) return false;
   const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
   const want = expected.address || {};

@@ -233,6 +233,7 @@ function makeKnex(store) {
           // Lock-time ownership columns — a test simulates a property /
           // customer / catalog reassignment committing before the lock.
           customer_id: store.lockedCustomerId || CUSTOMER.customer_id,
+          service_type: CUSTOMER.service_type,
           property_id: store.lockedPropertyId ?? null,
           service_id: store.lockedCatalogServiceId ?? null,
           ...(store.lockedStamp || {}),
@@ -1379,6 +1380,7 @@ describe('recap ownership identity under the lock (codex P1 #4249)', () => {
   beforeEach(() => jest.clearAllMocks());
   const identity = {
     customerId: 'cust-1', propertyId: 'property-a', catalogServiceId: 'cat-1',
+    serviceType: 'Quarterly Pest Control', scheduledDate: '2026-05-29',
     address: { line1: '200 Palm Ave', line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
   };
   const customerRow = { first_name: 'Pat', last_name: 'Jones', address_line1: '200 Palm Ave', city: 'Parrish', state: 'FL', zip: '34219' };
@@ -1398,6 +1400,8 @@ describe('recap ownership identity under the lock (codex P1 #4249)', () => {
     ['property', { lockedPropertyId: 'property-b' }],
     ['customer', { lockedCustomerId: 'cust-2' }],
     ['catalog service', { lockedCatalogServiceId: 'cat-2' }],
+    ['service type', { lockedStamp: { service_type: 'Mosquito Control' } }],
+    ['scheduled date', { lockedScheduledDate: '2026-05-30' }],
     ['stamped address', { lockedStamp: { service_address_line1: '300 Palm Ave', service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219' } }],
   ])('a %s reassignment committing before the lock rejects the recap without writing', async (_label, lockedChange) => {
     const store = { serviceStatus: 'scheduled', records: [], customerRow, lockedPropertyId: 'property-a', lockedCatalogServiceId: 'cat-1', ...lockedChange };
