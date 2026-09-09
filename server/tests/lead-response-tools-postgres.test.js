@@ -207,7 +207,7 @@ const SKIP = !process.env.DATABASE_URL;
     }
   }, 30000);
 
-  test('actual appointment conversion and agent mutation both commit under contention', async () => {
+  test.each(['admin', 'phone'])('actual %s appointment conversion and agent mutation both commit under contention', async mode => {
     const express = require('express');
     const app = express();
     app.use(express.json());
@@ -223,7 +223,7 @@ const SKIP = !process.env.DATABASE_URL;
       while (Date.now() < deadline) {
         const { rows } = await db.raw(`SELECT count(*)::int AS count FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-          AND query ~ ?`, ['^select.*"(leads|customers)".*for (no key )?update']);
+          AND query ~ ?`, ['("leads"|"customers"|pg_advisory_xact_lock)']);
         if (rows[0].count >= count) return;
         await new Promise(resolve => setTimeout(resolve, 10));
       }
@@ -234,7 +234,18 @@ const SKIP = !process.env.DATABASE_URL;
       // the agent then holds customer while queued behind it: a real cycle.
       await holder('leads').where({ id: leadId }).forUpdate().first();
       const date = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
-      converting = fetch(`http://127.0.0.1:${server.address().port}/admin/leads/${leadId}/schedule-appointment`, {
+      converting = mode === 'phone' ? db.transaction(async trx => {
+        // The booking insert takes an FK KEY SHARE before the conversion
+        // savepoint, matching the phone caller's real outer transaction.
+        const [booking] = await trx('scheduled_services').insert({
+          customer_id: customerId, scheduled_date: date, service_type: 'Pest Control',
+        }).returning('*');
+        const { convertCallLeadOnPhoneBooking } = require('../services/call-recording-processor')._test;
+        const converted = await convertCallLeadOnPhoneBooking(trx, {
+          leadId, customerId, scheduledServiceId: booking.id, callSid: 'CA_qa_integrity', booking,
+        });
+        return { converted };
+      }) : fetch(`http://127.0.0.1:${server.address().port}/admin/leads/${leadId}/schedule-appointment`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date, time: '10:00', serviceType: 'Pest Control' }),
       }).then(async res => ({ status: res.status, body: await res.json() }));
@@ -242,7 +253,9 @@ const SKIP = !process.env.DATABASE_URL;
       updating = executeLeadTool('update_lead_pipeline', { stage: 'won', note: 'QA concurrent conversion' }, context);
       await waitForLocks(2);
       await holder.commit();
-      expect(await converting).toMatchObject({ status: 200, body: { customerId, createdCustomer: false } });
+      expect(await converting).toMatchObject(mode === 'phone'
+        ? { converted: true } // A committed booking alone hides a failed conversion savepoint.
+        : { status: 200, body: { customerId, createdCustomer: false } });
       expect(await updating).toMatchObject({ updated: true });
       expect(await db('scheduled_services').where({ customer_id: customerId })).toHaveLength(1);
       expect((await db('leads').where({ id: leadId }).first()).converted_at).toBeTruthy();
@@ -252,6 +265,36 @@ const SKIP = !process.env.DATABASE_URL;
       if (!holder.isCompleted()) await holder.rollback();
       await Promise.allSettled([converting, updating].filter(Boolean));
       await new Promise(resolve => server.close(resolve));
+    }
+  }, 30000);
+
+  test('an agent joins the acceptance comms fence before taking customer or lead rows', async () => {
+    const accepting = await db.transaction();
+    let updating;
+    try {
+      // estimate-public's acceptance takes comms, then its linked lead,
+      // then writes customer terms/preferences. Exercise that held order.
+      await require('../utils/customer-comms-lock').lockCustomerComms(accepting, customerId);
+      await accepting('leads').where({ id: leadId }).forUpdate().first();
+      updating = executeLeadTool('update_lead_pipeline', { stage: 'won' }, context);
+      const deadline = Date.now() + 10000;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        const { rows } = await db.raw(`SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+          AND query ILIKE '%pg_advisory_xact_lock%'`);
+        if (rows[0].count) { blocked = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      await accepting.raw("SET LOCAL lock_timeout = '1s'");
+      await accepting('customers').where({ id: customerId }).update({ first_name: 'QA accepted' });
+      await accepting.commit();
+      expect(await updating).toMatchObject({ updated: true });
+      expect((await db('customers').where({ id: customerId }).first()).first_name).toBe('QA accepted');
+    } finally {
+      if (!accepting.isCompleted()) await accepting.rollback();
+      if (updating) await updating.catch(() => {});
     }
   }, 30000);
 
