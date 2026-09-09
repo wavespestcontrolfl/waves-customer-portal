@@ -8373,23 +8373,24 @@ function readLawnAssessmentPhoto(file) {
 }
 
 function parseAssessmentScores(row = {}) {
-  const turf_density = row.turf_density ?? row.turfDensity ?? 0;
-  const weed_suppression = row.weed_suppression ?? row.weedSuppression ?? 0;
-  const color_health = row.color_health ?? row.colorHealth ?? 0;
+  const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
+  const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
+  const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
   // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
   // now corrects stress_damage directly instead of these two.
-  const fungus_control = row.fungus_control ?? row.fungusControl ?? 0;
-  const thatch_level = row.thatch_level ?? row.thatchLevel ?? 0;
+  const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
+  const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
   // Legacy assessments (created before the stress_damage column) have a null
   // stress_damage. Coercing that to 0 would make a plain re-confirm POST
   // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
   // override and persists an artificially low score. Instead derive it exactly the
   // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
   // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
-  const rawStress = row.stress_damage ?? row.stressDamage;
+  const rawStress = lawnScores.lawnScoreValue(row.stress_damage ?? row.stressDamage);
+  const components = [fungus_control, thatch_level].filter((value) => value != null);
   const stress_damage = rawStress != null
     ? rawStress
-    : Math.min(Number(fungus_control) || 0, Number(thatch_level) || 0, 95);
+    : (components.length ? Math.min(...components, 95) : null);
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
@@ -8632,17 +8633,19 @@ function LawnAssessmentCompletionBlock({
     onReady?.(false);
     setError("");
     try {
-      const response = await adminFetch("/admin/lawn-assessment/confirm", {
+      const { confirmed: confirmationComplete, assessment: savedAssessment } = await adminFetch("/admin/lawn-assessment/confirm", {
         method: "POST",
         body: JSON.stringify({
           assessmentId: result.assessment.id,
           adjustedScores: techScores || result.adjustedScores || result.displayScores,
         }),
       });
-      const assessmentId = response?.assessment?.id || result.assessment.id;
+      setResult((prev) => ({ ...prev, assessment: savedAssessment || prev.assessment }));
+      const assessmentId = confirmationComplete === false ? null : savedAssessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
       onReady?.(true);
+      setError(assessmentId ? "" : "Scores saved. Complete the missing scores before confirming.");
     } catch (err) {
       setError(err.message || "Confirm failed");
       // A definitive 4xx rejection means the write did NOT commit — null is
@@ -8796,7 +8799,7 @@ function LawnAssessmentCompletionBlock({
         <>
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
             {LAWN_ASSESSMENT_METRICS.map((metric) => {
-              const value = Number(scoreSource?.[metric.key] || 0);
+              const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
               return (
                 <div
                   key={metric.key}
@@ -8809,8 +8812,8 @@ function LawnAssessmentCompletionBlock({
                     minWidth: 0,
                   }}
                 >
-                  <div style={{ fontSize: 15, fontWeight: 500, color: lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value}/100
+                  <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
+                    {value == null ? "—" : `${value}/100`}
                   </div>
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
                   {!confirmed && (
@@ -8893,7 +8896,7 @@ function LawnAssessmentCompletionBlock({
           </div>
         </>
       )}
-      {error && <div style={{ fontSize: 12, color: D.red, lineHeight: 1.45 }}>{error}</div>}
+      {error && <div style={{ fontSize: 14, color: D.red, lineHeight: 1.45 }}>{error}</div>}
     </div>
   );
 }
