@@ -15,12 +15,17 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sms-intent', () => ({ isSmsReaction: jest.fn((b) => /^(👍|❤️|Liked|Loved) ?/.test(String(b))) }));
+jest.mock('../services/voice-agent/relay-protocol', () => ({
+  whereNotSandboxCall: jest.fn((qb) => { qb.whereRaw('SANDBOX_EXCLUDED'); return qb; }),
+}));
 
 const db = require('../models/db');
+const { whereNotSandboxCall } = require('../services/voice-agent/relay-protocol');
 const {
   REASONS,
   LOOKBACK_MS,
   VISIT_IN_PROGRESS_WINDOW_MS,
+  TEXT_SCAN_LIMIT,
   NON_SERVICE_NATURES,
   resolveOutboundCallReason,
   visitInProgress,
@@ -46,7 +51,8 @@ function installDb(byTable = {}) {
     b.orWhere = jest.fn((...a) => { q.wheres.push(['OR', ...a]); return b; });
     b.whereRaw = jest.fn((...a) => { q.raws.push(a); return b; });
     b.orderBy = jest.fn(() => b);
-    b.limit = jest.fn(() => b);
+    q.limits = [];
+    b.limit = jest.fn((n) => { q.limits.push(n); return b; });
     const rowsFor = () => {
       const isQuoteBridge = table === 'call_log' && q.wheres.some((w) => w[0] === 'direction' && w[1] === 'outbound');
       if (isQuoteBridge) return state.byTable.quote_bridges || [];
@@ -180,7 +186,7 @@ describe('resolveOutboundCallReason', () => {
   test('no customer and no usable phone → contact predicate is false, generic', async () => {
     const r = await resolveOutboundCallReason({ call: call({ customer_id: null }), phone: '' });
     expect(r.reason).toBe(REASONS.GENERIC);
-    for (const q of state.queries) expect(q.raws).toEqual([['false']]);
+    for (const q of state.queries) expect(q.raws).toContainEqual(['false']);
     expect(state.queries).toHaveLength(4);
   });
 
@@ -249,12 +255,32 @@ describe('resolveOutboundCallReason', () => {
     expect(isSubstantiveText({ message_body: 'looking for a wdo on 12211 Violet Jasper Dr' })).toBe(true);
   });
 
+  test('every call_log probe excludes voice-relay sandbox calls (dry-run scanner contract)', async () => {
+    installDb({ call_log: [{ id: 'in-9', created_at: hoursAgo(1), ai_extraction_enriched: { call_nature: 'new_lead' } }] });
+    await resolveOutboundCallReason({ call: call({ metadata: { relatedCallId: 'in-9' } }), phone: PHONE });
+    installDb({});
+    await resolveOutboundCallReason({ call: call(), phone: PHONE });
+    await nonServiceCaller({ customerId: 'cust-1', phone: PHONE, relatedCallId: 'in-9', before: T0 });
+    await nonServiceCaller({ customerId: 'cust-1', phone: PHONE, before: T0 });
+    for (const q of state.queries.filter((x) => x.table === 'call_log')) {
+      expect(q.raws).toContainEqual(['SANDBOX_EXCLUDED']);
+    }
+    expect(whereNotSandboxCall).toHaveBeenCalled();
+  });
+
+  test('the text probe scans deep enough that a run of acknowledgements cannot hide the real inquiry', async () => {
+    expect(TEXT_SCAN_LIMIT).toBeGreaterThanOrEqual(25);
+    await resolveOutboundCallReason({ call: call(), phone: PHONE });
+    const smsQ = state.queries.find((x) => x.table === 'sms_log');
+    expect(smsQ.limits).toEqual([TEXT_SCAN_LIMIT]);
+  });
+
   test('nothing in the lookback → generic', async () => {
     const r = await resolveOutboundCallReason({ call: call(), phone: PHONE });
     expect(r).toEqual({ reason: REASONS.GENERIC, evidence: {} });
   });
 
-  test('visitInProgress: TODAY\'s en_route/on_site visit, or an en_route/arrived stamp inside the last 3h; visit booked after the call never counts', async () => {
+  test('visitInProgress: TODAY\'s (ET) en_route/on_site visit, or an en_route/arrived stamp inside the last 3h; visit booked after the call never counts', async () => {
     installDb({ 'scheduled_services as ss': [{ id: 'v1' }] });
     await expect(visitInProgress({ customerId: 'cust-1', before: T0 })).resolves.toBe(true);
     const q = state.queries[0];
@@ -266,11 +292,10 @@ describe('resolveOutboundCallReason', () => {
       ['OR BETWEEN', 'ss.en_route_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
       ['OR BETWEEN', 'ss.arrived_at', [new Date(T0.getTime() - VISIT_IN_PROGRESS_WINDOW_MS), T0]],
     ]));
-    // The live-status branch is fenced to the call's day (stale on_site rows from days ago never count).
-    const dateFence = q.wheres.find((w) => w[0] === 'BETWEEN' && w[1] === 'ss.scheduled_date');
-    expect(dateFence).toBeTruthy();
-    expect(dateFence[2][0] < T0 && dateFence[2][1] > T0).toBe(true);
-    expect(dateFence[2][1] - dateFence[2][0]).toBeLessThanOrEqual(48 * 3600000);
+    // The live-status branch is fenced to the call's ET calendar day — never an
+    // adjacent day (codex r1 P1: yesterday's stale on_site row silenced today's text).
+    expect(q.wheres).toContainEqual(['ss.scheduled_date', '2026-09-08']);
+    expect(q.wheres.some((w) => w[0] === 'BETWEEN' && w[1] === 'ss.scheduled_date')).toBe(false);
     expect(q.wheres.some((w) => w[0] === 'JOIN')).toBe(false);
     expect(VISIT_IN_PROGRESS_WINDOW_MS).toBe(3 * 3600000);
     installDb({});

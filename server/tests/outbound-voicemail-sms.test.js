@@ -10,7 +10,9 @@
 
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
-  mockDb.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  // db.raw is BOTH the claim statement (awaited → { rows }) and an inline
+  // fragment builder elsewhere; the claim is the only await in this module.
+  mockDb.raw = jest.fn(async () => ({ rows: [{ id: 1 }] }));
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -40,6 +42,8 @@ const {
   MESSAGE_TYPE,
   GENERIC_TEMPLATE_KEY,
   REASON_TEMPLATE_KEYS,
+  CLAIM_PREFIX,
+  CLAIM_WINDOW,
   GATE,
   isVoicemailAnsweredBy,
   isAdminPhone,
@@ -56,19 +60,22 @@ const IN_WINDOW = new Date('2026-09-08T15:00:00Z');
 const OUT_OF_WINDOW = new Date('2026-09-09T02:00:00Z');
 
 let smsLogFirst;
+let claimDel;
 
 function installDb({ priorRow = undefined, firstError = null } = {}) {
   smsLogFirst = jest.fn(async () => {
     if (firstError) throw firstError;
     return priorRow;
   });
+  claimDel = jest.fn(async () => 1);
   db.mockImplementation((table) => {
-    if (table !== 'sms_log') throw new Error(`unexpected table ${table}`);
     const b = {};
     b.where = jest.fn(() => b);
-    b.first = smsLogFirst;
-    return b;
+    if (table === 'sms_log') { b.first = smsLogFirst; return b; }
+    if (table === 'sms_send_claims') { b.del = claimDel; return b; }
+    throw new Error(`unexpected table ${table}`);
   });
+  db.raw.mockImplementation(async () => ({ rows: [{ id: 1 }] }));
 }
 
 beforeEach(() => {
@@ -171,7 +178,7 @@ describe('precheck — decided before the customer leg is hung up', () => {
 describe('sendOutboundVoicemailText', () => {
   test('gate off → no template render, no send', async () => {
     isEnabled.mockImplementation(() => false);
-    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'gate_off' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'gate_off', reason: 'generic' });
     expect(renderSmsTemplate).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
@@ -180,6 +187,7 @@ describe('sendOutboundVoicemailText', () => {
     renderSmsTemplate.mockResolvedValueOnce(null);
     await expect(sendOutboundVoicemailText({ phone: PHONE, customerId: 'c1' })).resolves.toEqual({ sent: false, skipped: 'template_disabled', reason: 'generic' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(claimDel).toHaveBeenCalledTimes(1); // nothing left → claim released
   });
 
   test('linked customer: customer audience, phone_matches_customer trust, no STOP footer, callback clause from the caller ID, reply from the main line', async () => {
@@ -197,7 +205,7 @@ describe('sendOutboundVoicemailText', () => {
       first_name: 'Maria',
       callback_clause: ' at (941) 297-5749',
       optout_clause: '',
-    }, { workflow: MESSAGE_TYPE, entity_type: 'customer', entity_id: 'cust-1' });
+    }, { workflow: MESSAGE_TYPE, entity_type: 'customer', entity_id: 'cust-1' }, { requiredVars: ['first_name', 'callback_clause', 'optout_clause'] });
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     const input = sendCustomerMessage.mock.calls[0][0];
@@ -279,28 +287,63 @@ describe('sendOutboundVoicemailText', () => {
   test('a suppression sentinel from the pipeline is reported as not sent', async () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
     await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
-      sent: false, skipped: 'send_suppressed', code: 'gate-blocked',
+      sent: false, skipped: 'send_suppressed', code: 'gate-blocked', reason: 'generic',
     });
+    expect(claimDel).toHaveBeenCalledTimes(1); // nothing left → claim released
   });
 
   test('a policy block (STOP list) is reported with its code', async () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED_STOP' });
     await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
-      sent: false, skipped: 'policy_block', code: 'SUPPRESSED_STOP',
+      sent: false, skipped: 'policy_block', code: 'SUPPRESSED_STOP', reason: 'generic',
     });
+    expect(claimDel).toHaveBeenCalledTimes(1);
   });
 
   test('a provider failure is reported as provider_failed', async () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, code: '30006', reason: 'landline' });
     await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({
-      sent: false, skipped: 'provider_failed', code: '30006',
+      sent: false, skipped: 'provider_failed', code: '30006', reason: 'generic', ambiguous: false,
     });
+    expect(claimDel).toHaveBeenCalledTimes(1);
+  });
+
+  test('an AMBIGUOUS provider outcome (retryable / deferred) keeps the claim — the provider may still hold the text', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, retryable: true, code: 'TWILIO_TIMEOUT' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toMatchObject({ sent: false, skipped: 'provider_failed', ambiguous: true });
+    expect(claimDel).not.toHaveBeenCalled();
+  });
+
+  test('the atomic per-phone claim is taken right before the send and lost claims skip (concurrent callbacks → one text)', async () => {
+    await sendOutboundVoicemailText({ phone: '(941) 555-0101' });
+    expect(db.raw).toHaveBeenCalledTimes(1);
+    const [sql, bindings] = db.raw.mock.calls[0];
+    expect(sql).toMatch(/INSERT INTO sms_send_claims/);
+    expect(sql).toMatch(/ON CONFLICT \(claim_key\) DO UPDATE/);
+    expect(sql).toContain(`interval '${CLAIM_WINDOW}'`);
+    expect(bindings).toEqual([`${CLAIM_PREFIX}${PHONE}`]);
+    expect(CLAIM_WINDOW).toBe('24 hours');
+    // Claim held by a concurrent execution → no render, no send, no release.
+    jest.clearAllMocks();
+    installDb();
+    db.raw.mockImplementation(async () => ({ rows: [] }));
+    await expect(sendOutboundVoicemailText({ phone: PHONE, reason: 'saw_text' })).resolves.toEqual({ sent: false, skipped: 'already_sent_recently', reason: 'saw_text' });
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(claimDel).not.toHaveBeenCalled();
+  });
+
+  test('a claim statement failure fails CLOSED', async () => {
+    db.raw.mockImplementation(async () => { throw Object.assign(new Error('down'), { code: 'ECONN' }); });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'claim_failed', reason: 'generic' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('re-runs the precheck itself so a direct call is still safe', async () => {
     installDb({ priorRow: { id: 'sms1' } });
-    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'already_sent_recently' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toEqual({ sent: false, skipped: 'already_sent_recently', reason: 'generic' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled(); // the sms_log probe exits before the claim
   });
 });
 

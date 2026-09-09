@@ -25,7 +25,10 @@
  *      a non-service contact (van complaint, solicitor, applicant, wrong
  *      number — owner ruling 2026-09-09).
  *   4. One text per phone per 24h — an admin who redials the same number
- *      an hour later must not double-text (sms_log probe on message_type).
+ *      an hour later must not double-text: an atomic sms_send_claims row
+ *      (the same cross-process gate tech-line / estimate-public use) taken
+ *      right before the send, released when nothing left; the sms_log probe
+ *      stays as a cheap early exit.
  *   5. The sendCustomerMessage policy pipeline: suppression (STOP),
  *      consent (transactional — we called about their own service), emoji
  *      fail-closed, line-type, audit log.
@@ -36,8 +39,13 @@
  *      disabled generic template is the lane's kill switch.
  *   7. Never to a staff phone (the bridge's admin leg).
  *
- * precheck() runs 1–4 and is called BEFORE the webhook hangs up the customer
- * leg: if the text cannot go, nothing changes for the admin on the call.
+ * Ordering contract with the webhook: the TEXT IS SENT FIRST and the
+ * customer leg is hung up only on a real provider send (codex #4195 r1 P1 —
+ * a disabled template or a policy block used to be discovered after the
+ * hangup, with the admin told a text was going). AMD reports ~3–4 s into the
+ * greeting and the send takes ~1–2 s, so the hangup still lands before the
+ * beep on ordinary greetings; on a very short greeting a blank voicemail is
+ * the worst case.
  */
 
 const db = require('../models/db');
@@ -50,6 +58,13 @@ const { isRealProviderSend } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const { REASONS, visitInProgress, nonServiceCaller } = require('./outbound-call-reason');
+
+const CLAIM_PREFIX = 'outbound_voicemail:';
+const CLAIM_WINDOW = '24 hours';
+// The four lane templates share one placeholder contract; the write-time
+// guard (admin-sms-templates REQUIRED_TEMPLATE_PLACEHOLDERS) and this
+// render-time check read the same list.
+const REQUIRED_VARS = ['first_name', 'callback_clause', 'optout_clause'];
 
 // One message_type for the whole lane (dedupe + sms_log history), one
 // template per reason the resolver can honestly name. A deactivated reason
@@ -162,36 +177,83 @@ async function precheck({ phone: rawPhone, customerId = null, relatedCallId = nu
 
 async function renderForReason(reason, vars, context) {
   const key = REASON_TEMPLATE_KEYS[reason] || GENERIC_TEMPLATE_KEY;
-  let body = await renderSmsTemplate(key, vars, context);
+  const opts = { requiredVars: REQUIRED_VARS };
+  let body = await renderSmsTemplate(key, vars, context, opts);
   let templateKey = key;
   if (!body && key !== GENERIC_TEMPLATE_KEY) {
     // Reason template missing/disabled → the generic copy is always true.
-    body = await renderSmsTemplate(GENERIC_TEMPLATE_KEY, vars, context);
+    body = await renderSmsTemplate(GENERIC_TEMPLATE_KEY, vars, context, opts);
     templateKey = GENERIC_TEMPLATE_KEY;
   }
   return { body, templateKey };
 }
 
+// Atomic per-phone claim: a fresh insert, or a takeover of a claim older than
+// the window, in ONE statement (the pattern tech-line.js / estimate-public.js
+// use on the same table — no advisory-lock transaction on the pool).
+async function claimSend(phone) {
+  const claim = await db.raw(
+    `INSERT INTO sms_send_claims (claim_key) VALUES (?)
+     ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+     WHERE sms_send_claims.created_at < NOW() - interval '${CLAIM_WINDOW}'
+     RETURNING id`,
+    [CLAIM_PREFIX + phone],
+  );
+  return (claim?.rows || []).length > 0;
+}
+function releaseClaim(phone) {
+  return db('sms_send_claims').where({ claim_key: CLAIM_PREFIX + phone }).del()
+    .catch((err) => logger.warn(`[outbound-voicemail-sms] claim release failed for ${maskPhone(phone)} (${err?.code || err?.name || 'error'})`));
+}
+// A retryable / deferred provider outcome is NOT a definitive no-send — the
+// provider may still hold the text — so the claim stays held (tech-line rule).
+function isAmbiguousOutcome(result) {
+  return Boolean(result) && result.sent !== true && !result.blocked && Boolean(result.retryable || result.deferred);
+}
+
+// Fold a sendCustomerMessage result into this lane's outcome shape.
+function classifyOutcome(result, { phone, reason, templateKey, callLogId }) {
+  if (result.sent && isRealProviderSend(result)) {
+    logger.info(`[outbound-voicemail-sms] Missed-you text (${reason}) sent to ${maskPhone(phone)} (call_log ${callLogId || 'n/a'})`);
+    return { sent: true, providerMessageId: result.providerMessageId, reason, templateKey };
+  }
+  if (result.sent) {
+    // Upstream suppression sentinel — no text actually left the system.
+    logger.info(`[outbound-voicemail-sms] Suppression sentinel for ${maskPhone(phone)} (${result.providerMessageId || 'no-id'})`);
+    return { sent: false, skipped: 'send_suppressed', code: result.providerMessageId || null, reason };
+  }
+  if (result.blocked) {
+    logger.info(`[outbound-voicemail-sms] Policy-blocked for ${maskPhone(phone)}: ${result.code || result.reason || 'blocked'}`);
+    return { sent: false, skipped: 'policy_block', code: result.code || null, reason };
+  }
+  logger.warn(`[outbound-voicemail-sms] Provider send failed for ${maskPhone(phone)}: ${result.code || result.reason || 'unknown'}`);
+  return { sent: false, skipped: 'provider_failed', code: result.code || null, reason, ambiguous: isAmbiguousOutcome(result) };
+}
+
 /**
- * Send the missed-you text. Callers are expected to have run precheck()
- * first; it is re-run here so a direct call is still safe.
+ * Send the missed-you text. Runs precheck() itself, then takes the atomic
+ * per-phone claim, renders, sends, and releases the claim when nothing left.
  *
  * @param {object} p
- * @param {string}  p.phone        customer number (any format)
- * @param {string}  [p.customerId] linked customer, when the call had one
- * @param {string}  [p.firstName]  for the greeting; falls back to "there"
+ * @param {string}  p.phone          customer number (any format)
+ * @param {string}  [p.customerId]   linked customer, when the call had one
+ * @param {string}  [p.firstName]    for the greeting; falls back to "there"
  * @param {string}  [p.callLogId]
- * @param {string}  [p.callSid]    the customer-leg CallSid (audit trail)
- * @param {string}  [p.callerId]   the number the customer saw ring
- * @param {string}  [p.reason]     a REASONS value from outbound-call-reason.js (default generic)
+ * @param {string}  [p.callSid]      the customer-leg CallSid (audit trail)
+ * @param {string}  [p.callerId]     the number the customer saw ring
+ * @param {string}  [p.reason]       a REASONS value from outbound-call-reason.js (default generic)
+ * @param {string}  [p.relatedCallId] the inbound call a call-log callback is returning
  */
 async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, firstName = '', callLogId = null, callSid = null, callerId = null, reason = REASONS.GENERIC, relatedCallId = null } = {}) {
   const pre = await precheck({ phone: rawPhone, customerId, relatedCallId });
   if (!pre.ok) {
     logger.info(`[outbound-voicemail-sms] Skipped (${pre.skipped}) for ${maskPhone(rawPhone)}`);
-    return { sent: false, skipped: pre.skipped };
+    return { sent: false, skipped: pre.skipped, reason };
   }
   const phone = pre.phone;
+
+  const claim = await acquireClaim(phone);
+  if (claim.skipped) return { sent: false, skipped: claim.skipped, reason };
 
   const { body, templateKey } = await renderForReason(reason, {
     first_name: capitalizeName(firstName) || 'there',
@@ -206,20 +268,40 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
     entity_id: customerId || callLogId || null,
   });
   if (!body) {
+    await releaseClaim(phone);
     logger.info(`[outbound-voicemail-sms] Template ${GENERIC_TEMPLATE_KEY} missing/disabled — text skipped for ${maskPhone(phone)}`);
     return { sent: false, skipped: 'template_disabled', reason };
   }
 
-  // Reply from the line the customer just saw ring (matches the body's
-  // {callback_clause}) — only when it's one of OUR managed numbers and not
-  // the AI-assistant toll-free line, whose replies enter the AI chat flow
-  // instead of the human comms inbox. Otherwise the location default applies.
-  const fromNumber = callerId
+  const result = await sendCustomerMessage(buildSendInput({ phone, body, customerId, callerId, callSid, callLogId, reason, templateKey }));
+  const outcome = classifyOutcome(result, { phone, reason, templateKey, callLogId });
+  if (!outcome.sent && !outcome.ambiguous) await releaseClaim(phone);
+  return outcome;
+}
+
+async function acquireClaim(phone) {
+  try {
+    return (await claimSend(phone)) ? { ok: true } : { skipped: 'already_sent_recently' };
+  } catch (e) {
+    logger.warn(`[outbound-voicemail-sms] send claim failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
+    return { skipped: 'claim_failed' };
+  }
+}
+
+// Reply from the line the customer just saw ring (matches the body's
+// {callback_clause}) — only when it's one of OUR managed numbers and not the
+// AI-assistant toll-free line, whose replies enter the AI chat flow instead
+// of the human comms inbox. Otherwise the location default applies.
+function replyFromNumber(callerId) {
+  return callerId
     && callerId !== TWILIO_NUMBERS.tollFree?.number
     && TWILIO_NUMBERS.findByNumber(callerId)
     ? callerId : null;
+}
 
-  const result = await sendCustomerMessage({
+function buildSendInput({ phone, body, customerId, callerId, callSid, callLogId, reason, templateKey }) {
+  const fromNumber = replyFromNumber(callerId);
+  return {
     to: phone,
     body,
     channel: 'sms',
@@ -237,23 +319,7 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
       template_key: templateKey,
       ...(fromNumber ? { fromNumber } : {}),
     },
-  });
-
-  if (result.sent && isRealProviderSend(result)) {
-    logger.info(`[outbound-voicemail-sms] Missed-you text (${reason}) sent to ${maskPhone(phone)} (call_log ${callLogId || 'n/a'})`);
-    return { sent: true, providerMessageId: result.providerMessageId, reason, templateKey };
-  }
-  if (result.sent) {
-    // Upstream suppression sentinel — no text actually left the system.
-    logger.info(`[outbound-voicemail-sms] Suppression sentinel for ${maskPhone(phone)} (${result.providerMessageId || 'no-id'})`);
-    return { sent: false, skipped: 'send_suppressed', code: result.providerMessageId || null };
-  }
-  if (result.blocked) {
-    logger.info(`[outbound-voicemail-sms] Policy-blocked for ${maskPhone(phone)}: ${result.code || result.reason || 'blocked'}`);
-    return { sent: false, skipped: 'policy_block', code: result.code || null };
-  }
-  logger.warn(`[outbound-voicemail-sms] Provider send failed for ${maskPhone(phone)}: ${result.code || result.reason || 'unknown'}`);
-  return { sent: false, skipped: 'provider_failed', code: result.code || null };
+  };
 }
 
 module.exports = {
@@ -266,5 +332,7 @@ module.exports = {
   isAdminPhone,
   precheck,
   sendOutboundVoicemailText,
-  _private: { callbackClause, normalizePhoneE164, capitalizeName, renderForReason },
+  CLAIM_PREFIX,
+  CLAIM_WINDOW,
+  _private: { callbackClause, normalizePhoneE164, capitalizeName, renderForReason, classifyOutcome, claimSend, releaseClaim },
 };

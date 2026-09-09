@@ -45,6 +45,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isSmsReaction } = require('./sms-intent');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { etDateString } = require('../utils/datetime-et');
 
 const REASONS = Object.freeze({
   QUOTE_REQUEST: 'quote_request',
@@ -58,6 +60,7 @@ const QUOTE_REQUEST_SOURCES = new Set(['lead-webhook-auto-bridge']);
 const QUOTE_FORM_CHANNELS = new Set(['form', 'website_quote']);
 // Reply types that are answers to OUR texts, never a message to call back about.
 const IGNORED_TEXT_TYPES = new Set(['reschedule_reply']);
+const TEXT_SCAN_LIMIT = 25;
 const VISIT_IN_PROGRESS_STATUSES = ['en_route', 'on_site'];
 const VISIT_IN_PROGRESS_WINDOW_MS = 3 * 60 * 60 * 1000;
 // The customer-facing arrival texts — phone-keyed, so they cover a call row
@@ -104,8 +107,8 @@ function fromContact(qb, { customerId, phoneLast10, phoneColumn }) {
 
 async function relatedInboundCall(relatedCallId) {
   if (!relatedCallId || relatedCallId === 'undefined') return null;
-  const row = await db('call_log')
-    .where({ id: relatedCallId, direction: 'inbound' })
+  const row = await whereNotSandboxCall(db('call_log')
+    .where({ id: relatedCallId, direction: 'inbound' }))
     .first('id', 'created_at', 'ai_extraction_enriched');
   if (!row) return null;
   if (NON_CONTACT_NATURES.has(callNature(row))) return null;
@@ -114,10 +117,10 @@ async function relatedInboundCall(relatedCallId) {
 
 async function latestInboundCall({ customerId, phoneLast10, before, since }) {
   const rows = await fromContact(
-    db('call_log')
+    whereNotSandboxCall(db('call_log')
       .where('direction', 'inbound')
       .where('created_at', '<', before)
-      .where('created_at', '>=', since),
+      .where('created_at', '>=', since)),
     { customerId, phoneLast10, phoneColumn: 'from_phone' },
   )
     .orderBy('created_at', 'desc')
@@ -147,7 +150,9 @@ async function latestInboundText({ customerId, phoneLast10, before, since }) {
     { customerId, phoneLast10, phoneColumn: 'from_phone' },
   )
     .orderBy('created_at', 'desc')
-    .limit(5)
+    // A thread of acknowledgements can be long ("Ok" / "Thanks" / a thumbs-up
+    // per reminder); the real inquiry must still be reachable behind them.
+    .limit(TEXT_SCAN_LIMIT)
     .select('id', 'created_at', 'message_body', 'message_type');
   return rows.find(isSubstantiveText) || null;
 }
@@ -178,13 +183,13 @@ async function nonServiceCaller({ customerId, phone, relatedCallId = null, befor
   const since = new Date(at.getTime() - LOOKBACK_MS);
   let row = null;
   if (relatedCallId && relatedCallId !== 'undefined') {
-    row = await db('call_log').where({ id: relatedCallId, direction: 'inbound' }).first('id', 'ai_extraction_enriched');
+    row = await whereNotSandboxCall(db('call_log').where({ id: relatedCallId, direction: 'inbound' })).first('id', 'ai_extraction_enriched');
   }
   if (!row) {
     const phoneLast10 = last10(phone);
     if (!customerId && !phoneLast10) return false;
     row = await fromContact(
-      db('call_log').where('direction', 'inbound').where('created_at', '<', at).where('created_at', '>=', since),
+      whereNotSandboxCall(db('call_log').where('direction', 'inbound').where('created_at', '<', at).where('created_at', '>=', since)),
       { customerId, phoneLast10, phoneColumn: 'from_phone' },
     ).orderBy('created_at', 'desc').first('id', 'ai_extraction_enriched');
   }
@@ -203,13 +208,12 @@ async function visitInProgress({ customerId, phone = null, before = new Date() }
   if (!customerId && !phoneLast10) return false;
   const at = new Date(before);
   const since = new Date(at.getTime() - VISIT_IN_PROGRESS_WINDOW_MS);
-  // Live status counts only for a visit dated today: the audit found rows
-  // left at on_site for days (never transitioned), and a visit booked AFTER
-  // the call must not suppress it. The en_route_at / arrived_at stamps are
-  // exact and make the check replayable on history.
-  const dayStart = new Date(at); dayStart.setUTCHours(0, 0, 0, 0);
-  const dayEnd = new Date(dayStart.getTime() + 36 * 60 * 60 * 1000); // ET-safe slack over the UTC day
-  const dayStartSlack = new Date(dayStart.getTime() - 12 * 60 * 60 * 1000);
+  // Live status counts only for a visit dated the call's ET day: the audit
+  // found rows left at on_site for days (never transitioned), and a visit
+  // booked AFTER the call must not suppress it (codex r1 P1: an adjacent-day
+  // slack let yesterday's stale on_site row silence today's text). The
+  // en_route_at / arrived_at stamps are exact and make the check replayable.
+  const etDay = etDateString(at);
   const row = await db('scheduled_services as ss')
     .modify((qb) => {
       // No linked customer on the call row → match the dialed number to a
@@ -223,7 +227,7 @@ async function visitInProgress({ customerId, phone = null, before = new Date() }
     .where(function active() {
       this.where(function liveToday() {
         this.whereIn('ss.status', VISIT_IN_PROGRESS_STATUSES)
-          .whereBetween('ss.scheduled_date', [dayStartSlack, dayEnd]);
+          .where('ss.scheduled_date', etDay);
       })
         .orWhereBetween('ss.en_route_at', [since, at])
         .orWhereBetween('ss.arrived_at', [since, at]);
@@ -245,9 +249,9 @@ async function visitInProgress({ customerId, phone = null, before = new Date() }
 // follow-up call is still about their quote request. The bridge row's
 // to_phone is the admin cell; the prospect's number is metadata.leadPhone.
 async function latestQuoteBridge({ customerId, phoneLast10, before, since }) {
-  return db('call_log')
+  return whereNotSandboxCall(db('call_log')
     .where('direction', 'outbound')
-    .whereIn('source', [...QUOTE_REQUEST_SOURCES])
+    .whereIn('source', [...QUOTE_REQUEST_SOURCES]))
     .where('created_at', '<', before)
     .where('created_at', '>=', since)
     .where(function contact() {
@@ -320,6 +324,7 @@ module.exports = {
   NON_CONTACT_NATURES,
   NON_SERVICE_NATURES,
   VISIT_IN_PROGRESS_WINDOW_MS,
+  TEXT_SCAN_LIMIT,
   resolveOutboundCallReason,
   visitInProgress,
   nonServiceCaller,

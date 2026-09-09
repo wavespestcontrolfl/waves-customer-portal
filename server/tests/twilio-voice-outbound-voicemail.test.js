@@ -27,7 +27,6 @@ jest.mock('../services/outbound-voicemail-sms', () => {
   return {
     GATE: actual.GATE,
     isVoicemailAnsweredBy: actual.isVoicemailAnsweredBy,
-    precheck: jest.fn(async () => ({ ok: true, phone: '+19415550101' })),
     sendOutboundVoicemailText: jest.fn(async () => ({ sent: true, providerMessageId: 'SM_sent' })),
   };
 });
@@ -50,7 +49,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const twilio = require('twilio');
 const { isEnabled } = require('../config/feature-gates');
-const { precheck, sendOutboundVoicemailText } = require('../services/outbound-voicemail-sms');
+const { sendOutboundVoicemailText } = require('../services/outbound-voicemail-sms');
 const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 
@@ -99,7 +98,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.SERVER_DOMAIN;
   isEnabled.mockImplementation(() => false);
-  precheck.mockImplementation(async () => ({ ok: true, phone: CUSTOMER }));
   sendOutboundVoicemailText.mockImplementation(async () => ({ sent: true, providerMessageId: 'SM_sent', templateKey: 'outbound_voicemail_missed_you' }));
   resolveOutboundCallReason.mockImplementation(async () => ({ reason: 'generic', evidence: {} }));
   installDb();
@@ -178,16 +176,15 @@ describe('POST /outbound-amd', () => {
     body: { CallSid: 'CA_child', AnsweredBy: answeredBy, MachineDetectionDuration: '3200', ...extra.body },
   });
 
-  test('human verdict → AMD result stamped, no precheck, no hangup, no text', async () => {
+  test('human verdict → AMD result stamped, no send, no hangup', async () => {
     const res = mockRes();
     await amd()(req('human'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
     expect(metadataPatches()).toEqual([
       { amd: { answered_by: 'human', duration_ms: 3200, child_call_sid: 'CA_child', at: expect.any(String) } },
     ]);
-    expect(precheck).not.toHaveBeenCalled();
-    expect(twilio.__calls).not.toHaveBeenCalled();
     expect(sendOutboundVoicemailText).not.toHaveBeenCalled();
+    expect(twilio.__calls).not.toHaveBeenCalled();
   });
 
   test('unknown verdict is treated like human', async () => {
@@ -196,21 +193,35 @@ describe('POST /outbound-amd', () => {
     expect(sendOutboundVoicemailText).not.toHaveBeenCalled();
   });
 
-  test('machine verdict but text cannot go → customer leg LEFT UP, skip reason stamped, no text', async () => {
-    precheck.mockResolvedValueOnce({ ok: false, skipped: 'quiet_hours' });
+  test('machine verdict, text did NOT go (any reason) → customer leg LEFT UP, skip stamped, no detected stamp', async () => {
+    sendOutboundVoicemailText.mockResolvedValueOnce({ sent: false, skipped: 'quiet_hours', reason: 'generic' });
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
-    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: null, relatedCallId: null });
     expect(twilio.__calls).not.toHaveBeenCalled();
-    expect(sendOutboundVoicemailText).not.toHaveBeenCalled();
     const patches = metadataPatches();
     expect(patches).toHaveLength(2);
-    expect(patches[1]).toEqual({ voicemail_text: { outcome: 'skipped', reason: 'quiet_hours' } });
+    expect(patches[1]).toEqual({ voicemail_text: { outcome: 'skipped', reason: 'quiet_hours', code: null, call_reason: 'generic' } });
     expect(patches.some((p) => p[AMD_MACHINE_DETECTED_KEY])).toBe(false);
   });
 
-  test('machine verdict, text can go → stamp detected, hang up the CHILD leg, text with the linked customer first name, stamp sent', async () => {
+  test('a disabled template or a policy block is discovered BEFORE the hangup — the admin is never told a text went out', async () => {
+    for (const outcome of [
+      { sent: false, skipped: 'template_disabled', reason: 'generic' },
+      { sent: false, skipped: 'policy_block', code: 'SUPPRESSED_STOP', reason: 'generic' },
+      { sent: false, skipped: 'send_suppressed', code: 'gate-blocked', reason: 'generic' },
+    ]) {
+      jest.clearAllMocks();
+      installDb({ call_log: { id: CALL_LOG_ID, customer_id: 'cust-9', to_phone: CUSTOMER } });
+      sendOutboundVoicemailText.mockResolvedValueOnce(outcome);
+      await amd()(req('machine_start'), mockRes());
+      expect(twilio.__calls).not.toHaveBeenCalled();
+      expect(metadataPatches().some((p) => p[AMD_MACHINE_DETECTED_KEY])).toBe(false);
+      expect(metadataPatches()[1].voicemail_text).toMatchObject({ outcome: 'skipped', reason: outcome.skipped });
+    }
+  });
+
+  test('machine verdict, text SENT → send first, then stamp detected + sent, THEN hang up the CHILD leg', async () => {
     installDb({
       call_log: { id: CALL_LOG_ID, customer_id: 'cust-9', to_phone: CUSTOMER },
       customers: { id: 'cust-9', first_name: 'Maria' },
@@ -218,20 +229,6 @@ describe('POST /outbound-amd', () => {
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
-    // The precheck sees the linked customer (visit-in-progress suppression).
-    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: 'cust-9', relatedCallId: null });
-
-    const patches = metadataPatches();
-    // Order matters: the detected stamp lands BEFORE the hangup so the dial
-    // action (which fires the instant the child drops) already sees it.
-    expect(Object.keys(patches[1])).toEqual([AMD_MACHINE_DETECTED_KEY]);
-    const detectedIndex = state.updates.findIndex((u) => u.table === 'call_log' && u.patch.metadata && JSON.parse(u.patch.metadata.bindings[0])[AMD_MACHINE_DETECTED_KEY]);
-    expect(detectedIndex).toBeGreaterThanOrEqual(0);
-    expect(twilio.__update.mock.invocationCallOrder[0]).toBeGreaterThan(0);
-
-    expect(twilio).toHaveBeenCalledWith(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-    expect(twilio.__calls).toHaveBeenCalledWith('CA_child');
-    expect(twilio.__update).toHaveBeenCalledWith({ status: 'completed' });
 
     expect(sendOutboundVoicemailText).toHaveBeenCalledWith({
       phone: CUSTOMER,
@@ -243,21 +240,49 @@ describe('POST /outbound-amd', () => {
       reason: 'generic',
       relatedCallId: null,
     });
-    expect(patches[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_sent', reason: 'generic', template_key: 'outbound_voicemail_missed_you', evidence: {} } });
+    const patches = metadataPatches();
+    expect(patches[1]).toEqual({
+      [AMD_MACHINE_DETECTED_KEY]: expect.any(String),
+      voicemail_text: { outcome: 'sent', provider_sid: 'SM_sent', reason: 'generic', template_key: 'outbound_voicemail_missed_you', evidence: {} },
+    });
+    // Order: send → stamp → hangup.
+    const sendOrder = sendOutboundVoicemailText.mock.invocationCallOrder[0];
+    const hangupOrder = twilio.__update.mock.invocationCallOrder[0];
+    const stampUpdate = state.updates.find((u) => u.table === 'call_log' && u.patch.metadata && JSON.parse(u.patch.metadata.bindings[0])[AMD_MACHINE_DETECTED_KEY]);
+    expect(stampUpdate).toBeTruthy();
+    expect(sendOrder).toBeLessThan(hangupOrder);
+    expect(twilio).toHaveBeenCalledWith(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+    expect(twilio.__calls).toHaveBeenCalledWith('CA_child');
+    expect(twilio.__update).toHaveBeenCalledWith({ status: 'completed' });
   });
 
-  test('the resolved reason rides into the send and onto the call_log stamp', async () => {
+  test('no linked customer → texts the dialed number with no name and no customerId', async () => {
+    installDb({ call_log: { id: CALL_LOG_ID, customer_id: null, to_phone: CUSTOMER } });
+    await amd()(req('machine_start'), mockRes());
+    expect(sendOutboundVoicemailText).toHaveBeenCalledWith(expect.objectContaining({
+      phone: CUSTOMER, customerId: null, firstName: '', callLogId: CALL_LOG_ID,
+    }));
+  });
+
+  test('hangup REST failure after a real send is logged; the text is already out', async () => {
+    installDb({ call_log: { id: CALL_LOG_ID, customer_id: null, to_phone: CUSTOMER } });
+    twilio.__update.mockRejectedValueOnce(new Error('Call is not in-progress'));
+    const res = mockRes();
+    await amd()(req('machine_start'), res);
+    expect(sendOutboundVoicemailText).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('customer-leg hangup failed'));
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+  });
+
+  test('the resolved reason and the callback\'s related call ride into the send and onto the call_log stamp', async () => {
     const row = { id: CALL_LOG_ID, customer_id: 'cust-9', source: 'admin-callback', metadata: { relatedCallId: 'in-1' }, created_at: new Date('2026-09-08T15:00:00Z') };
     installDb({ call_log: row, customers: { id: 'cust-9', first_name: 'Maria' } });
     resolveOutboundCallReason.mockResolvedValueOnce({ reason: 'returning_call', evidence: { related_call_id: 'in-1' } });
     sendOutboundVoicemailText.mockResolvedValueOnce({ sent: true, providerMessageId: 'SM_2', templateKey: 'outbound_voicemail_returning_call' });
     await amd()(req('machine_start'), mockRes());
-    // The resolver sees the call_log row (source + metadata + created_at) and the DIALED number from the query;
-    // the precheck sees the callback's related inbound call for the non-service check.
     expect(resolveOutboundCallReason).toHaveBeenCalledWith({ call: row, phone: CUSTOMER });
-    expect(precheck).toHaveBeenCalledWith({ phone: CUSTOMER, customerId: 'cust-9', relatedCallId: 'in-1' });
-    expect(sendOutboundVoicemailText).toHaveBeenCalledWith(expect.objectContaining({ reason: 'returning_call' }));
-    expect(metadataPatches()[2]).toEqual({ voicemail_text: { outcome: 'sent', provider_sid: 'SM_2', reason: 'returning_call', template_key: 'outbound_voicemail_returning_call', evidence: { related_call_id: 'in-1' } } });
+    expect(sendOutboundVoicemailText).toHaveBeenCalledWith(expect.objectContaining({ reason: 'returning_call', relatedCallId: 'in-1' }));
+    expect(metadataPatches()[1].voicemail_text).toEqual({ outcome: 'sent', provider_sid: 'SM_2', reason: 'returning_call', template_key: 'outbound_voicemail_returning_call', evidence: { related_call_id: 'in-1' } });
   });
 
   test('auto-bridge row: the text goes to the DIALED number from the query, never call_log.to_phone (the admin cell)', async () => {
@@ -269,36 +294,9 @@ describe('POST /outbound-amd', () => {
     expect(arg.reason).toBe('quote_request');
   });
 
-  test('no linked customer → texts the dialed number with no name and no customerId', async () => {
-    installDb({ call_log: { id: CALL_LOG_ID, customer_id: null, to_phone: CUSTOMER } });
-    await amd()(req('machine_start'), mockRes());
-    expect(sendOutboundVoicemailText).toHaveBeenCalledWith(expect.objectContaining({
-      phone: CUSTOMER, customerId: null, firstName: '', callLogId: CALL_LOG_ID,
-    }));
-  });
-
-  test('hangup REST failure still sends the text (a voicemail plus a text beats a silent missed call)', async () => {
-    installDb({ call_log: { id: CALL_LOG_ID, customer_id: null, to_phone: CUSTOMER } });
-    twilio.__update.mockRejectedValueOnce(new Error('Call is not in-progress'));
-    const res = mockRes();
-    await amd()(req('machine_start'), res);
-    expect(sendOutboundVoicemailText).toHaveBeenCalledTimes(1);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('customer-leg hangup failed'));
-    expect(res.sendStatus).toHaveBeenCalledWith(200);
-  });
-
-  test('text skipped after hangup → skip reason + code stamped and warned', async () => {
-    installDb({ call_log: { id: CALL_LOG_ID, customer_id: null, to_phone: CUSTOMER } });
-    sendOutboundVoicemailText.mockResolvedValueOnce({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_STOP' });
-    await amd()(req('machine_start'), mockRes());
-    expect(metadataPatches()[2]).toEqual({ voicemail_text: { outcome: 'skipped', reason: 'policy_block', code: 'SUPPRESSED_STOP', call_reason: 'generic' } });
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('text did not send (policy_block:SUPPRESSED_STOP)'));
-  });
-
   test('a thrown error still answers 200 so Twilio does not retry into a double text', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
-    // patchCallLogMetadata swallows its own error; force one past it.
-    precheck.mockRejectedValueOnce(new Error('precheck exploded'));
+    resolveOutboundCallReason.mockRejectedValueOnce(new Error('resolver exploded'));
     const res = mockRes();
     await amd()(req('machine_start'), res);
     expect(res.sendStatus).toHaveBeenCalledWith(200);
@@ -314,7 +312,7 @@ describe('POST /outbound-dial-complete', () => {
     const res = mockRes();
     await complete()({ query: { callLogId: CALL_LOG_ID }, body: { DialCallStatus: 'completed' } }, res);
     expect(res.type).toHaveBeenCalledWith('text/xml');
-    expect(res.body).toContain('Voicemail detected. Hanging up and sending a text instead.');
+    expect(res.body).toContain('Voicemail detected. We sent them a text instead.');
     expect(res.body).toContain('<Hangup/>');
   });
 

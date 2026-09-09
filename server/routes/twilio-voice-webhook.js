@@ -68,7 +68,6 @@ function phoneDigits(value) {
 const { customerPhoneLookupKey, knownCallerPhoneExists } = require('../utils/known-caller-phone');
 const {
   isVoicemailAnsweredBy,
-  precheck: voicemailTextPrecheck,
   sendOutboundVoicemailText,
   GATE: OUTBOUND_VOICEMAIL_SMS_GATE,
 } = require('../services/outbound-voicemail-sms');
@@ -3185,12 +3184,12 @@ router.post('/outbound-connect', async (req, res) => {
 // With the gate ON, the customer <Number> in /outbound-connect carries Twilio
 // answering-machine detection. Twilio reports the verdict asynchronously to
 // /outbound-amd while the admin is already bridged and hearing the greeting.
-// On a machine verdict — and only when the text CAN go (gate, quiet hours,
-// 24h dedupe) — we hang up the customer leg by REST before any voicemail is
-// left, the <Dial action> (/outbound-dial-complete) tells the admin what
-// happened, and the "sorry we missed you" text goes out. When the text
-// cannot go, nothing is hung up: the admin hears the voicemail and decides,
-// exactly as before this lane.
+// On a machine verdict the "why we called" text is sent through the full
+// policy pipeline FIRST; only a real provider send hangs up the customer leg
+// by REST (before any voicemail is left) and the <Dial action>
+// (/outbound-dial-complete) tells the admin. When the text does not go,
+// nothing is hung up: the admin hears the voicemail and decides, exactly as
+// before this lane.
 //
 // With the gate OFF nothing is added to the <Dial> at all — no AMD charge,
 // no extra callbacks, byte-identical TwiML to the pre-lane flow.
@@ -3246,6 +3245,67 @@ async function hangUpCustomerLeg(childCallSid) {
 
 // POST /api/webhooks/twilio/outbound-amd — Twilio AMD verdict for the
 // customer leg. Body: CallSid (the CHILD leg), AnsweredBy, MachineDetectionDuration.
+//
+// Order of operations (codex #4195 r1 P1): the text is SENT FIRST, through
+// the full policy pipeline, and the customer leg is hung up only on a real
+// provider send. Anything that stops the text (gate, quiet hours, tech on
+// site, non-service caller, 24h claim, disabled template, STOP list, provider
+// failure) leaves the admin on the voicemail greeting exactly as before.
+async function loadOutboundCallContext(callLogId) {
+  if (!callLogId || callLogId === 'undefined') return { row: null, customer: null };
+  const row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'source', 'metadata', 'created_at').catch(() => null);
+  const customer = row?.customer_id
+    ? await db('customers').where({ id: row.customer_id }).first('id', 'first_name').catch(() => null)
+    : null;
+  return { row, customer };
+}
+
+function voicemailTextStamp(result, why) {
+  if (!result.sent) {
+    return { voicemail_text: { outcome: 'skipped', reason: result.skipped || 'unknown', code: result.code || null, call_reason: why.reason } };
+  }
+  return {
+    [AMD_MACHINE_DETECTED_KEY]: new Date().toISOString(),
+    voicemail_text: { outcome: 'sent', provider_sid: result.providerMessageId || null, reason: why.reason, template_key: result.templateKey || null, evidence: why.evidence },
+  };
+}
+
+// Machine verdict: text first, hang up only on a real send.
+async function handleVoicemailDetected({ callLogId, customerNumber, callerIdNumber, childCallSid }) {
+  const { row, customer } = await loadOutboundCallContext(callLogId);
+  const relatedCallId = foldVoiceMetadata(row?.metadata, {}).relatedCallId || null;
+  // The customer number always comes from the TwiML query (the originator
+  // set it) — never from call_log.to_phone, which on the auto-bridge rows
+  // is the admin cell.
+  const why = await resolveOutboundCallReason({ call: row || {}, phone: customerNumber });
+  const result = await sendOutboundVoicemailText({
+    phone: customerNumber,
+    customerId: customer?.id || row?.customer_id || null,
+    firstName: customer?.first_name || '',
+    callLogId: row?.id || null,
+    callSid: childCallSid || null,
+    callerId: callerIdNumber,
+    reason: why.reason,
+    relatedCallId,
+  });
+
+  // Stamp BEFORE any hangup so /outbound-dial-complete (which fires the
+  // instant the child leg drops) already sees whether a text went out.
+  await patchCallLogMetadata(callLogId, voicemailTextStamp(result, why));
+  if (!result.sent) {
+    logger.info(`[outbound-amd] Voicemail detected but no text (${result.skipped}${result.code ? `:${result.code}` : ''}) — customer leg left up (call_log ${callLogId || 'n/a'})`);
+    return;
+  }
+  if (!childCallSid) return;
+  try {
+    await hangUpCustomerLeg(childCallSid);
+  } catch (e) {
+    // Could not hang up (leg already gone, REST error): the text is out;
+    // the admin hears the rest of the greeting and decides.
+    logger.warn(`[outbound-amd] customer-leg hangup failed for ${maskSid(childCallSid)}: ${sanitizeVoiceProviderError(e.message)}`);
+  }
+}
+
 router.post('/outbound-amd', async (req, res) => {
   const { CallSid, AnsweredBy, MachineDetectionDuration } = req.body || {};
   const callLogId = req.query.callLogId;
@@ -3260,66 +3320,8 @@ router.post('/outbound-amd', async (req, res) => {
         at: new Date().toISOString(),
       },
     });
-
-    if (!isVoicemailAnsweredBy(AnsweredBy)) return res.sendStatus(200);
-
-    let row = null;
-    let customer = null;
-    if (callLogId && callLogId !== 'undefined') {
-      row = await db('call_log').where({ id: callLogId }).first('id', 'customer_id', 'source', 'metadata', 'created_at').catch(() => null);
-      if (row?.customer_id) {
-        customer = await db('customers').where({ id: row.customer_id }).first('id', 'first_name').catch(() => null);
-      }
-    }
-
-    // Decide BEFORE hanging up: if the text cannot go, leave the admin on
-    // the voicemail greeting to decide for themselves.
-    const rowMeta = foldVoiceMetadata(row?.metadata, {});
-    const relatedCallId = rowMeta.relatedCallId || null;
-    const pre = await voicemailTextPrecheck({ phone: customerNumber, customerId: row?.customer_id || null, relatedCallId });
-    if (!pre.ok) {
-      logger.info(`[outbound-amd] Voicemail detected but text skipped (${pre.skipped}) — customer leg left up (call_log ${callLogId || 'n/a'})`);
-      await patchCallLogMetadata(callLogId, { voicemail_text: { outcome: 'skipped', reason: pre.skipped } });
-      return res.sendStatus(200);
-    }
-
-    // Stamp first so /outbound-dial-complete (which fires the instant the
-    // child leg drops) already sees the verdict.
-    await patchCallLogMetadata(callLogId, { [AMD_MACHINE_DETECTED_KEY]: new Date().toISOString() });
-
-    if (CallSid) {
-      try {
-        await hangUpCustomerLeg(CallSid);
-      } catch (e) {
-        // Could not hang up (leg already gone, REST error): still text — the
-        // customer will see the missed call either way and a voicemail plus
-        // a text is better than a silent missed call.
-        logger.warn(`[outbound-amd] customer-leg hangup failed for ${maskSid(CallSid)}: ${sanitizeVoiceProviderError(e.message)}`);
-      }
-    }
-
-    // The customer number always comes from the TwiML query (the originator
-    // set it) — never from call_log.to_phone, which on the auto-bridge rows
-    // is the admin cell.
-    const why = await resolveOutboundCallReason({ call: row || {}, phone: customerNumber });
-
-    const result = await sendOutboundVoicemailText({
-      phone: customerNumber,
-      customerId: customer?.id || row?.customer_id || null,
-      firstName: customer?.first_name || '',
-      callLogId: row?.id || null,
-      callSid: CallSid || null,
-      callerId: callerIdNumber,
-      reason: why.reason,
-      relatedCallId,
-    });
-    await patchCallLogMetadata(callLogId, {
-      voicemail_text: result.sent
-        ? { outcome: 'sent', provider_sid: result.providerMessageId || null, reason: why.reason, template_key: result.templateKey || null, evidence: why.evidence }
-        : { outcome: 'skipped', reason: result.skipped || 'unknown', code: result.code || null, call_reason: why.reason },
-    });
-    if (!result.sent) {
-      logger.warn(`[outbound-amd] Customer leg hung up on voicemail but text did not send (${result.skipped}${result.code ? `:${result.code}` : ''}) for call_log ${callLogId || 'n/a'}`);
+    if (isVoicemailAnsweredBy(AnsweredBy)) {
+      await handleVoicemailDetected({ callLogId, customerNumber, callerIdNumber, childCallSid: CallSid });
     }
     res.sendStatus(200);
   } catch (err) {
@@ -3353,7 +3355,7 @@ router.post('/outbound-dial-complete', async (req, res) => {
       detected = !!meta[AMD_MACHINE_DETECTED_KEY];
     }
     if (detected) {
-      twiml.say({ voice: SAY_VOICE }, 'Voicemail detected. Hanging up and sending a text instead.');
+      twiml.say({ voice: SAY_VOICE }, 'Voicemail detected. We sent them a text instead.');
     }
     twiml.hangup();
     res.type('text/xml').send(twiml.toString());
