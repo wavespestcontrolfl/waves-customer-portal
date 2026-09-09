@@ -69,6 +69,7 @@ export default function CustomerPropertiesPanelV2({
   const [rowErr, setRowErr] = useState("");
   const [canChangePrimary, setCanChangePrimary] = useState(false);
   const [primaryPreview, setPrimaryPreview] = useState(null);
+  const primaryPreviewSeq = useRef(0);
   const activeCustomer = useRef(customerId);
   activeCustomer.current = customerId;
   // Inline label editing: { id, value } while a row's label input is open.
@@ -79,6 +80,7 @@ export default function CustomerPropertiesPanelV2({
   const writeBusy = saving || !!rowBusy;
 
   useEffect(() => {
+    primaryPreviewSeq.current += 1;
     if (!customerId) return undefined;
     let cancelled = false;
     setLoading(true);
@@ -103,6 +105,7 @@ export default function CustomerPropertiesPanelV2({
       });
     return () => {
       cancelled = true;
+      primaryPreviewSeq.current += 1;
     };
   }, [customerId, refreshToken]);
 
@@ -185,15 +188,16 @@ export default function CustomerPropertiesPanelV2({
 
   const previewPrimary = async (propertyId) => {
     if (writeBusy) return;
+    const seq = ++primaryPreviewSeq.current;
     setRowBusy(propertyId);
     setRowErr("");
     try {
       const preview = await adminFetch(`/admin/customers/${customerId}/properties/${propertyId}/primary-preview`);
-      if (activeCustomer.current === customerId) setPrimaryPreview({ ...preview, customerId, propertyId });
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setPrimaryPreview({ ...preview, customerId, propertyId });
     } catch (err) {
-      if (activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
     } finally {
-      if (activeCustomer.current === customerId) setRowBusy(null);
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
