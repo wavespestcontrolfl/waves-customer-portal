@@ -1,7 +1,6 @@
 import { Archive, Check, Paperclip, Sparkles, Star, Trash2 } from "lucide-react";
 import { cn } from "../../../components/ui/cn";
 import { Button, buttonStyles } from "../../../components/ui/Button";
-import { Field } from "../../../components/ui/Field";
 import { Input } from "../../../components/ui/Input";
 import EmailReply from "./EmailReply";
 import { D } from "./emailStyles";
@@ -66,13 +65,13 @@ export function EmailSummary({ stats, digest }) {
         { label: "domains blocked", value: digest.domains_blocked_today },
       ].filter((item) => item.value > 0).map((item) => <span key={item.label}><span className="u-nums text-ink-primary">{item.value}</span> {item.label}</span>)}
     </div>}
-    {stats && <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    {stats && <dl className="m-0 grid grid-cols-2 gap-3 sm:grid-cols-4">
       {[
         { label: "Unread", value: stats.unread }, { label: "Today", value: stats.today },
         { label: "Vendor", value: stats.vendor }, { label: "Total", value: stats.total },
       ].map((item) => <div key={item.label} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
         <dt className="text-ui-caption text-ink-secondary">{item.label}</dt>
-        <dd className="u-nums mt-1 text-18 leading-[1.35] font-medium">{item.value ?? "—"}</dd>
+        <dd className="u-nums m-0 mt-1 text-18 leading-[1.35] font-medium">{item.value ?? "—"}</dd>
       </div>)}
     </dl>}
   </div>;
@@ -82,19 +81,18 @@ export function BlockedSenders({ mailbox }) {
   const { blocked, blockInput, setBlockInput, handleBlock, handleUnblock } = mailbox;
   return <section aria-label="Blocked senders" className="space-y-4">
     <div className="flex flex-wrap items-end gap-2 rounded-md border-hairline border-zinc-200 bg-white p-4">
-      <Field label="Domain or email to block" className="min-w-0 flex-1">
-        <Input value={blockInput} onChange={(event) => setBlockInput(event.target.value)}
-          onKeyDown={(event) => event.key === "Enter" && handleBlock()}
-          placeholder="example.com or name@example.com" />
-      </Field>
+      <Input value={blockInput} onChange={(event) => setBlockInput(event.target.value)}
+        onKeyDown={(event) => event.key === "Enter" && handleBlock()}
+        aria-label="Domain or email to block" className="min-w-0 flex-1"
+        placeholder="Block domain or email (e.g. spammer.com or bad@example.com)" />
       <Button variant="danger" onClick={handleBlock}>Block</Button>
     </div>
     <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-      {blocked.length === 0 ? <p className="p-8 text-center text-ink-secondary">No blocked senders</p>
-        : <ul>{blocked.map((entry) => <li key={entry.id} className="flex items-start justify-between gap-3 border-b-hairline border-zinc-200 p-4 last:border-b-0">
+      {blocked.length === 0 ? <p className="m-0 p-8 text-center text-ink-secondary">No blocked senders</p>
+        : <ul className="m-0 list-none p-0">{blocked.map((entry) => <li key={entry.id} className="flex items-start justify-between gap-3 border-b-hairline border-zinc-200 p-4 last:border-b-0">
           <div className="min-w-0 break-words">
-            <p className="font-medium">{entry.domain || entry.email_address}</p>
-            <p className="mt-1 text-ui-caption text-ink-secondary">{entry.reason}{entry.blocked_count > 0 && ` — ${entry.blocked_count} emails caught`} <span className="u-nums">{timeAgo(entry.created_at)}</span></p>
+            <p className="m-0 font-medium">{entry.domain || entry.email_address}</p>
+            <p className="m-0 mt-1 text-ui-caption text-ink-secondary">{entry.reason}{entry.blocked_count > 0 && ` — ${entry.blocked_count} emails caught`} <span className="u-nums">{timeAgo(entry.created_at)}</span></p>
           </div>
           <Button variant="secondary" onClick={() => handleUnblock(entry.id)} className="shrink-0">Unblock</Button>
         </li>)}</ul>}
@@ -159,7 +157,7 @@ function EmailMessage({ active, email, mailbox, editor }) {
           <div className="min-w-0 break-words"><span className="font-medium">{message.from_name || message.from_address}</span> <span className="text-ink-secondary">&lt;{message.from_address}&gt;</span></div>
           <span className="u-nums text-ui-caption text-ink-secondary">{new Date(message.received_at).toLocaleString("en-US", { timeZone: "America/New_York" })}</span>
         </div>
-        {message.to_address && <p className="mb-3 break-words text-ui-caption text-ink-secondary">To: {message.to_address}</p>}
+        {message.to_address && <p className="m-0 mb-3 break-words text-ui-caption text-ink-secondary">To: {message.to_address}</p>}
         <EmailBody html={message.body_html} text={message.body_text} />
         {message.attachments?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">
           {message.attachments.map((attachment) => <a key={attachment.id}
