@@ -13,7 +13,13 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-const OCCUPANCY_TYPES = ['owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'];
+// 'family_occupied' (owner ruling 2026-09-08): a home the customer owns or
+// pays for that a FAMILY MEMBER lives in — neither owner-occupied nor a
+// rental. Office-set only for now: the call extractor's occupancy enum
+// (schemas/call-extraction.*.json, intake-normalize CALL_OCCUPANCY_TYPES)
+// does not emit it, so a call never writes it and normalizeCallOccupancy
+// keeps treating it as unstated.
+const OCCUPANCY_TYPES = ['owner_occupied', 'family_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'];
 
 /**
  * Occupancy a lazily-backfilled PRIMARY should carry when nothing better is

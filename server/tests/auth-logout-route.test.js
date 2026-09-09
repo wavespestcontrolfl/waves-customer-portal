@@ -109,7 +109,8 @@ describe('POST /auth/refresh', () => {
     });
 
     expect(rotateRefreshSession).toHaveBeenCalledWith('old-refresh-token');
-    expect(generateToken).toHaveBeenCalledWith('customer-1', 'account-1', 'family-1');
+    // The rotated pair forwards the saved-property claim (GATE_APP_PROPERTY_SCOPE) — null when the family carries none.
+    expect(generateToken).toHaveBeenCalledWith('customer-1', 'account-1', 'family-1', { propertyId: null });
   });
 
   test('reports replay as a rejected session without exposing token details', async () => {

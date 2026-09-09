@@ -2492,7 +2492,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
                   Last message from customer
                 </div>{" "}
-                <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+                <div className="text-16 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
                   {lastInbound.body}
                 </div>{" "}
                 <div className="text-12 md:text-11 text-ink-tertiary mt-1">
@@ -2537,7 +2537,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             {agentDraftLoading ? (
               <div className="text-13 text-ink-secondary">Checking pending review…</div>
             ) : (
-              <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+              <div className="text-16 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
                 {agentDraft.suggestedMessage}
               </div>
             )}
@@ -3058,7 +3058,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                       </div>{" "}
                       <div
                         className={cn(
-                          "text-15 md:text-12 truncate leading-snug",
+                          "text-16 md:text-12 truncate leading-snug",
                           hasUnseen ? "text-zinc-900" : "text-ink-secondary",
                         )}
                       >

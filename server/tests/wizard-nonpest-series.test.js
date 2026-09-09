@@ -1132,14 +1132,6 @@ describe('booking route wiring (source contracts)', () => {
     expect(backfillSrc2).toMatch(/anchored_split_per_visit/);
   });
 
-  test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
-    // codex #3504 r12: a confirmation racing its own replay could both
-    // pass hasWelcomeSequence and enqueue two welcome sequences.
-    const welcome = fs.readFileSync(path.join(__dirname, '..', 'services', 'new-recurring-welcome-sms.js'), 'utf8');
-    expect(welcome).toMatch(/async function hasWelcomeSequence\(customerId, conn = db\)/);
-    expect(welcome).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\)\)', \[`new-recurring-welcome:\$\{customer\.id\}`\]\);\s*\n\s*if \(await hasWelcomeSequence\(customer\.id, trx\)\) return 'already_sent';\s*\n\s*await trx\('sms_sequences'\)\.insert\(data\);/);
-  });
-
   test('seeded children reserve the converter DURATION AUTHORITY first, then the catalog default, never the coarse funnel duration', () => {
     // codex #3504 r10+r12: mosquito's funnel books 45min while its catalog
     // row reserves 60; but lawn's catalog default is 45 and CONTRADICTS

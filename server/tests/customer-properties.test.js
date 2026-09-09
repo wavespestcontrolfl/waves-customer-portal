@@ -92,6 +92,7 @@ describe('customer-properties pure helpers', () => {
 
   test('normalizeOccupancy coerces unknown values', () => {
     for (const t of OCCUPANCY_TYPES) expect(normalizeOccupancy(t)).toBe(t);
+    expect(normalizeOccupancy('family_occupied')).toBe('family_occupied'); // owner ruling 2026-09-08
     expect(normalizeOccupancy('rental')).toBe('unknown');
     expect(normalizeOccupancy(undefined)).toBe('unknown');
     expect(normalizeOccupancy(null)).toBe('unknown');

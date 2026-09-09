@@ -8,4 +8,7 @@ export const Capacitor = {
   Plugins: {},
   registerPlugin: () => ({}),
 };
+// Match the named registration API imported by the native helpers, even
+// though the web guard prevents any actual native plugin calls here.
+export const registerPlugin = Capacitor.registerPlugin;
 export default { Capacitor };
