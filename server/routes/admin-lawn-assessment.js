@@ -946,7 +946,11 @@ router.post('/assess', async (req, res, next) => {
       adjustedScores,
       overallScore,
       season,
-      isBaseline,
+      // What the row PERSISTS: a run-backed (or property-history) row is
+      // inserted pending and becomes a baseline only on the confirm that
+      // completes it, so the panel must not call it the baseline now
+      // (Codex #4150 r14).
+      isBaseline: assessment.is_baseline === true,
       divergenceFlags: allDivergences,
       photoCount: photos.length,
       analyzedCount,
@@ -1297,8 +1301,13 @@ router.post('/confirm', async (req, res, next) => {
         // 7. Track assessment completion
         await LawnIntel.trackAssessmentCompletion(updated.service_date);
 
-        // Delivered: a later retry has nothing to resume.
-        if (reviewedRun) await visitAssessment.completePipeline(assessmentId, db);
+        // Delivered — as far as the steps' own stamps prove it: a step that
+        // swallowed its failure leaves its stamp missing, the claim stays
+        // open, and a retry resumes the delivery once the claim is stale.
+        if (reviewedRun) {
+          const gaps = await visitAssessment.completePipeline(assessmentId, db);
+          if (gaps.length) logger.warn(`[lawn-assessment] delivery for ${assessmentId} left incomplete (${gaps.join(', ')}) — a retry may resume it`);
+        }
       } catch (intelErr) {
         logger.error(`[lawn-assessment] Intelligence pipeline failed (non-blocking): ${intelErr.message}`);
       }

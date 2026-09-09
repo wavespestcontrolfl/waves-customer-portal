@@ -960,12 +960,34 @@ async function claimPipeline(assessmentId, knex, { staleAfterMs = PIPELINE_STALE
     throw err;
   }
 }
+// Complete only what the steps' OWN stamps prove delivered: the helpers
+// swallow their failures and return null, so reaching the end of the
+// pipeline proves nothing. The assessment row carries a stamp per customer
+// step — `recommendations` (Knowledge Bridge), `report_auto_generated` /
+// `report_id` (the service report), `notification_sent` (the standalone
+// notification, only owed when the row has no service) — and the claim is
+// marked complete only when every owed stamp is present; otherwise it stays
+// open and a retry after PIPELINE_STALE_MS resumes the delivery (Codex
+// #4150 r14). Returns what was still missing (empty when completed).
 async function completePipeline(assessmentId, knex) {
   try {
+    const row = await knex('lawn_assessments').where({ id: assessmentId }).first();
+    const missing = deliveryGaps(row);
+    if (missing.length) return missing;
     await knex('lawn_assessment_runs').where({ assessment_id: assessmentId }).update({ pipeline_completed_at: knex.fn.now(), updated_at: knex.fn.now() });
+    return [];
   } catch (err) {
     if (!missingPipelineColumns(err)) throw err;
+    return [];
   }
+}
+function deliveryGaps(row) {
+  if (!row) return ['assessment'];
+  const gaps = [];
+  if (!parseJsonObject(row.recommendations)) gaps.push('recommendations');
+  if (!(row.report_auto_generated === true || row.report_id)) gaps.push('report');
+  if (!row.service_id && !row.notification_sent) gaps.push('notification');
+  return gaps;
 }
 
 async function claimConfirm(assessmentId, trx) {
@@ -1488,6 +1510,7 @@ module.exports = {
   claimConfirm,
   claimPipeline,
   completePipeline,
+  deliveryGaps,
   PIPELINE_STALE_MS,
   PHOTO_ZONES,
   RESPONSE_SCHEMA,
