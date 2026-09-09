@@ -6,7 +6,7 @@ jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'fast-st
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  screenInboundSms, classifySolicitation, classifierMode, SOLICITATION_RE, ENFORCE_CONFIDENCE,
+  screenInboundSms, classifySolicitation, classifierMode, isSolicitationPitch, ENFORCE_CONFIDENCE,
 } = require('../services/sms-solicitation-classifier');
 
 // Synthetic texts in the shape of the 2026-09 audit corpus (vocabulary only).
@@ -31,7 +31,7 @@ describe('gate', () => {
     expect(await screenInboundSms({ body: PITCH, hasCustomer: true, isReaction: false })).toBeNull();
     expect(await screenInboundSms({ body: 'Liked "…"', hasCustomer: false, isReaction: true })).toBeNull();
     expect(await screenInboundSms({ body: PITCH, hasCustomer: false, isReaction: false, isAiLine: true })).toBeNull();
-    for (const cmd of ['STOP', 'stop.', ' Start ', 'HELP', 'Yes', 'unsubscribe']) {
+    for (const cmd of ['STOP', 'stop.', ' Start ', 'HELP', 'Yes', 'unsubscribe', 'REMOVE', 'OPT OUT', 'do not text', 'SUBSCRIBE', 'optin']) {
       expect(await screenInboundSms({ body: cmd, hasCustomer: false, isReaction: false })).toBeNull();
     }
     expect(await screenInboundSms({ body: '  ', hasCustomer: false, isReaction: false })).toBeNull();
@@ -45,11 +45,19 @@ describe('regex layer', () => {
     expect(v).toMatchObject({ solicitation: true, confidence: 1, method: 'regex' });
     expect(mockDispatch).not.toHaveBeenCalled();
   });
-  test('a homeowner ask that shares vocabulary does not match', () => {
-    expect(SOLICITATION_RE.test('Can you give me a free estimate on lawn treatment for my new house?')).toBe(false);
-    expect(SOLICITATION_RE.test('How much do you charge for a monthly pest plan? No contract preferred.')).toBe(false);
-    expect(SOLICITATION_RE.test(HOMEOWNER)).toBe(false);
-    expect(SOLICITATION_RE.test('I have termites at my new house. Would you like more details?')).toBe(false);
+  test('a pitch with a natural-language stop footer is still screened (not a carrier command)', async () => {
+    process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    const v = await screenInboundSms({ body: 'Are you open to more booked jobs? Reply "NO" if you need me to stop texting', hasCustomer: false, isReaction: false });
+    expect(v).toMatchObject({ solicitation: true, method: 'regex', enforced: true });
+  });
+  test('a homeowner ask that shares vocabulary does not match; a single weak marker is not a pitch', () => {
+    expect(isSolicitationPitch('Can you give me a free estimate on lawn treatment for my new house?')).toBe(false);
+    expect(isSolicitationPitch('How much do you charge for a monthly pest plan? No contract preferred.')).toBe(false);
+    expect(isSolicitationPitch(HOMEOWNER)).toBe(false);
+    expect(isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
+    expect(isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
+    expect(isSolicitationPitch('Can I get termite service with no upfront cost?')).toBe(false);
+    expect(isSolicitationPitch('$0 upfront cost for our marketing package. Want more details?')).toBe(true);
   });
 });
 

@@ -284,7 +284,9 @@ router.post('/sms', async (req, res) => {
         // slot is a known sender even though findSingleCustomerByPhone only
         // matches customers.phone — never screen them (codex #4214 P1).
         // Relationship check only; nothing is linked.
-        const known = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => null);
+        // No catch: an unverifiable sender must not be screened — the
+        // outer catch leaves solicitation null (codex #4214 r2).
+        const known = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: Boolean(customer || known), isReaction: smsReaction, isAiLine: isAiNumber });
       }
     } catch (e) { logger.warn(`[sms-solicitation] screen failed: ${e.message}`); }
@@ -920,7 +922,9 @@ router.post('/sms', async (req, res) => {
       // texts fall through to the general quote-intent trigger. The
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
-      const clarifyReply = (!intakeScopeVetoed && Body && String(Body).trim())
+      // An enforced pitch is not an answer to an open clarify ask either
+      // (the service-intent regex would accept "pest control leads for you").
+      const clarifyReply = (!intakeScopeVetoed && !solicitationEnforced && Body && String(Body).trim())
         ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
