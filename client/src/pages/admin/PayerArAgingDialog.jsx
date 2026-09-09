@@ -32,16 +32,24 @@ const termLabel = (v) => ({ net15: "Net 15", net30: "Net 30" }[v] || v);
 export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
   const [ar, setAr] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(""); // UI audit F0502
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setLoading(true);
+    setLoadError("");
     (async () => {
       try {
         const r = await adminFetch("/admin/payers/ar-aging");
-        const d = await r.json();
+        const d = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
         if (alive) setAr(d || null);
-      } catch {
-        if (alive) setAr(null);
+      } catch (e) {
+        if (alive) {
+          setAr(null);
+          setLoadError(e?.message || "Could not load payer aging.");
+        }
       } finally {
         if (alive) setLoading(false);
       }
@@ -49,7 +57,7 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [attempt]);
 
   const buckets = ar?.buckets || {};
   const bucketRows = [
@@ -69,6 +77,13 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
       <DialogBody className="space-y-4">
         {loading ? (
           <p className="text-13 text-zinc-400 py-4">Loading…</p>
+        ) : loadError ? (
+          <p role="alert" className="text-13 text-alert-fg py-4">
+            {loadError}{" "}
+            <Button size="sm" variant="ghost" onClick={() => setAttempt((n) => n + 1)}>
+              Retry
+            </Button>
+          </p>
         ) : !ar || ar.statement_count === 0 ? (
           <p className="text-13 text-zinc-400 py-4">
             No outstanding payer statements. Balances appear here once NET-terms

@@ -130,8 +130,14 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
 // write happened. No internal try/catch: inside a transaction a swallowed SQL
 // error would leave the txn aborted and doom the commit — callers own
 // containment.
-async function promoteCustomerOnBooking(database, customerId) {
+// `serviceType` — the booked service. A Waves Assessment is NOT a win (owner
+// ruling 2026-09-08, services/assessment-booking.js): the owner is going out
+// to look and quote, nothing has sold, so the row keeps its lead stage and
+// no member_since is stamped. Callers that know what was booked pass it;
+// the deal converts later on quote acceptance / a paid booking as usual.
+async function promoteCustomerOnBooking(database, customerId, { serviceType = null } = {}) {
   if (!customerId) return false;
+  if (require('./assessment-booking').isAssessmentServiceType(serviceType)) return false;
   const customer = await database('customers')
     .where({ id: customerId })
     .first('id', 'pipeline_stage', 'member_since', 'active', 'churned_at');

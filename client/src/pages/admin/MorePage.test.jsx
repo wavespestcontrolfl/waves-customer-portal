@@ -12,13 +12,14 @@ vi.mock("../../hooks/useFeatureFlag", () => ({
 }));
 
 import MorePage from "./MorePage";
+import { AdminNavigationProvider } from '../../hooks/useAdminNavigation';
 import { clearEmailDrafts, loadEmailDrafts, setEmailSending, updateEmailDrafts } from "../../lib/emailDrafts";
 
-function renderMore(role = "admin") {
+function renderMore(role = "admin", navigation = false) {
   return render(
     <MemoryRouter initialEntries={["/admin/more"]}>
       <Routes>
-        <Route element={<Outlet context={{ user: { role } }} />}>
+        <Route element={<AdminNavigationProvider user={{ id: 'fixture', role }} enabled={navigation}><Outlet context={{ user: { role } }} /></AdminNavigationProvider>}>
           <Route path="/admin/more" element={<MorePage />} />
         </Route>
         <Route path="/admin/login" element={<div>Signed out</div>} />
@@ -30,6 +31,26 @@ function renderMore(role = "admin") {
 afterEach(() => { cleanup(); clearEmailDrafts(); localStorage.clear(); });
 
 describe("MorePage — the mobile Settings tab", () => {
+  it('keeps the complete directory and preferences under the grouped menu', () => {
+    renderMore('admin', true);
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Sales', exact: true }));
+    expect(screen.getByRole('link', { name: 'Estimates', exact: true })).toHaveAttribute('href', '/admin/pipeline?tab=estimates');
+    fireEvent.click(screen.getByRole('button', { name: 'Customers', exact: true }));
+    expect(screen.getByRole('link', { name: 'Contracts', exact: true })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Operations', exact: true }));
+    expect(screen.getByRole('link', { name: 'Assessments', exact: true })).toHaveAttribute('href', '/admin/lawn-assessments?tab=field');
+    expect(screen.getByRole('link', { name: 'System health', exact: true })).toHaveAttribute('href', '/admin/tool-health');
+    expect(screen.getByRole('link', { name: 'Early feature access', exact: true })).toHaveAttribute('href', '/admin/_design-system/flags');
+    expect(screen.getByRole('link', { name: 'Account', exact: true })).toHaveAttribute('href', '/admin/settings?tab=general');
+    expect(screen.getByRole('link', { name: 'Agent Ops', exact: true })).toHaveAttribute('href', '/admin/agents');
+  });
+
+  it('keeps Contracts and System health owner-only in the grouped technician directory', () => {
+    renderMore('technician', true);
+    expect(screen.queryByRole('button', { name: 'Customers', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Settings', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Portal Usage', exact: true })).toBeVisible();
+  });
   it("is titled Settings and lists the Settings leaves inline instead of a Settings nav row", () => {
     renderMore();
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();

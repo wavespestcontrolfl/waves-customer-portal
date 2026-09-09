@@ -73,9 +73,11 @@ const DEFAULTS = Object.freeze({
   LAWN_CHALLENGE: 'claude-opus-4-8',
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
+  VOICE_JUDGE: 'claude-opus-4-8',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
+  OPENAI_FRONTIER: 'gpt-6-astra',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
   GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
@@ -118,6 +120,12 @@ const CALL_RESEARCH_ANTHROPIC = process.env.MODEL_CALL_RESEARCH_ANTHROPIC || DEF
 // env so extraction and the research miner can diverge deliberately.
 const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC || DEFAULTS.CALL_EXTRACTION_ANTHROPIC;
 
+// Optional voice replay judge (services/eval/voice-relay-judge.js). Pinned
+// under the registry convention rather than riding FLAGSHIP: a judge that moves with the tier
+// re-baselines every scorecard, so it moves only when MODEL_VOICE_JUDGE is
+// set deliberately.
+const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
+
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
 const PROVIDER = Object.freeze({ ANTHROPIC: 'anthropic', OPENAI: 'openai', GEMINI: 'gemini' });
@@ -138,6 +146,12 @@ const OPENAI_BEST          = OPENAI_BALANCED;
 // The completed-service report uses this model first, then Claude Opus whenever
 // OpenAI is unavailable, overloaded, empty, or fails the copy-safety gate.
 const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || DEFAULTS.OPENAI_REPORT_WRITER;
+// Frontier OpenAI multimodal model — the backup leg of the lawn visit
+// assessment (owner 2026-09-08: when the Gemini call misses, ChatGPT takes
+// over on the best model). Its own selector, off BALANCED / REPORT_WRITER, so
+// the premium rate is paid only on that lane's fallback leg and a Q&A or
+// report model change never moves it.
+const OPENAI_FRONTIER      = process.env.MODEL_OPENAI_FRONTIER || DEFAULTS.OPENAI_FRONTIER;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 
 // Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
@@ -212,6 +226,7 @@ const MODEL_CATALOG = {
   'claude-fable-5-1': { label: 'Claude Fable 5.1', provider: 'anthropic', caps: ['text', 'vision'], status: 'current', requires: 'deep' },
   'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy', requires: 'deep' },
   'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
+  'gpt-6-astra': { label: 'GPT-6 Astra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
@@ -294,6 +309,16 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
+  lawnVisitAssessment: Object.freeze({
+    name: 'lawnVisitAssessment',
+    // One multimodal call per lawn visit (services/lawn-visit-assessment.js,
+    // GATE_LAWN_VISIT_ASSESSMENT). Owner ruling 2026-09-08 (DECISIONS.md): the
+    // Gemini vision model reads every visit photo at once; when it misses,
+    // GPT-6 Astra takes over. No Claude leg and no parallel providers — the
+    // one lane that deliberately departs from the Claude-fallback rule.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
   visitBrief: Object.freeze({
     name: 'visitBrief',
     // Per-visit pocket-reference brief (previsit-brief.js) — summarization
@@ -306,6 +331,14 @@ const TEXT_POLICIES = Object.freeze({
   deepAnalysis: Object.freeze({
     name: 'deepAnalysis',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: DEEP }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  voiceJudge: Object.freeze({
+    name: 'voiceJudge',
+    // Voice relay eval judge: the pinned Claude leg, Sol as the cross-provider
+    // backup. A verdict from the fallback leg is stamped judge_fallback and
+    // never flips a scenario's pass/fail (services/eval/voice-relay-judge.js).
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE_JUDGE }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
 });
@@ -321,6 +354,7 @@ module.exports = {
   LAWN_CHALLENGE,
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
+  VOICE_JUDGE,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,
@@ -329,6 +363,7 @@ module.exports = {
   OPENAI_BALANCED,
   OPENAI_FAST,
   OPENAI_REPORT_WRITER,
+  OPENAI_FRONTIER,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
   EMBEDDING_DIMS,
