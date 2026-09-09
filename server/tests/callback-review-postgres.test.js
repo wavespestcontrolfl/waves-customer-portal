@@ -1,5 +1,7 @@
 // Opt-in against the established synthetic QA database; every test rolls back.
 const run = process.env.CALLBACK_REVIEW_POSTGRES === '1' ? describe : describe.skip;
+// Remote QA round trips can exceed Jest's five-second unit-test default.
+jest.setTimeout(30000);
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));

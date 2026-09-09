@@ -1253,8 +1253,8 @@ router.post('/call', async (req, res, next) => {
       if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
       const active = await require('../services/call-bridge').activeBridgeCall({ source, fromPhone: from, customerId: customer?.id }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
-      const original = await trx('call_log as cl').join('call_commitments as cc', 'cc.call_log_id', 'cl.id')
-        .where({ 'cc.id': relatedCommitmentId, 'cc.kind': 'callback', 'cc.party': 'waves' }).forUpdate('cl').first('cl.*');
+      const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
+        .where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' })).forUpdate('cl').first('cl.*');
       const promise = original ? await trx('call_commitments as cc').where({ 'cc.id': relatedCommitmentId })
         .whereRaw(`NOT ${require('../services/call-commitments').staleAiRowSql('cc')}`).forUpdate('cc').first('cc.*') : null;
       const target = String(original?.direction || '').startsWith('outbound') ? original.to_phone : original?.from_phone;
