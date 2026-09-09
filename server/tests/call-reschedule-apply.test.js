@@ -3,15 +3,21 @@
 // connection. Fixtures are fictitious (555-01xx numbers, synthetic ids).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, isEnabled: jest.fn((name) => name === 'callAgentCommitTrustedLabels' || actual.isEnabled(name)) };
+});
 
 const {
-  planRescheduleFromCall,
+  planRescheduleFromCall: planWithLabelTrust,
   applyCallReschedule,
   MIN_SCHEDULING_CONFIDENCE,
   ACTIVITY_ACTION,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
 } = require('../services/call-reschedule-apply');
+
+const planRescheduleFromCall = (args) => planWithLabelTrust({ transcriptLabelsTrusted: true, ...args });
 
 const NOW = new Date('2026-09-22T19:20:00Z'); // 3:20 PM ET
 const CUSTOMER_ID = 'c0000000-0000-4000-8000-000000000001';
@@ -65,6 +71,16 @@ const visit = (overrides = {}) => ({
 describe('planRescheduleFromCall', () => {
   test.each(['2026-09-24T12:30:00-04:00', '2026-09-24T12:00:30-04:00', '2026-09-24T12:00:00.500-04:00'])('rejects off-hour instant %s', (confirmed_start_at) => {
     expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at } }), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('off_grid_start_time');
+  });
+
+  test('inferred speaker labels cannot authorize a move', () => {
+    expect(planWithLabelTrust({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('untrusted_speaker_labels');
+  });
+
+  test('formatted domestic phones match, while invalid and international suffixes do not', () => {
+    const args = { v2: v2(), call: call(), candidates: [visit()], now: NOW };
+    expect(planRescheduleFromCall({ ...args, customer: customer({ phone: '(555) 555-0101' }) }).action).toBe('apply');
+    expect(planRescheduleFromCall({ ...args, customer: customer({ phone: '+445555550101' }) }).reason).toBe('caller_phone_not_on_file');
   });
 
   test('agent evidence must ground to the same slot and an affirmative agent turn', () => {
@@ -293,16 +309,33 @@ describe('applyCallReschedule', () => {
     expect(conn.writes.updates.find((u) => u.table === 'call_log').arg.review_status).toBe('open');
   });
 
-  test('superseded passes stand down and applied calls retry card resolution', async () => {
+  test('superseded passes stand down and unproven prior applications preserve cards', async () => {
     const rebooker = { reschedule: jest.fn() };
     const lost = makeConn({ owned: false });
     expect(await applyCallReschedule({ conn: lost, call: call(), procGeneration: 2, now: NOW, rebooker })).toEqual({ outcome: 'skipped', reason: 'superseded_by_newer_pass' });
     const dup = makeConn({ prior: { id: 'act-0' } });
-    expect(await applyCallReschedule({ conn: dup, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'skipped', reason: 'already_applied', cardsResolved: 1 });
+    expect(await applyCallReschedule({ conn: dup, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'skipped', reason: 'prior_application_requires_review' });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
     expect(lost.writes.updates).toHaveLength(0);
-    expect(dup.writes.updates.find((u) => u.table === 'triage_items').arg.status).toBe('resolved');
+    expect(dup.writes.updates).toHaveLength(0);
     expect(dup.writes.inserts).toHaveLength(0);
+  });
+
+  test('only the same applied source and live destination can retry card closure', async () => {
+    const conn = makeConn();
+    const mover = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.beforeMove(conn); await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker: mover });
+    const prior = conn.writes.inserts.find((row) => row.table === 'activity_log').row;
+    const landed = visit({ window_start: '12:00:00', window_end: '13:00:00' });
+    const retry = makeConn({ prior, visits: [landed] });
+    expect(await applyCallReschedule({ conn: retry, call: call(), now: NOW })).toMatchObject({ reason: 'already_applied', cardsResolved: 1 });
+    for (const patch of [{ settledCall: { processing_generation: 4 } }, { settledCall: { transcription: 'Corrected source' } }, { visits: [visit()] }]) {
+      const changed = makeConn({ prior, visits: [landed], ...patch });
+      expect(await applyCallReschedule({ conn: changed, call: call(), now: NOW })).toMatchObject({ reason: 'prior_application_requires_review' });
+      expect(changed.writes.updates).toHaveLength(0);
+    }
   });
 
   test('a skip stamps the open card payload with the reason and leaves it open', async () => {

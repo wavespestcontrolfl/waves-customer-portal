@@ -1309,6 +1309,7 @@ const gates = {
   // Sends NO customer communication (owner directive 2026-09-08); the
   // reminder cron simply reads the new time. Off → cards stay open as
   // before. See services/call-reschedule-apply.js.
+  // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor

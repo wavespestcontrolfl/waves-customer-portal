@@ -1224,6 +1224,7 @@ class SmartRebooker {
       }
     };
     await moveTrx(async (trx) => {
+      if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -1886,6 +1887,7 @@ class SmartRebooker {
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
+      if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
       const preservedFutureIds = new Set();
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -2423,7 +2425,7 @@ class SmartRebooker {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
-          status: isAnchor ? 'confirmed' : sib.status,
+          status: isAnchor && !(options.keepStatus === true && !sibRewound) ? 'confirmed' : sib.status,
           updated_at: trx.fn.now(),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
