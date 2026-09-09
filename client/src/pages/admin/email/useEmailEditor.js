@@ -39,10 +39,14 @@ export default function useEmailEditor(userId) {
   );
   const { drafts, saved, sending } = editor;
   const composeForm = drafts.compose;
-  const [showCompose, setShowCompose] = useState(false);
+  const [showCompose, setComposeOpen] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
   const [sendFeedback, setSendFeedback] = useState({});
+  const setShowCompose = (visible) => {
+    if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
+    setComposeOpen(visible);
+  };
   const clearDraftResult = useCallback(() => setDraftResult(null), []);
   const changeDrafts = (update) => updateEmailDrafts(draftSession, update);
   const setReplyDraft = (id, text) =>
@@ -50,11 +54,13 @@ export default function useEmailEditor(userId) {
       ...current,
       replies: { ...current.replies, [id]: text },
     }));
-  const setComposeForm = (update) =>
+  const setComposeForm = (update) => {
+    setSendFeedback((current) => ({ ...current, compose: null }));
     changeDrafts((current) => ({
       ...current,
       compose: update(current.compose),
     }));
+  };
   const hasComposeDraft = Object.values(composeForm).some(Boolean);
   const hasDrafts =
     hasComposeDraft || Object.values(drafts.replies).some(Boolean);
@@ -148,8 +154,8 @@ export default function useEmailEditor(userId) {
       );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
+      if (d?.error || typeof d?.reply_draft !== "string" || !d.reply_draft.trim()) throw new Error("Draft unavailable");
       if (
-        d.reply_draft &&
         (draftSession.replyRevisions[email.id] || 0) === replyRevision
       ) {
         setReplyDraft(email.id, d.reply_draft);

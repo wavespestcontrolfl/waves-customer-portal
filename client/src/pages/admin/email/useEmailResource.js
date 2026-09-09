@@ -14,6 +14,7 @@ export default function useEmailResource(path, initialValue = null) {
       const response = await adminFetch(path);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
+      if (data?.error) throw new Error("Resource unavailable");
       if (request === sequence.current) {
         setValue(data);
         setState({ loading: false, error: false });

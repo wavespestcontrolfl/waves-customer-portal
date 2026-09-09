@@ -72,7 +72,7 @@ async function main() {
       else if (api === '/admin/email/send') { record.payload = request.postDataJSON(); state.sends.push(record.payload); await state.sendHold; body = { success: true, messageId: 'fixture-sent' }; }
       else if (api.startsWith('/admin/email/thread/')) { await state.threadHold; body = { thread: state.history || state.emails.filter((mail) => api.endsWith(mail.gmail_thread_id)) }; }
       else if (api.startsWith('/admin/email/message/')) {
-        const id = api.split('/')[4], mail = state.emails.find((message) => message.id === id) || fixtureMail.find((message) => message.id === id);
+        const id = api.split('/')[4], mail = state.emails.find((message) => message.id === id) || structuredClone(fixtureMail.find((message) => message.id === id));
         if (api.endsWith('/read')) { if (mail) mail.is_read = true; body = { read: true }; }
         else if (api.endsWith('/star')) { if (mail && !state.fail.has(api)) mail.is_starred = !mail.is_starred; body = { is_starred: mail?.is_starred }; }
         else if (/\/(archive|trash)$/.test(api)) { if (!state.fail.has(api)) state.emails = state.emails.filter((message) => message.id !== id); body = { success: true }; }
@@ -256,6 +256,34 @@ async function main() {
           await page.close();
         });
       }
+      for (const origin of ['rows', 'direct link']) {
+        await scenario(`Back to inbox preserves browser history from ${origin}`, async () => {
+          const { page, state } = await openPage(1440);
+          const previous = `${server.baseUrl}/synthetic-history-entry`;
+          await page.route(previous, (route) => route.fulfill({ contentType: 'text/html', body: '<title>Synthetic previous page</title>' }));
+          await page.goto(previous);
+          if (origin === 'direct link') { state.emails = []; state.history = [a]; }
+          await page.goto(`${server.baseUrl}/admin/communications?tag=return${origin === 'direct link' ? `&id=${a.id}` : ''}#tab=email`);
+          if (origin === 'rows') {
+            await row(page).click(); await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+            await row(page, b).click(); await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+            await page.reload(); await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+            await page.goBack(); await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+            await page.goForward(); await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+          } else {
+            await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+            await page.getByText('0 matching messages', { exact: true }).waitFor();
+          }
+          await page.setViewportSize({ width: 390, height: 844 });
+          await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+          await page.waitForURL((url) => url.pathname === '/admin/communications' && !url.searchParams.has('id'));
+          assert.equal(new URL(page.url()).searchParams.get('tag'), 'return');
+          await page.goBack();
+          assert.equal(page.url(), previous);
+          await page.close();
+        });
+      }
+
       await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
         const { page } = await openPage(390);
         await inbox(page);

@@ -238,12 +238,51 @@ describe("Email draft and navigation preservation", () => {
     expect(await screen.findByRole("textbox", { name: "Reply" })).toHaveValue("Reply for A");
   });
 
+  it.each(["single", "multiple", "remount"])("returns to the original inbox after %s message browsing", async (mode) => {
+    window.history.replaceState({ idx: 0 }, "", "/admin?fixture=previous");
+    window.history.pushState({ idx: 1 }, "", "/admin/communications?tag=fixture#tab=email");
+    let view = mount();
+    await open(a);
+    if (mode !== "single") await open(b);
+    if (mode === "remount") {
+      view.unmount(); view = mount();
+      await screen.findByText(b.body_text);
+      act(() => window.history.back());
+      await screen.findByText(a.body_text);
+      act(() => window.history.forward());
+      await screen.findByText(b.body_text);
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Back to inbox", exact: true }));
+    await waitFor(() => expect(window.location.search).toBe("?tag=fixture"));
+    expect(window.history.state.idx).toBe(1);
+    expect(window.location.hash).toBe("#tab=email");
+    await waitFor(() => expect(screen.queryByRole("textbox", { name: "Reply", exact: true })).not.toBeInTheDocument());
+    await waitFor(() => expect(document.activeElement).toBe(mode === "remount"
+      ? screen.getByPlaceholderText("Search emails...")
+      : screen.getByRole("button", { name: `Open email: ${(mode === "single" ? a : b).subject}` })));
+    view.unmount();
+    window.history.back();
+    await waitFor(() => expect(window.location.pathname + window.location.search).toBe("/admin?fixture=previous"));
+  });
+
+  it("replaces a direct-linked message with the inbox without leaving Communications", async () => {
+    window.history.replaceState({ idx: 0 }, "", "/admin?fixture=previous");
+    window.history.pushState({ idx: 1 }, "", `/admin/communications?id=${a.id}&tag=fixture#tab=email`);
+    mount(); await screen.findByText(a.body_text);
+    fireEvent.click(screen.getByRole("button", { name: "Back to inbox", exact: true }));
+    await waitFor(() => expect(window.location.search).toBe("?tag=fixture"));
+    expect(window.location.pathname).toBe("/admin/communications");
+    expect(window.history.state.idx).toBe(1);
+    await waitFor(() => expect(screen.getByPlaceholderText("Search emails...")).toHaveFocus());
+  });
+
   it("actually renders an archived or off-page message reached by a deep link", async () => {
     inbox = [];
     window.history.replaceState({}, "", `/admin/communications?id=${a.id}#tab=email`);
     mount();
     expect(await screen.findByText(a.body_text)).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Reply" })).toBeInTheDocument();
+    expect(screen.getByText("0 matching messages")).toBeInTheDocument();
   });
 
   it("opens a newly linked message from Blocked senders without losing its prior reply", async () => {
