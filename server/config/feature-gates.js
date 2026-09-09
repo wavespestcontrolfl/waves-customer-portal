@@ -43,6 +43,7 @@
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
+ *   GATE_VOICE_RELAY_EVAL=true  (weekly voice relay conversation eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
@@ -1675,6 +1676,14 @@ const gates = {
   // except one admin notification on regression. Enable with
   // GATE_CALL_REPLAY_EVAL=true.
   callReplayEval: isProd ? process.env.GATE_CALL_REPLAY_EVAL === 'true' : true,
+
+  // Weekly voice relay conversation eval — replays the synthetic-caller
+  // scenario fixture (server/fixtures/voice-relay-eval/) through the LIVE
+  // Sandy conversation loop and the pinned judge, in a child process (the
+  // per-scenario gates it sets never reach this process). Notifications and
+  // ordinary judge telemetry may write; synthetic conversations cannot.
+  // Explicit opt-in in every environment: GATE_VOICE_RELAY_EVAL=true.
+  voiceRelayEval: process.env.GATE_VOICE_RELAY_EVAL === 'true',
 
   // Estimate "Show your work" — public estimate page trust block: property
   // facts with friendly data-source labels, the county parcel match line,
