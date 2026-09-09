@@ -419,3 +419,14 @@ test('an emoji-bearing supported notice keeps its allowed SMS fallback and recor
   prefs.sms_enabled = false;
   expect(await sendCustomerMessage({ ...input, body: 'Your receipt is ready ✅' })).toMatchObject({ sent: false, code: 'SMS_OPTED_OUT' });
 });
+
+
+test.each(['no_fresh_device', 'preference_changed', 'app_gate_off'])('App-only request updates never become a text on %s', async (reason) => {
+  prefs.sms_enabled = false;
+  Twilio.sendSMS.mockResolvedValueOnce({ success: false, appUnavailable: true, error: reason });
+  const result = await sendCustomerMessage({ ...input, purpose: 'support_resolution',
+    metadata: { appOnly: true, original_message_type: 'service_request_updated' } });
+  expect(result).toMatchObject({ sent: false, blocked: true, code: 'APP_UNAVAILABLE' });
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+});

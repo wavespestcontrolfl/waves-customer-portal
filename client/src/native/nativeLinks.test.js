@@ -52,7 +52,7 @@ describe('nativeLinks', () => {
     expect(customerAppUrl('evil.example/login', loc)).toBeNull();
   });
 
-  it.each(['/report/token?from=push#photos', '/?tab=billing&focus=payment-methods'])('validates and preserves notification destination %s', (destination) => {
+  it.each(['/report/token?from=push#photos', '/?tab=billing&focus=payment-methods', '/?tab=dashboard&requestId=11111111-1111-4111-8111-111111111111'])('validates and preserves notification destination %s', (destination) => {
     const assign = vi.fn();
     const navigationLocation = {
       ...loc,

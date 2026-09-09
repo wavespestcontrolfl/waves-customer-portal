@@ -188,6 +188,7 @@ async function hasFreshPushDevice(customerId, knex = db) {
 // An explicit App choice also lets reminders replace their automatic
 // companion text, while the default PUSH_ROUTING_POLICY stays unchanged.
 const APP_FIRST_TYPES = new Set([
+  'service_request_received', 'service_request_updated',
   ...PAYMENT_ISSUE_TYPES,
   'invoice', 'payment_link', 'invoice_followup',
   ...APPOINTMENT_UPDATE_TYPES, 'tech_en_route',
@@ -215,6 +216,8 @@ const PREF_CHANNEL_COLUMN = {
   autopay: 'billing_channel',
   autopay_pre_charge: 'billing_channel',
   ...Object.fromEntries([...PAYMENT_ISSUE_TYPES].map((type) => [type, 'payment_issue_channel'])),
+  service_request_received: 'request_channel',
+  service_request_updated: 'request_channel',
 };
 
 // Channel columns that live on the account PRIMARY profile (see
@@ -371,7 +374,7 @@ async function recordBell(customerId, messageType, body, dedupeKey) {
  * Twilio entirely. Any failure returns { delivered: false } and the SMS
  * proceeds untouched.
  */
-async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, invoiceId }) {
+async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, invoiceId, requestNotification }) {
   try {
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly }))) return { delivered: false, reason: 'preference_changed' };
@@ -381,6 +384,17 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       let presentation = pushPresentation(messageType);
       if (PAYMENT_ISSUE_TYPES.has(messageType)) {
         presentation = { ...presentation, link: '/?tab=billing&focus=payment-methods' };
+      }
+      if (PREF_CHANNEL_COLUMN[messageType] === 'request_channel') {
+        try {
+          const request = requestNotification && await require('../request-app-notifications')
+            .loadEligibleRequest(customerId, requestNotification.id, requestNotification.updatedAt);
+          if (!request) return { delivered: false, blocked: true, reason: 'request_unavailable' };
+          presentation = { title: messageType === 'service_request_received' ? 'Request received' : 'Request update',
+            link: `/?tab=dashboard&requestId=${encodeURIComponent(request.id)}`, category: 'service' };
+        } catch {
+          return { delivered: false, retryable: true, reason: 'request_lookup_failed' };
+        }
       }
       if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
         let invoice;

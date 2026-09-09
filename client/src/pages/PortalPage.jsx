@@ -2616,7 +2616,7 @@ function SavedVisitDetails({ visits }) {
   </ul>;
 }
 
-function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
+function DashboardTab({ customer, onSwitchTab, onOpenPlanService, focusRequestId }) {
   const compact = useIsMobile(720);
   const nextRead = usePortalRead('next-visit', () => api.getNextService());
   const nextService = nextRead.data?.next || null;
@@ -3434,7 +3434,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         </section>
       )}
 
-      <MyRequestsCard />
+      <MyRequestsCard focusRequestId={focusRequestId} />
     </div>
   );
 }
@@ -4019,7 +4019,7 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
-const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel'];
+const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel', 'requestChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
 const APPOINTMENT_CHANNEL_KEYS = [
@@ -4112,7 +4112,7 @@ function AppNotificationSettings({ prefs, app, saving, onSave }) {
         </button>
       </div>
       <p style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
-        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices, payment problems and receipts. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
+        Choose App for appointment updates, 72-hour and 24-hour reminders, technician progress, service reports, invoices, payment problems, receipts and request updates. If an app notification cannot be delivered, we can use an allowed backup. Existing opt-outs stay in place.
       </p>
       <details style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6, color: B.grayDark }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Email copies and other messages</summary>
@@ -4362,7 +4362,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
     setPrefsLocked(prev => ({ ...prev, [channelKey]: true }));
     setPrefs(prev => ({ ...prev, [channelKey]: value }));
     try {
-      await api.updateNotificationPrefs({ [channelKey]: value });
+      const result = await api.updateNotificationPrefs({ [channelKey]: value });
+      if (channelKey === 'requestChannel' && result.preferences?.requestChannel !== value) {
+        throw new Error('Refresh the app to manage request notifications.');
+      }
     } catch (err) {
       setPrefs(prev => ({ ...prev, [channelKey]: prevVal }));
       showCustomerAlert('Could not update delivery preference. Please try again.');
@@ -5057,6 +5060,20 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
               Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
             </div>
             <AppNotificationSettings prefs={prefs} app={app} saving={Object.values(prefsLocked).some(Boolean)} onSave={saveAppPreferences} />
+            {prefs.appPreferencesAvailable && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 12, paddingTop: 16 }}>
+                <div style={{ flex: '1 1 220px', minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Request updates</div>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Open received requests and status updates in the app. Existing email confirmations continue.</div>
+                </div>
+                <select aria-label="Delivery method for request updates" value={prefs.requestChannel || 'email'}
+                  disabled={!!prefsLocked.requestChannel} onChange={(e) => handleChannelChange('requestChannel', e.target.value)}
+                  style={{ fontSize: 16, padding: '7px 10px', minHeight: 44, borderRadius: 8, border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy }}>
+                  <option value="email">Email</option>
+                  <option value="push" disabled={!app.ready && prefs.requestChannel !== 'push'}>App</option>
+                </select>
+              </div>
+            )}
             {customer.email ? (() => {
               const allEmail = APPOINTMENT_CHANNEL_KEYS.every(k => (prefs[k] || 'sms') === 'email');
               const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
@@ -14799,13 +14816,10 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 }
 
 // =========================================================================
-// MY REQUESTS CARD — a short-lived receipt for recently submitted requests
+// MY REQUESTS CARD — recent receipts and the exact request opened from App
 // =========================================================================
-// Requests are no longer tracked through an admin status pipeline; each one
-// fires an admin notification and the office follows up directly (call/text).
-// So this card is just an acknowledgment of recent submissions (last 14 days)
-// rather than a New→Reviewed→Scheduled→Resolved tracker.
-function MyRequestsCard() {
+function MyRequestsCard({ focusRequestId } = {}) {
+  const cardRef = useRef(null);
   const [requests, setRequests] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -14813,12 +14827,19 @@ function MyRequestsCard() {
   const loadRequests = useCallback(() => {
     setLoading(true);
     setLoadError(false);
-    api.getRequests()
+    api.getRequests(focusRequestId)
       .then(d => { setRequests(d.requests || []); setLoading(false); })
       .catch(() => { setLoadError(true); setLoading(false); });
-  }, []);
+  }, [focusRequestId]);
 
   useEffect(() => { loadRequests(); }, [loadRequests]);
+
+  useEffect(() => {
+    if (!loading && focusRequestId) {
+      cardRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      cardRef.current?.focus({ preventScroll: true });
+    }
+  }, [loading, focusRequestId]);
 
   if (loading) return null;
 
@@ -14838,17 +14859,19 @@ function MyRequestsCard() {
   const RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
   const recent = requests
     .filter(r => {
+      if (focusRequestId) return r.id === focusRequestId;
       if (r.status === 'resolved') return false; // dropped once the office marks it handled
       const created = new Date(r.createdAt).getTime();
       return Number.isFinite(created) && Date.now() - created < RECENT_WINDOW_MS;
     })
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  if (!recent.length) return null;
+  if (!recent.length) return focusRequestId
+    ? <section ref={cardRef} tabIndex={-1} role="status" data-glass="card" style={{ padding: 16 }}>This request isn’t available for the selected property.</section> : null;
 
   const muted = '#475569';
 
   return (
-    <section data-glass="card" style={{
+    <section ref={cardRef} tabIndex={-1} aria-label="My Requests" data-glass="card" style={{
       background: B.white,
       borderRadius: 8,
       padding: 16,
@@ -14872,7 +14895,7 @@ function MyRequestsCard() {
         </span>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy }}>My Requests</div>
-          <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>We've got your recent requests — our team will follow up directly.</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>{focusRequestId ? 'View the latest status of this request.' : "We've got your recent requests — our team will follow up directly."}</div>
         </div>
       </div>
 
@@ -14890,7 +14913,7 @@ function MyRequestsCard() {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.35 }}>{r.subject}</div>
                   <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                    {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(focusRequestId ? { year: 'numeric' } : {}) })}
                   </div>
                 </div>
                 <span style={{
@@ -14902,7 +14925,7 @@ function MyRequestsCard() {
                   color: B.glassNavy,
                   border: '1px solid #E7E2D7',
                   whiteSpace: 'nowrap',
-                }}>Received</span>
+                }}>{focusRequestId ? ({ new: 'Received', acknowledged: 'Acknowledged', scheduled: 'Scheduled', resolved: 'Resolved' }[r.status] || 'Received') : 'Received'}</span>
               </div>
               {r.urgency === 'urgent' && (
                 <div style={{ marginTop: 8, fontSize: 14, color: B.red, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5 }}>
@@ -16268,7 +16291,7 @@ export default function PortalPage() {
         )}
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
-        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
+        {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);

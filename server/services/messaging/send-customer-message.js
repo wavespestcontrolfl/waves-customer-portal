@@ -195,6 +195,9 @@ async function sendCustomerMessage(input) {
   const { preDispatchCheck, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
+  // Request lifecycle email companions have no text leg. Keep their App
+  // intent even when the saved choice or gate changes before dispatch.
+  if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
   // Typographic punctuation (curly quotes, em dashes, real ellipses) forces
@@ -477,6 +480,9 @@ async function sendCustomerMessage(input) {
   }
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
+    if (sendInput.metadata?.appOnly === true) {
+      return { sent: false, blocked: true, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+    }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
       // The scan captured App; Email/Both now require a different set of

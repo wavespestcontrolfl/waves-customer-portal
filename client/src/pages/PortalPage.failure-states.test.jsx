@@ -182,3 +182,19 @@ describe('authenticated portal partial failures', () => {
     await waitFor(() => expect(api.getRequests).toHaveBeenCalledTimes(2));
   });
 });
+
+
+it('opens and focuses the exact older resolved request from a notification', async () => {
+  api.getRequests.mockResolvedValue({ requests: [{ id: 'request-1', subject: 'Old service request',
+    category: 'general', status: 'resolved', createdAt: '2025-01-01' }] });
+  render(<MyRequestsCard focusRequestId="request-1" />);
+  expect(await screen.findByText('Resolved')).toBeInTheDocument();
+  expect(api.getRequests).toHaveBeenCalledWith('request-1');
+  expect(screen.getByRole('region', { name: 'My Requests' })).toHaveFocus();
+});
+
+it('does not substitute another request for an unavailable notification destination', async () => {
+  api.getRequests.mockResolvedValue({ requests: [] });
+  render(<MyRequestsCard focusRequestId="request-1" />);
+  expect(await screen.findByText(/request isn’t available/)).toBeInTheDocument();
+});

@@ -809,6 +809,7 @@ const TwilioService = {
           explicitPushOnly: options.explicitPushOnly,
           notificationEventKey: options.notificationEventKey,
           invoiceId: options.invoiceId,
+          requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
         });
