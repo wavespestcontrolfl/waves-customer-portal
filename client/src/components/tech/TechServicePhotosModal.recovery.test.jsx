@@ -7,6 +7,28 @@ import TechServicePhotosModal from './TechServicePhotosModal';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+it('allows closing after upload succeeds while the photo refresh is still pending', async () => {
+  const close = vi.fn();
+  let reads = 0, release;
+  const pending = new Promise(resolve => { release = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    if (options?.method === 'POST') return { ok: true, json: async () => ({ photo: { id: 'photo-a' } }) };
+    if (++reads > 1) await pending;
+    return { ok: true, json: async () => ({ photos: [] }) };
+  }));
+  const { container } = render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
+  await screen.findByText('No photos yet.');
+  fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  await screen.findByText('Photo uploaded');
+  const dismiss = screen.getByRole('button', { name: /Close|×/ });
+  await waitFor(() => expect(dismiss).toBeEnabled());
+  fireEvent.click(dismiss);
+  expect(close).toHaveBeenCalledTimes(1);
+  release();
+  await screen.findByText('No photos yet.');
+});
+
 it('retries the same failed photo with its original caption and type, and protects it while pending', async () => {
   const writes = [], close = vi.fn();
   let release;

@@ -145,7 +145,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         : 'Photo uploaded');
       setPendingPhoto(null);
       setCaption('');
-      await load();
+      void load();
     } catch (err) {
       setErrorMsg(err.message || 'Upload failed');
     }
