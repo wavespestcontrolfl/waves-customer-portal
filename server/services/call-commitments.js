@@ -1496,7 +1496,12 @@ async function listOpenCommitments(conn, { party = null, kind = null, customerId
     const lead = await conn('leads').where({ id: leadId }).first('twilio_call_sid');
     leadSid = lead?.twilio_call_sid || null;
   }
-  await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
+  // Preparation happens on the FIRST page only: a deadline installed
+  // between pages re-sorts the queue under a walker's offset (Load more,
+  // the watchdog scan) and would skip rows or repeat them. Later pages read
+  // the snapshot the first page established; the next first-page read
+  // prepares whatever arrived meanwhile.
+  if (!(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')

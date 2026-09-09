@@ -104,6 +104,35 @@ run('callback ledger on PostgreSQL', () => {
     expect((await trx('call_commitments').where({ id: mine.id }).first()).callback_due_at).not.toBeNull();
   });
 
+  test('a paged walk over more than one preparation batch neither skips nor repeats callbacks', async () => {
+    const ledger = require('../services/call-commitments');
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    // 210 undated AI callbacks whose CREATION order (the preparation order)
+    // is the reverse of their CALL order (the deadline order): the ten
+    // prepared last belong to the oldest calls and would sort first.
+    const batch = Array.from({ length: 210 }, (_, i) => ({ callId: randomUUID(), id: randomUUID(),
+      callAt: new Date(ago.getTime() - (210 - i) * 60000), createdAt: new Date(ago.getTime() - 3600000 + i * 1000) }));
+    await trx('call_log').insert(batch.map(({ callId, callAt }) => ({ id: callId, direction: 'inbound', from_phone: phone,
+      to_phone: '+15555550100', status: 'completed', duration_seconds: 60, created_at: callAt, updated_at: callAt })));
+    await trx('call_commitments').insert(batch.map(({ callId, id, createdAt }) => ({ id, call_log_id: callId, commitment_key: `fixture:${id}`,
+      party: 'waves', kind: 'callback', status: 'open', source: 'ai', description: 'Synthetic backlog',
+      callback_due_at: null, created_at: createdAt, updated_at: createdAt })));
+    const mine = new Set(batch.map((b) => b.id));
+    const seen = [];
+    for (let offset = 0, more = true; more;) {
+      const page = await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 101, offset, now });
+      more = page.length > 100;
+      seen.push(...page.slice(0, 100).map((r) => r.id).filter((id) => mine.has(id)));
+      offset += 100;
+    }
+    expect(seen).toHaveLength(210);
+    expect(new Set(seen).size).toBe(210);
+    expect(staff).toBeTruthy();
+    // The rows left undated by the first walk are prepared by the next first-page read.
+    await ledger.listOpenCommitments(trx, { kind: 'callback', limit: 1, offset: 0, now });
+    expect(Number((await trx('call_commitments').whereIn('id', [...mine]).whereNull('callback_due_at').count('id as n').first()).n)).toBe(0);
+  }, 180000); // 210 remote preparation transactions
+
   test('a snoozed callback is not overdue and queues behind actionable work', async () => {
     const ledger = require('../services/call-commitments');
     const snoozed = await seed(), due = await seed({ created_at: new Date(ago.getTime() - 60000) });
