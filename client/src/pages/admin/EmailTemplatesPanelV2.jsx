@@ -383,7 +383,7 @@ function TemplateIssuesPanel({ issues, loading, onRefresh, onOpenTemplate }) {
                       </button>
                     </td>
                     <td className="py-3 pr-4 whitespace-nowrap">
-                      <Badge tone="danger">{issue.event_type || "issue"}</Badge>
+                      <Badge tone="alert">{issue.event_type || "issue"}</Badge>
                     </td>
                     <td className="py-3 pr-4 min-w-[220px] text-ink-secondary">
                       <div>{issue.workflow || "-"}</div>

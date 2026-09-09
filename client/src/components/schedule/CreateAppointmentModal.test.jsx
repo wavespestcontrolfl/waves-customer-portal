@@ -3,6 +3,7 @@ import {
   bookableProperties,
   bookingPropertyTarget,
   buildFindTimeRequestBody,
+  customerPropertyCountLabel,
   defaultBookingPropertyId,
   ESTIMATE_SOURCE_LABEL,
   filterScheduleEstimatesForProperty,
@@ -218,5 +219,20 @@ describe('service-address picker guards', () => {
     expect(bookingPropertyTarget(null)).toEqual({});
     const body = buildFindTimeRequestBody({ customerId: 'c', ...bookingPropertyTarget(COMPLETE), serviceName: 's', durationMinutes: 60, dateFrom: 'a', dateTo: 'b' });
     expect(body).toMatchObject({ customerId: 'c', lat: 27.44, lng: -82.52, address: '10 Palm Ave, Naples, FL 34102' });
+  });
+});
+
+describe('customerPropertyCountLabel', () => {
+  it('labels a customer with two or more active saved properties', () => {
+    expect(customerPropertyCountLabel(2)).toBe('2 properties');
+    expect(customerPropertyCountLabel('4')).toBe('4 properties');
+  });
+
+  it('stays silent for 0/1 properties and for a missing count', () => {
+    expect(customerPropertyCountLabel(1)).toBeNull();
+    expect(customerPropertyCountLabel(0)).toBeNull();
+    expect(customerPropertyCountLabel(undefined)).toBeNull();
+    expect(customerPropertyCountLabel(null)).toBeNull();
+    expect(customerPropertyCountLabel('n/a')).toBeNull();
   });
 });
