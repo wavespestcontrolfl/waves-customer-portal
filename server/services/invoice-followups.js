@@ -924,6 +924,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     // leaves the sequence armed instead of pausing it.
     smsSkipReason = 'collections_policy_denied';
   } else if (customer?.phone) {
+    const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
           first_name: ctx.name,
@@ -964,7 +965,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         // cron path stays fenced.
         ...(operatorInitiated ? { operatorInitiated: true } : {}),
         metadata: {
-          original_message_type: 'invoice_followup',
+          original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
         },
       }) : null;
@@ -996,9 +997,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                 message_body: body,
                 status: 'scheduled',
                 scheduled_for: smsDeferUntil,
-                message_type: 'invoice_followup',
+                message_type: messageType,
                 metadata: JSON.stringify({
                   entry_point: 'invoice_followup_deferred',
+                  original_message_type: messageType,
                   invoice_id: row.invoice_id,
                   customer_id: customer.id,
                   // Minted ONCE at enqueue: the replay's delivery-time

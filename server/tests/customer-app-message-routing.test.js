@@ -93,6 +93,14 @@ test('invoice App choice retains operator Text and consent-checked fallback', as
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(2);
 });
 
+test('an unavailable invoice guard keeps a retry without falling back around the payer check', async () => {
+  prefs.invoice_channel = 'push';
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, error: 'invoice_lookup_failed' });
+  expect(await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } }))
+    .toMatchObject({ sent: false, code: 'APP_DELIVERY_HOLD', retryable: true, deferred: true, nextAllowedAt: expect.any(String) });
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+});
+
 test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc', 'non_mobile'])('hard suppression %s still blocks app delivery', async (reason) => {
   suppression = { reason, active: true };
   const result = await sendCustomerMessage(input);

@@ -379,11 +379,20 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
       if (PREF_CHANNEL_COLUMN[messageType] === 'invoice_channel') {
-        const invoice = invoiceId && await db('invoices')
-          .where({ id: invoiceId, customer_id: customerId }).whereNull('payer_id')
-          .first('token', 'status').catch(() => null);
-        if (!invoice?.token || !require('../invoice-helpers').isInvoiceCollectibleStatus(invoice.status)) {
-          return { delivered: false, blocked: true, reason: 'invoice_unavailable' };
+        let invoice;
+        try {
+          invoice = invoiceId && await db('invoices')
+            .where({ id: invoiceId, customer_id: customerId }).whereNull('payer_id').whereNull('payer_statement_id')
+            .first('token', 'status', 'scheduled_service_id');
+          if (!invoice?.token || !require('../invoice-helpers').isInvoiceCollectibleStatus(invoice.status)) {
+            return { delivered: false, blocked: true, reason: 'invoice_unavailable' };
+          }
+          const payer = await require('../payer').resolveForInvoice({
+            customerId, scheduledServiceId: invoice.scheduled_service_id, throwOnError: true,
+          });
+          if (payer.payerId) return { delivered: false, blocked: true, reason: 'invoice_payer_billed' };
+        } catch {
+          return { delivered: false, retryable: true, reason: 'invoice_lookup_failed' };
         }
         presentation = { title: messageType === 'invoice_followup' ? 'Invoice reminder' : 'Your invoice is ready',
           link: `/pay/${encodeURIComponent(invoice.token)}`, category: 'billing' };

@@ -5,6 +5,7 @@ jest.mock('../models/db', () => {
   db.raw = (...args) => mockPg.raw(...args);
   db.transaction = (...args) => mockPg.transaction(...args);
   Object.defineProperty(db, 'fn', { get: () => mockPg.fn });
+  Object.defineProperty(db, 'schema', { get: () => mockPg.schema });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -40,7 +41,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     admin = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     mockPg = require('knex')({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
-    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log']) {
+    for (const table of ['customers', 'notification_prefs', 'notifications', 'push_subscriptions', 'invoices', 'sms_log', 'scheduled_services', 'payers']) {
       await mockPg.raw('CREATE TABLE ?? (LIKE ?? INCLUDING ALL)', [table, `public.${table}`]);
     }
     expect(await mockPg.schema.hasColumn('notification_prefs', 'push_enabled')).toBe(true);
@@ -82,6 +83,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     await mockPg('notification_prefs').del();
     await mockPg('invoices').del();
     await mockPg('sms_log').del();
+    await mockPg('scheduled_services').del();
+    await mockPg('payers').del();
+    await mockPg('customers').update({ payer_id: null });
     await mockPg('notification_prefs').insert([owner, property, outsider].map((id) => ({ customer_id: id })));
     apns.send.mockResolvedValue({ ok: true });
     fcm.send.mockResolvedValue({ ok: true });
@@ -203,6 +207,44 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     })).toMatchObject({ delivered: false, reason: 'invoice_unavailable' });
     expect(apns.send).not.toHaveBeenCalled();
     expect(await mockPg('notifications')).toHaveLength(0);
+  });
+
+  test.each(['customer', 'visit', 'self_pay_override'])('invoice App guard resolves the live %s payer context', async (kind) => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    await mockPg('payers').insert({ id: 999996, display_name: 'QA Payer', active: true });
+    const visitId = randomUUID();
+    const invoiceId = randomUUID();
+    await mockPg('customers').where({ id: property }).update({ payer_id: kind === 'visit' ? null : 999996 });
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: property,
+      scheduled_date: '2026-09-09', service_type: 'Pest Control', payer_id: kind === 'visit' ? 999996 : null,
+      self_pay_override: kind === 'self_pay_override' });
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, scheduled_service_id: visitId,
+      token: randomUUID(), invoice_number: 'QA-LIVE-PAYER', status: 'sent' });
+    const result = await require('../services/messaging/push-channel-routing').attemptPushFirst({
+      customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
+    });
+    expect(result.delivered).toBe(kind === 'self_pay_override');
+    expect(apns.send).toHaveBeenCalledTimes(kind === 'self_pay_override' ? 1 : 0);
+  });
+
+  test.each([['invoices', 'token'], ['customers', 'payer_id']])('a failed %s guard lookup defers without any notification', async (table, column) => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-LOOKUP', status: 'sent' });
+    await mockPg.schema.alterTable(table, t => t.renameColumn(column, `qa_${column}`));
+    try {
+      expect(await require('../services/messaging/push-channel-routing').attemptPushFirst({
+        customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
+        explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
+      })).toMatchObject({ delivered: false, retryable: true, reason: 'invoice_lookup_failed' });
+      expect(apns.send).not.toHaveBeenCalled();
+      expect(await mockPg('notifications')).toHaveLength(0);
+    } finally {
+      await mockPg.schema.alterTable(table, t => t.renameColumn(`qa_${column}`, column));
+    }
   });
 
   test('older clients and a gate rollback preserve saved App first values', async () => {
