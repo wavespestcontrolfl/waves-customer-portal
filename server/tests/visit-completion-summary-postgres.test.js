@@ -193,10 +193,10 @@ postgres('visit summary recipient recovery', () => {
 
   test.each(['contact', 'consent', 'revocation'])('a queued summary suppresses after %s changes', async (change) => {
     const queued = await heldSummary();
+    const replay = require('../services/messaging/deferred-replay-registry');
     if (change === 'contact') await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '+12025550125' });
     if (change === 'consent') await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
     if (change === 'revocation') await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
-    const replay = require('../services/messaging/deferred-replay-registry');
     expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
     expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
@@ -252,7 +252,6 @@ postgres('visit summary recipient recovery', () => {
       }
       return execute.call(this, connection, query);
     });
-    const replay = require('../services/messaging/deferred-replay-registry');
     expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
     expect(revoked).toBe(true);
   });
@@ -269,7 +268,6 @@ postgres('visit summary recipient recovery', () => {
 
   test('a proven provider-boundary quiet-hours hold can retry its pending scheduled handoff', async () => {
     const queued = await heldSummary();
-    const replay = require('../services/messaging/deferred-replay-registry');
     expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
     const effect = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
     const heldMeta = { ...queued.metadata, quiet_hours_hold_at: new Date(effect.claimed_at).toISOString() };
@@ -591,7 +589,6 @@ postgres('visit summary recipient recovery', () => {
       }
       return execute.call(this, connection, query);
     });
-    const replay = require('../services/messaging/deferred-replay-registry');
     expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
     expect(raced).toBe(true);
   });
@@ -786,6 +783,38 @@ postgres('visit summary recipient recovery', () => {
     expect(await Summary.retrySummaryThroughHandoff(stored, async () => { dispatched += 1; }))
       .toEqual({ ok: false, reason: 'visit_summary_recipient_changed' });
     expect(dispatched).toBe(1);
+  });
+
+  test('an account-primary contact edit during the provider request waits for the handoff to commit', async () => {
+    // A secondary profile with blank contact fields resolves its SMS
+    // recipient from the account primary; that row is held too.
+    const primaryId = randomUUID();
+    const accountId = randomUUID();
+    await mockPg('customer_accounts').insert({ id: accountId, first_name: 'Primary' });
+    await mockPg('customers').insert({ id: primaryId, first_name: 'Primary', phone: '+12025550199',
+      email: `${primaryId}@example.invalid`, account_id: accountId, is_primary_profile: true });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: accountId, is_primary_profile: false,
+      phone: '', service_contact_phone: null, service_contacts_consent_at: null });
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    let blockedCode = null;
+    sendCustomerMessage.mockImplementation(handoffSender(async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('customers').where({ id: primaryId }).update({ phone: '+12025550198' });
+      }).catch((err) => { blockedCode = err.code; });
+      return { sent: true };
+    }));
+    try {
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(sendCustomerMessage.mock.calls[0][0].to).toBe('+12025550199');
+      expect(blockedCode).toBe('55P03');
+      expect(await mockPg('customers').where({ id: primaryId }).first()).toMatchObject({ phone: '+12025550199' });
+    } finally {
+      await mockPg('customers').where({ id: primaryId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: null });
+      await mockPg('customer_accounts').where({ id: accountId }).del();
+    }
   });
 
   test.each(['sms', 'email'])('a contact edit during the %s provider request waits for the handoff to commit', async (channel) => {

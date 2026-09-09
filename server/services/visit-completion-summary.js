@@ -123,12 +123,14 @@ async function deferSummarySms({ visit, customer, recipient, body, claim, nextAl
 }
 
 // A frozen bearer-link recipient must still be authorized when the queue runs.
-async function recheckDeferredSummarySms(meta, database = db) {
+async function recheckDeferredSummarySms(meta, database = db, { customer: heldCustomer = null } = {}) {
   const visit = await database('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
     summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
     .whereIn('status', ['closing', 'closed']).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
-  const customer = await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
+  // The locked handoff passes the customer it holds (with its held account
+  // primary); the worker's earlier recheck resolves it fresh.
+  const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
     { db: database });
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
@@ -170,7 +172,11 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // an existing opt-out; hold the resulting row through the handoff.
     await createDefaultCustomerRows(trx, customerId);
     const prefs = await trx('notification_prefs').where({ customer_id: customerId }).forShare().first();
-    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(), { db: trx });
+    // A secondary profile's blank contact fields fall back to the account
+    // primary: that row is held too, and an unreadable primary is a failed
+    // claim read, not a silently different recipient.
+    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
+      { db: trx, forShare: true, rethrow: true });
     if (!(await authorized(customer, prefs, trx))) return lost;
     if (!(await VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: db }))) return lost;
     const verdict = await dispatch(trx);
@@ -189,12 +195,12 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
 async function beginDeferredSummarySms(meta, dispatch) {
   return claimDispatchThroughHandoff({ visitId: meta.visit_id, customerId: meta.customer_id, kind: 'completion_sms',
     token: meta.visit_summary_claim_token, scheduled: true, dispatch,
-    authorized: async (_customer, prefs) => {
+    authorized: async (customer, prefs) => {
       if (prefs.sms_enabled === false || prefs.service_completed === false) return false;
       // The recheck may return a proven-unsent effect to pending; that write
-      // commits on the same connection the durable dispatch mark uses, while
-      // the held customer and preference rows keep both reads current.
-      return (await recheckDeferredSummarySms(meta, db)).eligible;
+      // commits on the same connection the durable dispatch mark uses. The
+      // recipient is judged on the held customer row.
+      return (await recheckDeferredSummarySms(meta, db, { customer })).eligible;
     } });
 }
 
@@ -405,8 +411,9 @@ async function summaryRetryAuthorized(message, database = db) {
   const visit = await database('service_visits').where({ id: match[1] }).whereNull('summary_token_revoked_at')
     .whereIn('status', ['closing', 'closed']).first('id', 'customer_id');
   if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
+  const held = Boolean(database.isTransaction);
   const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database, forShare: held, rethrow: held },
   );
   if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
