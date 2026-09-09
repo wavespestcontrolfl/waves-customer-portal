@@ -20,13 +20,19 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
     };
     document.addEventListener("pointerdown", closeOutside);
     document.addEventListener("focusin", closeOutside);
-    document.addEventListener("pointerup", endPointer);
+    // Hold the pointer target until the tap's click has run, not until
+    // pointerup. iOS Safari releases the pointer BEFORE it dispatches the
+    // compatibility mousedown that focuses the containing main, so clearing
+    // on pointerup let that focusin close the menu and the click then landed
+    // on nothing — Open profile / Edit customer / Messages did nothing on
+    // phones. A cancelled gesture or a move to the keyboard still clears it.
+    document.addEventListener("click", endPointer);
     document.addEventListener("pointercancel", endPointer);
     document.addEventListener("keydown", endPointer);
     return () => {
       document.removeEventListener("pointerdown", closeOutside);
       document.removeEventListener("focusin", closeOutside);
-      document.removeEventListener("pointerup", endPointer);
+      document.removeEventListener("click", endPointer);
       document.removeEventListener("pointercancel", endPointer);
       document.removeEventListener("keydown", endPointer);
     };
