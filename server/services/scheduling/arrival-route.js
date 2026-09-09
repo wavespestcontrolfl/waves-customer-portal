@@ -239,14 +239,14 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     const fixedRows = rows.filter(row => row.status !== 'completed'
       && (capacity ? row.technician_id == null
         : row.technician_id !== target.technician_id || row.reservation_expires_at != null));
-    const fixed = capacity ? occupiedRows(fixedRows.map(row => {
-      if (row.window_start) return row;
+    const fixed = capacity ? occupiedRows(fixedRows).map(row => {
       const range = effectiveWindowRange(row);
-      // Legacy windows promise an arrival range, so reserve through the
-      // latest arrival plus work. Unknown windows remain uncertifiable.
+      // Unassigned work can start anywhere in its arrival promise. Add that
+      // promise once to the complete allocation, not once per member.
+      const duration = Math.max(workDuration(row), row.endMin - (row.startMin ?? 0));
       return range ? { ...row, window_start: hhmm(range.startMin),
-        window_end: hhmm(range.endMin + workDuration(row)) } : row;
-    })) : fixedRows;
+        endMin: range.endMin + duration } : row;
+    }) : fixedRows;
     const hitsFixed = simulation.arrivals.some((arrival, index) => fixed.some(row => {
       if (row.id === arrival.id) return false;
       const start = minuteOfDay(row.window_start);

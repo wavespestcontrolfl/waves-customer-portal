@@ -110,9 +110,9 @@ test.each([null, 'other-tech'])('fixed allocations respect capacity ownership fo
     reservation_service_mix: { version: 2, allocatedServiceIds: ['pest', 'lawn'] },
   }));
   const input = context(rows, { now: new Date('2027-01-15T15:00:00Z') });
-  // Unassigned members block until 10:20; another technician has independent capacity.
+  // Unassigned members block through their latest arrival plus work at 12:20; another technician has independent capacity.
   expect(evaluateArrivalPlacement(input, options(600)).feasible).toBe(technician_id != null);
-  expect(evaluateArrivalPlacement({ ...input, now: new Date('2027-01-15T15:20:00Z') }, options(600)).feasible).toBe(true);
+  expect(evaluateArrivalPlacement({ ...input, now: new Date('2027-01-15T17:20:00Z') }, options(780)).feasible).toBe(true);
 });
 
 test('the return leg respects the full duration of a fixed allocation', () => {
@@ -142,4 +142,12 @@ test('legacy morning unassigned work stops blocking after its arrival range and 
   expect(evaluateArrivalPlacement(context(rows), { ...options(960), departureMin: 780 }).feasible).toBe(true);
   expect(evaluateArrivalPlacement(context([{ ...rows[0], time_window: 'unknown' }]),
     { ...options(960), departureMin: 780 }).feasible).toBe(false);
+});
+
+
+test('unassigned hourly windows retain their full arrival promise before afternoon capacity opens', () => {
+  const rows = [stop('unassigned', 540, 60, { technician_id: null })];
+  const input = context(rows, { now: new Date('2027-01-15T15:30:00Z') });
+  expect(evaluateArrivalPlacement(input, options(660)).feasible).toBe(false);
+  expect(evaluateArrivalPlacement({ ...input, now: new Date('2027-01-15T17:00:00Z') }, options(780)).feasible).toBe(true);
 });

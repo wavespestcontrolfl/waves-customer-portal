@@ -1357,6 +1357,12 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     );
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
+  if (capacityEnabled()) {
+    // The complete route already includes its technician's work and unassigned
+    // blockers. A global fixed-window pass would erase certified flexibility.
+    return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
+      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
+  }
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
@@ -1524,7 +1530,9 @@ function signCustomerFacingSlots(slots, estimateId) {
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
     });
-    return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    delete publicSlot.routeMode;
+    return publicSlot;
   });
 }
 
@@ -1543,6 +1551,7 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
     windowStart,
     windowEnd,
     durationMinutes,
+    ...(capacityEnabled() ? { routeMode: slot.route_mode } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
     routeOptimal,

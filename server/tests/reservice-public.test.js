@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({
 // flipping this map flips the gate per test.
 const gateState = { reserviceSelfServe: true, selfBooking: true, bookingCustomersOnly: false };
 jest.mock('../config/feature-gates', () => ({
+  gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   isEnabled: jest.fn((name) => (name in gateState ? gateState[name] : true)),
 }));
 
@@ -352,3 +353,17 @@ describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
     expect(carveOutIdx).toBeLessThan(helperUpdateIdx);
   });
 });
+
+
+test.each([[['pest'], 'pest_control'], [['lawn'], 'lawn_care'], [['pest', 'lawn'], 'pest_control+lawn_care']])(
+  're-service availability forwards requested lanes %j to capability filtering', async (lanes, serviceKey) => {
+    const booking = require('../routes/booking')._internals;
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({ days: [] });
+    try {
+      await reservicePublicRouter._test.buildAvailabilityForCustomer({ latitude: 27.4, longitude: -82.4 }, {
+        rangeFrom: '2027-05-20', rangeTo: '2027-05-20', config: {}, duration: 30, lanes,
+      });
+      expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey }));
+    } finally { build.mockRestore(); }
+  },
+);
