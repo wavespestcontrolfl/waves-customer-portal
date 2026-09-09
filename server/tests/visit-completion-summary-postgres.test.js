@@ -178,6 +178,27 @@ postgres('visit summary recipient recovery', () => {
       .toMatchObject({ status: 'suppressed' });
   });
 
+  test.each(['sms_enabled', 'service_completed'])('an immediate SMS rechecks %s after the sender validation and before its claim', async (toggle) => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    let providerCalls = 0;
+    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+      // The canonical sender already validated consent. The preference
+      // writer commits before the callback gets its row lock.
+      await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, [toggle]: false,
+        seasonal_tips: null, marketing_offers: null }).onConflict('customer_id').merge({ [toggle]: false });
+      const verdict = await preDispatchCheck();
+      if (verdict.ok) providerCalls += 1;
+      return { sent: verdict.ok, blocked: !verdict.ok, code: verdict.code };
+    });
+    await deliver();
+    expect(providerCalls).toBe(0);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed' });
+    // The email leg can need one recovery pass to observe the new shared toggle.
+    expect(await deliver()).toEqual({ state: 'delivered' });
+  });
+
   test.each(['sms_enabled', 'service_completed'])('a queued summary whose customer turned off %s is refused at the dispatch claim', async (toggle) => {
     const queued = await heldSummary();
     // The sender's own consent read happens before the claim callback; the
