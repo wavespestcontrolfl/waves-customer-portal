@@ -1967,6 +1967,10 @@ const gates = {
   // GATE_ROUTE_REORDER_WINDOW_FIT.
   routeReorderWindowFit: gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT'),
 
+  // Planned route measurements and candidate-specific gap checks in the
+  // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
+  scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
+
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against
   // real trips: a fixed per-leg overhead plus a per-mile rate. Purely an

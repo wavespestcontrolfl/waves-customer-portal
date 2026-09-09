@@ -535,6 +535,20 @@ describe('mergeSingletonPrefRow', () => {
     expect(state.deleted).toBe(true);
   });
 
+  it.each([
+    ['sms', 'push', 'push'], ['push', 'sms', null],
+    ['both', 'push', 'push'], ['push', 'email', 'email'], ['email', 'push', null],
+    [null, 'push', 'push'], ['push', null, null],
+  ])('notification_prefs: payment problems merge %s + %s preserves the least-SMS choice', async (winner, loser, expected) => {
+    const { trx, state } = stubTrx({
+      winnerRow: { customer_id: 'W', payment_issue_channel: winner },
+      loserRow: { customer_id: 'L', payment_issue_channel: loser },
+    });
+    await mergeSingletonPrefRow(trx, 'notification_prefs', 'customer_id', 'W', 'L');
+    expect(state.updated?.payment_issue_channel ?? null).toBe(expected);
+    expect(state.deleted).toBe(true);
+  });
+
   it('property_preferences: empty jsonb defaults ([]/{}) count as empty; real details copy stringified', async () => {
     const { trx, state } = stubTrx({
       winnerRow: { id: 'p1', customer_id: 'W', special_features: [], pets_structured: {}, watering_days: null, created_at: 'x', updated_at: 'x' },

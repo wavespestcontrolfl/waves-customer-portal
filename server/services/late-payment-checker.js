@@ -104,7 +104,7 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       customerId: customer.id,
       invoiceId: inv.id,
       entryPoint: 'late_payment_checker_microdeposit',
-      metadata: { original_message_type: 'bank_verification_incomplete' },
+      metadata: { original_message_type: 'bank_verification_incomplete', notificationEventKey: `payment-problem:microdeposit:${inv.id}:${tierDays}` },
     });
     if (sendResult.blocked || sendResult.sent === false) {
       await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'blocked' });
