@@ -6,6 +6,12 @@ const { isRealProviderSend } = require('./sms-auto-send');
 const TEMPLATE_KEY = 'auto_new_recurring';
 const SEQUENCE_TYPE = 'new_customer_welcome';
 const EMAIL_SEQUENCE_TYPE = 'new_customer_welcome_email';
+// Open = booked or actively proceeding. Delivery runs ~60 minutes after
+// booking, so a same-day visit can already be en_route/on_site at the
+// recheck (Codex #4112 r5). 'rescheduled' is NOT open (r4): with the
+// reschedule streamline dark, a reschedule request parks the visit with no
+// booked replacement until staff rebook it.
+const OPEN_BOOKING_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 const { gateEnvValue } = require('../config/feature-gates');
 const oneTimeWelcomeEmailEnabled = () => gateEnvValue('GATE_ONE_TIME_WELCOME_EMAIL');
 
@@ -106,19 +112,57 @@ async function hasWelcomeSequence(customerId, conn = db, sequenceType = SEQUENCE
   }
 }
 
+// A cancel-and-rebook inside the ~60-minute delay (Codex #4112 r6): the
+// original booking's email queue row stays 'active' until the delayed
+// processor reaches it and drops it as appointment_cancelled, so the
+// replacement booking's enqueue would read 'already_sent' and the customer
+// would get no welcome at all. Called under the per-customer advisory lock
+// BEFORE the once-per-customer check: any still-queued email row whose
+// linked booking is no longer open (cancelled, parked, deleted) is retired as
+// a tombstone so the rebooked visit re-enters. Only 'active' rows are
+// touched — a 'sending' row is mid-dispatch and settles itself. A row for
+// the SAME booking, or for another booking that is still open, is left alone
+// (the guard then holds as before). The recurring SMS queue is untouched.
+async function retireSupersededEmailRows(customerId, scheduledServiceId, conn) {
+  const queued = await conn('sms_sequences')
+    .where({ customer_id: customerId, sequence_type: EMAIL_SEQUENCE_TYPE, status: 'active' })
+    .limit(25);
+  let retired = 0;
+  for (const row of queued) {
+    const meta = parseMetadata(row);
+    const linkedId = meta.scheduled_service_id || null;
+    if (!linkedId || linkedId === scheduledServiceId) continue;
+    const linked = await conn('scheduled_services').where({ id: linkedId }).first('status');
+    if (linked && OPEN_BOOKING_STATUSES.includes(String(linked.status || '').toLowerCase())) continue;
+    // status-qualified so a concurrent sweep claim (active → sending) wins.
+    const updated = await conn('sms_sequences').where({ id: row.id, status: 'active' }).update({
+      status: 'cancelled',
+      metadata: JSON.stringify({
+        ...meta,
+        skip_reason: 'superseded_by_rebooking',
+        superseded_by_service_id: scheduledServiceId || null,
+        superseded_at: new Date().toISOString(),
+      }),
+      updated_at: new Date(),
+    });
+    if (updated) {
+      retired++;
+      logger.info(`[new-recurring-welcome] retired queued one-time welcome email for customer ${customerId}: booking ${linkedId} no longer open, superseded by ${scheduledServiceId || 'unknown'}`);
+    }
+  }
+  return retired;
+}
+
 // Read-only audience decision, shared by enqueue, delayed delivery and the
 // admin preview. Gate/queue state are separate: previewing never enables sends.
 async function oneTimeWelcomeEligibility(service, customer) {
   if (!service?.id || !customer?.id || service.customer_id !== customer.id) return { eligible: false, reason: 'missing_booking' };
   if (service.is_recurring !== false) return { eligible: false, reason: 'not_one_time' };
-  // Open = booked or actively proceeding. Delivery runs ~60 minutes after
-  // booking, so a same-day visit can already be en_route/on_site at the
-  // recheck (Codex #4112 r5). 'rescheduled' is NOT open (r4): with the
-  // reschedule streamline dark, a reschedule request parks the visit with no
-  // booked replacement until staff rebook it; the parked row drops at
-  // delivery and the rebooked visit re-enters through the tagger (cancelled
-  // email queue rows do not hold the once-per-customer guard).
-  if (!['pending', 'confirmed', 'en_route', 'on_site'].includes(service.status)) return { eligible: false, reason: 'booking_not_open' };
+  // A parked or cancelled row drops at delivery and the rebooked visit
+  // re-enters through the tagger (cancelled email queue rows do not hold the
+  // once-per-customer guard; a still-queued row for a dead booking is retired
+  // by the rebook's enqueue — see retireSupersededEmailRows).
+  if (!OPEN_BOOKING_STATUSES.includes(service.status)) return { eligible: false, reason: 'booking_not_open' };
   if (customer.active === false || customer.deleted_at) return { eligible: false, reason: 'inactive_customer' };
   if (!String(customer.email || '').trim()) return { eligible: false, reason: 'no_email' };
   const { tierLabelStatus } = require('./self-booking-plan-sync');
@@ -254,6 +298,7 @@ async function sendNewRecurringWelcome({
     // existence check and enqueue two welcome sequences — two texts.
     const outcome = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${emailOnly ? 'new-customer-welcome-email' : 'new-recurring-welcome'}:${customer.id}`]);
+      if (emailOnly) await retireSupersededEmailRows(customer.id, scheduledServiceId || null, trx);
       if (await hasWelcomeSequence(customer.id, trx, sequenceType)) return 'already_sent';
       await trx('sms_sequences').insert(data);
       return 'queued';
@@ -615,6 +660,7 @@ module.exports = {
   _internals: {
     isNewRecurringSignupCandidate,
     hasWelcomeSequence,
+    retireSupersededEmailRows,
     deliverQueuedWelcome,
     recordWelcomeInteraction,
     renderWelcomeBody,
