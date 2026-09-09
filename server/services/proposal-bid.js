@@ -22,7 +22,16 @@ function assertBidSendDate(estimate, at = new Date()) {
 function decimalValid(value, { min = 0, max = 99999999.99 } = {}) {
   if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return false;
   const n = Number(value);
-  return Number.isFinite(n) && n >= min && n <= max && Math.abs(n * 10000 - Math.round(n * 10000)) < 0.001;
+  if (!Number.isFinite(n) || n < min || n > max) return false;
+  if (typeof value === 'string') {
+    const match = /^[+-]?(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(value.trim());
+    if (!match) return false;
+    const fraction = match[2] || '';
+    const digits = match[1] + fraction;
+    const trailingZeros = digits.length - digits.replace(/0+$/, '').length;
+    return fraction.length - Number(match[3] || 0) - trailingZeros <= 4;
+  }
+  return Math.abs(n - roundDecimal(n)) <= Number.EPSILON * Math.abs(n);
 }
 function validateBidFields(proposal, costing) {
   if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return 'A proposal must be an object.';

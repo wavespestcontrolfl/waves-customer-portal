@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const { PDFDocument, PDFArray, StandardFonts, rgb } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../estimate-proposal');
 const { validDateOnly } = require('../../utils/date-only');
-const { BID_FORM_PROFILES, roundCents, roundDecimal, formatQuantity, formatUnitPrice } = require('../../../shared/proposal-bid.cjs');
+const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQuantity, formatUnitPrice } = require('../../../shared/proposal-bid.cjs');
 
 // Hashes of the blank form page's content streams, not of customer documents.
 // Requiring the reviewed page prevents prices being overlaid on a different
@@ -53,7 +53,7 @@ function mapFormPrices(proposal, template, mapping = {}) {
       // Combining multiple individually rounded charges must still reconcile
       // with the single unit price and combined quantity printed on this form.
       const quantity = roundDecimal(rows.reduce((sum, row) => sum + row.quantity, 0));
-      if (roundCents(quantity * rows[0].unitPrice) !== amounts[key]) throw invalid(`The combined ${key} quantity and unit price differ from the saved line amounts by rounding. Consolidate those proposal lines before exporting.`);
+      if (proposalLineAmount({ quantity, unitPrice: rows[0].unitPrice }) !== amounts[key]) throw invalid(`The combined ${key} quantity and unit price differ from the saved line amounts by rounding. Consolidate those proposal lines before exporting.`);
     }
     if (groups.other.length > 1) throw invalid('The additional-item row supports one quoted line. Consolidate additional charges first.');
   } else {

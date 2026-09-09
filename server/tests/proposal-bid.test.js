@@ -8,7 +8,7 @@ const { normalizeProposal, computeProposalTotals } = require('../services/estima
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
 const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCosting } = require('../services/proposal-bid');
-const { computeProjectCosts } = require('../../shared/proposal-bid.cjs');
+const { computeProjectCosts, roundCents } = require('../../shared/proposal-bid.cjs');
 const { mapFormPrices, buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 
 const line = (id, quantity, unitPrice, unit = 'acre') => ({ id, description: `Synthetic ${id}`, quantity, unitPrice, unit, frequency: 'one_time' });
@@ -16,9 +16,22 @@ const estimate = (lines, extra = {}) => ({ estimate_data: { proposal: { enabled:
 const normalized = (lines, extra) => normalizeProposal(estimate(lines, extra));
 
 describe('bid quantity and costing authority', () => {
+  test.each([[1, 10.075, 10.08], [146.5, 0.15, 21.98], [0.5, 2.01, 1.01], [1, 10.0749, 10.07], [1, 10.0751, 10.08], [1999899.9999, 50.0001, 99995199.98], [1999899.9999, 49.9999, 99994800.01]])('rounds %s × %s once to %s through persisted proposal and invoice totals', (quantity, price, expected) => {
+    const proposal = normalized([line('half-cent', quantity, price)]);
+    expect(proposal.buildings[0].lineItems[0].amount).toBe(expected);
+    expect(computeProposalTotals(proposal).oneTime).toBe(expected);
+    expect(buildProposalFirstInvoice(proposal).subtotal).toBe(expected);
+  });
+  test('rounds decimal half cents without magnitude-dependent binary drift', () => {
+    expect([10.075, -10.075, 1.005, 0.00000001].map(roundCents)).toEqual([10.08, -10.08, 1.01, 0]);
+  });
   test('unknown or incomplete costs do not imply a zero-cost project and 100% margin', () => {
     expect(computeProjectCosts({ rows: [] }, { oneTime: 10000 })).toMatchObject({ profit: null, marginPercent: null, costsComplete: false });
     expect(computeProjectCosts({ rows: [{ description: 'Awaiting supplier price', quantity: 1, unitCost: '', occurrences: 1 }] }, { oneTime: 10000 })).toMatchObject({ profit: null, marginPercent: null });
+  });
+  test.each([[146.5, 0.15, 1, 21.98], [1, 1.005, 2, 2.01], [2, 1.0075, 5, 10.08]])('rounds the complete project cost %s × %s × %s only once', (quantity, unitCost, occurrences, expected) => {
+    const costing = { rows: [{ category: 'labor', description: 'Synthetic fractional cost', quantity, unitCost, occurrences }] };
+    expect(computeProjectCosts(costing, { oneTime: 100 })).toMatchObject({ cost: expected, profit: roundCents(100 - expected) });
   });
   test('keeps fractional acres, sub-cent square-foot rates, and per-line cent rounding through reload and invoice billing', () => {
     const proposal = normalized([line('acre', 25.8, 100), line('slab', 14768, 0.0755, 'sqft'), line('fraction', 0.125, 1.08, 'gal')]);
@@ -35,11 +48,14 @@ describe('bid quantity and costing authority', () => {
     expect(invoice.lineItems[1].description).toContain('14,768 sq ft × $0.0755');
     expect(JSON.stringify(proposal)).not.toContain('PRIVATE_COST_DO_NOT_RENDER');
   });
-  test.each([0, -1, Infinity, NaN, null, true, '', 0.00001, 25.12345])('rejects invalid quantity %s before normalization', (quantity) => {
+  test.each([0, -1, Infinity, NaN, null, true, '', 0.00001, 25.12345, 1.00000001, '1.0000000000000000001', '1e-5'])('rejects invalid quantity %s before normalization', (quantity) => {
     expect(validateBidFields({ buildings: [{ lineItems: [line('a', quantity, 10)] }] })).toMatch(/quantit/i);
   });
-  test.each([null, true, Infinity, '', 1.23456])('rejects invalid unit price %s before normalization', (unitPrice) => {
+  test.each([null, true, Infinity, '', 1.23456, 1.00000001, '0.0000000000000000001'])('rejects invalid unit price %s before normalization', (unitPrice) => {
     expect(validateBidFields({ buildings: [{ lineItems: [line('a', 1, unitPrice)] }] })).toMatch(/Unit prices/);
+  });
+  test.each([1.2345, 0.1 + 0.2, 99999999.99, '1.2345000', '1000e-5', '.1234', '1.2345e2'])('accepts four-decimal values and minimal numeric roundoff: %s', (value) => {
+    expect(validateBidFields({ buildings: [{ lineItems: [line('a', value, value)] }] })).toBeNull();
   });
   test('costs all crew hours, trips, and warranty occurrences without engine caps or invented allowances', () => {
     const costing = { revenueYears: 1, rows: [
@@ -81,6 +97,10 @@ describe('required bid form price mapping', () => {
   const mapping = { product: 'product', apply: 'application', freight: 'freight' };
   test('quotes North Port with exact product units, acres and freight, reconciling to the proposal', () => {
     expect(mapFormPrices(normalized(lines), 'north_port_pr27_02', mapping)).toMatchObject({ amounts: { product: 1000, application: 2580, freight: 80, other: 0 }, total: 3660 });
+  });
+  test('North Port mapping uses the same exact half-cent rounding as saved lines', () => {
+    const proposal = normalized([line('product', 146.5, 0.15, 'lb'), line('apply', 0.5, 2.01), lines[2]]);
+    expect(mapFormPrices(proposal, 'north_port_pr27_02', mapping)).toMatchObject({ amounts: { product: 21.98, application: 1.01, freight: 80 }, total: 102.99 });
   });
   test('requires a fixed date and enforces the 90-day North Port hold after the amended deadline', () => {
     expect(() => mapFormPrices(normalized(lines, { validThrough: null }), 'north_port_pr27_02', mapping)).toThrow(/explicit Valid through/);
