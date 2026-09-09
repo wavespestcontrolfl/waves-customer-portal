@@ -574,6 +574,23 @@ describe('/confirm-action commit path', () => {
     });
   });
 
+  test('an accepted-but-unconfirmed send returns unsuccessful with an explicit unknown outcome', async () => {
+    mockClaimForConfirm.mockResolvedValue({
+      action: { id: PENDING_ID, tool_name: 'send_email_reply', params: { email_id: 'synthetic-email', body: 'Synthetic reply' } },
+    });
+    const result = { outcome_unknown: true, warning: 'Gmail did not confirm the send outcome. Check the sent thread before creating another send.' };
+    mockExecuteTool.mockResolvedValue(result);
+    await withServer(async baseUrl => {
+      const response = await fetch(`${baseUrl}/admin/intelligence-bar/confirm-action`, {
+        method: 'POST', headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pending_action_id: PENDING_ID }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ success: false, outcome: 'outcome_unknown', result });
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, result);
+    });
+  });
+
   test.each([
     ['not_found', 404],
     ['actor_mismatch', 403],
