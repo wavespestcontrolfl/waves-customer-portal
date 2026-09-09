@@ -998,11 +998,23 @@ async function savePropertyToggles(req, res, updates) {
   // fresh house race the read-then-insert (property_id is UNIQUE), and an
   // in-flight send must not read a half-committed toggle.
   const existing = await db('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
-  await withCustomerCommsLock(db, property.customer_id, (trx) =>
-    trx('property_notification_prefs')
+  // Re-read the property row UNDER the lock: a primary flip landing between
+  // the unlocked read above and this write would otherwise leave a dormant
+  // row on the new primary that resurfaces as a stale override on a later
+  // demotion (GitHub codex r4 P2).
+  const stillSecondary = await withCustomerCommsLock(db, property.customer_id, async (trx) => {
+    const live = await trx('customer_properties').where({ id: property.id, customer_id: property.customer_id }).forUpdate().first('is_primary', 'active');
+    if (!live || live.active === false || live.is_primary === true) return false;
+    await trx('property_notification_prefs')
       .insert({ property_id: property.id, customer_id: property.customer_id, ...dbUpdates })
       .onConflict('property_id')
-      .merge(dbUpdates));
+      .merge(dbUpdates);
+    return true;
+  });
+  if (!stillSecondary) {
+    res.status(409).json({ error: 'This property just changed. Refresh and try again.' });
+    return true;
+  }
   const row = await db('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
   const customerPrefs = await ensurePrefs(req.params.customerId);
   const effective = PropertyTexts.effectivePropertyToggles(property, row, customerPrefs);

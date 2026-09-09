@@ -139,6 +139,18 @@ describe('PUT /property-preferences/:customerId with propertyId', () => {
     expect(writes[writes.length - 1][0]).toBe('upsert');
     expect(body.preferences).toMatchObject({ techEnRoute: true, techArrived: true });
   });
+  test('a property promoted to primary between the read and the locked write is refused (409), nothing written', async () => {
+    setDb({ property: { id: 'pb', customer_id: 'c1', is_primary: false, active: true, relationship: 'family_home' } });
+    // The locked re-read answers "primary now".
+    const lock = require('../utils/customer-comms-lock').withCustomerCommsLock;
+    lock.mockImplementationOnce(async (_db, _id, fn) => fn((table) => {
+      if (table === 'customer_properties') { const c = chain([{ is_primary: true, active: true }]); c.forUpdate = jest.fn(() => c); return c; }
+      return db(table);
+    }));
+    const res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', techEnRoute: false }) });
+    expect(res.status).toBe(409);
+    expect(writes.some(([t]) => t === 'upsert')).toBe(false);
+  });
   test('the PRIMARY property writes the profile row (today\'s path)', async () => {
     setDb({ property: { id: 'pa', customer_id: 'c1', is_primary: true, active: true } });
     const res = await fetch(`${base}/notifications/property-preferences/c1`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ propertyId: '6f1c2e2a-1111-4a2b-8c3d-0123456789ab', techEnRoute: false }) });

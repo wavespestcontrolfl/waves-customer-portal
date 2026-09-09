@@ -133,6 +133,10 @@ async function recordDecision({ customerId, property, scheduledServiceId, source
         property_decisions: JSON.stringify(effective),
         agreed,
         enforced,
+        // The review query and the 90-day prune key on created_at: a
+        // refreshed decision must be visible to the pre-flip review and
+        // must not age out under its first observation.
+        created_at: db.fn.now(),
       });
   } catch (err) {
     logger.warn(`[property-texts] shadow log write failed for property ${property.id}: ${err.message}`);

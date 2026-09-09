@@ -1255,7 +1255,7 @@ const TwilioService = {
     const sendEnRouteEmail = async () => {
       try {
         const AppointmentEmail = require("./appointment-email");
-        return await AppointmentEmail.sendTechEnRouteEmail({
+        const res = await AppointmentEmail.sendTechEnRouteEmail({
           customerId,
           scheduledServiceId,
           techName: customerTechName,
@@ -1263,6 +1263,16 @@ const TwilioService = {
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
+        // A HELD email (preferences unreadable at the provider handoff) has
+        // no retry lane on this path — bell the office so an email-only
+        // service contact is not silently skipped (GitHub codex #4299 r4 P1).
+        if (res?.held) {
+          await require('./notification-service').notifyAdmin('appointment', 'En-route email not sent',
+            `The en-route email for visit ${scheduledServiceId || customerId} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `en-route-email-held:${scheduledServiceId || customerId}`, metadata: { scheduledServiceId, customerId } })
+            .catch((bellErr) => logger.error(`[twilio] en-route email hold bell failed for ${customerId}: ${bellErr.message}`));
+        }
+        return res;
       } catch (e) {
         logger.warn(`[twilio] en-route email send failed for customer ${customerId}: ${e.message}`);
         return { ok: false, error: e.message };

@@ -4588,15 +4588,19 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         [key]: newVal,
         ...(property.propertyId ? { propertyId: property.propertyId } : {}),
       });
+      // Only THIS toggle from the response: two quick taps on different
+      // alerts run concurrently and an earlier snapshot arriving last would
+      // otherwise revert the other switch (GitHub codex r4 P2).
+      const confirmed = result?.preferences && result.preferences[key] !== undefined ? { [key]: result.preferences[key] } : {};
       setPropertyPrefs(prev => prev.map(p => (
         p.id === propertyId
-          ? { ...p, preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } }
+          ? { ...p, preferences: { ...(p.preferences || {}), ...confirmed } }
           : p
       )));
       // The signed-in profile's own row changed (its primary property, or the
       // profile entry): the account-level card mirrors it.
       if ((property.customerId || propertyId) === customer.id && property.isPrimaryProperty !== false) {
-        setPrefs(prev => ({ ...(prev || {}), ...(result.preferences || {}) }));
+        setPrefs(prev => ({ ...(prev || {}), ...confirmed }));
       }
     } catch (err) {
       setPropertyPrefs(prev => prev.map(p => (

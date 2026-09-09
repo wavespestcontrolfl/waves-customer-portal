@@ -2053,6 +2053,14 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
 
   try {
     const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+    // Unreadable (a failed read, or the visit's saved property unreadable
+    // under enforcement): the toggles below are fail-open defaults, not
+    // choices — return WITHOUT marking so the sweep re-delivers, instead of
+    // texting/emailing on a guess and closing the row (GitHub codex r4 P1).
+    if (prefs.unavailable) {
+      logger.warn(`[appt-remind] Confirmation for ${scheduledServiceId} held: notification preferences unreadable — row left unmarked for retry`);
+      return false;
+    }
     if (!prefs.appointmentConfirmation) {
       await db('appointment_reminders')
         .where({ id: record.id })
@@ -4762,7 +4770,7 @@ const AppointmentReminders = {
       // is always truthful.
       try {
         const AppointmentEmail = require('./appointment-email');
-        await AppointmentEmail.sendAppointmentNoShowEmail({
+        const noShowEmail = await AppointmentEmail.sendAppointmentNoShowEmail({
           customerId: svc.customer_id,
           scheduledServiceId,
           serviceLabel: svc.service_type,
@@ -4771,6 +4779,15 @@ const AppointmentReminders = {
           feeOutcome: options.feeOutcome
             || (options.feeCharged === true ? 'charged' : 'none'),
         });
+        // A HELD email (preferences unreadable at the provider handoff) has
+        // no retry rail here either — bell the office (GitHub codex r4 P1).
+        if (noShowEmail?.held) {
+          logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
+          await require('./notification-service').notifyAdmin('appointment', 'No-show email not sent',
+            `The no-show email for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `no-show-email-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } })
+            .catch((bellErr) => logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`));
+        }
       } catch (e) {
         logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
       }

@@ -190,3 +190,13 @@ describe('primary-flip and merge hygiene', () => {
   });
 });
 
+describe('confirmation deliverer on unreadable preferences', () => {
+  test('the deliverer holds on prefs.unavailable before any preference-skip close (source guard)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-reminders'), 'utf8');
+    const i = src.indexOf("const prefs = await getReminderPrefs(customerId, { scheduledServiceId });\n    // Unreadable");
+    expect(i).toBeGreaterThan(-1);
+    const after = src.slice(i, i + 900);
+    expect(after.indexOf('if (prefs.unavailable)')).toBeLessThan(after.indexOf('if (!prefs.appointmentConfirmation)'));
+  });
+});
+

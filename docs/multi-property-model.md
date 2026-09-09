@@ -205,7 +205,7 @@ Under `GATE_APP_PROPERTY_SCOPE` (call-time; off = tonight's behavior exactly):
   property or no `propertyId` = today's profile write. The Visits tab's
   Appointment-texts card follows the page's selected house.
 - **Shadow-log hygiene.** One row per (property, visit, seam) — the resolver
-  writes `ON CONFLICT … DO UPDATE` (latest decision wins) on the unique index from
+  writes `ON CONFLICT … DO UPDATE` (latest decision wins, `created_at` refreshed so the review query and the prune see the newest observation) on the unique index from
   `20260909000031`, on the ROOT db handle (never a caller's transaction),
   only in shadow mode, and only where the two rules CAN disagree (a chosen
   toggle, or a rental / managed house); an inheriting house with no chosen
