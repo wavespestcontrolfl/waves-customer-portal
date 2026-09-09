@@ -9,24 +9,7 @@ const { previewServer, launchBrowser, evidence, waitForFonts } = require('./brow
 const root = path.resolve(__dirname, '../..');
 const baseline = process.argv.includes('--baseline');
 const output = path.join(root, '.tmp/estimate-foundation', baseline ? 'baseline' : 'current');
-const result = {
-  recurring: { tier: 'Bronze', serviceCount: 1, monthlyTotal: 50, grandTotal: 50, annualAfterDiscount: 600,
-    services: [{ service: 'pest_control', name: 'Pest Control', mo: 50, annual: 600 }] },
-  oneTime: { total: 99, items: [{ service: 'pest_initial', name: 'Initial service', price: 99 }] },
-  results: {}, totals: { year2mo: 50, year1: 699, year2: 600 },
-};
-const source = {
-  id: 'estimate-example-a', status: 'draft', editable: true, editVersion: 'version-a',
-  customerId: 'customer-example-a', customerName: 'Avery Example', customerPhone: '+19415550100',
-  customerEmail: 'avery@example.invalid', address: '100 Example Court, Example City, FL 34201',
-  notes: 'Notes for Avery only.', propertyId: 'property-example-a',
-  inputs: { svcPest: true, homeSqFt: '2000', lotSqFt: '6000',
-    manualDiscountPreset: '__custom__', manualDiscountType: 'FIXED', manualDiscountValue: '25',
-    manualDiscountLabel: 'Customer-specific credit', manualDiscountInternalReason: 'First customer only',
-    serviceSpecificDiscountKeys: ['first-customer-credit'] },
-  engineRequest: { profile: { homeSqFt: 2000, lotSqFt: 6000 }, selectedServices: ['PEST'], options: { pestTier: 'quarterly' } },
-  result, token: 'synthetic-example-token', updatedAt: '2026-09-08T15:00:00Z',
-};
+const { source, createFixtures } = require('./estimate-foundation-fixtures.cjs');
 
 async function main() {
   fs.rmSync(output, { recursive: true, force: true });
@@ -44,13 +27,12 @@ async function main() {
         page.setDefaultNavigationTimeout(60000);
         const state = { device, errors: [], consoleErrors: [], unmatched: [], reads: [], writes: [], geometry: [], passed: false };
         report.scenarios.push(state);
-        const records = new Map([[source.id, structuredClone(source)]]);
-        let failCreate = true;
         let releaseCreate;
         const pendingCreate = new Promise((resolve) => { releaseCreate = resolve; });
         let releaseCalculation;
         const pendingCalculation = new Promise((resolve) => { releaseCalculation = resolve; });
-        let conflictRevision = false;
+        const fixtures = createFixtures({ baseUrl: server.baseUrl, pendingCreate, pendingCalculation });
+        const { records } = fixtures;
         await page.addInitScript(() => {
           localStorage.setItem('waves_admin_token', 'synthetic-local-token');
           localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'fixture-user', role: 'admin', name: 'Fixture operator' }));
@@ -70,51 +52,13 @@ async function main() {
           const body = method === 'GET' ? null : request.postDataJSON();
           if (method === 'GET') state.reads.push({ endpoint, method });
           else state.writes.push({ endpoint, method, body });
-          let response, status = 200;
-          if (endpoint === '/api/admin/auth/me') response = { id: 'fixture-user', role: 'admin', name: 'Fixture operator' };
-          else if (endpoint === '/api/admin/feature-flags') response = { flags: {} };
-          else if (endpoint.endsWith('/unread-count')) response = { count: 0, conversations: 0 };
-          else if (endpoint === '/api/admin/discounts') response = [];
-          else if (endpoint.startsWith('/api/admin/pricing-config/')) response = { data: null, featureAvailable: false, subFeaturesAvailable: {} };
-          else if (endpoint === '/api/admin/customers') response = { customers: [] };
-          else if (endpoint === '/api/admin/triage') response = { items: [] };
-          else if (endpoint.endsWith('/properties')) response = { properties: [] };
-          else if (endpoint.includes('/estimates/customer-spend/')) response = { services: [] };
-          else if (endpoint.endsWith('/group')) response = { estimates: [] };
-          else if (endpoint === '/api/admin/estimator/turf-preview') response = { turfSf: 4000 };
-          else if (endpoint === '/api/admin/estimator/calculate-estimate') {
-            await pendingCalculation;
-            response = structuredClone(result);
+          try {
+            const { body: response, status } = await fixtures.dispatch(method, endpoint, body);
+            return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(response) });
+          } catch (error) {
+            state.unmatched.push({ endpoint, method, error: error.message });
+            return route.abort();
           }
-          else if (endpoint.endsWith('/edit-source')) response = records.get(endpoint.split('/').at(-2));
-          else if (endpoint.endsWith('/send-preview')) {
-            const record = records.get(endpoint.split('/').at(-2));
-            response = { ...record, previewPath: '/preview-estimate.html?scenario=pest',
-              customerUrl: `${server.baseUrl}/preview-estimate.html?scenario=pest`, messageVersion: 'message-example-v1', groupVersions: [],
-              messages: { sms: 'A fictional estimate preview for the selected recipient.', email: { subject: 'Example estimate', text: 'A fictional estimate email preview.' } } };
-          } else if (endpoint === '/api/admin/estimates' && method === 'POST') {
-            if (failCreate) {
-              await pendingCreate;
-              failCreate = false; status = 503; response = { error: 'Example save failed. Please retry.' };
-            }
-            else {
-              const record = { ...body, id: 'estimate-example-created', status: 'draft', editable: true,
-                editVersion: 'created-v1', token: 'synthetic-created-token', updatedAt: source.updatedAt,
-                inputs: body.estimateData.inputs, result: body.estimateData.result, engineRequest: body.estimateData.engineRequest };
-              records.set(record.id, record); response = record;
-            }
-          } else if (endpoint.startsWith('/api/admin/estimates/') && method === 'PUT') {
-            if (conflictRevision) return route.fulfill({ status: 409, contentType: 'application/json',
-              body: JSON.stringify({ error: 'This example changed in another editor. Reopen the saved estimate.' }) });
-            const id = endpoint.split('/').at(-1), prior = records.get(id);
-            assert.equal(body.expectedEditVersion, prior.editVersion, 'The current revision must be sent');
-            const record = { ...prior, ...body, editVersion: `${prior.editVersion}-next`,
-              inputs: body.estimateData.inputs, result: body.estimateData.result, engineRequest: body.estimateData.engineRequest };
-            if (!body.dryRun) records.set(id, record);
-            response = record;
-          }
-          if (response === undefined) { state.unmatched.push({ endpoint, method }); response = {}; }
-          return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(response) });
         });
         async function screenshot(name, locator) {
           if (locator) await locator.scrollIntoViewIfNeeded();
@@ -219,7 +163,7 @@ async function main() {
         await page.keyboard.press('Escape');
         await dialog.waitFor({ state: 'detached' });
         assert.equal(await send.evaluate((node) => node === document.activeElement), true);
-        conflictRevision = true;
+        fixtures.state.conflictRevision = true;
         await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Keep this unsaved revision');
         await save.click();
         await page.getByText('This example changed in another editor. Reopen the saved estimate.', { exact: true }).waitFor();
@@ -285,6 +229,35 @@ async function main() {
           for (const key of ['shortButtons', 'shortControls', 'smallFields', 'unlabelled', 'shortChoices']) assert.deepEqual(geometry[key], [], `${device} ${width}px: ${key}`);
         }
         await page.setViewportSize(viewport);
+        // Enter through the real lead-prefill route. Reopening a draft clears
+        // lead linkage intentionally and cannot seed this regression check.
+        fixtures.state.conflictRevision = false;
+        page.once('dialog', (dialog) => dialog.accept());
+        await page.goto(`${server.baseUrl}/admin/estimates?tab=new&leadId=lead-example-a&customerName=Lead%20Example`);
+        await page.getByRole('heading', { name: 'Create estimate', exact: true }).waitFor();
+        assert.equal(await page.getByRole('textbox', { name: 'Customer name', exact: true }).inputValue(), 'Lead Example');
+        await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
+        await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).check();
+        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        await save.click();
+        await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
+        const leadSaved = state.writes.filter((write) => write.method === 'POST' && write.endpoint === '/api/admin/estimates').at(-1).body;
+        assert.equal(leadSaved.leadId, 'lead-example-a', 'Lead linkage must be seeded before testing reset');
+        assert.equal(leadSaved.estimateData.inputs.leadId, 'lead-example-a');
+        await page.getByRole('button', { name: 'Next estimate (keep services)', exact: true }).click();
+        assert.equal(new URL(page.url()).searchParams.has('leadId'), false);
+        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('After Lead Example');
+        await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
+        assert.equal(await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).isChecked(), true);
+        await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
+        await save.click();
+        await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
+        const afterLead = state.writes.filter((write) => write.method === 'POST' && write.endpoint === '/api/admin/estimates').at(-1).body;
+        assert.equal(afterLead.customerName, 'After Lead Example');
+        assert.equal(afterLead.leadId, null, 'Next estimate must not relink the previous lead');
+        assert.equal(afterLead.estimateData.inputs.leadId, '');
+        assert.notEqual(afterLead.clientDraftId, leadSaved.clientDraftId);
+        state.leadReset = { seededLeadId: leadSaved.leadId, nextLeadId: afterLead.leadId, newDraft: true };
         assert.deepEqual(state.unmatched, []);
         assert.deepEqual(state.errors, []);
         assert.deepEqual(state.consoleErrors, [
@@ -298,6 +271,7 @@ async function main() {
           'GET /api/admin/notifications/unread-count',
           'GET /api/admin/discounts',
           'GET /api/admin/triage',
+          'GET /api/admin/leads/lead-example-a',
           'GET /api/admin/pricing-config/lawn_pricing_v2',
           'GET /api/admin/pricing-config/onetime_flea',
           'GET /api/admin/pricing-config/rodent_bait_brackets',
