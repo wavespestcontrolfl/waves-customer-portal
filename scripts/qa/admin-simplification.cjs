@@ -67,6 +67,7 @@ async function main() {
       else if (api === '/health') body = { status: 'ok', gates: {} };
       else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
+      else if (api === '/admin/communications/unread-count') body = { conversations: 0, messages: 0 };
       else if (api === '/admin/usage/track') body = { ok: true };
       else if (api === '/admin/tool-health') body = runtime;
       else if (api === '/admin/integrations/health') { body = failCatalog ? { error: 'Synthetic unavailable' } : catalog; status = failCatalog ? 503 : 200; }
@@ -178,13 +179,13 @@ async function main() {
     });
     await scenario('customer and communication labels retain existing tab keys', async () => {
       await page.goto(`${server.baseUrl}/admin/customers`);
-      await page.getByRole('button', { name: 'Retention & Upsells', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Outreach & Upsells', exact: true }).waitFor();
       await shot(page, 'customers-desktop-1440');
-      await page.getByRole('button', { name: 'Retention & Upsells', exact: true }).click();
-      await page.getByText('0 active customers scanned', { exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Outreach & Upsells', exact: true }).click();
+      await page.getByText('No pending outreach or upsell opportunities. Use Directory filters to find customers by health or past retention outcomes.', { exact: true }).waitFor();
       assert.equal(new URL(page.url()).searchParams.get('view'), 'intelligence');
       await page.reload();
-      await page.getByText('0 active customers scanned', { exact: true }).waitFor();
+      await page.getByText('No pending outreach or upsell opportunities. Use Directory filters to find customers by health or past retention outcomes.', { exact: true }).waitFor();
       await page.goto(`${server.baseUrl}/admin/communications`);
       await page.getByRole('button', { name: 'Message Automations', exact: true }).waitFor();
       await page.getByRole('button', { name: 'Promises', exact: true }).waitFor();
@@ -217,7 +218,7 @@ async function main() {
       await mobile.getByText('Synthetic runtime failure', { exact: true }).waitFor();
       await shot(mobile, 'tool-health-mobile-390');
       await mobile.goto(`${server.baseUrl}/admin/customers?view=intelligence`);
-      await mobile.getByText('0 active customers scanned', { exact: true }).waitFor();
+      await mobile.getByText('No pending outreach or upsell opportunities. Use Directory filters to find customers by health or past retention outcomes.', { exact: true }).waitFor();
       await shot(mobile, 'customers-mobile-390');
       await mobile.goto(`${server.baseUrl}/admin/communications#tab=owed`);
       await mobile.getByRole('button', { name: 'Promises', exact: true }).waitFor();

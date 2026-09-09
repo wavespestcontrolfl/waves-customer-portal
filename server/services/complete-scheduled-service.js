@@ -11787,7 +11787,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     if (closedDealVisitPerformed) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id });
+        await convertLeadFromEvent({ source: 'service_completed', customerId: svc.customer_id, booking: svc });
       } catch (leadErr) {
         logger.warn(`[lead-trigger] first-service conversion failed for customer=${svc?.customer_id}: ${leadErr.message}`);
       }

@@ -252,6 +252,7 @@ describe('admin customers route helpers', () => {
       services_count: '4',
       service_type_count: '2',
       cards_on_file: '1',
+      property_count: '3',
       tags_str: 'gate,pets',
     });
 
@@ -265,9 +266,15 @@ describe('admin customers route helpers', () => {
       totalServices: 4,
       serviceCount: 2,
       cardsOnFile: 1,
+      propertyCount: 3,
       tags: ['gate', 'pets'],
       address: '1 Algorithm Way, Unit 4, Sarasota, FL 34236',
     });
+  });
+
+  test('propertyCount reads 0, never 1, when the list query did not select property_count', () => {
+    const mapped = mapCustomerListRow({ id: 'customer-2', first_name: 'Ada', tags_str: '' });
+    expect(mapped.propertyCount).toBe(0);
   });
 
   test('maps slot 2/3 service contacts on customer list rows', () => {

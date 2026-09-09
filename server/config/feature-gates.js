@@ -23,6 +23,10 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
+ *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
+ *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the
+ *     same day, before any send. Leave dark; do not re-enable without a new owner ruling.
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
  *   GATE_LEAD_ESTIMATE_AUTOMATION=true    (generate priced lead draft estimates)
  *   GATE_LEAD_ESTIMATE_AUTO_SEND=true    (auto-send generated lead estimates)
@@ -98,6 +102,10 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Admin-only fixed test pair for one explicitly configured customer; opt-in everywhere.
+  customerInboxTest: gateEnvValue('GATE_CUSTOMER_INBOX_TEST'),
+  // Customer iOS icon count; opt-in everywhere, with request-time route checks.
+  customerNativeBadges: gateEnvValue('GATE_CUSTOMER_NATIVE_BADGES'),
   // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
   composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for

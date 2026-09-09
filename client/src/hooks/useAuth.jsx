@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../utils/api';
 import { deactivateNativePushToken, flushNativePushToken, repostNativePushToken } from '../native/nativePush';
+import { clearNativeBadge } from '../native/nativeBadge';
 
 const AuthContext = createContext(null);
 
@@ -86,6 +87,7 @@ export function AuthProvider({ children }) {
   // Sign out, and a slow /auth/me must not paint a previous identity over
   // the one the current token authenticates (last-response-wins).
   const sessionEpochRef = useRef(0);
+  const [sessionEpoch, setSessionEpoch] = useState(0);
 
   // Check for existing session on mount
   useEffect(() => {
@@ -94,6 +96,7 @@ export function AuthProvider({ children }) {
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       loadCustomer();
     } else {
+      void clearNativeBadge();
       setLoading(false);
     }
     return () => {
@@ -116,6 +119,8 @@ export function AuthProvider({ children }) {
       // property switch, cross-tab adoption) — a load for the NEW epoch is
       // already running; applying this one would paint a stale identity.
       if (sessionEpochRef.current !== epoch) return;
+      // Cancelled accounts never mount the bell, including on a fresh launch.
+      if (data?.cancelled === true) void clearNativeBadge();
       customerRef.current = data;
       setCustomer(data);
       try {
@@ -153,7 +158,7 @@ export function AuthProvider({ children }) {
         // (a concurrent property switch, another load) must be discarded
         // too, or its later success would adopt tokens / repaint the
         // customer and undo this sign-out.
-        sessionEpochRef.current += 1;
+        setSessionEpoch(++sessionEpochRef.current);
         api.clearTokens();
         customerRef.current = null;
         setCustomer(null);
@@ -199,7 +204,7 @@ export function AuthProvider({ children }) {
         retryTimer.current = null;
       }
       if (!token) {
-        sessionEpochRef.current += 1;
+        setSessionEpoch(++sessionEpochRef.current);
         api.clearTokens();
         customerRef.current = null;
         setCustomer(null);
@@ -220,7 +225,7 @@ export function AuthProvider({ children }) {
       // this tab's in-flight flows (e.g. a property switch mid-await) —
       // that identity is still current (Codex #2859 r1+r2+r3).
       const familyChanged = !sameSessionFamily(tokenSessionIdentity(api.token), tokenSessionIdentity(token));
-      if (familyChanged) sessionEpochRef.current += 1;
+      if (familyChanged) setSessionEpoch(++sessionEpochRef.current);
       api.adoptTokens(token, localStorage.getItem('waves_refresh_token'));
       if (identityChanged) {
         // The token now points at a DIFFERENT customer — the old one must not
@@ -261,7 +266,7 @@ export function AuthProvider({ children }) {
       const data = await api.verifyCode(phone, code);
       // Another tab logged in / adopted a session while the code verified.
       if (sessionEpochRef.current !== epoch) return false;
-      sessionEpochRef.current += 1;
+      setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
       setProperties(data.properties || []);
       setPropertiesError(null);
@@ -274,10 +279,11 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    void clearNativeBadge();
     // Invalidate every in-flight auth response (property switch, /auth/me)
     // — without this, a delayed switch response re-writes tokens after
     // sign-out and walks the user back into the portal.
-    sessionEpochRef.current += 1;
+    setSessionEpoch(++sessionEpochRef.current);
     if (retryTimer.current) {
       clearTimeout(retryTimer.current);
       retryTimer.current = null;
@@ -353,7 +359,7 @@ export function AuthProvider({ children }) {
       // server has revoked the family on logout, so the returned tokens are
       // a ≤15-minute zombie; never adopt them.
       if (sessionEpochRef.current !== epoch) return false;
-      sessionEpochRef.current += 1;
+      setSessionEpoch(++sessionEpochRef.current);
       api.setTokens(data.token, data.refreshToken);
       // Re-point this device's push subscription at the newly selected
       // customer — otherwise pushes keep flowing to the previous property.
@@ -377,6 +383,7 @@ export function AuthProvider({ children }) {
   return (
     <AuthContext.Provider value={{
       customer,
+      sessionEpoch,
       properties,
       propertiesError,
       loading,

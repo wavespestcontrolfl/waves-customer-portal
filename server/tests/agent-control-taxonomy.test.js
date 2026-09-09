@@ -161,6 +161,7 @@ describe('agent-control lane policies', () => {
     const laneIds = sb.LANES.map((l) => l.id).sort();
     expect(Object.keys(policies.LANE_RUNTIME).sort()).toEqual(laneIds);
     expect(new Set(laneIds).size).toBe(laneIds.length);
+    expect(laneIds).toContain('voice_relay_judge');
   });
 
   it('every entry is valid and every merged policy keeps the timing invariants', () => {
