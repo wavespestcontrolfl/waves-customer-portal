@@ -914,6 +914,13 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.warn(`[reschedule-public] series re-anchor for ${svc.id} committed ${siblingConflicts.length} far-out occurrence(s) windowless (projected window held a seeded placeholder): ${JSON.stringify(siblingConflicts)}`);
     }
 
+    // Close only proposals linked to a promised link for this exact visit.
+    try {
+      await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
+    } catch (err) {
+      logger.warn(`[reschedule-public] promise resolve failed for ${svc.id}: ${err.code || err.name || 'error'}`);
+    }
+
     // Office alert — same internal ping a new self-booked appointment fires.
     try {
       if (process.env.ADAM_PHONE) {

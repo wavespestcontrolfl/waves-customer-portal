@@ -56,7 +56,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const WAVES_KINDS = Object.freeze([
   'send_estimate', 'send_appointment_confirmation', 'callback', 'send_report',
-  'send_paperwork', 'technician_follow_up', 'schedule_visit',
+  'send_paperwork', 'technician_follow_up', 'schedule_visit', 'send_reschedule_link',
 ]);
 const CUSTOMER_KINDS = Object.freeze([
   'send_photos', 'confirm_date', 'call_back', 'provide_info', 'make_payment',
@@ -76,7 +76,7 @@ const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown'])
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v1';
+const EXTRACTOR_VERSION = 'commitments-v2';
 
 // Mirrors CALL_PROC_EXTRACT_TIMEOUT_MS in call-recording-processor.js; the
 // claim ceiling counts this leg at the same budget.
@@ -334,6 +334,15 @@ const MODEL_OUTPUT_SCHEMA = {
           due_text: { type: ['string', 'null'], maxLength: 80 },
           due_at: { type: ['string', 'null'] },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
+          subject: {
+            type: ['object', 'null'], additionalProperties: false,
+            properties: {
+              visit_date: { type: ['string', 'null'], pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+              service: { type: ['string', 'null'], maxLength: 120 },
+              address: { type: ['string', 'null'], maxLength: 240 },
+              quote: { type: ['string', 'null'], maxLength: 500 },
+            },
+          },
           evidence: {
             type: 'array',
             minItems: 1,
@@ -377,6 +386,7 @@ Rules — these are strict:
 3. "due_text" is the timing as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when the spoken timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never invent a time.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
 5. Use kind "other" only when none of the listed kinds fits.
+   Use send_reschedule_link ONLY when the AGENT promises to send a link for changing an existing appointment. A caller asking for one, a generic website link, a booking link for new service, or a link already sent is not this promise. Include subject: the CURRENT appointment's date (visit_date, YYYY-MM-DD), service and street address actually discussed, plus a verbatim subject.quote. Resolve relative dates against the call date. Never put the requested NEW date into visit_date. Omit unknown subject values; never guess the soonest visit. If the transcript discusses multiple possible visits, leave subject null.
 6. Output ONLY a JSON object, no prose:
 {"commitments":[{"party":"waves","kind":"send_estimate","description":"...","channel":"email","due_text":"...","due_at":null,"confidence":0.9,"evidence":[{"quote":"...","speaker":"agent"}]}]}
 
@@ -422,6 +432,7 @@ function speakerTurns(transcript) {
 const KIND_ACTION_WORDS = Object.freeze({
   send_estimate: ['estimate', 'quote', 'pricing', 'price', 'proposal'],
   send_appointment_confirmation: ['confirm', 'confirmation', 'text', 'email', 'details'],
+  send_reschedule_link: ['link', 'reschedule', 'rescheduling'],
   callback: ['call', 'ring', 'phone', 'reach'],
   send_report: ['report', 'summary', 'send'],
   send_paperwork: ['paperwork', 'form', 'agreement', 'contract', 'document', 'send'],
@@ -468,6 +479,9 @@ function groundModelCommitments(items, transcript) {
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     const malformedDue = Number.isNaN(parseDueAt(item.due_at));
     if (malformedDue) malformedDueAt += 1;
+    // Preserve a supplied subject for the send guard to validate. Dropping
+    // an ungrounded subject would turn an explicit mismatch into no filter.
+    const subject = item.kind === 'send_reschedule_link' ? item.subject || null : null;
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -486,6 +500,7 @@ function groundModelCommitments(items, transcript) {
       // words, not the model's claim.
       evidence: grounded.map((e) => ({ quote: String(e.quote).trim(), speaker: turns && speaker ? speaker : e.speaker })),
       origin: 'model',
+      subject,
     });
   }
   return { kept, droppedUngrounded, droppedLowConfidence, droppedMismatched, malformedDueAt };
@@ -536,6 +551,7 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     due_basis: item.due_basis || null,
     confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : null,
     evidence: JSON.stringify(item.evidence || []),
+    subject: JSON.stringify(item.subject || null),
     source: 'ai',
     processing_generation: generation ?? null,
     last_seen_generation: generation ?? null,
@@ -605,8 +621,8 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
       const result = await trx.raw(
         `INSERT INTO call_commitments
            (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, confidence,
-            evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
+            evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at, subject)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
@@ -614,6 +630,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
            due_basis = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_basis ELSE call_commitments.due_basis END,
            confidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.confidence ELSE call_commitments.confidence END,
            evidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.evidence ELSE call_commitments.evidence END,
+           subject = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.subject ELSE call_commitments.subject END,
            processing_generation = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.processing_generation ELSE call_commitments.processing_generation END,
            extractor_version = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.extractor_version ELSE call_commitments.extractor_version END,
            recording_sid = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.recording_sid ELSE call_commitments.recording_sid END,
@@ -622,7 +639,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
          RETURNING id, (xmax = 0) AS inserted`,
         [
           row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.confidence,
-          row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at,
+          row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at, row.subject,
         ],
       );
       written += (result?.rows || []).length;
@@ -707,6 +724,7 @@ function normalizeRow(row) {
   return {
     ...row,
     evidence: parse(row.evidence) || [],
+    subject: parse(row.subject),
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),
   };
@@ -1832,6 +1850,8 @@ module.exports = {
   kindBelongsToParty,
   parseDueAt,
   anchorEvidence,
+  speakerTurns,
+  normalizeForMatch,
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,

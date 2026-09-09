@@ -353,8 +353,8 @@ describe('model contract', () => {
   });
   test('the output schema pins the kinds the table CHECK-constrains', () => {
     expect(MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties.kind.enum).toEqual(COMMITMENT_KINDS);
-    const migration = require('../models/migrations/20260901000010_call_commitments');
-    expect(migration.COMMITMENT_KINDS).toEqual([...COMMITMENT_KINDS]);
+    const migration = require('../models/migrations/20260909000092_reschedule_link_promises');
+    expect(new Set(migration.COMMITMENT_KINDS)).toEqual(new Set(COMMITMENT_KINDS));
   });
 });
 

@@ -173,6 +173,13 @@ function normalizeRecipient(phone) {
  * }>}
  */
 async function sendCustomerMessage(input) {
+  if (String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE).toLowerCase() === 'true') {
+    return require('../reschedule-link-promises').withSendLock(input, (lockedInput) => sendCustomerMessageCore(lockedInput));
+  }
+  return sendCustomerMessageCore(input);
+}
+
+async function sendCustomerMessageCore(input) {
   // 1. Contract validation
   const contractCheck = validateContract(input);
   if (!contractCheck.ok) {
@@ -191,7 +198,7 @@ async function sendCustomerMessage(input) {
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
   //    form. Caller closures stay outside message state and audit payloads.
-  const { preDispatchCheck, withSmsHandoff, ...inputRest } = input;
+  const { preDispatchCheck, preProviderCheck, withSmsHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -441,6 +448,7 @@ async function sendCustomerMessage(input) {
       if (appointmentMoveHoldApplies(sendInput) && await appointmentMoveHeld(sendInput)) {
         return { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true };
       }
+      if (typeof preProviderCheck === 'function') return preProviderCheck({ channel: sendInput.channel });
       return { ok: true };
     },
   });

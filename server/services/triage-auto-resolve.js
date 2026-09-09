@@ -988,6 +988,7 @@ const CLASSIFY_RULES = [
 // off). Returns { action: 'resolve'|'dismiss', rule } or null (untouched).
 function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (item.status !== 'open') return null;
+  if (item.payload?.reschedule_link_promise) return null;
   const ev = (ctx.evidence instanceof Map && ctx.evidence.get(item.id)) || null;
   const hit = CLASSIFY_RULES.find(({ when }) => when(item, ev, now));
   return hit ? { action: hit.action, rule: hit.rule } : null;
@@ -1872,7 +1873,32 @@ async function sweep({ now = new Date() } = {}) {
   return { skipped: false, scanned: items.length, applied: totalApplied, deferred, counts, callsSynced };
 }
 
+// Resolve the call's open reschedule cards and re-sync review_status —
+// admin-triage transitionCore's rule: open/in_progress cards remaining keep
+// the call 'open', otherwise it takes the applied status.
+async function resolveRescheduleCards(conn, callLogId, note) {
+  const now = new Date();
+  return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, callLogId);
+    const resolved = await trx('triage_items')
+      .where({ call_log_id: callLogId, status: 'open' })
+      .whereIn('reason_code', ['reschedule_or_cancel', 'existing_appointment_coordination'])
+      .update({ status: 'resolved', resolution_note: note, resolution_source: 'auto', resolved_at: now, updated_at: now })
+      .returning('id');
+    if (!resolved.length) return 0;
+    const remaining = await trx('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
+      .count({ n: '*' })
+      .first();
+    const next = Number(remaining?.n || 0) > 0 ? 'open' : 'resolved';
+    await trx('call_log').where({ id: callLogId }).update({ review_status: next, updated_at: now });
+    return resolved.length;
+  });
+}
+
 module.exports = {
+  resolveRescheduleCards,
   runTriageAutoResolve,
   classifyTriageItem,
   hasNewAddressEvidence,

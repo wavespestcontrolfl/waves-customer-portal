@@ -240,6 +240,7 @@ async function existingShortUrlFor({ kind, entityType, entityId, purpose = null 
 }
 
 module.exports = {
+  baseUrl,
   createShortCode,
   createTrackedShortLink,
   existingShortUrlFor,
