@@ -19,6 +19,7 @@ const {
   assignVisitsToEntries,
   appPropertyScopeEnabled,
   sessionPropertyScopePayload,
+  isSecondarySelection,
 } = require('../services/account-properties');
 
 function chain(rows) {
@@ -292,5 +293,15 @@ describe('sessionPropertyScopePayload — the selection the middleware honored, 
     expect(sessionPropertyScopePayload({ propertyId: 'prop-b', customerInactive: true })).toEqual({ enabled: false, propertyId: null });
     delete process.env.GATE_APP_PROPERTY_SCOPE;
     expect(sessionPropertyScopePayload({ propertyId: 'prop-b' })).toEqual({ enabled: false, propertyId: null });
+  });
+});
+
+describe('isSecondarySelection — when customer-wide self-serve surfaces must step aside', () => {
+  test('true only for an enabled, multi-property scope resolved to a NON-primary property', () => {
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: true, property: { id: 'pb', is_primary: false } })).toBe(true);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: true, property: { id: 'pa', is_primary: true } })).toBe(false);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: true, multi: false, property: { id: 'pb', is_primary: false } })).toBe(false);
+    expect(isSecondarySelection({ customerId: 'c1', enabled: false, multi: false, property: null })).toBe(false);
+    expect(isSecondarySelection(null)).toBe(false);
   });
 });

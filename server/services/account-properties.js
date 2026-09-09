@@ -253,6 +253,13 @@ function assignVisitsToEntries(entries, visits) {
   return next;
 }
 
+// True when the session is scoped to a NON-primary saved property — the one
+// case where customer-wide self-serve surfaces (the re-service picker, its
+// request guard) must step aside, because they act on the primary address.
+function isSecondarySelection(scope) {
+  return !!(scope && scope.enabled && scope.multi && scope.property && scope.property.is_primary !== true);
+}
+
 // The session's EFFECTIVE property selection — what the middleware actually
 // honored (a retired property, a foreign claim or the gate being off all
 // read as null), for GET /auth/me. The client trusts THIS, never the raw
@@ -272,5 +279,6 @@ module.exports = {
   scopeVisitsToProperty,
   applyPropertyPredicate,
   assignVisitsToEntries,
+  isSecondarySelection,
   _test: { savedPropertyEntry, selectedEntryFor },
 };

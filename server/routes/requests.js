@@ -15,6 +15,7 @@ const AccountMembershipEmail = require('../services/account-membership-email');
 const { processCancellationRequest, PORTAL_CANCEL_REASON_PREFIX } = require('../services/cancellation-processor');
 const { sendCancellationConfirmations } = require('../services/cancellation-confirmations');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+const { isSecondarySelection, resolveSessionScope } = require('../services/account-properties');
 const CancellationResolution = require('../services/cancellation-resolution');
 const { REASON_CODE_VALUES } = require('../services/cancellation-resolution/reason-codes');
 const { situationalHardStop } = require('../services/cancellation-resolution/resolve');
@@ -395,7 +396,14 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // one-time/lapsed) still file tickets — those genuinely are office calls.
     // Fail-open on lookup errors: a broken eligibility check must not block a
     // customer from reporting a problem.
-    if (category === 'pest_issue' || category === 'lawn_concern') {
+    // Under a SECONDARY saved-property selection (GATE_APP_PROPERTY_SCOPE)
+    // GET /schedule withholds the picker (it books the primary address), so
+    // the guard steps aside with it and the ticket files (codex #4207 r1h).
+    // Same fail-open posture as the eligibility check below.
+    let secondarySelection = false;
+    try { secondarySelection = isSecondarySelection(await resolveSessionScope(req)); }
+    catch (scopeErr) { logger.warn(`Property scope check failed for ${req.customer.id}: ${scopeErr.message}`); }
+    if ((category === 'pest_issue' || category === 'lawn_concern') && !secondarySelection) {
       try {
         const { reserviceStreamlineAccess } = require('../services/reservice-link');
         const access = await reserviceStreamlineAccess(req.customer.id);

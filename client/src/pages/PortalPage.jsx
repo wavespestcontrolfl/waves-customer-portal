@@ -6,6 +6,7 @@ import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
 import { fmtMoney } from '../lib/money';
@@ -15474,7 +15475,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null } = useAuth();
+  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer, selectedProperty = null, propertyScope = 'profile' } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
@@ -15791,6 +15792,7 @@ export default function PortalPage() {
   return (
     <PortalGlassContext.Provider value={true}>
     <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
+      <PropertySelectionRevalidator active={propertyScope === 'saved'} refresh={refreshProperties} />
     <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an

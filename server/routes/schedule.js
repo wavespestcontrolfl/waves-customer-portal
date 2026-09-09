@@ -39,6 +39,7 @@ const {
   appPropertyScopeEnabled,
   applyPropertyPredicate,
   assignVisitsToEntries,
+  isSecondarySelection,
   resolveSessionScope,
 } = require('../services/account-properties');
 
@@ -172,7 +173,7 @@ router.get('/', async (req, res, next) => {
     // (codex #4207 r1g P1): offering it would book house A from house B's
     // screen. The overlay then files a notify-only ticket as before the
     // streamline; a property-carrying re-service link is a follow-up.
-    const secondarySelection = !!(scope && scope.enabled && scope.multi && scope.property && scope.property.is_primary !== true);
+    const secondarySelection = isSecondarySelection(scope);
     try {
       const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
       if (!secondarySelection && reserviceSelfServeEnabled()) {
