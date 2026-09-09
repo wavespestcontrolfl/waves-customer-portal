@@ -308,8 +308,8 @@ describe("Email draft and navigation preservation", () => {
     window.history.replaceState({}, "", `/admin/communications?id=${a.id}#tab=email`);
     mount();
     await screen.findByText(a.body_text);
-    fireEvent.click(screen.getByText("☆", { exact: true }));
-    expect(await screen.findByText("⭐", { exact: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: `Star ${a.subject}` }));
+    expect(await screen.findByRole("button", { name: `Unstar ${a.subject}` })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Reclassify/ }));
     expect(await screen.findByText("AI classification:")).toBeInTheDocument();
   });
