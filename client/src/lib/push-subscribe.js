@@ -143,7 +143,7 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
   // subscription" error message after the subscribe call has already
   // failed.
   if (isIOS() && !isStandalonePWA()) {
-    throw new Error('On iPhone, install Waves Admin to your Home Screen first (tap Share → Add to Home Screen), then open the new icon and try Enable again.');
+    throw new Error('On iPhone, install Waves to your Home Screen first (tap Share → Add to Home Screen), then open the new icon and try Enable again.');
   }
 
   // If the user previously blocked notifications, requestPermission
@@ -152,7 +152,7 @@ export async function ensurePushSubscription({ apiBase = '/api', token } = {}) {
   // through Settings → Notifications, not the URL-bar lock icon.
   if (Notification.permission === 'denied') {
     if (isIOS()) {
-      throw new Error('Notifications are off for Waves Admin. Open Settings → Notifications → Waves Admin and turn them on. If Waves Admin isn’t listed, remove the Home Screen icon, reinstall from Safari, and grant permission when prompted.');
+      throw new Error('Notifications are off for Waves. Open Settings → Notifications → Waves and turn them on. If Waves isn’t listed, remove the Home Screen icon, reinstall from Safari, and grant permission when prompted.');
     }
     throw new Error('Notifications are blocked in your browser. Click the lock/site-info icon in the URL bar → Notifications → Allow, then reload.');
   }

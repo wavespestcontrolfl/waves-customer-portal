@@ -218,7 +218,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const reserviceTrendsBefore = await reserviceTrendsPdfSignature(service, knex);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
@@ -251,7 +251,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       logger,
       serviceRecordId: recordId,
       pinnedLawnAssessmentId: effectivePin,
-      pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
+      pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
       pinnedLawnHistoryIdentity,
     });
     pdf = rendered.pdf;

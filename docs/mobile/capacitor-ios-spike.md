@@ -34,9 +34,33 @@ Developer account.
 bash scripts/mobile/bootstrap-ios.sh
 ```
 
-Then in Xcode: pick your signing Team, add the **Push Notifications** and
-**Background Modes → Remote notifications** capabilities, and run on a **real
+The script configures **Push Notifications** and connects the entitlement file
+to every App build configuration. Then in Xcode: pick your signing Team, add
+**Background Modes → Remote notifications**, and run on a **real
 device** (push doesn't work in the simulator).
+
+## Check the signed release before upload
+
+Allowing notification permission does not prove that the installed binary has
+the APNs entitlement. The signed customer app must contain `aps-environment`;
+App Store and TestFlight exports must use `production`.
+
+After exporting the IPA, run:
+
+```bash
+python3 scripts/mobile/ios_push.py verify /path/to/Waves.ipa
+```
+
+The check also accepts a signed `.app` directory. It inspects the actual code
+signature and rejects missing push entitlements, a development environment,
+or the wrong bundle identifier. For a development-signed device build, pass
+`--environment development`. This checks push entitlement configuration;
+delivery still needs a physical-device registration and notification test.
+
+If it fails, enable Push Notifications for the App ID, refresh its signing
+profile in Xcode, rebuild, and export again. A portal web deployment cannot
+change an entitlement in an installed iOS binary. See Apple's
+[APS entitlement documentation](https://developer.apple.com/documentation/bundleresources/entitlements/aps-environment).
 
 ## Load modes (set in `capacitor.config.json`)
 

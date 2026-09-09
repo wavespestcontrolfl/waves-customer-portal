@@ -69,7 +69,7 @@ jobs:
         working-directory: server
         env:
           SMS_OPERATIONS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js tests/sms-commitments-postgres.test.js tests/sms-inbound-consumers-postgres.test.js
       - name: SMS copy migration transaction tests
         working-directory: server
         env:
@@ -80,6 +80,11 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Grouped closeout transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2
@@ -286,8 +291,11 @@ jobs:
         run: |
           xcodebuild -version
           pod --version
+          xcodeproj --version
       - name: Generate and sync the pinned iOS app
         run: bash scripts/mobile/bootstrap-ios.sh
+      - name: Verify iOS push signing setup and release checks
+        run: python3 scripts/mobile/test_ios_push.py
       - name: Compile iOS simulator app without signing
         working-directory: client/ios/App
         run: >-
@@ -324,6 +332,8 @@ jobs:
         run: npm run check:portal-brand
       - name: Domain rules gate
         run: npm run check:domain-rules
+      - name: Intelligence Bar capability coverage drift
+        run: npm run check:ib-coverage
       - name: Local session supervisor lifecycle tests
         run: python3 -m unittest discover -s scripts/agents/tests -v
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)
