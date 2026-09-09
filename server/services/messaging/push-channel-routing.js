@@ -180,8 +180,11 @@ async function hasFreshPushDevice(customerId, knex = db) {
 // senders consult (appointment-reminders.js, twilio.js en-route,
 // scheduler.js receipts). Every type in PUSH_ROUTING_POLICY must map here
 // (test-enforced) so a customer channel choice always wins.
+// An explicit App choice also lets reminders replace their automatic
+// companion text, while the default PUSH_ROUTING_POLICY stays unchanged.
 const APP_FIRST_TYPES = new Set([
   ...APPOINTMENT_UPDATE_TYPES, 'tech_en_route',
+  'reminder_72h', 'appointment_reminder',
   'tech_arrived', 'service_complete', 'service_complete_with_invoice',
   'service_complete_paid_receipt', 'service_complete_annual_prepay', 'service_complete_prepaid',
   'service_report_v1', 'service_report_v1_with_invoice', 'receipt', 'deposit_receipt',
