@@ -246,7 +246,7 @@ function CalendarLine({ line, muted }) {
           <span className="text-ink-tertiary"> — {line.detail}</span>
         )}
         {line.description && (
-          <div className="text-11 text-ink-tertiary italic">
+          <div className="text-12 text-ink-tertiary italic">
             {line.description}
           </div>
         )}

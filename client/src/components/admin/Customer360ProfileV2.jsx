@@ -105,10 +105,20 @@ import {
 
 // Invoice status tone, shared by the Overview list and the Billing table.
 // alert-fg is reserved for overdue (header contract); paid/prepaid read
-// strong; sent, viewed, draft and void are neutral, not alarms.
-function invoiceStatusTone(status) {
-  if (status === "overdue") return "alert";
+// strong; draft and void are neutral, not alarms. Nothing flips a stored
+// status to 'overdue' — the late-payment checker treats a sent/viewed
+// invoice as overdue by due_date (created_at when due_date is null) past a
+// 7-day grace, so this mirrors that predicate on the raw rows.
+const OVERDUE_GRACE_MS = 7 * 86400000;
+export function invoiceStatusTone(inv, now = Date.now()) {
+  const status = inv?.status;
   if (status === "paid" || status === "prepaid") return "strong";
+  if (status === "overdue") return "alert";
+  if (status === "sent" || status === "viewed") {
+    const ref = inv.due_date || inv.created_at;
+    const t = ref ? new Date(ref).getTime() : NaN;
+    if (Number.isFinite(t) && t <= now - OVERDUE_GRACE_MS) return "alert";
+  }
   return "neutral";
 }
 const INVOICE_STATUS_TEXT = {
@@ -6205,7 +6215,7 @@ export default function Customer360ProfileV2({
                       <span
                         className={cn(
                           "font-medium uppercase tracking-label text-10",
-                          INVOICE_STATUS_TEXT[invoiceStatusTone(inv.status)],
+                          INVOICE_STATUS_TEXT[invoiceStatusTone(inv)],
                         )}
                       >
                         {inv.status}
@@ -7516,7 +7526,7 @@ export default function Customer360ProfileV2({
                         </TD>{" "}
                         <TD>
                           {" "}
-                          <Badge tone={invoiceStatusTone(inv.status)}>
+                          <Badge tone={invoiceStatusTone(inv)}>
                             {inv.status}
                           </Badge>{" "}
                         </TD>{" "}
