@@ -43,6 +43,12 @@ export function nextStopOf(stops) {
   return (stops || []).find((st) => st.liveCount > 0) || null;
 }
 
+/** Preserve mixed member state instead of presenting a partial stop as done. */
+export function stopStatusLabel(stop) {
+  const statuses = new Set(stop.services.map((service) => service.status || 'pending'));
+  return statuses.size > 1 ? 'mixed' : [...statuses][0].replace(/_/g, ' ');
+}
+
 /**
  * The stop's window = union of the members' windows (the visit parent
  * stores the same union; a 09-10 + 10-11 chain is one 09-11 stop) —
@@ -86,3 +92,24 @@ export function stopSummaryLabel(stop) {
   const n = stop.services.length;
   return `${n} service${n === 1 ? '' : 's'}${minutes ? ` · ~${minutes} min` : ''}`;
 }
+
+// Day-view stops come from GET /api/admin/schedule, whose payload is
+// camelCase and carries the arrival window as windowStart/windowEnd/
+// windowDisplay — there is no `time`/`scheduled_time` field, so the old
+// reads rendered 'Pending' (or nothing) for every booked stop. Prefer the
+// server's display string; fall back to a formatted windowStart.
+const fmtWindowClock = (v) => {
+  const m = String(v || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const h12 = h % 12 || 12;
+  return `${h12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+};
+export const serviceWindowLabel = (service) => {
+  if (!service) return null;
+  if (service.windowDisplay) return service.windowDisplay;
+  const start = fmtWindowClock(service.windowStart);
+  if (!start) return null;
+  const end = fmtWindowClock(service.windowEnd);
+  return end ? `${start}–${end}` : start;
+};
