@@ -148,7 +148,8 @@ describe('llm call ledger', () => {
     it('records openai_incomplete as a failed call WITH usage (tokens were billed)', async () => {
       global.fetch = fetchJson({ ...OPENAI_BODY, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } });
       const { call } = load();
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toMatchObject({ ok: false, reason: 'openai_incomplete' });
+      // A billed failure hands its usage back too (a chain's failure entry carries it — every paid leg is accountable).
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_incomplete', usage: expect.objectContaining({ input_tokens: 120, output_tokens: 30, reasoning_tokens: 12 }) });
       await flush();
       const [row] = callRows();
       expect(row).toMatchObject({ ok: false, error_code: 'openai_incomplete', error_class: 'incomplete', input_tokens: 120, output_tokens: 30 });
@@ -192,7 +193,7 @@ describe('llm call ledger', () => {
     it('records HTTP failures with the status code and a provider class, no usage', async () => {
       global.fetch = fetchJson({}, { ok: false, status: 429 });
       const { call } = load();
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toMatchObject({ ok: false, reason: 'openai_429' });
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_429' });
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'openai_429', error_class: 'provider', input_tokens: null, served_model: null });
     });
@@ -200,7 +201,7 @@ describe('llm call ledger', () => {
     it('records a thrown fetch as error/infrastructure and still returns the legacy shape', async () => {
       global.fetch = jest.fn(() => Promise.reject(new Error('socket hang up')));
       const { call } = load();
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toMatchObject({ ok: false, reason: 'error' });
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'error' });
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'error', error_class: 'infrastructure' });
     });
@@ -208,7 +209,7 @@ describe('llm call ledger', () => {
     it("files the adapter's own AbortSignal timeout as openai_timeout / timeout, not infrastructure", async () => {
       global.fetch = jest.fn(() => Promise.reject(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })));
       const { call } = load();
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toMatchObject({ ok: false, reason: 'openai_timeout' });
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'openai_timeout' });
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'openai_timeout', error_class: 'timeout' });
     });
@@ -217,7 +218,7 @@ describe('llm call ledger', () => {
       delete process.env.OPENAI_API_KEY;
       global.fetch = jest.fn();
       const { call } = load();
-      expect(await call.callOpenAI({ model: 'm', text: 't' })).toMatchObject({ ok: false, reason: 'no_key' });
+      expect(await call.callOpenAI({ model: 'm', text: 't' })).toEqual({ ok: false, reason: 'no_key' });
       await flush();
       expect(mockInsert).not.toHaveBeenCalled();
     });
@@ -304,7 +305,7 @@ describe('llm call ledger', () => {
     it('records SDK errors with the provider status code', async () => {
       mockAnthropicCreate.mockRejectedValue(Object.assign(new Error('overloaded'), { status: 529 }));
       const { call } = load();
-      expect(await call.callAnthropic({ model: 'a', text: 't' })).toMatchObject({ ok: false, reason: 'anthropic_529' });
+      expect(await call.callAnthropic({ model: 'a', text: 't' })).toEqual({ ok: false, reason: 'anthropic_529' });
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_529', error_class: 'provider' });
     });
@@ -332,7 +333,7 @@ describe('llm call ledger', () => {
     it('files a statusless SDK timeout as anthropic_timeout / timeout', async () => {
       mockAnthropicCreate.mockRejectedValue(Object.assign(new Error('Request timed out.'), { name: 'APIConnectionTimeoutError' }));
       const { call } = load();
-      expect(await call.callAnthropic({ model: 'a', text: 't', timeoutMs: 50 })).toMatchObject({ ok: false, reason: 'anthropic_timeout' });
+      expect(await call.callAnthropic({ model: 'a', text: 't', timeoutMs: 50 })).toEqual({ ok: false, reason: 'anthropic_timeout' });
       await flush();
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_timeout', error_class: 'timeout' });
     });
