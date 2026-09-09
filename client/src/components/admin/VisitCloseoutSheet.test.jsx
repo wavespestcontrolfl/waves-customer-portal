@@ -11,6 +11,7 @@ import { getCompletionResumeBody } from '../../lib/completion-resume-store';
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 vi.mock('../../pages/admin/SchedulePage', () => ({
   createCompletionIdempotencyKey: (id) => `fixture_${id}`,
+  completionReconcilePrompt: (error) => error.code === 'report_reconcile' ? 'Confirm recorded values' : null,
   CompletionPanel: ({ service, onPrepared }) => <button onClick={() => onPrepared(service.id, {
     visitOutcome: service.id === 'one' ? 'completed' : 'incomplete',
     completionPhotos: [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', capturedAt: '2020-01-01T12:00:00Z' }],
@@ -31,7 +32,7 @@ beforeEach(() => {
     return { visitId: 'visit', serviceDate: '2020-01-01', members: services, packet };
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 async function prepareBoth() {
   await screen.findAllByRole('button', { name: 'Open form' });
@@ -98,6 +99,32 @@ it('requires every form and preserves the exact photo bodies and key across a re
   expect(submitted[0]).toBe('/admin/visit-closeouts/visit');
   expect(submitted[1].headers['Idempotency-Key']).toBe(saved.key);
   expect(JSON.parse(submitted[1].body).items).toEqual(services.map((service) => ({ serviceId: service.id, body: saved.forms[service.id].body })));
+});
+
+it.each([true, false])('preserves member reconciliation confirmation (confirmed=%s)', async (confirmed) => {
+  vi.spyOn(window, 'confirm').mockReturnValue(confirmed);
+  mount();
+  await prepareBoth();
+  const saved = await getCompletionResumeBody('visit:visit');
+  const original = adminFetch.getMockImplementation();
+  adminFetch.mockImplementation(async (path, options) => {
+    if (options?.method !== 'POST') return original(path);
+    const items = JSON.parse(options.body).items;
+    if (!items[0].body.reportReconcileConfirmed) throw Object.assign(new Error('Report disagrees with recorded values'), {
+      code: 'report_reconcile', details: { serviceId: 'one' },
+    });
+    expect(await getCompletionResumeBody('visit:visit')).toMatchObject({ key: saved.key,
+      forms: { one: { body: { ...saved.forms.one.body, reportReconcileConfirmed: true } }, two: saved.forms.two } });
+    return { packetId: 'packet', state: 'effects_pending' };
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Complete visit' }));
+  await waitFor(() => expect(window.confirm).toHaveBeenCalledWith('Confirm recorded values'));
+  if (confirmed) await screen.findByRole('button', { name: 'Resume closeout' });
+  else await waitFor(() => expect(screen.getByRole('button', { name: 'Complete visit' })).toBeEnabled());
+  const posts = adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST');
+  expect(posts).toHaveLength(confirmed ? 2 : 1);
+  expect(posts.every(([, options]) => options.headers['Idempotency-Key'] === saved.key)).toBe(true);
+  if (!confirmed) expect(await getCompletionResumeBody('visit:visit')).toEqual(saved);
 });
 
 it('clears photo drafts when reopening a packet already finished by the server', async () => {

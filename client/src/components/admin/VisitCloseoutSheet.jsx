@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, CheckCircle2, ClipboardList } from 'lucide-react';
 import { Button, Sheet, SheetBody, SheetFooter, SheetHeader } from '../ui';
-import { CompletionPanel, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
+import { CompletionPanel, completionReconcilePrompt, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
 import { adminFetch } from '../../utils/admin-fetch';
 import { getCompletionResumeBody, putCompletionResumeBody, deleteCompletionResumeBody } from '../../lib/completion-resume-store';
 
@@ -61,17 +61,18 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
     setError('');
   }
 
-  async function submit() {
+  async function submit(candidate = draft) {
     if (submitting.current || (!packet && !ready)) return;
     submitting.current = true;
     setBusy(true);
     setError('');
+    let confirmedDraft;
     try {
-      if (!packet && !await putCompletionResumeBody(storageKey, draft)) throw new Error('Could not preserve these forms for retry. Please try again.');
+      if (!packet && !await putCompletionResumeBody(storageKey, candidate)) throw new Error('Could not preserve these forms for retry. Please try again.');
       const response = await adminFetch(`/admin/visit-closeouts/${visitId}${packet ? '/resume' : ''}`, {
         method: 'POST',
-        headers: { 'Idempotency-Key': draft.key },
-        body: JSON.stringify(packet ? {} : { items: services.map((service) => ({ serviceId: service.id, body: draft.forms[service.id].body })) }),
+        headers: { 'Idempotency-Key': candidate.key },
+        body: JSON.stringify(packet ? {} : { items: services.map((service) => ({ serviceId: service.id, body: candidate.forms[service.id].body })) }),
       });
       setResult(response);
       setVisit((current) => ({ ...current, canRevokeSummary: response.canRevokeSummary === true,
@@ -79,22 +80,34 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       if (['done', 'office_required'].includes(response.state)) await deleteCompletionResumeBody(storageKey);
       onSaved();
     } catch (err) {
-      setError(err.name === 'TypeError'
-        ? 'Connection interrupted. Your forms are saved. Resume this closeout when you reconnect.'
-        : err.message || 'Could not finish the closeout. Your forms are saved on this device.');
-      // An HTTP timeout does not mean the transaction failed. Discover the
-      // server-owned packet before offering another submit or editable form.
-      try {
-        const detail = await adminFetch(`/admin/visit-closeouts/${visitId}`);
-        setVisit(detail);
-        setResult(null);
-        if (['done', 'failed'].includes(detail.packet?.status)) await deleteCompletionResumeBody(storageKey);
-        if (detail.packet) onSaved();
-      } catch { /* The same key/body remain durable for a later retry. */ }
+      const form = candidate.forms[err.details?.serviceId];
+      const prompt = completionReconcilePrompt(err);
+      if (!packet && form && !form.body.reportReconcileConfirmed && prompt) {
+        if (window.confirm(prompt)) {
+          confirmedDraft = { ...candidate, forms: { ...candidate.forms, [err.details.serviceId]: {
+            ...form, body: { ...form.body, reportReconcileConfirmed: true },
+          } } };
+          setDraft(confirmedDraft);
+        }
+      } else {
+        setError(err.name === 'TypeError'
+          ? 'Connection interrupted. Your forms are saved. Resume this closeout when you reconnect.'
+          : err.message || 'Could not finish the closeout. Your forms are saved on this device.');
+        // An HTTP timeout does not mean the transaction failed. Discover the
+        // server-owned packet before offering another submit or editable form.
+        try {
+          const detail = await adminFetch(`/admin/visit-closeouts/${visitId}`);
+          setVisit(detail);
+          setResult(null);
+          if (['done', 'failed'].includes(detail.packet?.status)) await deleteCompletionResumeBody(storageKey);
+          if (detail.packet) onSaved();
+        } catch { /* The same key/body remain durable for a later retry. */ }
+      }
     } finally {
       submitting.current = false;
       setBusy(false);
     }
+    if (confirmedDraft) return submit(confirmedDraft);
   }
 
   async function revokeSummary() {
@@ -160,7 +173,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       </SheetBody>
       <SheetFooter>
         <Button variant="secondary" className="text-sm" onClick={onClose}>{finished ? 'Done' : 'Close'}</Button>
-        {visit && !finished && <Button className="text-sm" disabled={busy || (!packet && !ready)} onClick={submit}>{busy ? 'Saving visit…' : packet ? 'Resume closeout' : 'Complete visit'}</Button>}
+        {visit && !finished && <Button className="text-sm" disabled={busy || (!packet && !ready)} onClick={() => submit()}>{busy ? 'Saving visit…' : packet ? 'Resume closeout' : 'Complete visit'}</Button>}
       </SheetFooter>
     </Sheet>
   );
