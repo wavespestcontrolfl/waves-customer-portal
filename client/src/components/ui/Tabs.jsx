@@ -56,7 +56,7 @@ function ScrollableTabs({ children, active }) {
   const measure = useCallback(() => {
     const node = strip.current;
     if (!node) return;
-    setEdges({ overflow: node.scrollWidth > node.clientWidth + 2, left: node.scrollLeft > 2, right: node.scrollLeft + node.clientWidth < node.scrollWidth - 2 });
+    setEdges({ overflow: node.scrollWidth > node.parentElement.clientWidth + 2, left: node.scrollLeft > 2, right: node.scrollLeft + node.clientWidth < node.scrollWidth - 2 });
   }, []);
   const reveal = useCallback(() => {
     const node = strip.current;
