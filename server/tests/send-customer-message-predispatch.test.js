@@ -97,6 +97,48 @@ test('no hook — the legacy pipeline is untouched', async () => {
   expect(sendViaTwilio).toHaveBeenCalledTimes(1);
 });
 
+test('lead handoff closure reaches only the provider hook, never message or audit state', async () => {
+  const withSmsHandoff = jest.fn();
+  expect((await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', withSmsHandoff })).sent).toBe(true);
+  expect(sendViaTwilio.mock.calls[0][1].withSmsHandoff).toEqual(expect.any(Function));
+  expect(sendViaTwilio.mock.calls[0][0]).not.toHaveProperty('withSmsHandoff');
+  expect(persistAudit.mock.calls[0][0].input).not.toHaveProperty('withSmsHandoff');
+});
+
+test.each([
+  [{ prefs: { sms_enabled: false }, suppressionLoaded: true }, 'SMS_OPTED_OUT'],
+  [{ prefs: { sms_enabled: true }, suppressionLoaded: true, suppression: { reason: 'opt_out_keyword' } }, 'SUPPRESSED_OPT_OUT'],
+  [{ prefs: { sms_enabled: true } }, 'SUPPRESSION_LOOKUP_FAILED'],
+])('the locked handoff refuses newly blocked or unknown contact state: %s', async (currentState, code) => {
+  const consent = require('../services/messaging/validators/consent');
+  const suppression = require('../services/messaging/validators/suppression');
+  const trx = jest.fn();
+  const dispatch = jest.fn();
+  await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', withSmsHandoff: locked => locked(trx) });
+  // The initial pipeline passed; the lock wait then changes its snapshot.
+  consent.loadContactState.mockResolvedValueOnce(currentState);
+  suppression.loadSuppressionState.mockImplementationOnce(async (_input, state) => state);
+  consent.checkConsentForPurpose.mockImplementationOnce(jest.requireActual('../services/messaging/validators/consent').checkConsentForPurpose);
+  suppression.checkSuppression.mockImplementationOnce(jest.requireActual('../services/messaging/validators/suppression').checkSuppression);
+  expect(await sendViaTwilio.mock.calls[0][1].withSmsHandoff(dispatch)).toMatchObject({ ok: false, code });
+  expect(dispatch).not.toHaveBeenCalled();
+  expect(consent.loadContactState).toHaveBeenLastCalledWith(expect.objectContaining({ to: BASE_INPUT.to }), trx);
+  expect(suppression.loadSuppressionState).toHaveBeenLastCalledWith(expect.any(Object), currentState, trx);
+  // A suppression block short-circuits consent; discard unused one-shot mocks.
+  consent.checkConsentForPurpose.mockReset().mockReturnValue({ ok: true });
+  suppression.checkSuppression.mockReset().mockReturnValue({ ok: true });
+});
+
+test.each([{ channel: 'push' }, { audience: 'customer' }, { purpose: 'appointment' }, { entryPoint: 'other' }, { metadata: { appOnly: true } }])(
+  'a handoff guard cannot silently cross another routing contract: %j', async fields => {
+    const result = await sendCustomerMessage({ ...BASE_INPUT, entryPoint: 'lead_response_auto_reply', ...fields, withSmsHandoff: jest.fn() });
+    // The existing channel contract rejects lead push before hook validation.
+    expect(result).toMatchObject({ sent: false, blocked: true,
+      code: fields.channel === 'push' ? 'CONTRACT_VIOLATION' : 'UNSUPPORTED_SMS_HANDOFF' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  },
+);
+
 describe('invoice-specific receipt SMS evidence', () => {
   const db = require('../models/db');
   const input = { ...BASE_INPUT, audience: 'customer', customerId: 'c1', invoiceId: 'invoice-1', purpose: 'payment_receipt', metadata: { original_message_type: 'receipt' }, operatorInitiated: true };

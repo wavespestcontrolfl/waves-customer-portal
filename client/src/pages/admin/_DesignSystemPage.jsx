@@ -1,6 +1,8 @@
 import React, { useState } from "react";
 import {
   Button,
+  Field,
+  UiSurface,
   Input,
   Select,
   Checkbox,
@@ -33,6 +35,10 @@ import {
   TabPanel,
 } from "../../components/ui";
 
+import { FieldExample, SaveExample, DataStatesExample, DraftOwnershipExample, NestedOverlaysExample, WorkflowDensityExamples } from './_DesignSystemExamples';
+import examplesSource from './_DesignSystemExamples.jsx?raw';
+import primitivesSource from './_DesignSystemPage.jsx?raw';
+
 const ALLOWLIST = (import.meta.env.VITE_DESIGN_SYSTEM_ALLOWLIST || "")
   .split(",")
   .map((s) => s.trim())
@@ -45,11 +51,11 @@ function isAllowed() {
   return ALLOWLIST.includes(userId);
 }
 
-function Section({ title, children }) {
+function Section({ title, id, children }) {
   return (
-    <section className="mb-10">
+    <section id={id} className="mb-10">
       {" "}
-      <h2 className="text-11 uppercase tracking-label font-medium text-ink-secondary mb-3">
+      <h2 className="text-18 font-medium text-zinc-900 mb-3">
         {title}
       </h2>{" "}
       <div className="space-y-3">{children}</div>{" "}
@@ -59,15 +65,16 @@ function Section({ title, children }) {
 
 function Row({ label, children }) {
   return (
-    <div className="flex items-center gap-6 py-2">
+    <div className="grid sm:grid-cols-[128px_minmax(0,1fr)] gap-2 sm:gap-6 py-2">
       {" "}
-      <div className="w-32 text-12 text-ink-secondary">{label}</div>{" "}
-      <div className="flex items-center gap-3 flex-wrap">{children}</div>{" "}
+      <div className="text-ui-body text-ink-secondary">{label}</div>{" "}
+      <div className="min-w-0 flex items-center gap-3 flex-wrap">{children}</div>{" "}
     </div>
   );
 }
 
 export default function DesignSystemPage() {
+  const [density, setDensity] = useState('comfortable');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [switchOn, setSwitchOn] = useState(true);
@@ -83,7 +90,7 @@ export default function DesignSystemPage() {
         <h1 className="text-28 font-normal text-zinc-900">
           Not available
         </h1>{" "}
-        <p className="text-13 text-ink-secondary mt-2">
+        <p className="text-ui-body text-ink-secondary mt-2">
           The design system reference is only available in development or to
           allowlisted users.
         </p>{" "}
@@ -92,20 +99,31 @@ export default function DesignSystemPage() {
   }
 
   return (
-    <div className="bg-surface-page min-h-full p-6 font-sans text-zinc-900">
+    <UiSurface density={density} className="bg-surface-page min-h-full max-w-[1500px] mx-auto text-zinc-900">
       {" "}
       <header className="mb-8">
         {" "}
-        <div className="text-11 uppercase tracking-label text-ink-secondary">
+        <div className="ui-label text-ink-secondary">
           Internal
         </div>{" "}
         <h1 className="text-28 font-normal tracking-tight">Design system</h1>{" "}
-        <p className="text-13 text-ink-secondary mt-1 max-w-2xl">
-          Canonical reference for every primitive in the monochrome admin spec.
-          When building a Tier 1 page, render the primitive here and match its
-          states rather than hand-styling.
+        <p className="text-ui-body text-ink-secondary mt-1 max-w-2xl">
+          The shared reference for new and migrated admin work. Comfortable is the default; compact is an explicit dense-data exception. Existing pages retain their presentation until migrated.
         </p>{" "}
       </header>{" "}
+      <Section title="Presentation density">
+        <Field label="Density" help="Comfortable: 44px. Compact: 36px on large fine-pointer screens, 44px on tablets or touch. Touch: 48px." className="max-w-md">
+          <Select value={density} onChange={(event) => setDensity(event.target.value)}>
+            <option value="comfortable">Comfortable (default)</option><option value="compact">Compact</option><option value="touch">Touch</option>
+          </Select>
+        </Field>
+      </Section>
+      <Section title="Typography">
+        <p className="ui-record-title">Example record title</p>
+        <p className="text-ui-body">Body copy uses the shared readable scale.</p>
+        <p className="ui-label">Sentence-case label</p>
+        <p className="text-ui-caption text-ink-secondary">Captions keep the same 14px minimum.</p>
+      </Section>
       <Section title="Buttons">
         {" "}
         <Row label="Primary">
@@ -133,19 +151,19 @@ export default function DesignSystemPage() {
         {" "}
         <Row label="Text (md)">
           {" "}
-          <Input placeholder="Search customers" className="w-64" />{" "}
+          <Field label="Customer search"><Input placeholder="Search customers" className="w-64 max-w-full" /></Field>{" "}
         </Row>{" "}
         <Row label="Text (sm)">
           {" "}
-          <Input size="sm" placeholder="Filter" className="w-48" />{" "}
+          <Field label="Filter records"><Input size="sm" placeholder="Filter" className="w-48 max-w-full" /></Field>{" "}
         </Row>{" "}
         <Row label="Disabled">
           {" "}
-          <Input disabled value="Locked" className="w-48" />{" "}
+          <Field label="Managed value" help="Managed by the account settings."><Input disabled value="Locked" className="w-48 max-w-full" /></Field>{" "}
         </Row>{" "}
         <Row label="Select">
           {" "}
-          <Select
+          <Field label="Example option"><Select
             value={selectVal}
             onChange={(e) => setSelectVal(e.target.value)}
             className="w-48"
@@ -154,11 +172,11 @@ export default function DesignSystemPage() {
             <option value="a">Option A</option>{" "}
             <option value="b">Option B</option>{" "}
             <option value="c">Option C</option>{" "}
-          </Select>{" "}
+          </Select></Field>{" "}
         </Row>{" "}
         <Row label="Textarea">
           {" "}
-          <Textarea placeholder="Notes" className="w-96" />{" "}
+          <Field label="Notes"><Textarea placeholder="Add notes" className="w-96 max-w-full" /></Field>{" "}
         </Row>{" "}
       </Section>{" "}
       <Section title="Toggles">
@@ -218,17 +236,17 @@ export default function DesignSystemPage() {
         </Row>{" "}
         <Row label="Status dots">
           {" "}
-          <span className="inline-flex items-center gap-2 text-12">
+          <span className="inline-flex items-center gap-2 text-ui-label">
             {" "}
             <span className="u-dot u-dot--filled" />
             Active
           </span>{" "}
-          <span className="inline-flex items-center gap-2 text-12">
+          <span className="inline-flex items-center gap-2 text-ui-label">
             {" "}
             <span className="u-dot u-dot--hollow" />
             Dormant
           </span>{" "}
-          <span className="inline-flex items-center gap-2 text-12">
+          <span className="inline-flex items-center gap-2 text-ui-label">
             {" "}
             <span className="u-dot u-dot--alert" />
             Alert
@@ -237,17 +255,17 @@ export default function DesignSystemPage() {
       </Section>{" "}
       <Section title="Card">
         {" "}
-        {/* Metric card: spec §3.4 — overline label (u-label, same as the live
+        {/* Metric card: spec §3.4 — overline label (ui-label, same as the live
             KPI tiles) above the number. CardTitle is NOT the metric label. */}
         <Card className="max-w-md">
           {" "}
           <CardBody>
             {" "}
-            <div className="u-label text-ink-secondary">
+            <div className="ui-label text-ink-secondary">
               Revenue — last 30 days
             </div>{" "}
             <div className="u-nums text-28 font-medium mt-1.5">$48,211</div>{" "}
-            <div className="text-12 text-ink-secondary mt-1">
+            <div className="text-ui-label text-ink-secondary mt-1">
               +4.2% vs prior
             </div>{" "}
           </CardBody>{" "}
@@ -262,7 +280,7 @@ export default function DesignSystemPage() {
           </CardHeader>{" "}
           <CardBody>
             {" "}
-            <p className="text-13 text-ink-secondary">
+            <p className="text-ui-body text-ink-secondary">
               Perimeter treated; granular bait at the north fence line.
               Follow-up scheduled for the first week of October.
             </p>{" "}
@@ -274,53 +292,53 @@ export default function DesignSystemPage() {
         <Card>
           {" "}
           <Table>
-            {" "}
+
             <THead>
-              {" "}
+
               <TR>
-                {" "}
-                <TH>Customer</TH> <TH>Status</TH>{" "}
-                <TH align="right">MRR</TH>{" "}
-              </TR>{" "}
-            </THead>{" "}
+
+                <TH>Customer</TH><TH>Status</TH>
+                <TH align="right">MRR</TH>
+              </TR>
+            </THead>
             <TBody>
-              {" "}
+
               <TR>
-                {" "}
-                <TD>Miller, A.</TD>{" "}
+
+                <TD>Miller, A.</TD>
                 <TD>
                   {" "}
                   <Badge dot>Active</Badge>{" "}
-                </TD>{" "}
+                </TD>
                 <TD align="right" nums>
                   $261
-                </TD>{" "}
-              </TR>{" "}
+                </TD>
+              </TR>
               <TR>
-                {" "}
-                <TD>Chen, L.</TD>{" "}
+
+                <TD>Chen, L.</TD>
                 <TD>
                   {" "}
                   <Badge dot tone="alert">
                     Past due
                   </Badge>{" "}
-                </TD>{" "}
+                </TD>
                 <TD align="right" nums>
                   $189
-                </TD>{" "}
-              </TR>{" "}
+                </TD>
+              </TR>
               <TR>
-                {" "}
-                <TD>Rodriguez, M.</TD>{" "}
+
+                <TD>Rodriguez, M.</TD>
                 <TD>
                   {" "}
                   <Badge>Dormant</Badge>{" "}
-                </TD>{" "}
+                </TD>
                 <TD align="right" nums>
                   $0
-                </TD>{" "}
-              </TR>{" "}
-            </TBody>{" "}
+                </TD>
+              </TR>
+            </TBody>
           </Table>{" "}
         </Card>{" "}
       </Section>{" "}
@@ -328,22 +346,22 @@ export default function DesignSystemPage() {
         {" "}
         <Tabs value={tabVal} onValueChange={setTabVal}>
           {" "}
-          <TabList>
+          <TabList aria-label="Example tabs">
             {" "}
             <Tab value="one">Overview</Tab> <Tab value="two">Activity</Tab>{" "}
             <Tab value="three">Billing</Tab>{" "}
           </TabList>{" "}
           <TabPanel value="one">
             {" "}
-            <p className="text-13">Overview panel content.</p>{" "}
+            <p className="text-ui-body">Overview panel content.</p>{" "}
           </TabPanel>{" "}
           <TabPanel value="two">
             {" "}
-            <p className="text-13">Activity panel content.</p>{" "}
+            <p className="text-ui-body">Activity panel content.</p>{" "}
           </TabPanel>{" "}
           <TabPanel value="three">
             {" "}
-            <p className="text-13">Billing panel content.</p>{" "}
+            <p className="text-ui-body">Billing panel content.</p>{" "}
           </TabPanel>{" "}
         </Tabs>{" "}
       </Section>{" "}
@@ -360,6 +378,17 @@ export default function DesignSystemPage() {
           </Button>{" "}
         </Row>{" "}
       </Section>{" "}
+      <Section id="field-associations" title="Labels, help, validation, and disabled reasons"><FieldExample /></Section>
+      <Section id="save-behavior" title="Loading and failed saves"><SaveExample /></Section>
+      <Section id="data-states" title="Directory composition and result states"><DataStatesExample /></Section>
+      <Section id="draft-ownership" title="Record header, mobile sections, and draft ownership"><DraftOwnershipExample /></Section>
+      <Section id="nested-overlays" title="Nested overlay interaction"><NestedOverlaysExample /></Section>
+      <Section id="workflow-compositions" title="Estimate and technician compositions"><WorkflowDensityExamples /></Section>
+      <Section title="Implementation examples">
+        <p className="text-ui-body text-ink-secondary">These are the actual sources rendered above. Import shared controls from components/ui; customer-specific CSS is not required.</p>
+        <details><summary className="py-3 cursor-pointer text-ui-body">Behavior and composition source</summary><pre className="max-h-96 overflow-auto text-ui-caption bg-zinc-50 p-4"><code>{examplesSource}</code></pre></details>
+        <details><summary className="py-3 cursor-pointer text-ui-body">Primitive catalog source</summary><pre className="max-h-96 overflow-auto text-ui-caption bg-zinc-50 p-4"><code>{primitivesSource}</code></pre></details>
+      </Section>
       <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)}>
         {" "}
         <DialogHeader>
@@ -368,7 +397,7 @@ export default function DesignSystemPage() {
         </DialogHeader>{" "}
         <DialogBody>
           {" "}
-          <p className="text-13 text-zinc-700">
+          <p className="text-ui-body text-zinc-700">
             This will archive the selected customer. You can restore them later
             from the archive view.
           </p>{" "}
@@ -387,7 +416,7 @@ export default function DesignSystemPage() {
           {" "}
           <div>
             {" "}
-            <div className="text-11 uppercase tracking-label text-ink-secondary">
+            <div className="ui-label text-ink-secondary">
               Customer
             </div>{" "}
             <div className="text-18 font-medium">Miller, Anna</div>{" "}
@@ -398,9 +427,8 @@ export default function DesignSystemPage() {
         </SheetHeader>{" "}
         <SheetBody>
           {" "}
-          <p className="text-13 text-zinc-700">
-            Detail panel content for a selected row. Spec §5.6 — this is where
-            Customer 360 lives.
+          <p className="text-ui-body text-zinc-700">
+            Sheets support focused secondary tasks such as messaging. Customer 360 uses a full-width record workspace by default.
           </p>{" "}
         </SheetBody>{" "}
         <SheetFooter>
@@ -410,6 +438,6 @@ export default function DesignSystemPage() {
           </Button>{" "}
         </SheetFooter>{" "}
       </Sheet>{" "}
-    </div>
+    </UiSurface>
   );
 }

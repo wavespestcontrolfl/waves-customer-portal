@@ -20,6 +20,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { threadsEnabled } = require('./threads');
+const { executionOutcome } = require('./outcomes');
 
 const DEFAULT_DAYS = 90;
 const MAX_DAYS = 400; // retention is 365 — nothing older exists
@@ -197,7 +198,7 @@ async function searchIbHistory(input, actionContext) {
     mode,
     total: results.length,
     results,
-    note: 'Receipts are the audit trail of pending actions proposed by that exact exchange. Trust `outcome`, not `status`: executed = the operator confirmed AND the run recorded success; failed = confirmed but the run recorded an error; unknown = confirmed but no result was recorded; never_ran = pending, expired, or cancelled.',
+    note: 'Receipts describe actions proposed by that exact exchange. Trust outcome, not confirmation status: completed records success; provider_accepted is not delivery; partially_completed needs follow-up; outcome_unknown requires reconciliation before retry; failed or blocked records refusal/error; never_ran means pending, expired, or cancelled.',
   };
 }
 
@@ -218,17 +219,9 @@ function receiptOutcome(row) {
   if (row.status !== 'confirmed') return 'never_ran';
   let result = row.result;
   if (typeof result === 'string') {
-    try { result = JSON.parse(result); } catch { return 'unknown'; }
+    try { result = JSON.parse(result); } catch { return 'outcome_unknown'; }
   }
-  if (result === null || result === undefined) return 'unknown';
-  // Write tools signal a non-run three ways: { error }, { failed: true },
-  // or { success: false, blocked: true } (e.g. duplicate-blocked estimate
-  // drafts) — none of those wrote anything.
-  if (typeof result === 'object'
-    && (result.error || result.failed === true || result.success === false || result.blocked === true)) {
-    return 'failed';
-  }
-  return 'executed';
+  return executionOutcome(result);
 }
 
 module.exports = { HISTORY_TOOLS, executeHistoryTool };

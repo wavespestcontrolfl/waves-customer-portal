@@ -895,6 +895,12 @@ describe('manual /send vs in-flight release (Codex P2)', () => {
       expect(projectUpdates[releasedIdx].status).toBe('sent');
       expect(projectUpdates[releasedIdx].report_hold_release_source).toBe('manual_send');
       expect(ProjectEmail.sendProjectReportWithInvoice).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: 'sms', operatorInitiated: true,
+        entryPoint: 'admin_project_report_with_invoice',
+        body: expect.stringContaining('/report/project/'),
+      }));
     });
   });
 

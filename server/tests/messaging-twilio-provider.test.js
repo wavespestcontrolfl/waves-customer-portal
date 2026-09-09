@@ -154,6 +154,16 @@ describe('Twilio messaging provider adapter', () => {
     );
   });
 
+  test('forwards the local handoff and preserves its authority-block classification', async () => {
+    const withSmsHandoff = jest.fn();
+    TwilioService.sendSMS.mockResolvedValue({ success: false, preSendBlocked: true,
+      code: 'LEAD_SUBJECT_CHANGED', validator: 'check_sms_handoff_authority' });
+    expect(await sendViaTwilio(baseInput(), { withSmsHandoff })).toMatchObject({
+      sent: false, blocked: true, code: 'LEAD_SUBJECT_CHANGED', validator: 'check_sms_handoff_authority',
+    });
+    expect(TwilioService.sendSMS.mock.calls[0][2].withSmsHandoff).toBe(withSmsHandoff);
+  });
+
   test('maps a preSendBlocked result onto the blocked/deferral contract, not a provider failure', async () => {
     TwilioService.sendSMS.mockResolvedValue({
       success: false,

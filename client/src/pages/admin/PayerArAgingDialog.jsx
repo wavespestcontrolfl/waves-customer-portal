@@ -22,26 +22,33 @@ import {
   TR,
   TH,
   TD,
+  ActionFeedback,
 } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 
 const money = (n) =>
-  `$${Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  n == null ? "—" : `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const termLabel = (v) => ({ net15: "Net 15", net30: "Net 30" }[v] || v);
 
 export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
   const [ar, setAr] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
+    setLoading(true);
+    setError("");
     (async () => {
       try {
         const r = await adminFetch("/admin/payers/ar-aging");
-        const d = await r.json();
+        const d = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(d?.error || `HTTP ${r.status}`);
+        if (!Array.isArray(d?.payers)) throw new Error("Could not load payer aging.");
         if (alive) setAr(d || null);
-      } catch {
-        if (alive) setAr(null);
+      } catch (err) {
+        if (alive) setError(err.message || "Could not load payer aging.");
       } finally {
         if (alive) setLoading(false);
       }
@@ -49,7 +56,7 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [attempt]);
 
   const buckets = ar?.buckets || {};
   const bucketRows = [
@@ -68,9 +75,10 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
       </DialogHeader>
       <DialogBody className="space-y-4">
         {loading ? (
-          <p className="text-13 text-zinc-400 py-4">Loading…</p>
-        ) : !ar || ar.statement_count === 0 ? (
-          <p className="text-13 text-zinc-400 py-4">
+          <div className="min-h-[160px]"><ActionFeedback>Loading…</ActionFeedback></div>
+        ) : error ? <ActionFeedback error onRetry={() => setAttempt((value) => value + 1)}>{error}</ActionFeedback>
+        : ar?.statement_count === 0 ? (
+          <p className="text-ui-body text-ink-secondary py-4">
             No outstanding payer statements. Balances appear here once NET-terms
             statements are sent.
           </p>
@@ -87,12 +95,12 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
 
             <div className="grid sm:grid-cols-2 gap-4">
               <div>
-                <div className="text-11 text-zinc-500 uppercase tracking-label mb-1">By age</div>
-                <div className="border-hairline rounded-sm overflow-hidden">
+                <h3 className="text-ui-label font-medium text-ink-secondary mb-2">By age</h3>
+                <div className="border-hairline border-zinc-200 rounded-md overflow-hidden">
                   {bucketRows.map(([label, b], i) => (
                     <div
                       key={label}
-                      className={`flex items-center justify-between gap-3 px-3 py-1.5 text-12 ${i % 2 ? "bg-zinc-50/60" : ""}`}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 text-ui-caption u-nums ${i % 2 ? "bg-zinc-50/60" : ""}`}
                     >
                       <span className="text-zinc-600">{label}</span>
                       <span className={i >= 2 && b?.total > 0 ? "text-alert-fg" : "text-zinc-700"}>
@@ -103,15 +111,15 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
                 </div>
               </div>
               <div>
-                <div className="text-11 text-zinc-500 uppercase tracking-label mb-1">By terms</div>
-                <div className="border-hairline rounded-sm overflow-hidden">
+                <h3 className="text-ui-label font-medium text-ink-secondary mb-2">By terms</h3>
+                <div className="border-hairline border-zinc-200 rounded-md overflow-hidden">
                   {Object.keys(terms).length === 0 ? (
-                    <div className="px-3 py-1.5 text-12 text-zinc-400">—</div>
+                    <div className="px-3 py-2 text-ui-caption u-nums text-ink-secondary">—</div>
                   ) : (
                     Object.entries(terms).map(([t, v], i) => (
                       <div
                         key={t}
-                        className={`flex items-center justify-between gap-3 px-3 py-1.5 text-12 ${i % 2 ? "bg-zinc-50/60" : ""}`}
+                        className={`flex items-center justify-between gap-3 px-3 py-2 text-ui-caption u-nums ${i % 2 ? "bg-zinc-50/60" : ""}`}
                       >
                         <span className="text-zinc-600">{termLabel(t)}</span>
                         <span className="text-zinc-700">
@@ -125,10 +133,10 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
             </div>
 
             <div>
-              <div className="text-11 text-zinc-500 uppercase tracking-label mb-1">
+              <h3 className="text-ui-label font-medium text-ink-secondary mb-2">
                 Collections worklist (oldest first)
-              </div>
-              <Table>
+              </h3>
+              <Table layout="records" aria-label="Payer collections worklist">
                 <THead>
                   <TR>
                     <TH>Payer</TH>
@@ -141,27 +149,30 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
                   {ar.payers.map((p) => (
                     <TR key={p.payer_id}>
                       <TD>
-                        <button
-                          type="button"
-                          className="text-zinc-900 hover:underline text-left"
-                          onClick={() => onSelectPayer && onSelectPayer(p.payer_id)}
+                        <Button
+                          variant="ghost"
+                          className="max-w-full justify-start text-left"
+                          onClick={(event) => {
+                            event.currentTarget.focus({ preventScroll: true });
+                            onSelectPayer?.(p.payer_id);
+                          }}
                         >
                           {p.payer_name}
-                        </button>
+                        </Button>
                       </TD>
-                      <TD className="text-right text-zinc-700">{money(p.outstanding_total)}</TD>
-                      <TD className="text-right">
+                      <TD data-label="Outstanding" nums align="right" className="whitespace-nowrap text-zinc-700">{money(p.outstanding_total)}</TD>
+                      <TD data-label="Past due" nums align="right" className="whitespace-nowrap">
                         {p.past_due_total > 0 ? (
                           <span className="text-alert-fg">{money(p.past_due_total)}</span>
                         ) : (
-                          <span className="text-zinc-400">—</span>
+                          <span className="text-ink-secondary">—</span>
                         )}
                       </TD>
-                      <TD className="text-right">
+                      <TD data-label="Oldest" nums align="right" className="whitespace-nowrap">
                         {p.oldest_days_past_due > 0 ? (
-                          <Badge tone="alert">{p.oldest_days_past_due}d</Badge>
+                          <span><Badge tone="alert">{p.oldest_days_past_due}d</Badge></span>
                         ) : (
-                          <span className="text-zinc-400">—</span>
+                          <span className="text-ink-secondary">—</span>
                         )}
                       </TD>
                     </TR>
@@ -184,8 +195,8 @@ export default function PayerArAgingDialog({ onClose, onSelectPayer }) {
 function Stat({ label, value, alert }) {
   return (
     <div>
-      <div className="text-11 text-zinc-500 uppercase tracking-label">{label}</div>
-      <div className={`text-16 font-medium ${alert ? "text-alert-fg" : "text-zinc-900"}`}>{value}</div>
+      <div className="text-ui-caption text-ink-secondary font-medium">{label}</div>
+      <div className={`text-18 leading-[1.35] font-medium u-nums ${alert ? "text-alert-fg" : "text-zinc-900"}`}>{value}</div>
     </div>
   );
 }

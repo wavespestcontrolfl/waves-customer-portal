@@ -88,6 +88,21 @@ describe("AdminLayoutV2", () => {
     expect(ForbiddenChild).not.toHaveBeenCalled();
   });
 
+  it.each(["payers", "billing-recovery", "invoices"].flatMap((path) => ["csr", "technician"].map((role) => ({ path, role }))))(
+    "blocks $role at the migrated $path route before mounting its content",
+    async ({ path, role }) => {
+      adminFetch.mockResolvedValue({ id: 2, name: "Fixture staff", role });
+      const ForbiddenChild = vi.fn(() => <div>Restricted billing content</div>);
+      render(<MemoryRouter initialEntries={[`/admin/${path}?source=fixture`]}>
+        <Routes><Route element={<AdminLayoutV2 />}>
+          <Route path={`/admin/${path}`} element={<ForbiddenChild />} />
+          <Route path="/admin/schedule" element={<div>Authorized schedule</div>} />
+        </Route></Routes></MemoryRouter>);
+      expect(await screen.findByText("Authorized schedule")).toBeInTheDocument();
+      expect(ForbiddenChild).not.toHaveBeenCalled();
+    },
+  );
+
   it("explicit sign-out clears local Email recovery and invalidates pending callbacks", async () => {
     const session = loadEmailDrafts(1);
     updateEmailDrafts(session, (drafts) => ({ ...drafts, replies: { fixture: "Private unsent edit" } }));

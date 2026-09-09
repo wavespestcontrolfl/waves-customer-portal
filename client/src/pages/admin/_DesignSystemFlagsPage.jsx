@@ -35,6 +35,7 @@ function adminFetch(path, init) {
 }
 
 const KNOWN_FLAGS = [
+  "admin-navigation", // grouped admin workspaces; default off, per verified account
   // dispatch-v2 retired — V1 SchedulePage default + DispatchGate gone,
   // /admin/dispatch and /admin/schedule both resolve to V2 (Board tab
   // + DispatchPageV2 under AdminDispatchPage).
