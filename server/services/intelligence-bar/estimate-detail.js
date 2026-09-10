@@ -4,20 +4,29 @@
 // (find_similar_estimates, the conversation thread) but not the amounts
 // inside them: "what did we quote him per application?" ended with the
 // operator being sent to the Estimates tab. The priced contents live in
-// estimates.estimate_data (JSONB, engine-shaped). Amounts, containers,
-// cadence ladders, and customer viewability are read through the
-// repository's existing owners of those rules — the estimate converter
-// (recurring amounts, visit vocabulary, one-time containers) and the
-// public estimate route (the pricing bundle every cadence the customer can
-// pick from is built by, and which links a customer can open) — never a
-// parallel reading of the stored shapes. Amount precedence on every line
-// follows the proposal generator: an operator-accepted net (manualFinal*)
-// outranks engine figures, an explicit zero is comped scope, a negative
-// amount is a credit; all three are reported, never dropped.
+// estimates.estimate_data (JSONB, engine-shaped) and every reading here
+// goes through the repository's existing owner of that rule:
+//   recurring lines  → plan-rate-ledger acceptedRecurringBillingLines (the
+//                      acceptance path's list: converter rows + raw engine
+//                      lines + rodent/palm scalar supplements, every root)
+//   review state     → draft-builder lineRequiresReview / lineHasHeuristicTurf
+//                      + the proposal generator's LOW-confidence guard
+//   one-time lines   → converter extractors (collapseMirrored: occurrence-
+//                      aware) over both stored shapes + BOTH raw containers
+//                      + installation charges on recurring rows, twins
+//                      reconciled by service + exact amount first, as the
+//                      proposal generator's resolver does; credits and
+//                      accepted zeros are reported, never dropped
+//   cadence ladders  → estimate-public buildPricingBundle (top-level plan
+//                      totals, per-service ladders, cadence combos)
+//   links            → estimate-public isEstimateCustomerViewable /
+//                      adminDraftPreviewEligible + the durable call-side
+//                      block (estimate-claim-sql), the same 404 checks the
+//                      public page runs
 // Record scope: estimate_id resolves to its customer through the
 // task-context RECORDS map, customer_id is the customer selector itself.
 const db = require('../../models/db');
-const { deriveTotals } = require('../estimator-engine/draft-builder');
+const { deriveTotals, lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
 
 const ESTIMATE_COLUMNS = [
   'id', 'customer_id', 'customer_name', 'address', 'status', 'category', 'service_interest',
@@ -49,19 +58,25 @@ function parseStoredJson(value) {
   }
 }
 
-// The converter and the public route pull in the full estimate pipeline;
-// estimate-public does the same lazy require of the converter for that
-// reason, and the registry must not load either with the tool list.
+// The converter, the ledger, and the public route pull in the full
+// estimate pipeline; estimate-public does the same lazy require of the
+// converter for that reason, and the registry must not load them with
+// the tool list.
 const lazy = {
   converter: () => require('../estimate-converter'),
+  ledger: () => require('../plan-rate-ledger'),
   publicRoute: () => require('../../routes/estimate-public'),
+  claimSql: () => require('../../utils/estimate-claim-sql'),
 };
 
-// Customer-facing name first: set_estimate_presentation relabels a service
-// by writing displayName only, and every customer renderer prefers it.
+const list = (v) => (Array.isArray(v) ? v : []);
+
+// Customer-facing copy first (set_estimate_presentation writes displayName
+// only; raw engine rows nest display.name), never the internal key when a
+// label exists — the proposal generator's rawLineLabel order.
 function lineName(row, Converter) {
-  return row.displayName || row.name || row.label || row.serviceName || row.service_name
-    || row.description || Converter.recurringServiceKey(row) || 'Service';
+  return row.displayName || row.label || row.display?.name || row.name || row.serviceName || row.service_name
+    || row.description || Converter.recurringServiceKey(row) || row.service || 'Service';
 }
 
 function overrideAmount(value) {
@@ -71,7 +86,22 @@ function overrideAmount(value) {
 // ── Recurring lines ──────────────────────────────────────────────────
 // manualFinalAnnual (zero = fully comped) outranks the engine figures;
 // otherwise the converter's alias-aware reader (annualAfterDiscount /
-// annual / ann, or mo / monthly × 12).
+// annual / ann, or mo / monthly × 12). A row gated by ANY review marker
+// (the estimator's complete predicate, heuristic turf, LOW confidence) is
+// a field-verification price and says so beside its amount.
+function reviewState(svc) {
+  const reasons = [];
+  let gated = false;
+  try { gated = lineRequiresReview(svc); } catch { gated = false; }
+  if (gated) reasons.push('requires_review');
+  let turf = false;
+  try { turf = lineHasHeuristicTurf(svc); } catch { turf = false; }
+  if (turf) reasons.push('heuristic_turf');
+  if (String(svc.pricingConfidence || '').toUpperCase() === 'LOW') reasons.push('low_confidence');
+  for (const reason of list(svc.manualReviewReasons)) reasons.push(String(reason));
+  return reasons;
+}
+
 function recurringLine(svc, Converter) {
   const override = overrideAmount(svc.manualFinalAnnual);
   const annual = override ?? money(Converter.recurringLineAnnualAmount(svc));
@@ -82,7 +112,7 @@ function recurringLine(svc, Converter) {
   const priced = annual > 0 || override != null;
   const line = {
     service: lineName(svc, Converter),
-    frequency: svc.frequency || svc.frequencyKey || svc.frequency_key || null,
+    frequency: svc.frequency || svc.frequencyKey || svc.frequency_key || svc.cadence || null,
     visits_per_year: visits,
     monthly: priced ? monthly : null,
     annual: priced ? annual : null,
@@ -91,7 +121,24 @@ function recurringLine(svc, Converter) {
   };
   if (override === 0) line.comped = true;
   if (svc.quoteRequired === true) line.quote_required = true;
+  const reasons = reviewState(svc);
+  if (reasons.length) {
+    line.review_required = true;
+    line.review_reasons = [...new Set(reasons)];
+  }
   return line;
+}
+
+function recurringLines(data, Converter) {
+  try {
+    return list(lazy.ledger().acceptedRecurringBillingLines(data)).map((svc) => recurringLine(svc, Converter));
+  } catch {
+    try {
+      return list(Converter.recurringServicesFromEstimateData(data)).map((svc) => recurringLine(svc, Converter));
+    } catch {
+      return [];
+    }
+  }
 }
 
 // ── One-time lines ───────────────────────────────────────────────────
@@ -110,105 +157,196 @@ function oneTimeAmount(item = {}) {
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
 }
 
-// Raw engine lines that are one-time work, by the proposal generator's
-// rule: an explicit one-time cadence wins; otherwise only the explicit
-// annual cadence fields or recurring dollars count as recurring evidence
-// (a package `visits` count on a priced row is not). Rows a program already
-// includes never bill again. A line qualifies when it carries a one-time
-// amount (positive, a credit, or an accepted zero).
-function rawOneTimeLines(data, Converter) {
-  const lines = data.lineItems || data.result?.lineItems || data.engineResult?.lineItems || data.estimate?.lineItems || [];
-  if (!Array.isArray(lines)) return [];
-  return lines.filter((line) => {
-    if (!line || typeof line !== 'object') return false;
+function isExplicitOneTime(line) {
+  const cadence = String(line.billingCadence || line.billing_cadence || line.frequency || line.cadence || '')
+    .trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return cadence === 'one_time' || cadence === 'onetime';
+}
+
+function hasAnnualCadence(line) {
+  return Number(line.visitsPerYear) > 0 || Number(line.appsPerYear) > 0 || Number(line.treatmentsPerYear) > 0;
+}
+
+// BOTH raw containers contribute (a truthy ancillary result must not hide
+// engineResult.lineItems), object-deduped — the proposal generator's rule.
+function rawContainers(data) {
+  const result = data.result || data.engineResult || data;
+  const containers = [
+    list(result.lineItems),
+    data.engineResult && data.engineResult !== result ? list(data.engineResult.lineItems) : [],
+    list(data.lineItems),
+    list(data.estimate?.lineItems),
+  ];
+  const seen = new Set();
+  const rows = [];
+  for (const container of containers) {
+    for (const line of container) {
+      if (!line || typeof line !== 'object' || seen.has(line)) continue;
+      seen.add(line);
+      rows.push(line);
+    }
+  }
+  return rows;
+}
+
+// Raw engine lines that are one-time work: an explicit one-time cadence
+// wins; otherwise only the explicit annual cadence fields or recurring
+// dollars count as recurring evidence (a package `visits` count on a
+// priced row is not). Rows a program already includes never bill again.
+function rawOneTimeLines(rows, Converter) {
+  return rows.filter((line) => {
     if (line.onProg === true || line.includedOnProgram === true) return false;
-    const cadence = String(line.billingCadence || line.billing_cadence || line.frequency || line.cadence || '')
-      .trim().toLowerCase().replace(/[\s-]+/g, '_');
-    const explicitOneTime = cadence === 'one_time' || cadence === 'onetime';
-    const annualCadence = Number(line.visitsPerYear) > 0 || Number(line.appsPerYear) > 0 || Number(line.treatmentsPerYear) > 0;
-    if (!explicitOneTime && (annualCadence || Converter.recurringLineAnnualAmount(line) > 0)) return false;
+    if (!isExplicitOneTime(line) && (hasAnnualCadence(line) || Converter.recurringLineAnnualAmount(line) > 0)) return false;
     const amount = oneTimeAmount(line);
     return amount != null && (amount !== 0 || overrideAmount(line.manualFinalOneTime) === 0);
   });
 }
 
-function oneTimeKey(row) {
+// Recurring rows can CARRY a one-time installation charge
+// (installation.price on termite-bait lines) — reported as its own line
+// even though the row itself is recurring.
+function installationLines(rows, Converter) {
+  return rows
+    .filter((line) => line.onProg !== true && line.includedOnProgram !== true
+      && Number(line.installation?.price) > 0
+      && (Converter.visitsPerYearForRecurringService(line) > 0 || Converter.recurringLineAnnualAmount(line) > 0))
+    .map((line) => ({ item: `${lineName(line, Converter)} installation`, amount: money(line.installation.price) }));
+}
+
+function serviceIdOf(row) {
   return String(row.service || row.key || row.serviceKey || row.service_key || row.name || row.label || row.displayName || '').toLowerCase().trim();
 }
 
-// Mapped containers over both stored shapes (root and { result:
-// engineResult }) plus the raw engine lines. A mapped item and its raw
-// twin (same service) are ONE charge — the mapped row consumes the twin
-// and an operator-accepted net on either side wins.
-function oneTimeLines(data, Converter) {
-  const list = (v) => (Array.isArray(v) ? v : []);
-  const engineShaped = data.engineResult && typeof data.engineResult === 'object' ? { result: data.engineResult } : null;
-  let mapped = [];
+// Mapped containers over both stored shapes (mirrors collapsed
+// occurrence-aware by the converter, so two legitimate identical unit
+// treatments survive) plus the raw engine lines. A mapped item and its raw
+// twin are ONE charge: the exact-amount mirror is the twin first, then any
+// same-service row; an operator-accepted net on either side wins; two
+// accepted nets or two engine amounts that disagree are reported with a
+// conflict flag rather than silently resolved by array order.
+// One mapped item against the raw pool: the exact-amount mirror is the
+// twin first, then any same-service row; an operator-accepted net on
+// either side wins; two accepted nets or two engine amounts that disagree
+// are reported with a conflict flag rather than resolved by array order.
+function resolveMappedItem(item, pool) {
+  const service = serviceIdOf(item);
+  const itemAmount = oneTimeAmount(item);
+  const itemManual = overrideAmount(item.manualFinalOneTime);
+  const twinEntry = (service && pool.find((e) => !e.used && serviceIdOf(e.line) === service && oneTimeAmount(e.line) === itemAmount))
+    || (service && pool.find((e) => !e.used && serviceIdOf(e.line) === service))
+    || null;
+  if (!twinEntry) return { amount: itemAmount, flags: itemManual === 0 ? { comped: true } : {} };
+  twinEntry.used = true;
+  const twin = twinEntry.line;
+  const twinManual = overrideAmount(twin.manualFinalOneTime);
+  if (twinManual === 0 || itemManual === 0) return { amount: 0, flags: { comped: true } };
+  if (twinManual != null && itemManual != null && twinManual !== itemManual) {
+    return { amount: itemManual, flags: { conflict: true, other_amount: twinManual } };
+  }
+  if (twinManual != null && itemManual == null) return { amount: twinManual, flags: {} };
+  const twinAmount = oneTimeAmount(twin);
+  if (twinManual == null && itemManual == null && twinAmount !== itemAmount) {
+    return { amount: itemAmount, flags: { conflict: true, other_amount: twinAmount } };
+  }
+  return { amount: itemAmount, flags: {} };
+}
+
+function mappedOneTimeItems(data, Converter) {
+  const engineShaped = data.engineResult && typeof data.engineResult === 'object' && data.engineResult !== data.result
+    ? { result: data.engineResult } : null;
   try {
-    mapped = [
-      ...list(Converter.estimateOneTimeItemsFromData(data)),
-      ...(engineShaped ? list(Converter.estimateOneTimeItemsFromData(engineShaped)) : []),
-    ];
+    const rootItems = list(Converter.estimateOneTimeItemsFromData(data, { collapseMirrored: true }));
+    const engineItems = engineShaped ? list(Converter.estimateOneTimeItemsFromData(engineShaped, { collapseMirrored: true })) : [];
+    const seen = new Set();
+    const mapped = [];
+    for (const item of [...rootItems, ...engineItems]) {
+      if (!item || typeof item !== 'object' || seen.has(item)) continue;
+      seen.add(item);
+      mapped.push(item);
+    }
+    return mapped;
   } catch {
-    mapped = [];
+    return [];
   }
-  const raw = rawOneTimeLines(data, Converter).map((line) => ({ line, used: false }));
+}
+
+// Mapped containers over both stored shapes (mirrors collapsed
+// occurrence-aware by the converter, so two legitimate identical unit
+// treatments survive) plus the raw engine lines, twins reconciled above.
+function oneTimeLines(data, Converter) {
+  const rows = rawContainers(data);
+  const pool = rawOneTimeLines(rows, Converter).map((line) => ({ line, used: false }));
   const lines = [];
-  const seen = new Set();
-  const push = (item, twin) => {
-    const override = overrideAmount(item.manualFinalOneTime) ?? (twin ? overrideAmount(twin.manualFinalOneTime) : null);
-    const amount = override ?? oneTimeAmount(item);
-    const line = { item: lineName(item, Converter), amount };
-    if (override === 0) line.comped = true;
+  const emit = (row, amount, flags) => {
+    const line = { item: lineName(row, Converter), amount };
     if (amount != null && amount < 0) line.credit = true;
-    const key = `${line.item.toLowerCase()}|${line.amount}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    lines.push(line);
+    lines.push(Object.assign(line, flags));
   };
-  for (const item of mapped) {
-    const key = oneTimeKey(item);
-    const twin = key ? raw.find((entry) => !entry.used && oneTimeKey(entry.line) === key) : null;
-    if (twin) twin.used = true;
-    push(item, twin ? twin.line : null);
+  for (const item of mappedOneTimeItems(data, Converter)) {
+    const { amount, flags } = resolveMappedItem(item, pool);
+    emit(item, amount, flags);
   }
-  for (const entry of raw) {
-    if (!entry.used) push(entry.line, null);
+  for (const entry of pool) {
+    if (entry.used) continue;
+    emit(entry.line, oneTimeAmount(entry.line), overrideAmount(entry.line.manualFinalOneTime) === 0 ? { comped: true } : {});
   }
-  return lines;
+  return [...lines, ...installationLines(rows, Converter)];
 }
 
 // ── Offered cadences ─────────────────────────────────────────────────
-// A residential pest estimate offers a ladder (quarterly / bi-monthly /
-// monthly) the customer picks from on the public page; the stored
-// recurring row is only the recommended one. The public route's pricing
-// bundle is the canonical ladder, so "what did we quote for quarterly"
-// answers from the same rows the customer saw.
-async function offeredFrequencies(row) {
+// The public route's pricing bundle is the ladder the customer picks from:
+// top-level plan totals per cadence, per-service ladders (pest quarterly /
+// bi-monthly / monthly, lawn standard / enhanced / premium) and the priced
+// combinations on a mixed estimate. The stored recurring row is only the
+// recommended pick.
+function frequencyEntry(f) {
+  const entry = {
+    key: f.key || null,
+    label: f.label || null,
+    monthly: money(f.monthly),
+    annual: money(f.annual),
+    per_visit: money(f.perTreatment ?? f.perVisit),
+    visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
+  };
+  if (f.oneTimeTotal != null) entry.one_time_total = money(f.oneTimeTotal);
+  if (f.quoteRequired === true) entry.quote_required = true;
+  return entry;
+}
+
+async function offeredPricing(row) {
   try {
     const bundle = await lazy.publicRoute().buildPricingBundle(row);
-    const frequencies = Array.isArray(bundle?.frequencies) ? bundle.frequencies : [];
-    return frequencies.map((f) => ({
-      key: f.key || null,
-      label: f.label || null,
-      monthly: money(f.monthly),
-      annual: money(f.annual),
-      per_visit: money(f.perVisit),
-      one_time_total: money(f.oneTimeTotal),
-    }));
+    if (!bundle || typeof bundle !== 'object') return null;
+    return {
+      plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
+      services: list(bundle.services).map((s) => ({
+        key: s.key || null,
+        label: s.label || null,
+        default_frequency_key: s.defaultFrequencyKey || null,
+        frequencies: list(s.frequencies).map(frequencyEntry),
+      })),
+      combos: list(bundle.serviceCadenceCombos).map((c) => ({ key: c.key || null, monthly: money(c.monthly), annual: money(c.annual) })),
+    };
   } catch {
     return null;
   }
 }
 
 // ── Links ────────────────────────────────────────────────────────────
-// Only where the public route would serve them: the customer link when
-// isEstimateCustomerViewable says so, the staff draft preview for an
-// unpublished, unarchived row, nothing otherwise — a bare token URL for a
-// draft, expired, send_failed, or archived estimate is a 404 in the
-// customer's hands.
-function estimateLinks(row) {
+// Only where the public route would serve them: the durable call-side
+// block and the customer-surface check first (both 404 on the public
+// page), then the customer link when isEstimateCustomerViewable says so,
+// the staff draft preview for an unpublished, unarchived row, nothing
+// otherwise.
+async function estimateLinks(row, data) {
   if (!row.token) return { customer_link: null, staff_preview_link: null, link_state: 'no_token' };
+  let blocked = false;
+  try {
+    blocked = !!(await lazy.claimSql().callSideBlockForEstimateData(db, data));
+  } catch {
+    blocked = true; // fail closed: an unverifiable block is not a link
+  }
+  if (blocked) return { customer_link: null, staff_preview_link: null, link_state: 'blocked' };
   const publicRoute = lazy.publicRoute();
   if (publicRoute.isEstimateCustomerViewable(row)) {
     return { customer_link: `${PUBLIC_ESTIMATE_BASE}${row.token}`, staff_preview_link: null, link_state: 'customer_viewable' };
@@ -222,12 +360,6 @@ function estimateLinks(row) {
 async function shapeEstimate(row, deposits = []) {
   const Converter = lazy.converter();
   const data = parseStoredJson(row.estimate_data);
-  let recurring = [];
-  try {
-    recurring = Converter.recurringServicesFromEstimateData(data) || [];
-  } catch {
-    // Malformed stored data: totals below still come from the columns.
-  }
   // Same engine-result selection as the proposal generator: agent and
   // website rows persist { engineResult: { summary, lineItems } }.
   const result = data.result || data.engineResult || data;
@@ -252,15 +384,15 @@ async function shapeEstimate(row, deposits = []) {
       annual: stored.annual ?? derived.annual,
       one_time: stored.one_time ?? derived.oneTime,
     },
-    recurring_services: recurring.map((svc) => recurringLine(svc, Converter)),
-    offered_frequencies: await offeredFrequencies(row),
+    recurring_services: recurringLines(data, Converter),
+    offered_pricing: await offeredPricing(row),
     one_time_items: oneTimeLines(data, Converter),
     accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
     deposits: deposits.map((d) => ({
       amount: money(d.amount), credited: money(d.credited_amount), refunded: money(d.refunded_amount), status: d.status, received_at: d.received_at,
     })),
     customer_notes: row.notes || null,
-    ...estimateLinks(row),
+    ...(await estimateLinks(row, data)),
     sent_at: row.sent_at,
     viewed_at: row.viewed_at,
     view_count: row.view_count || 0,
@@ -305,7 +437,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate actually priced: every recurring service with its monthly, annual, and per-visit (per-application) amount, the offered cadence ladder (quarterly / bi-monthly / monthly as the customer sees it), one-time items including credits and comped work, totals, deposits, status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
+  description: `Read what an estimate actually priced: every recurring service being billed (monthly, annual, per-visit / per-application, with review_required when the amount is still a field-verification price), the offered pricing the customer picks from (plan cadences, per-service ladders such as pest quarterly / bi-monthly / monthly and lawn tiers, priced combinations), one-time items including installation charges, credits and comped work, totals, deposits, status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "did the estimate include the one-time cleanup", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread.`,
   input_schema: {
     type: 'object',
