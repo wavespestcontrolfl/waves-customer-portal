@@ -1712,9 +1712,11 @@ const ReviewService = {
         customerId: customer.id,
         entryPoint: "review_request_send",
         // Re-judged inside the canonical sender immediately before provider
-        // preparation: a summary bounce that parked this ask after it was
-        // loaded stops it here.
+        // preparation, and held through the Twilio request: the packet row
+        // is shared FOR SHARE so a bounce reconciliation (which takes it FOR
+        // UPDATE) serializes with the send.
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
+        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch),
       });
 
       if (result.sent) {
@@ -3457,6 +3459,7 @@ const ReviewService = {
         entryPoint: "review_outreach_touch",
         metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
+        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch),
       });
     } catch (err) {
       if (manageRetryVia === "cron") {
@@ -4383,6 +4386,15 @@ const ReviewService = {
       });
       return { ran: false, stopped: true, reason };
     };
+    // Parking a sequence behind its summary is resumable, so it must never
+    // overwrite a stop an operator recorded while this step was running.
+    this._parkSequence = async (sequenceId) => {
+      const Summary = require("./visit-completion-summary");
+      await db("review_sequences").where({ id: sequenceId, status: "active" }).update({
+        status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON, completed_at: new Date(), updated_at: new Date(),
+      });
+      return { ran: false, stopped: true, reason: Summary.PARKED_REVIEW_REASON };
+    };
 
     if (!customer || customer.deleted_at) return stop("deleted");
     if (customer.has_left_google_review) return stop("reviewed");
@@ -4474,8 +4486,14 @@ const ReviewService = {
     if (seq.service_record_id) {
       const Summary = require("./visit-completion-summary");
       const parked = await Summary.visitSummaryUncertainForRecord(seq.service_record_id);
-      if (parked === null) return { ran: false, deferred: true, retryAt: new Date(Date.now() + 30 * 60 * 1000), reason: "summary_state_unavailable" };
-      if (parked) return stop(Summary.PARKED_REVIEW_REASON);
+      if (parked === null) {
+        // Persisted like the other deferrals, or the due timestamp would
+        // select this sequence again on every cron pass.
+        const retryAt = new Date(Date.now() + 30 * 60 * 1000);
+        await db("review_sequences").where({ id: seq.id, status: "active" }).update({ next_run_at: retryAt, updated_at: new Date() });
+        return { ran: false, deferred: true, retryAt, reason: "summary_state_unavailable" };
+      }
+      if (parked) return this._parkSequence(seq.id);
     }
 
     // Gate-toggle hygiene (Codex P2, r4): while GATE_REVIEW_SEQUENCES is off
@@ -4598,7 +4616,7 @@ const ReviewService = {
       return { ran: true, sent: true, step: seq.current_step };
     }
 
-    if (outcome.reason === "visit_summary_parked") return stop(require("./visit-completion-summary").PARKED_REVIEW_REASON);
+    if (outcome.reason === "visit_summary_parked") return this._parkSequence(seq.id);
     if (outcome.terminal || outcome.blocked) {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");

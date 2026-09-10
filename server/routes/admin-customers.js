@@ -4088,8 +4088,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // FOR SHARE while it resolves ownership, so this write waits for
           // the claim to commit and then sees the invoice in 'sending'. A
           // payer can never land between the claim and the provider request.
-          if (updates.payer_id !== undefined && String(updates.payer_id ?? '') !== String(before.payer_id ?? '')) {
-            await trx('customers').where({ id: req.params.id }).forNoKeyUpdate().first('id');
+          // Judged against the LOCKED snapshot, not the pre-transaction read:
+          // a payer cleared by another edit and restored by this stale request
+          // is still a change while a self-pay send is in flight.
+          if (updates.payer_id !== undefined && String(updates.payer_id ?? '') !== String(lockedBefore.payer_id ?? '')) {
             if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx)) {
               throw Object.assign(new Error('A combined-visit invoice for this customer is being delivered. Retry the Bill-To change in a moment.'), {
                 statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
