@@ -577,13 +577,26 @@ const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’
 // "not a factor") negates the whole clause, because it describes the subject
 // that precedes it. Anything the rule cannot place is treated as negated.
 const FORWARD_NEGATION = /\b(no|not|never|without|non|neither)\b/;
+// A "-free" differential ("weed-free", "disease free", "free of grubs") negates
+// only its own compound; the rest of the clause is judged on its own, so
+// "Large patch in otherwise weed-free turf" keeps large patch while
+// "Disease-free turf" stays clean.
+const FREE_DIFFERENTIAL = /\b\w+[\s‐‑‒–—-]*free\b|\bfree\s+(?:of|from)\s+\w+(?:\s+\w+)?/g;
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
   const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
   for (const clause of lower.split(CLAUSE_SPLIT)) {
-    const text = clause.trim();
+    let text = clause.trim();
     if (!text) continue;
+    if (FREE_DIFFERENTIAL.test(text)) {
+      FREE_DIFFERENTIAL.lastIndex = 0;
+      negated = true;
+      text = text.replace(FREE_DIFFERENTIAL, ' ').replace(/\s+/g, ' ').trim();
+      // The remainder counts only when it names a condition on its own.
+      if (!text || !CONDITION_LABELS.some(([pattern]) => pattern.test(text))) continue;
+    }
+    FREE_DIFFERENTIAL.lastIndex = 0;
     if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
     negated = true;
     const forward = FORWARD_NEGATION.exec(text);

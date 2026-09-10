@@ -595,6 +595,7 @@ describe('lawn diagnostic auto-release ladder', () => {
     'No weeds, disease, or pests observed', 'No chinch bugs: drought stress ruled out', 'Not drought, chinch bugs, or grubs',
     // A subject-describing negation negates the whole clause.
     'Chinch bugs not a factor', 'Chinch bugs were never seen', 'Large patch with no weed pressure ruled out',
+    'Weed-free, disease-free turf', 'Free of chinch bugs',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -610,6 +611,10 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Large patch without dollar spot', 'large patch (fungal) activity'],
     ['Drought stress, not chinch bugs', 'drought stress'],
     ['Chinch bugs, no drought', 'chinch bug activity'],
+    // A "-free" differential negates only its own compound.
+    ['Large patch in otherwise weed-free turf', 'large patch (fungal) activity'],
+    ['Chinch bug damage, disease free', 'chinch bug activity'],
+    ['Grub damage free of fungal signs', 'grub activity'],
     ['Healthy overall, some yellowing', 'color and nutrient stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
