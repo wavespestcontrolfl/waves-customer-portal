@@ -207,6 +207,8 @@ describe('getAvailableSlots — zone capacity end to end', () => {
     try {
       mockDb({ scheduledRows: [unassignedRow()] });
       const result = await getAvailableSlots('est-zone-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
+      expect(require('../services/scheduling/find-time').findAvailableSlots).toHaveBeenCalledWith(
+        expect.objectContaining({ serviceTypes: ['Pest Control'] }));
       const slots = [...(result.primary || []), ...(result.expander || [])];
       expect(slots.length).toBeGreaterThan(0);
       expect(slots.filter(overlapsBlockedWindow)).toHaveLength(0);
@@ -233,4 +235,53 @@ test('a hold on another tech outside the zone keeps the existing hold coexistenc
   mockDb({ scheduledRows: [unassignedRow({ technician_id: 'tech-2', customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z' })] });
   const out = await filterCollidingSlots([slot()], { ...RANGE, estimateZone: null });
   expect(out).toHaveLength(1);
+});
+
+
+test('capacity mode never manufactures ASAP offers outside the complete-route evaluator', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  try {
+    await expect(estimateSlotAvailability._internals.buildAsapCapacitySlots({ dateFrom: '2027-05-20',
+      dateTo: '2027-05-20', durationMinutes: 60 })).resolves.toEqual([]);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
+});
+
+
+test('capacity post-filter preserves route-certified offers and rejects synthetic candidates', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  const slot = { date: '2027-05-20', windowStart: '10:00', windowEnd: '11:00', techId: 'tech-1' };
+  mockDb({ scheduledRows: [{ scheduled_date: slot.date, window_start: '10:00', window_end: '11:00', technician_id: 'tech-2' }] });
+  try {
+    const certified = { ...slot, routeMode: 'arrival_windows' };
+    await expect(filterCollidingSlots([certified, slot], { dateFrom: slot.date, dateTo: slot.date }))
+      .resolves.toEqual([certified]);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
+});
+
+
+test('capacity estimates keep late work within the shared shift and its last arrival window', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  mockDb();
+  const certified = { date: '2027-05-20', windowStart: '16:00', windowEnd: '17:30', techId: 'tech-1', routeMode: 'arrival_windows' };
+  try {
+    await expect(filterCollidingSlots([
+      certified,
+      { ...certified, windowStart: '17:00', windowEnd: '17:30' },
+      { ...certified, windowEnd: '18:30' },
+    ], { dateFrom: certified.date, dateTo: certified.date })).resolves.toEqual([certified]);
+    process.env.GATE_SCHEDULING_CAPACITY = 'false';
+    expect(estimateSlotAvailability._internals.slotWindowFitsDay('16:00', '17:30')).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
 });
