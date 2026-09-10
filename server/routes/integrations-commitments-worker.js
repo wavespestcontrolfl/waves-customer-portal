@@ -38,7 +38,9 @@ router.get('/open', async (req, res, next) => {
       party: row.party, kind: row.kind, channel: row.channel, status: row.status, source: row.source,
       description: String(row.description || '').slice(0, 2000),
       description_truncated: String(row.description || '').length > 2000,
-      due_at: row.due_at, effective_due_at: row.due_at || implicitDueAt(row),
+      // The judged deadline the queue uses (staffed, pushed out by an
+      // active snooze), never recomputed here as if no snooze existed.
+      due_at: row.due_at, effective_due_at: row.effective_due_at || row.due_at || implicitDueAt(row),
       overdue: row.overdue, updated_at: row.updated_at, call_started_at: row.call_started_at,
       confidence: row.confidence, human_state: row.human_state,
       evidence: (row.evidence || []).slice(0, 8).map((item) => ({
