@@ -46,7 +46,7 @@ const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
-const { ASK_SPACING_MS, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt } = ASK_HISTORY;
+const { ASK_SPACING_MS, deliveredAskRows, lastDeliveredAskAt } = ASK_HISTORY;
 const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 // Trapping-family catalog keys (owner ruling 2026-08-06: "rodent/wildlife
 // should be deemed multiple visits") — multi-treatment REVIEW-CADENCE
@@ -4970,11 +4970,17 @@ const ReviewService = {
       return stop("stale");
     }
     let recentAskRows = [];
+    let lastAskAt = null;
     let askLookupFailed = false;
     try {
-      // Since 30 days ago — the supersede window; the 3-day anchor below is
-      // the latest delivery among them.
-      recentAskRows = await deliveredAskRows(seq.customer_id, { since: new Date(Date.now() - 30 * 86400000) });
+      const supersedeSince = new Date(Date.now() - 30 * 86400000);
+      // Confirmed deliveries can permanently supersede a cadence. An
+      // unresolved legacy follow-up reservation is separate evidence: it
+      // holds the 72-hour spacing floor below but cannot prove delivery.
+      [recentAskRows, lastAskAt] = await Promise.all([
+        deliveredAskRows(seq.customer_id, { since: supersedeSince, includeReservations: false }),
+        lastDeliveredAskAt(seq.customer_id, { since: supersedeSince }),
+      ]);
     } catch {
       askLookupFailed = true; // hygiene check is best-effort; the 3-day rule fails closed (below)
     }
@@ -5041,7 +5047,6 @@ const ReviewService = {
         .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
     }
-    const lastAskAt = latestDeliveredAt(recentAskRows);
     const anchorMs = Math.max(lastAskAt ? lastAskAt.getTime() : 0, manualAskAt ? manualAskAt.getTime() : 0);
     if (stepIsAsk && anchorMs && Date.now() - anchorMs < ASK_SPACING_MS) {
       let spacedAt = new Date(anchorMs + ASK_SPACING_MS);

@@ -70,6 +70,7 @@ postgres('review ask history against migrated PostgreSQL', () => {
     const reservedAt = new Date(at.getTime() + 80 * 3600000);
     await trx('review_requests').where({ id: row.id }).update({ followup_reserved_at: reservedAt });
     expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(reservedAt);
+    expect(await history.lastDeliveredAskAt(customerId, { since: at, includeReservations: false })).toBeNull();
     expect((await trx('review_requests').where({ id: row.id }).first()).followup_delivered_at).toBeNull();
     await trx('review_requests').where({ id: row.id }).update({ followup_reserved_at: null });
     expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);

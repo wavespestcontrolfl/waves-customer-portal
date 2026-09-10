@@ -94,6 +94,13 @@ function makeMock(initial = {}, opts = {}) {
       const l = valueFor(r, k); if (l == null) return false;
       return op === '>=' ? l >= v : op === '<=' ? l <= v : op === '>' ? l > v : op === '<' ? l < v : l === v;
     }));
+    if (q.greatest) {
+      const since = new Date(q.greatest.since).getTime();
+      rows = rows.filter(r => Math.max(...q.greatest.columns.map(column => {
+        const value = valueFor(r, column);
+        return value ? new Date(value).getTime() : 0;
+      })) > since);
+    }
     if (q.followupRetryAt) rows = rows.filter(r => !r.followup_next_attempt_at || new Date(r.followup_next_attempt_at) <= q.followupRetryAt);
     if (q.order) { const [k, d] = q.order; rows.sort((a, b) => { const av = valueFor(a, k), bv = valueFor(b, k); if (av === bv) return 0; const x = av > bv ? 1 : -1; return d === 'desc' ? -x : x; }); }
     return q.limitValue ? rows.slice(0, q.limitValue) : rows;
@@ -101,7 +108,7 @@ function makeMock(initial = {}, opts = {}) {
   function make(tbl) {
     const t = String(tbl).split(/\s+as\s+/i)[0];
     const q = {
-      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], raws: [], order: null, limitValue: null,
+      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], raws: [], greatest: null, order: null, limitValue: null,
       where(a, op, v) {
         if (typeof a === 'function') { a.call(this, this); return this; } // knex passes the builder as both `this` and the argument
         if (a && typeof a === 'object') { Object.entries(a).forEach(([k, val]) => this.equals.push([k, val])); return this; }
@@ -110,7 +117,15 @@ function makeMock(initial = {}, opts = {}) {
       },
       orWhere() { return this; },
       orWhereNull() { return this; },
-      whereRaw(sql, bindings) { this.raws.push(sql); if (sql.includes("followup_next_attempt_at")) this.followupRetryAt = bindings[0]; return this; },
+      whereRaw(sql, bindings) {
+        this.raws.push(sql);
+        if (sql.includes("followup_next_attempt_at")) this.followupRetryAt = bindings[0];
+        const greatest = sql.match(/GREATEST\(([^)]+)\) > \?/);
+        if (greatest && bindings?.length) {
+          this.greatest = { columns: greatest[1].split(',').map(column => column.trim()), since: bindings[0] };
+        }
+        return this;
+      },
       whereNot(c, v) { this.notEquals.push([c, v]); return this; },
       whereIn(c, vs) { this.ins.push([c, vs]); return this; },
       whereNotIn(c, vs) { this.notIns.push([c, vs]); return this; },
@@ -938,6 +953,44 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       jest.useFakeTimers().setSystemTime(new Date(seq.next_run_at.getTime() + 1000));
       try {
         expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('an uncertain legacy follow-up holds 72h without permanently superseding the cadence', async () => {
+      const rows = fixture('seq-legacy-reservation', { lastAskAgoMs: 73 * 3600000 });
+      const reservedAt = new Date(Date.now() - 3600000);
+      rows.review_requests.push({
+        id: 'legacy-uncertain',
+        customer_id: 'seq-legacy-reservation-c',
+        status: 'sent',
+        template_key: 'day0_ask',
+        sms_sent_at: new Date(Date.now() - 40 * 86400000),
+        followup_sent: true,
+        followup_reserved_at: reservedAt,
+        followup_delivered_at: null,
+        created_at: new Date(Date.now() - 40 * 86400000),
+      });
+      const mock = makeMock(rows);
+      db.mockImplementation(mock);
+
+      expect(await ReviewService.processReviewSequences()).toMatchObject({ sent: 0, deferred: 1 });
+
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(seq.stop_reason).toBeUndefined();
+      expect(seq.current_step).toBe(1);
+      expect(seq.next_run_at.getTime()).toBe(reservedAt.getTime() + 72 * 3600000);
+      expect(parse(seq.decision)).toMatchObject({ reason: 'spacing', ownerAction: 'none' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+      jest.useFakeTimers().setSystemTime(new Date(seq.next_run_at.getTime() + 1000));
+      try {
+        expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+        expect(seq.status).toBe('completed');
+        expect(seq.stop_reason).toBe('completed');
         expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
       } finally {
         jest.useRealTimers();
@@ -4703,6 +4756,14 @@ describe('shared ask history foundation', () => {
       { sms_sent_at: new Date(base + 60000), sent_at: null },
     ])).toEqual(new Date(base + 3600000));
     expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
+  });
+
+  test('legacy follow-up reservations are spacing evidence, not confirmed delivery', () => {
+    const deliveredAt = new Date(base);
+    const reservedAt = new Date(base + 3600000);
+    const rows = [{ sms_sent_at: deliveredAt, followup_reserved_at: reservedAt }];
+    expect(history.latestDeliveredAt(rows)).toEqual(reservedAt);
+    expect(history.latestDeliveredAt(rows, { includeReservations: false })).toEqual(deliveredAt);
   });
 });
 
