@@ -5461,7 +5461,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               <>
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment notifications</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Sent to the app when it is installed, or by text.</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Delivered by app, text, or email, as you chose under Service notifications.</div>
                 <div style={{ marginTop: 12 }}>
                   {/* Under the saved-property scope the server lists one entry
                       per SAVED property (id = the entry key, so this picker
