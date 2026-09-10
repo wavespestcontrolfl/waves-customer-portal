@@ -324,18 +324,31 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
   return { status: 202, body: { visitId: packet.visit_id, packetId: packet.id, state: 'member_effects_ready' } };
 }
 
-// The same predicate technicianCurrentVisitFilter applies to reads, judged
-// on a locked member row for a technician actor; administrators are unscoped.
+// The canonical technician scope (technician-visit-scope.js), judged on a
+// locked member row; administrators are unscoped.
 function memberInTechnicianScope(member, actor) {
-  const scope = require('./technician-visit-scope');
-  if (!scope.isTechnicianRequest(actor)) return true;
-  return String(member.technician_id || '') === String(actor.technicianId || '')
-    && !scope.TECH_DEAD_ASSIGNMENT_STATUSES.includes(String(member.status || ''))
-    && dateOnly(member.scheduled_date) >= scope.techAccessCutoff();
+  return require('./technician-visit-scope').technicianVisitRowInScope(actor, member);
+}
+
+// The resume boundary re-applies the actor's scope on the locked member rows,
+// exactly as the save does: a reassignment or reschedule that committed after
+// the route's unlocked preflight must not let the former technician trigger
+// billing and customer-summary effects. Retained history is not judged.
+async function packetInTechnicianScope(packetId, actor, database) {
+  return database.transaction(async (trx) => {
+    const packet = await trx('visit_completion_packets').where({ id: packetId }).first('id', 'visit_id', 'payload');
+    if (!packet) return true;
+    const members = await visitCloseoutMemberQuery(packet.visit_id, trx).orderBy('id').forShare();
+    const retainedIds = new Set(retainedCloseoutMembers(members, { payload: packetPayload(packet) }).map((member) => member.serviceId));
+    return members.filter((member) => !retainedIds.has(member.id)).every((member) => memberInTechnicianScope(member, actor));
+  });
 }
 
 /** Run summary and financial effects only after every member is ready. */
-async function runVisitCompletionPacketEffects(packetId, database = db) {
+async function runVisitCompletionPacketEffects(packetId, database = db, { actor = null } = {}) {
+  if (actor && require('./technician-visit-scope').isTechnicianRequest(actor) && !await packetInTechnicianScope(packetId, actor, database)) {
+    return failure(409, 'visit_out_of_scope', 'This visit is no longer in your current schedule. Refresh the schedule.');
+  }
   const members = await runVisitCompletionPacketMemberEffects(packetId, database);
   if (members.body.state !== 'member_effects_ready') return members;
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();

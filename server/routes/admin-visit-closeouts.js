@@ -78,7 +78,7 @@ router.post('/:visitId/resume', async (req, res, next) => {
   try {
     const { packet } = req.visitCloseout;
     if (!packet) return res.status(404).json({ error: 'Saved visit closeout not found.' });
-    const result = await runVisitCompletionPacketEffects(packet.id);
+    const result = await runVisitCompletionPacketEffects(packet.id, undefined, { actor: { techRole: req.techRole, technicianId: req.technicianId } });
     return res.status(result.status).json({ ...result.body, canRevokeSummary: req.techRole === 'admin' && Boolean(result.body.summaryUrl) });
   } catch (err) { return next(err); }
 });

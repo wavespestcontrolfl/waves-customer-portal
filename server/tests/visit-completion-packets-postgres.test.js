@@ -249,6 +249,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  test('resuming effects re-applies the technician scope on the locked members', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved).toMatchObject({ status: 202 });
+    const technician = { techRole: 'technician', technicianId: fixture.techId };
+    // A whole-visit reassignment that committed after the route's preflight.
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: null });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId, undefined, { actor: technician }))
+      .toMatchObject({ status: 409, body: { code: 'visit_out_of_scope' } });
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: fixture.techId });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId, undefined, { actor: technician })).toMatchObject({ status: 200 });
+  });
+
   test('status-only completed members still require canonical closeout forms', async () => {
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ status: 'completed' });
     const input = submission();
