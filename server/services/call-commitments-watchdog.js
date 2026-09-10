@@ -152,8 +152,7 @@ async function runInner({ now = new Date() } = {}) {
       .whereNotExists(trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
         .whereRaw("cc.id::text = n.metadata->>'commitment_id'").where({ 'cc.status': 'open', 'cc.party': 'waves' })
         .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`)
-        .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} < ?`, [now])
-        .modify((q) => { if (require('./callback-cards').enabled()) q.whereRaw("(cc.kind <> 'callback' OR cc.snoozed_until IS NULL OR cc.snoozed_until <= ?)", [now]); }))
+        .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} < ?`, [now]))
       .update({ read_at: now, metadata: trx.raw("metadata || '{\"dedupeVersion\":\"retired\"}'::jsonb") });
     if (!overdue.length) {
       await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")

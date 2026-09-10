@@ -148,7 +148,7 @@ run('callback ledger on PostgreSQL', () => {
     expect(rearmed.overdue).toBe(true);
   });
 
-  test('an action that leaves the callback open releases its reminder identity for the next due sweep', async () => {
+  test('an action that leaves the callback open retires the reminder for the version acted on', async () => {
     const row = await seed();
     const key = `call-commitment-overdue:${row.id}:2026-09-09`;
     const [bell] = await trx('notifications').insert({ recipient_type: 'admin', category: 'alert', title: 'Fixture reminder',
@@ -157,8 +157,9 @@ run('callback ledger on PostgreSQL', () => {
     await cards.actOnCallback(trx, row.id, { action: 'snooze', actorId: staff.id, expectedAt: row.updated_at, snooze: 'two_hours', now });
     const after = await trx('notifications').where({ id: bell.id }).first();
     expect(after.read_at).not.toBeNull();
-    expect(after.metadata.dedupeKey.startsWith(`${key}:superseded:`)).toBe(true);
-    expect(await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key])).toEqual([]);
+    // The identity itself is re-armed by the versioned watchdog refresh
+    // (tests/callback-alerts-postgres.test.js), so the key is left intact.
+    expect(after.metadata.dedupeKey).toBe(key);
   });
 
   test('acting on one callback preserves a shared reminder for other open promises', async () => {
