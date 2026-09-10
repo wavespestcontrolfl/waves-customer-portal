@@ -665,6 +665,11 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Large patch in otherwise weed-free turf', 'large patch (fungal) activity'],
     ['Chinch bug damage, disease free', 'chinch bug activity'],
     ['Grub damage free of fungal signs', 'grub activity'],
+    // A negated recovery negates the recovery, not the condition.
+    ['Large patch is not improving', 'large patch (fungal) activity'],
+    ['Chinch bug damage has not recovered', 'chinch bug activity'],
+    ['Chinch bug damage hasn\u2019t responded to treatment', 'chinch bug activity'],
+    ['Dollar spot still not clearing up', 'dollar spot'],
     // A "free of" list ends at its conjunction item or at a new statement.
     ['Free of chinch bugs and weeds, large patch present', 'large patch (fungal) activity'],
     ['Free of chinch bugs, weeds, large patch is spreading', 'large patch (fungal) activity'],

@@ -128,6 +128,15 @@ describe('customer publication', () => {
     },
   );
 
+  test.each(['Large patch is not improving', 'Large patch has not recovered', 'Large patch hasn\u2019t responded to treatment'])(
+    'a negated recovery in the finding name %s is positive evidence for its cause', (name) => {
+      const text = 'Large patch is spreading in the shade.';
+      const evidence = { name, label: 'large patch (fungal) activity', confidence: 'moderate' };
+      expect(copy.customerObservations(text, [evidence])).toBe(text);
+      expect(copy.customerObservations(text, [{ ...evidence, name: 'Large patch ruled out' }])).toBe(copy.NO_OBSERVATIONS);
+    },
+  );
+
   test.each(['Chinch bugs may have been active along the edge.', 'Chinch bugs may have been previously active.', 'Chinch bugs may be active along the edge.'])(
     'the downgraded hedged form is not itself a residual definitive claim: %s', (text) => {
       expect(copy.residualDefinitiveClaim(text)).toBe(false);

@@ -1,5 +1,5 @@
 /** Customer publication rules for lawn visit results and repeated reviews. */
-const { scrubCustomerText, SUMMARY_CAUSE_RE, residualDefinitiveClaim, spaceJoinedNon } = require('./lawn-diagnostic-report');
+const { scrubCustomerText, SUMMARY_CAUSE_RE, residualDefinitiveClaim, spaceJoinedNon, stripNegatedRecovery } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
@@ -114,7 +114,8 @@ function establishesCause(finding) {
   // A finding the technician removed (keep: false) is never evidence, on every
   // publication path, not only reviewedObservations.
   if (finding.keep === false || finding.negated || finding.label === NO_STRESS_LABEL) return false;
-  const name = spaceJoinedNon(finding.name || '');
+  // A negated recovery ("Large patch is not improving") is positive evidence.
+  const name = stripNegatedRecovery(spaceJoinedNon(finding.name || ''));
   if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
   return distinctCauseCount(name) <= 1;

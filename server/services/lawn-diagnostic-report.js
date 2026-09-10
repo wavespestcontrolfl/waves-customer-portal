@@ -592,6 +592,14 @@ function spaceJoinedNon(text) {
   if (!joinedNon) joinedNon = new RegExp(`\\bnon(?=[‐‑‒–—-]?(?:${SUMMARY_CAUSE_RE.source.slice(2, -2)}))`, 'gi');
   return String(text || '').replace(joinedNon, 'non ');
 }
+// A negated recovery predicate ("is not improving", "hasn't recovered", "not
+// responding to treatment") negates the recovery, not the condition, so it is
+// removed before any negation check: "Large patch is not improving" keeps large
+// patch on every publication path.
+const NEGATED_RECOVERY = /\b(?:(?:is|are|was|were|has|have|had|does|did|do|still)\s+)?(?:not|never|\w+n['’]t)\s+(?:yet\s+|fully\s+|really\s+)?(?:improv\w*|recover\w*|respond\w*|resolv\w*|heal\w*|better|bounc\w*\s+back|green\w*(?:\s+up)?|fill\w*\s+in|clear\w*\s+up|grow\w*\s+back|com\w*\s+back|got(?:ten)?\s+better)\b/gi;
+function stripNegatedRecovery(text) {
+  return String(text || '').replace(NEGATED_RECOVERY, ' ').replace(/\s+/g, ' ');
+}
 let freeDifferential = null;
 function freeDifferentialRe() {
   if (!freeDifferential) {
@@ -619,7 +627,7 @@ function positiveClauses(lower) {
   let negated = false;
   const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
   const FREE_DIFFERENTIAL = freeDifferentialRe();
-  for (const clause of spaceJoinedNon(lower).split(CLAUSE_SPLIT)) {
+  for (const clause of stripNegatedRecovery(spaceJoinedNon(lower)).split(CLAUSE_SPLIT)) {
     let text = clause.trim();
     if (!text) continue;
     if (FREE_DIFFERENTIAL.test(text)) {
@@ -1003,6 +1011,7 @@ module.exports = {
   safeConditionLabel,
   residualDefinitiveClaim,
   spaceJoinedNon,
+  stripNegatedRecovery,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
   lowerConfidence,
