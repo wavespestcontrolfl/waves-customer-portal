@@ -30,8 +30,9 @@ for (const c of captures) (byId[c.scenario] = byId[c.scenario] || []).push(c);
 
 const lines = [];
 lines.push('| Surface | Route / pattern | Role | Family | Scenario | States captured | Overlays / interactions | 390 | 1440 | Other widths | Engines | Evidence (run) | Findings (ids) | Blockers / exclusions |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
-// A state counts as inspected at a width when at least one capture of it succeeded
-// (earlier failed attempts that were re-run are superseded, not double-counted).
+// A state counts as inspected at a width when its LATEST capture (runs are read in argument order)
+// succeeded: an earlier success never masks a later failed rerun, and an earlier failure that was
+// re-run successfully is superseded, not double-counted.
 // Expected states at a width come from the scenario DECLARATION (honouring a state's own `widths`
 // restriction), never from whichever captures happen to exist, so a state that was never captured
 // at that width shows as `partial` instead of silently passing as `inspected`.
@@ -42,8 +43,9 @@ const status = (s, list, w) => {
   const rs = list.filter((c) => c.width === w);
   const states = declaredAt(s, w);
   if (!rs.length) return states.length ? 'NOT VERIFIED' : 'n/a';
-  const okStates = states.filter((st) => rs.some((c) => c.state === st && !c.failure && c.metrics));
-  if (!okStates.length) return `BLOCKED (${rs[0].failure ? rs[0].failure.slice(0, 40) : 'no metrics'})`;
+  const latestOf = (st) => rs.filter((c) => c.state === st).pop();
+  const okStates = states.filter((st) => { const c = latestOf(st); return c && !c.failure && c.metrics; });
+  if (!okStates.length) { const c = latestOf(states[0]) || rs[rs.length - 1]; return `BLOCKED (${c.failure ? c.failure.slice(0, 40) : 'no metrics'})`; }
   return okStates.length === states.length ? 'inspected' : `partial (${okStates.length}/${states.length} states)`;
 };
 const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|');

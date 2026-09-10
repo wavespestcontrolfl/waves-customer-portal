@@ -8,6 +8,9 @@ const path = require('node:path');
 
 const fx = (name) => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixtures', `${name}.json`), 'utf8'));
 const first = (obj) => Object.values(obj)[0].body;
+// The tracker renders "Updated Ns ago" from Date.now() - vehicle.lastReportedAt, so a fixed fixture
+// timestamp goes stale on every rerun; the en-route payload is stamped relative to the run instead.
+const liveTrack = (body) => ({ ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } });
 const T = (c) => c.repeat(64);
 
 function reportHandle(payload) {
@@ -42,7 +45,7 @@ module.exports = [
   })),
   { id: 'spa-track-en-route', family: 'flow', surface: 'customer', role: 'public token', route: '/track/:token (real route)',
     url: `/track/${T('b')}`, ready: 'Alex arrives in', settle: 900,
-    handle: ({ method, path: p }) => { if (method === 'GET' && p === `/api/public/track/${T('b')}`) return { body: first(fx('track-en-route')) }; if (/stops-ahead/.test(p)) return { body: { stopsAhead: 2 } }; return null; } },
+    handle: ({ method, path: p }) => { if (method === 'GET' && p === `/api/public/track/${T('b')}`) return { body: liveTrack(first(fx('track-en-route'))) }; if (/stops-ahead/.test(p)) return { body: { stopsAhead: 2 } }; return null; } },
   { id: 'spa-secure-pest', family: 'flow', surface: 'customer', role: 'public token', route: '/secure/:token (real route)',
     url: `/secure/${T('a')}`, ready: 'Quarterly Pest Control', settle: 900,
     handle: ({ method, path: p }) => (method === 'GET' && p === `/api/public/secure-card/${T('a')}` ? { body: first(fx('secure-pest')) } : null) },

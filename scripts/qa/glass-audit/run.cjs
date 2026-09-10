@@ -111,6 +111,9 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
     await page.screenshot({ path: shot, fullPage: !state.viewportOnly });
     rec.screenshot = path.relative(root, shot);
     rec.metrics = await page.evaluate(collectSrc + '(arguments[0])'.replace('arguments[0]', JSON.stringify(scenario.sheet || {})));
+    // A measurement probe that throws is missing evidence, not "no violations": it fails the capture
+    // (below) unless the scenario opted out of that probe. The error text is kept alongside.
+    const probeFailures = [];
     // Contrast: sample the full-page screenshot around small text (<=16px) and every control.
     try {
       const png = decode(fs.readFileSync(shot));
@@ -135,10 +138,12 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
         if (!c) continue;
         const large = it.size >= 24 || (it.size >= 18.66 && it.weight >= 700);
         const threshold = large ? 3 : 4.5;
-        if (c.avg < threshold) rec.contrast.push({ ...it, ...c, threshold });
+        // Screen on the WORST sampled background (text over a gradient or variegated glass can be
+        // unreadable at one edge while the averaged background still passes); `avg` is kept for the digest.
+        if (c.min < threshold) rec.contrast.push({ ...it, ...c, threshold });
       }
       rec.contrastSampled = items.length;
-    } catch (e) { rec.contrastError = String(e.message); }
+    } catch (e) { rec.contrastError = String(e.message); probeFailures.push(`contrast probe: ${String(e.message).slice(0, 120)}`); }
     // Keyboard focus ring probe on the PRISTINE page (before interactions open sheets / menus that trap or
     // drop focus): real Tab traversal (page.keyboard), so only elements actually in the
     // Tab order are reported and :focus-visible behaves as it does for a keyboard user. Resting
@@ -178,7 +183,7 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
         await page.evaluate(() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); window.scrollTo(0, 0); });
         await page.waitForTimeout(150);
         rec.focusProbe = out;
-      } catch (e) { rec.focusProbeError = String(e.message); }
+      } catch (e) { rec.focusProbeError = String(e.message); probeFailures.push(`focus probe: ${String(e.message).slice(0, 120)}`); }
     }
     // Interactions (hover / focus / open overlay), each captured as its own shot.
     for (const ix of (state.interactions || scenario.interactions || [])) {
@@ -196,9 +201,10 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
       } catch (e) { ixRec.error = String(e.message).slice(0, 300); }
       rec.interactions.push(ixRec);
     }
-    // A failed interaction is missing evidence: mark the capture failed (the main shot + metrics are kept).
+    // A failed interaction or probe is missing evidence: mark the capture failed (the main shot + metrics are kept).
     const badIx = rec.interactions.filter((i) => !i.ok);
-    if (badIx.length) rec.failure = `interaction(s) failed: ${badIx.map((i) => `${i.name} (${i.error})`).join('; ')}`.slice(0, 500);
+    if (badIx.length) probeFailures.push(`interaction(s) failed: ${badIx.map((i) => `${i.name} (${i.error})`).join('; ')}`);
+    if (probeFailures.length) rec.failure = probeFailures.join(' | ').slice(0, 500);
   } catch (e) {
     rec.failure = String(e.message).slice(0, 500);
     try { const s = path.join(dir, `${state.name}-${width}-FAILED.png`); await page.screenshot({ path: s, fullPage: true }); rec.screenshot = path.relative(root, s); } catch (e2) { /* ignore */ }
@@ -226,9 +232,19 @@ function ensureServerHtml(scenarios) {
 }
 
 async function main() {
-  fs.mkdirSync(outRoot, { recursive: true });
   const report = { ...evidence(root), engine: engineName, widths: widths.concat(extraWidths), started: new Date().toISOString(), results: [] };
-  const scenarios = loadScenarios().filter((s) => (!only || only.includes(s.id)) && (!family || s.family === family));
+  const registry = loadScenarios();
+  // A misspelled or stale --only id must fail BEFORE anything launches: silently dropping it would
+  // produce a zero- or partial-capture run that exits 0 without auditing what was asked for.
+  if (only) {
+    const known = new Set(registry.map((s) => s.id));
+    const unknown = only.filter((id) => !known.has(id));
+    if (unknown.length) throw new Error(`unknown scenario id(s) in --only: ${unknown.join(', ')}`);
+  }
+  if (family && !registry.some((s) => s.family === family)) throw new Error(`unknown --family: ${family}`);
+  const scenarios = registry.filter((s) => (!only || only.includes(s.id)) && (!family || s.family === family));
+  if (!scenarios.length) throw new Error('no scenarios selected (the --only ids exist but none is in --family)');
+  fs.mkdirSync(outRoot, { recursive: true });
   console.log(`glass-audit: ${scenarios.length} scenarios → ${path.relative(root, outRoot)}`);
   ensureServerHtml(scenarios);
   let server; let browser;

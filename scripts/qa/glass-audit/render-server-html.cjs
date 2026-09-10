@@ -13,12 +13,14 @@
 //   - email-template.js exports wrapEmail / wrapServiceEmail / wrapNewsletter /
 //     ctaButton / stripeFooterLine / currency directly; the module only pulls
 //     constants/business + utils/date-only, so a plain require() is enough.
-//   - public-newsletter.js does NOT export renderConfirmPage and requires
-//     models/db at load time, so we never require it. Instead the function's
-//     source is sliced out of the file text (from `function renderConfirmPage`
-//     to its closing brace) and evaluated with its single free dependency,
-//     glassUniversalFooterHtml, injected. If the slice ever fails to compile the
-//     script exits non-zero rather than emitting a stale page.
+//   - public-newsletter.js does NOT export renderConfirmPage and boots db /
+//     rate limiters / the confirmation mailer at load time, so we never
+//     require it. The file is parsed with acorn: renderConfirmPage and
+//     escapeHtml are sliced out and evaluated with glassUniversalFooterHtml
+//     injected, and each landing page's heading + bodyHtml is the route
+//     handler's own template expression (found by route + heading text),
+//     evaluated with fixture inputs. A missing branch, a renamed heading or a
+//     template that no longer compiles exits non-zero — never a stale page.
 //   - routes/estimate-public.js renderPage is NOT rendered: the module boots
 //     db/config/Twilio at require time, renderPage spans ~3.4k lines
 //     (4669-8041) of module-scope helpers, and it signs a JWT
@@ -146,70 +148,119 @@ function renderEmails() {
   }));
 }
 
-// ---------- public-newsletter.js renderConfirmPage ----------
-function loadRenderConfirmPage() {
-  const file = path.join(root, 'server/routes/public-newsletter.js');
-  const src = fs.readFileSync(file, 'utf8');
-  const start = src.indexOf('function renderConfirmPage(');
-  if (start < 0) throw new Error('renderConfirmPage not found in public-newsletter.js');
-  // The function body is a single template literal; the first "\n}\n" after
-  // the start closes it.
-  const end = src.indexOf('\n}\n', start);
-  if (end < 0) throw new Error('renderConfirmPage end not found');
-  const slice = src.slice(start, end + 2);
-  const sandbox = { glassUniversalFooterHtml: email.glassUniversalFooterHtml };
-  vm.createContext(sandbox);
-  return vm.runInContext(`${slice}\n; renderConfirmPage`, sandbox, { filename: 'public-newsletter.renderConfirmPage.slice.js' });
+// ---------- public-newsletter.js renderConfirmPage + route bodies ----------
+// public-newsletter.js is never require()d (it boots db / rate limiters / the
+// confirmation mailer at load time). Instead the file is PARSED (acorn) and
+//   - renderConfirmPage / escapeHtml are sliced out and evaluated as-is;
+//   - every landing page's heading + bodyHtml is the route handler's OWN
+//     template expression, located by route + heading text and evaluated with
+//     the same inputs the handler would have (email, token, quiz, reaction…).
+// Nothing is hand-copied, so a copy or markup change in any route branch is
+// captured on the next run; a branch that disappears or is renamed makes this
+// script exit non-zero rather than emit a stale page.
+const NEWSLETTER_ROUTE_FILE = path.join(root, 'server/routes/public-newsletter.js');
+
+function sliceFunction(src, name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`${name} not found in public-newsletter.js`);
+  const end = src.indexOf('\n}\n', start); // top-level function: first "\n}\n" closes it
+  if (end < 0) throw new Error(`${name} end not found`);
+  return src.slice(start, end + 2);
+}
+
+function parseNewsletterRoutes() {
+  const acorn = require('acorn');
+  const walk = require('acorn-walk');
+  const src = fs.readFileSync(NEWSLETTER_ROUTE_FILE, 'utf8');
+  const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script' });
+  const text = (n) => src.slice(n.start, n.end);
+  const routes = new Map(); // "get /confirm/:token" → [{ kind, name?, src, start }] in source order
+  walk.simple(ast, {
+    CallExpression(call) {
+      const c = call.callee;
+      if (c.type !== 'MemberExpression' || c.object.name !== 'router' || !['get', 'post'].includes(c.property.name)) return;
+      const first = call.arguments[0];
+      if (!first || first.type !== 'Literal') return;
+      const handler = call.arguments[call.arguments.length - 1];
+      const events = [];
+      walk.simple(handler, {
+        AssignmentExpression(n) { if (n.left.type === 'Identifier' && ['heading', 'bodyHtml'].includes(n.left.name)) events.push({ kind: n.left.name, src: text(n.right), start: n.start }); },
+        VariableDeclarator(n) { if (n.id.type === 'Identifier' && n.init) events.push({ kind: ['heading', 'bodyHtml'].includes(n.id.name) ? n.id.name : 'decl', name: n.id.name, src: text(n.init), start: n.start }); },
+        CallExpression(n) { if (n.callee.type === 'Identifier' && n.callee.name === 'renderConfirmPage' && n.arguments[0] && n.arguments[0].type === 'Literal') events.push({ kind: 'callHeading', src: text(n.arguments[0]), start: n.start }); },
+      });
+      events.sort((a, b) => a.start - b.start);
+      routes.set(`${c.property.name} ${first.value}`, events);
+    },
+  });
+  return { src, routes };
+}
+
+// Evaluate one route branch: the bodyHtml expression whose paired heading evaluates to `heading`.
+// `ctx` supplies the handler's free variables for that branch; `derive` names `const` declarations
+// in the handler (e.g. the checkbox `options`) that are evaluated from source, in order, before the body.
+function renderRouteBranch({ routes, sandboxBase }, route, heading, ctx, derive = []) {
+  const events = routes.get(route);
+  if (!events) throw new Error(`route ${route} not found in public-newsletter.js`);
+  const sandbox = vm.createContext({ ...sandboxBase, ...ctx });
+  const evalSrc = (s) => vm.runInContext(`(${s})`, sandbox, { filename: `public-newsletter.${route}.slice.js` });
+  const bodies = events.filter((e) => e.kind === 'bodyHtml');
+  for (const body of bodies) {
+    // Heading = nearest preceding heading assignment; when the route passes a literal straight to
+    // renderConfirmPage (unsubscribe POST), that literal is the heading.
+    const before = events.filter((e) => e.start < body.start);
+    const h = [...before].reverse().find((e) => e.kind === 'heading') || events.find((e) => e.kind === 'callHeading');
+    if (!h) continue;
+    let hv;
+    try { hv = evalSrc(h.src); } catch (e) { continue; } // a heading needing inputs of another branch
+    if (hv !== heading) continue;
+    for (const name of derive) {
+      const d = [...before].reverse().find((e) => e.kind === 'decl' && e.name === name);
+      if (!d) throw new Error(`${route}: derived const ${name} not found before "${heading}"`);
+      sandbox[name] = evalSrc(d.src);
+    }
+    return { heading: hv, bodyHtml: evalSrc(body.src) };
+  }
+  throw new Error(`${route}: no bodyHtml branch with heading "${heading}" (route copy changed? update the fixture spec)`);
 }
 
 function renderNewsletterLanding() {
-  const renderConfirmPage = loadRenderConfirmPage();
-  const emailSpan = '<span class="email">jordan.rivera@example.invalid</span>';
-  // Mirrors the route bodies: GET /confirm pending, POST /confirm success,
-  // unsubscribe confirmation, and the invalid-link branch.
-  write('newsletter-confirm-pending', renderConfirmPage('One last click.', `
-          <p>Confirm the subscription for ${emailSpan} to start receiving the Waves Newsletter.</p>
-          <form method="POST" action="#">
-            <button type="submit" class="btn">Confirm subscription</button>
-          </form>
-          <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">If you didn't sign up, just close this tab — nothing happens until you click the button.</p>
-        `));
-  write('newsletter-confirmed', renderConfirmPage("You're in.", `<p>${emailSpan} is confirmed. The next Waves Newsletter lands in your inbox this week.</p><p style="margin-bottom:0">Until then, browse recent issues at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
-  // Unsubscribe branches mirror GET /unsubscribe (pending confirm form, already-unsubscribed, invalid) and
-  // the POST form-submit result page.
-  write('newsletter-unsubscribe-confirm', renderConfirmPage('Confirm unsubscribe.', `
-        <p>Stop newsletter emails to ${emailSpan}?</p>
-        <form method="POST" action="#"><button type="submit" name="confirm_unsubscribe" value="1" class="btn">Unsubscribe</button></form>
-        <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">Nothing changes until you click the button.</p>`));
-  write('newsletter-already-unsubscribed', renderConfirmPage("You're already unsubscribed.", `<p>No more newsletters will be sent to ${emailSpan}.</p>`));
-  write('newsletter-unsubscribe-invalid', renderConfirmPage('Link expired or invalid.', `<p>This unsubscribe link no longer matches a subscription.</p><p style="margin-bottom:0">Email <a href="mailto:hello@example.invalid">hello@example.invalid</a> and we'll help.</p>`));
-  write('newsletter-unsubscribed', renderConfirmPage("You're unsubscribed.", `<p>We won't send any more newsletters to ${emailSpan}.</p>
-         <p style="margin-bottom:0">If this was a mistake, sign up again at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
-  // Quiz + feedback landings (GET confirm form, POST result) — mirrors public-newsletter.js quiz/feedback routes.
-  const fine = 'margin-bottom:0; font-size:14px; color:#4F5B70;';
-  write('newsletter-quiz-confirm', renderConfirmPage('One tap to confirm.', `
-          <p>You picked <strong>Brown patches</strong>. Tap confirm and we'll take it from here.</p>
-          <form method="POST" action="#"><button type="submit" class="btn">Confirm — Brown patches</button></form>
-          <p style="${fine}">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`));
-  write('newsletter-quiz-thanks', renderConfirmPage("Thanks — we've got you.", `
-          <p>We'll bring a free lawn check on your next visit.</p>
-          <p style="margin-bottom:6px;">Want it sooner?</p>
-          <p style="margin:0 0 10px;"><a href="https://example.invalid/book" class="btn">Book a lawn check</a></p>
-          <p style="margin-bottom:0; font-size:14px;">or call us at <a href="tel:+19415550100">(941) 555-0100</a>.</p>`));
-  const missing = ['Closer events', 'More local news', 'Restaurant openings', 'Family activities', 'Home tips']
-    .map((l) => `<label style="display:block;margin:0 0 10px;font-size:16px;color:#3F4A65;cursor:pointer;"><input type="checkbox" name="missing" value="x" style="margin-right:8px;vertical-align:middle;" />${l}</label>`).join('');
-  write('newsletter-feedback-needs-work', renderConfirmPage('Ouch — help us fix it.', `
-          <p>You picked <strong>👎 Needs work</strong>. What was missing?</p>
-          <form method="POST" action="#">${missing}<button type="submit" class="btn" style="margin-top:6px;">Send feedback</button></form>
-          <p style="${fine}">Nothing is recorded until you tap the button — check any that apply (or none).</p>`));
-  write('newsletter-feedback-confirm', renderConfirmPage('One tap to confirm.', `
-          <p>You picked <strong>🔥 Loved it</strong>. Tap confirm and it's counted.</p>
-          <form method="POST" action="#"><button type="submit" class="btn">Confirm — Loved it</button></form>
-          <p style="${fine}">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`));
-  write('newsletter-feedback-thanks', renderConfirmPage('Got it — thanks for the straight talk.', `
-          <p>Noted: <strong>Closer events, Home tips</strong>. Next issues will lean that way.</p>
-          <p style="margin-bottom:0;">— The Waves Team 🌊</p>`));
-  write('newsletter-invalid-link', renderConfirmPage('Link expired or invalid.', `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
+  const parsed = parseNewsletterRoutes();
+  const quizSvc = require(path.join(root, 'server/services/newsletter-quiz'));
+  const feedbackSvc = require(path.join(root, 'server/services/newsletter-feedback'));
+  const business = require(path.join(root, 'server/constants/business'));
+  const base = { glassUniversalFooterHtml: email.glassUniversalFooterHtml };
+  vm.createContext(base);
+  const renderConfirmPage = vm.runInContext(`${sliceFunction(parsed.src, 'renderConfirmPage')}\n; renderConfirmPage`, base, { filename: 'public-newsletter.renderConfirmPage.slice.js' });
+  const escapeHtml = vm.runInContext(`${sliceFunction(parsed.src, 'escapeHtml')}\n; escapeHtml`, base, { filename: 'public-newsletter.escapeHtml.slice.js' });
+  const sandboxBase = { escapeHtml, MISSING_OPTIONS: feedbackSvc.MISSING_OPTIONS, WAVES_SUPPORT_PHONE_TEL: business.WAVES_SUPPORT_PHONE_TEL, WAVES_SUPPORT_PHONE_DISPLAY: business.WAVES_SUPPORT_PHONE_DISPLAY };
+  const R = (route, heading, ctx, derive) => renderRouteBranch({ routes: parsed.routes, sandboxBase }, route, heading, ctx, derive);
+
+  // Fixture inputs (fictional). `email` is the handler's already-escaped address; `tokenSafe` its escaped token.
+  const emailAddr = escapeHtml('jordan.rivera@example.invalid');
+  const tokenSafe = escapeHtml('00000000-0000-4000-8000-000000000000');
+  const sub = { email: 'jordan.rivera@example.invalid', status: 'active' };
+  const quiz = quizSvc.getQuiz(quizSvc.DEFAULT_QUIZ_ID);
+  const ans = quizSvc.resolveAnswer(quizSvc.DEFAULT_QUIZ_ID, quiz.answers[0].key);
+  const needsWork = feedbackSvc.resolveReaction('needs-work');
+  const positive = feedbackSvc.REACTIONS.find((r) => r.key !== 'needs-work');
+  const missingKeys = feedbackSvc.resolveMissingKeys(['closer-events', 'home-tips']);
+  const missingLabels = feedbackSvc.MISSING_OPTIONS.filter((o) => missingKeys.includes(o.key)).map((o) => o.label);
+
+  const pages = {
+    'newsletter-confirm-pending': R('get /confirm/:token', 'One last click.', { email: emailAddr, tokenSafe }),
+    'newsletter-confirmed': R('post /confirm/:token', "You're in!", { email: emailAddr }),
+    'newsletter-invalid-link': R('get /confirm/:token', 'Link expired or invalid.', { email: '' }),
+    'newsletter-unsubscribe-confirm': R('get /unsubscribe/:token', 'Confirm unsubscribe.', { email: emailAddr, tokenSafe }),
+    'newsletter-already-unsubscribed': R('get /unsubscribe/:token', "You're already unsubscribed.", { email: emailAddr }),
+    'newsletter-unsubscribe-invalid': R('get /unsubscribe/:token', 'Link expired or invalid.', { email: '' }),
+    'newsletter-unsubscribed': R('post /unsubscribe/:token', "You're unsubscribed.", { sub, email: emailAddr }),
+    'newsletter-quiz-confirm': R('get /quiz/:token/:quizId/:answer', 'One tap to confirm.', { label: ans.label, tokenSafe, quizIdSafe: encodeURIComponent(quizSvc.DEFAULT_QUIZ_ID), answerSafe: encodeURIComponent(ans.key) }),
+    'newsletter-quiz-thanks': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz, landingLine: quiz.landingLine, bookLabel: quiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quizSvc.DEFAULT_QUIZ_ID) }),
+    'newsletter-feedback-needs-work': R('get /feedback/:token/:reaction', 'Ouch — help us fix it.', { pick: `${needsWork.emoji} ${needsWork.label}`, reaction: needsWork, formAction: `/api/public/newsletter/feedback/${tokenSafe}/${needsWork.key}` }, ['options']),
+    'newsletter-feedback-confirm': R('get /feedback/:token/:reaction', 'One tap to confirm.', { pick: `${positive.emoji} ${positive.label}`, reaction: positive, formAction: `/api/public/newsletter/feedback/${tokenSafe}/${positive.key}` }),
+    'newsletter-feedback-thanks': R('post /feedback/:token/:reaction', 'Got it — thanks for the straight talk.', { labels: missingLabels }),
+  };
+  for (const [name, { heading, bodyHtml }] of Object.entries(pages)) write(name, renderConfirmPage(heading, bodyHtml));
 }
 
 fs.mkdirSync(outDir, { recursive: true });

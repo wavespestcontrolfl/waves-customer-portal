@@ -22,21 +22,36 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
 - Output: `.tmp/glass-audit/<run>/<scenario>/<state>-<width>.png|json` and
   `summary.json`.
 - Exit status is non-zero when any capture failed (readiness timeout, HTTP >= 400
-  on navigation, screenshot or metrics error, or any failed interaction); the
-  remaining captures still run.
+  on navigation, screenshot or metrics error, a contrast or focus probe that
+  threw, or any failed interaction); the remaining captures still run. An
+  unknown `--only` id or `--family` fails before anything launches (no run
+  directory, no server) instead of silently auditing less than was asked.
 - `server-html` scenarios are re-rendered by `render-server-html.cjs` on every run
   that selects one, so `client/glass-audit-html/` always reflects the current
-  `email-template.js` / `public-newsletter.js`. Their `ready` text is page-specific copy so Vite's fallback document
+  `email-template.js` / `public-newsletter.js`. The newsletter landing pages are
+  not replicas: the renderer parses `public-newsletter.js` (acorn), slices
+  `renderConfirmPage` / `escapeHtml`, and evaluates each route handler's own
+  `heading` / `bodyHtml` template (located by route + heading text) with fixture
+  inputs, so a copy or markup change in a branch is captured on the next run and
+  a missing branch exits non-zero. Their `ready` text is page-specific copy so Vite's fallback document
   can never be captured in their place.
 - Metrics notes: `controls[].inFooter` marks universal-footer controls (they are
   counted, not hidden); `contrast` composites translucent text over the sampled
-  background; `layout.footer.top` is in document space, `belowFold` = outside the
+  background and screens on the WORST sampled ratio (`min`, with `avg` kept for
+  the digest) so text over a gradient is caught where it is least readable;
+  `layout.footer.top` is in document space, `belowFold` = outside the
   initial viewport, `beyondDocument` = pushed past the document end; the focus
   probe drives real `Tab` presses (only elements in the Tab order are reported)
   and treats a `box-shadow` as a ring only when it differs from the resting
-  shadow; every capture records its `engine`. `analyze.cjs` lets the LAST run in argument order supersede earlier
-  captures of the same scenario/state/width; `matrix.cjs` derives expected states
-  from the scenario declaration (honouring a state's `widths`).
+  shadow; every capture records its `engine`. `analyze.cjs` and `matrix.cjs` let
+  the LAST run in argument order supersede earlier captures of the same
+  scenario/state/width even when that latest capture FAILED (it is then excluded
+  and listed under "Latest capture failed" / shown as `BLOCKED`, never masked by an
+  older success); `matrix.cjs` derives expected states from the scenario
+  declaration (honouring a state's `widths`). Interactions run in sequence on one
+  page, so an interaction that needs a clean page must close what the previous one
+  opened (see `account-menu` in `10-previews.cjs`); fixtures with "N ago"
+  timestamps are stamped relative to the run (see `liveTrack` in `70-spa-parity.cjs`).
 
 ## Scenario contract (`scenarios/NN-<family>.cjs`)
 

@@ -19,17 +19,26 @@ for (const run of runs) {
 }
 // Runs are read in argument order; a later run's capture of the same scenario/state/width SUPERSEDES an
 // earlier one everywhere (summary table and every detail section), so a corrective rerun retires issues.
+// The latest record wins even when it FAILED: a failed rerun must not leave an older successful capture
+// standing in the tables as if it were current. Such records are excluded from every metric section and
+// listed under `supersededByFailure` / "Latest capture failed".
 const latest = new Map();
-for (const r of results.filter((x) => x.metrics)) latest.set(`${r.scenario}/${r.state}@${r.width}`, r);
-const withMetrics = [...latest.values()];
+for (const r of results) latest.set(`${r.scenario}/${r.state}@${r.width}`, r);
+const withMetrics = [...latest.values()].filter((r) => r.metrics && !r.failure);
+const latestFailed = [...latest.values()].filter((r) => r.failure || !r.metrics);
 const key = (r) => `${r.scenario}/${r.state}`;
 const byScenario = {};
 for (const r of withMetrics) (byScenario[key(r)] = byScenario[key(r)] || []).push(r);
 
 const count = (map, k) => { map[k] = (map[k] || 0) + 1; };
 const lines = [];
-const out = { runs, captures: results.length, withMetrics: withMetrics.length, failures: results.filter((r) => r.failure).map((r) => ({ id: key(r), width: r.width, failure: r.failure })) };
-lines.push(`# glass-audit digest — runs: ${runs.join(', ')}`, '', `Captures: ${results.length} (${withMetrics.length} with metrics, ${out.failures.length} failed)`, '');
+const out = { runs, captures: results.length, withMetrics: withMetrics.length, failures: results.filter((r) => r.failure).map((r) => ({ id: key(r), width: r.width, failure: r.failure })), supersededByFailure: latestFailed.map((r) => ({ id: key(r), width: r.width, run: r.run, failure: r.failure || 'no metrics' })) };
+lines.push(`# glass-audit digest — runs: ${runs.join(', ')}`, '', `Captures: ${results.length} (${withMetrics.length} current with metrics, ${out.failures.length} failed in total, ${latestFailed.length} scenario/state/width whose LATEST capture failed and is excluded)`, '');
+if (latestFailed.length) {
+  lines.push('## Latest capture failed (excluded from every section below)', '');
+  for (const r of latestFailed) lines.push(`- ${key(r)} @${r.width} (${r.run}): ${(r.failure || 'no metrics').slice(0, 160)}`);
+  lines.push('');
+}
 
 // 1. Per-scenario summary table (390 + 1440)
 lines.push('## Per-scenario summary (390 / 1440)', '', '| scenario/state | glass | h1 | <14px | >700 | off-scale | ctrl<44 | nested blur | inline blur | pills | heading≠sheet | contrast<AA | overflow-x | main | footer | unmatched | errors |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');

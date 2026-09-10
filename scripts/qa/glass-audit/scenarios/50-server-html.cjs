@@ -41,7 +41,7 @@ module.exports = [
   ...landing.map(([id, route, ready]) => ({
     id, family: 'newsletter-landing', surface: 'server-html', role: 'public token', route,
     url: `/glass-audit-html/${id}.html`, ready, handle: noApi, fonts: false,
-    notes: 'Rendered by render-server-html.cjs from a source slice of renderConfirmPage in server/routes/public-newsletter.js.',
+    notes: 'Rendered by render-server-html.cjs: renderConfirmPage sliced from server/routes/public-newsletter.js and the route handler\'s own heading/bodyHtml template evaluated with fixture inputs (no hand-copied bodies).',
   })),
   // family 'estimate-legacy-ssr' intentionally absent: renderPage in
   // server/routes/estimate-public.js is not reachable without db/config.

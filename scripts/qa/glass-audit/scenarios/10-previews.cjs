@@ -32,7 +32,14 @@ module.exports = [
     interactions: [
       hoverFirstCard,
       { name: 'more-sheet', widths: [390], fullPage: false, run: async (page) => { await page.getByRole('button', { name: /^More$/ }).first().click({ force: true }); } },
-      { name: 'account-menu', widths: [1440, 390], fullPage: false, run: async (page) => { await page.locator('button[aria-label="Account menu"]').first().click({ force: true }); } },
+      // Interactions run in sequence on the same page: the More sheet (390) is still open here, so close
+      // it first (Escape, via the sheet's modal focus contract) and REQUIRE an overlay-free page before
+      // opening the account menu, so the capture measures one dialog, the state a customer can reach.
+      { name: 'account-menu', widths: [1440, 390], fullPage: false, run: async (page) => {
+        if (await page.locator('[role="dialog"]').count()) { await page.keyboard.press('Escape'); await page.locator('[role="dialog"]').first().waitFor({ state: 'detached', timeout: 5000 }); }
+        if (await page.locator('[role="dialog"], [data-glass-scrim]').count()) throw new Error('an overlay is still open before account-menu');
+        await page.locator('button[aria-label="Account menu"]').first().click({ force: true });
+      } },
     ],
   },
   { id: 'portal-plan', family: 'portal-app', surface: 'customer', role: 'customer', route: '/?tab=plan', url: '/preview-portal.html?tab=plan', ready: 'css:[data-glass="card"]', handle: noApi },
