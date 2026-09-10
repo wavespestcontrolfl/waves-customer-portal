@@ -324,6 +324,17 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'missing' });
   });
 
+  test('gate off: a legacy payload\'s snake-case treated_sqft is still the visit area (never the planned whole lawn)', async () => {
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+      service: oneTimeVisit, serviceRecord: { id: 'record-5' }, serviceProducts: [],
+      plan: { protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] } } }, mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [] } },
+      completionInput: { treated_sqft: 1500 },
+    });
+    expect(completions[0]).toMatchObject({ treated_sqft: 1500, total_carrier_gal: 1.5 });
+    expect(JSON.parse(completions[0].metadata)).toMatchObject({ treatedSqftSource: 'visit' });
+  });
+
   test('gate off: the WaveGuard writer still substitutes the planned area and writes no skipped rows (unchanged while dark)', async () => {
     const completions = []; const actuals = [];
     await recordLawnProtocolCompletion(fakeTrx(completions, actuals, []), {

@@ -219,7 +219,10 @@ function planCarrierUsable(plan, allLawn, calibrationCleared) {
 }
 
 function resolveTreatedArea(completionInput, plan, allLawn, calibrationCleared = false) {
-  const enteredSqft = firstPositiveNumber(completionInput.treatedSqft);
+  // Legacy payloads carried the snake-case alias; the writer keeps accepting
+  // it while dark. Under the gate the handler passes the validated camelCase
+  // field only, so a raw alias cannot bypass that validation (pre-push audit P1).
+  const enteredSqft = firstPositiveNumber(completionInput.treatedSqft, allLawn ? undefined : completionInput.treated_sqft);
   const treatedSqft = enteredSqft || (allLawn ? null : firstPositiveNumber(plan?.mixCalculator?.lawnSqft));
   const source = enteredSqft ? 'visit' : (treatedSqft ? 'plan' : 'missing');
   const carrier = boundedPositive(
