@@ -295,6 +295,18 @@ run('callback bridge on PostgreSQL', () => {
     expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
   });
 
+  test('a successful pre-policy callback still counts after a failed card attempt', async () => {
+    const row = await seed();
+    const [legacy] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', duration_seconds: 120, metadata: { relatedCallId: row.call_log_id } }).returning('id');
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', duration_seconds: 45, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      created_at: new Date(Date.now() + 1000),
+      metadata: { relatedCommitmentId: row.id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } } });
+    expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    expect((await conn('call_commitments').where({ id: row.id }).first()).fulfillment).toMatchObject({ record_id: legacy.id, basis: 'callback_returned_connected_outbound_call' });
+  });
+
   test.each(['conversation', 'unanswered', 'voicemail'])('gate rollback retains customer-leg proof: %s', async (evidence) => {
     const row = await seed();
     const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,

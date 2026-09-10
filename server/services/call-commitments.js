@@ -1165,39 +1165,34 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
-      // The strict customer-leg proof applies once THIS promise has an
-      // attempt placed under the card policy (the card's commitment link, or
-      // the Call Log action's policy-stamped source-call link) — gate on or
-      // off, so rollback cannot weaken it and enabling the gate cannot strip
-      // pre-policy attempts of the legacy rule they were placed under.
-      const cardAttempt = await conn('call_log')
-        .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))",
-          [commitment.id, commitment.call_log_id]).first('id');
-      if (cardAttempt) {
-        if (!phone) return null;
-        // A child-leg connection plus reviewed extraction of a real
-        // conversation is proof. Ringing the staff phone, voicemail, and
-        // an unrelated/queued text are not fulfillment of this promise.
-        const connected = await conn('call_log').where('direction', 'outbound')
-          .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-          .where('created_at', '>', after).where('v2_extraction_status', 'valid')
-          // Placed from the card (commitment link) or from the existing
-          // call-log callback action (source-call link): both are this
-          // promise's own attempts, and only their customer leg counts.
-          .whereRaw("(metadata->>'relatedCommitmentId' = ? OR metadata->>'relatedCallId' = ?)", [commitment.id, commitment.call_log_id])
-          .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
-          .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
-          .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
-          .modify((b) => {
-            phoneWhere(b, 'to_phone', phone);
-            if (customerId) b.where('customer_id', customerId);
-          }).orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+      if (!phone) return null;
+      // Each attempt is judged under the policy it was placed under. An
+      // attempt under the CARD policy — the card's commitment link, or the
+      // Call Log action's policy-stamped source-call link — needs a
+      // completed customer leg plus a reviewed extraction of a real
+      // conversation; ringing the staff phone or voicemail is not proof. A
+      // pre-policy call keeps the legacy connected-call rule below. The gate
+      // plays no part, so rollback cannot weaken a card attempt and enabling
+      // the gate cannot strip an earlier attempt of its rule.
+      const policyLink = "COALESCE(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'), FALSE)";
+      const policyBindings = [commitment.id, commitment.call_log_id];
+      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      const connected = await conn('call_log').where('direction', 'outbound')
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+        .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+        .whereRaw(policyLink, policyBindings)
+        .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+        .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+        .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+        .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
+        .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+      if (connected) {
         // The proof is the completed customer leg, so the promise is kept
         // when that leg ended, not when the staff leg was dialed.
-        const legEnded = Date.parse(connected?.metadata?.customer_leg?.ended_at || '');
-        return connected ? { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+        const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
+        return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
           matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
-          strength: 'direct', basis: 'callback_customer_conversation' } : null;
+          strength: 'direct', basis: 'callback_customer_conversation' };
       }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
@@ -1209,18 +1204,21 @@ async function resolveFulfillment(conn, commitment, call) {
       // with no inbound anchor). A LINKED call is returned only by a
       // record linked to the same customer (shared household numbers);
       // an unlinked call keeps the phone-level match. No outer window: a
-      // callback returned late was still returned.
-      if (!phone) return null;
-      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      // callback returned late was still returned. Card-policy attempts are
+      // never judged by this rule (above), and once one exists a text no
+      // longer stands in for the conversation it promised.
       const outbound = await conn("call_log")
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .where("direction", "outbound")
         .where("created_at", ">", after)
+        .whereRaw(`NOT ${policyLink}`, policyBindings)
         .whereRaw("COALESCE(duration_seconds, 0) >= 60")
         .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomer(b, "customer_id"); })
         .orderBy("created_at", "asc")
         .first("id", "created_at");
       if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
+      const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
+      if (cardAttempt) return null;
       const text = await conn("sms_log as os")
         .where("os.direction", "outbound")
         .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
