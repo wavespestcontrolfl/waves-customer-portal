@@ -120,8 +120,34 @@ async function loadCustomer(customerId) {
 // email inside getAppointmentContacts). De-duplicated by address. When there are
 // no appointment phone contacts at all (e.g. email-only customer), falls back to
 // the primary customer email so they still get the notice.
-async function resolveRecipients(customer) {
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+// `scheduledServiceId` (app property scope, PR 3): "send these to me too"
+// (appointment_notify_primary) follows the visit's NON-primary saved property
+// when enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise. A
+// failed property read under enforcement reads as prefs-unavailable.
+const PROPERTY_PREFS_UNAVAILABLE = 'PROPERTY_PREFS_UNAVAILABLE';
+
+async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
+  let prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+  const unreadable = (p) => p === PREFS_UNAVAILABLE || p?.__prefsUnavailable === true;
+  if (!unreadable(prefs) && scheduledServiceId) {
+    try {
+      prefs = await require('./property-notification-prefs').prefsForVisit(prefs, customer.id, scheduledServiceId, 'email_recipients');
+    } catch (err) {
+      logger.warn(`[appointment-email] property notification settings unreadable for visit ${scheduledServiceId}: ${err.message}`);
+      prefs = PREFS_UNAVAILABLE;
+    }
+  }
+  // ONE posture for an unreadable row — the customer row's read or the
+  // property's under enforcement: the recipient list cannot be built (the
+  // service-contact fan-out and the primary fallback below would send a
+  // notice whose notify-primary is unknown), so sendTemplate HOLDS, never
+  // sends — the same fail-closed rule safeSendAppointment applies to the
+  // SMS twin (in-session review on f9945dc89).
+  if (unreadable(prefs)) {
+    const held = new Error(`notification preferences unreadable for customer ${customer.id}`);
+    held.code = PROPERTY_PREFS_UNAVAILABLE;
+    throw held;
+  }
   const seen = new Set();
   const recipients = [];
   const add = (email, name) => {
@@ -209,11 +235,21 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
   return require('./visit-groups').appointmentSendHeld(scheduledServiceId, renderedSlotMs);
 }
 
-async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null }) {
+async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
-  let recipients = await resolveRecipients(customer);
+  let recipients;
+  try {
+    recipients = await resolveRecipients(customer, { scheduledServiceId });
+  } catch (err) {
+    if (err?.code !== PROPERTY_PREFS_UNAVAILABLE) throw err;
+    // Held, not skipped: the next scan re-resolves — and like the reminders'
+    // preferences_unavailable hold, NO attempt row: a lingering read failure
+    // would otherwise write a "skipped" interaction every 15-minute scan.
+    logger.warn(`[appointment-email] ${templateKey} for ${customer.id} held: ${err.message}`);
+    return { ok: false, held: true, reason: 'preferences_unavailable' };
+  }
   // Optional allowlist of addresses: the call-booking confirmation fan-out
   // targets ONLY email-only service-contact slots (a phone-channel customer's
   // primary must not receive an email their channel choice didn't ask for) —
@@ -344,6 +380,7 @@ async function sendAppointmentConfirmationEmail({ customerId, scheduledServiceId
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
   return sendTemplate({
     customerId,
+    scheduledServiceId,
     recipientFilter,
     templateKey: 'appointment.confirmation',
     eventType: 'appointment.confirmation',
@@ -441,6 +478,7 @@ async function sendAppointmentReminderEmail({ customerId, scheduledServiceId, ap
     };
   return sendTemplate({
     customerId,
+    scheduledServiceId,
     templateKey,
     eventType: templateKey,
     payload,
@@ -457,6 +495,7 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
   const eta = Number.parseInt(etaMinutes, 10);
   return sendTemplate({
     customerId,
+    scheduledServiceId,
     templateKey: 'appointment.en_route',
     eventType: 'appointment.en_route',
     payload: {
@@ -487,6 +526,7 @@ async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, 
   const eventId = `appointment.tech_arrived:${occurrence || scheduledServiceId || customerId}`;
   return sendTemplate({
     customerId,
+    scheduledServiceId,
     templateKey: 'appointment.tech_arrived',
     eventType: 'appointment.tech_arrived',
     payload: {
@@ -528,6 +568,7 @@ async function sendAppointmentNoShowEmail({
       : 'There’s no charge for the attempted visit.';
   return sendTemplate({
     customerId,
+    scheduledServiceId,
     templateKey: 'appointment.no_show',
     eventType: 'appointment.no_show',
     payload: {

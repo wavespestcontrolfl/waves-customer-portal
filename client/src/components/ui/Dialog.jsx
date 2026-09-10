@@ -49,9 +49,9 @@ export function Dialog({
   if (!open) return null;
 
   // `sm` dialogs are short confirmation prompts and stay a centered card at
-  // every width. `md`/`lg` carry real content, so below the `sm` breakpoint
+  // every width. `md`/`lg` carry real content, so below the `md` breakpoint
   // they fill the phone viewport (the same treatment the completion sheet
-  // gets). Only `max-sm:` classes are added for that — the ≥640px classes
+  // gets). Only `max-md:` classes are added for that — the ≥768px classes
   // are unchanged, so a caller's own `className` sizing (e.g. the customer
   // preview's `h-[calc(100dvh-2rem)] max-w-6xl`) still wins on desktop.
   const isCompact = size === 'sm';
@@ -60,11 +60,11 @@ export function Dialog({
   const mobileFullScreenClass = isCompact
     ? ''
     : cn(
-        'max-sm:h-full max-sm:max-w-none max-sm:rounded-none max-sm:box-border',
-        // The overlay's safe-area padding is zeroed below `sm`, so the panel
+        'max-md:h-full max-md:max-w-none max-md:rounded-none max-md:box-border',
+        // The overlay's safe-area padding is zeroed below `md`, so the panel
         // carries the insets itself (all four sides — landscape notches too).
-        'max-sm:pt-[env(safe-area-inset-top)] max-sm:pb-[env(safe-area-inset-bottom)]',
-        'max-sm:pl-[env(safe-area-inset-left)] max-sm:pr-[env(safe-area-inset-right)]',
+        'max-md:pt-[env(safe-area-inset-top)] max-md:pb-[env(safe-area-inset-bottom)]',
+        'max-md:pl-[env(safe-area-inset-left)] max-md:pr-[env(safe-area-inset-right)]',
       );
 
   return createPortal(
@@ -80,8 +80,8 @@ export function Dialog({
         // otherwise it paints beneath the overlay that opened it.
         'fixed inset-0 flex items-center justify-center p-4',
         // `!` beats the inline safe-area padding below; that padding stays for
-        // every card layout (compact dialogs, and content dialogs from `sm` up).
-        !isCompact && 'max-sm:!p-0',
+        // every card layout (compact dialogs, and content dialogs from `md` up).
+        !isCompact && 'max-md:!p-0',
       )}
       role="dialog"
       data-ui-density={density}
