@@ -88,12 +88,23 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Gate-off availability is unchanged.
-Transactional reservation and route-order persistence belong to the following
-writer stage; this gate remains off until those writers are integrated.
+Catalog-sized estimate offers resolve the primary appointment allowance from
+`services.scheduling_duration_policy`; independent recurring companions do not
+enlarge that appointment, while one-time paid add-ons contribute shared work.
+Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
+`GATE_SEPARATE_COMBO_VISITS`. Version-2 combined allowances follow service
+identity; version-1 members keep their 60-minute contract. Public offer/cache
+responses omit catalog identifiers, route internals and allocation stamps.
+Reservation and acceptance re-resolve catalog policies. Transactional catalog
+reads hold matched rows with FOR SHARE until the outer transaction ends, so
+catalog edits cannot overtake a validated allowance. Existing version-2 holds
+reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
+Transactional route certification and independent-companion conversion belong
+to the following writer stages; capacity remains off until those are integrated.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
-`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
-per physical service program. Termite rental and bond billing riders fold into
+`GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
+per physical service program; capacity-enabled selections use version-2 catalog allowances. Termite rental and bond billing riders fold into
 bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
@@ -102,8 +113,8 @@ remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
 and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
 the selection, technician and full occupancy under existing locks, then converts
-the hold into separate sequential 60-minute service windows with independent
-cadences. Missing or unmatched members abort the transaction. A stamped hold
+the hold into independent programs: version-1 members use sequential 60-minute
+windows, and version-2 members use their catalog allowance at one arrival anchor. Missing or unmatched members abort the transaction. A stamped hold
 retains its capacity policy when the creation gate turns off. Shared-arrival
 reminder consumers use the persisted allocation, including with grouping off
 or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the

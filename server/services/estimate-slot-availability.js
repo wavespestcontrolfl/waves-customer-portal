@@ -242,7 +242,7 @@ function visitsForService(row = {}) {
 function clampDuration(minutes) {
   const n = Number(minutes);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_OPTS.durationMinutes;
-  const rounded = Math.ceil(n / 15) * 15;
+  const rounded = capacityEnabled() ? Math.ceil(n) : Math.ceil(n / 15) * 15;
   return Math.max(30, Math.min(MAX_ESTIMATE_SLOT_DURATION_MINUTES, rounded));
 }
 
@@ -797,11 +797,14 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
         // cadence catalog link can refuse residential rows (codex r12 P1).
         const rawIdentity = [row.service, row.serviceKey, row.service_key, row.key, row.name, row.label, row.displayName]
           .filter(Boolean).join(' ');
+        const explicitDuration = Number(row.estimatedDurationMinutes || row.estimated_duration_minutes || row.durationMinutes);
         return {
           service: key,
           label,
           visitsPerYear: visitsForService(row),
           commercial: /commercial/i.test(rawIdentity) || undefined,
+          ...((capacityEnabled() || userOpts.preserveCapacity) && Number.isFinite(explicitDuration) && explicitDuration > 0
+            ? { durationMinutes: explicitDuration } : {}),
         };
       })
       .filter((row) => row.service && row.label);
@@ -847,6 +850,33 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
     services,
     ...(reservationServiceMix ? { reservationServiceMix } : {}),
   };
+}
+
+/** Keep classification synchronous; resolve catalog allowances once at every
+ * booking boundary. This is also used inside reserve/commit transactions. */
+async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
+  const profile = resolveEstimateSlotProfile(estimate, userOpts);
+  if (!capacityEnabled() && !userOpts.preserveCapacity) return profile;
+  const { catalogLinkForProfile } = require('./slot-reservation');
+  const { serviceDurationMinutes } = require('./service-library');
+  // Without a combined recurring allocation, the held appointment belongs
+  // to the converter's primary service; companion programs book separately.
+  // One-time paid add-ons remain work on this same appointment.
+  const appointmentServices = profile.reservationServiceMix || profile.serviceMode === 'one_time' ? profile.services
+    : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
+  const services = [];
+  for (const service of appointmentServices) {
+    const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] }, { preserveCapacity: userOpts.preserveCapacity });
+    const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes, { preserveCapacity: userOpts.preserveCapacity });
+    services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
+  }
+  const capacity = profile.reservationServiceMix
+    ? require('./combined-visit-capacity').capacityForServices(services, services.map(service => service.durationMinutes)) : null;
+  return { ...profile, services, serviceLabel: formatServiceProfileLabel(services) || profile.serviceLabel,
+    durationMinutes: capacity?.durationMinutes
+    || Math.max(services.reduce((total, service) => total + service.durationMinutes, 0) || DEFAULT_OPTS.durationMinutes,
+      Number(userOpts.durationMinutes) > 0 ? clampDuration(userOpts.durationMinutes) : 0),
+  ...(capacity ? { reservationServiceMix: capacity } : {}) };
 }
 
 // ---------- geocoding ----------
@@ -1584,7 +1614,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     throw err;
   }
 
-  const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
+  const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
   const publicServiceProfile = { ...serviceProfile };
   delete publicServiceProfile.reservationServiceMix;
 
@@ -1968,7 +1998,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 
   const startedAt = Date.now();
   const geocodeBefore = geocodeCache.size;
-  const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
+  const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
   const coords = await resolveEstimateCoords(estimate);
   const geocodeAfter = geocodeCache.size;
 
@@ -2062,6 +2092,7 @@ module.exports = {
   invalidateEstimate,
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
+  resolveCatalogSlotProfile,
   // Shared with slot-reservation so holds can be geo-stamped as route anchors.
   resolveEstimateCoords,
   seasonalSelectionProfile,

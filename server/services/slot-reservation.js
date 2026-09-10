@@ -42,6 +42,8 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+const { capacityEnabled } = require('./scheduling/policy');
+const { capacityError } = require('./scheduling/arrival-route');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -336,7 +338,10 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   return null;
 }
 
-async function catalogLinkForProfile(conn, serviceProfile = {}) {
+async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false } = {}) {
+  const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
+  const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
   // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
@@ -382,7 +387,8 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         const rows = await sp('services')
           .where({ service_key: catalogKey })
           .limit(2)
-          .select('id', 'name', 'service_key');
+          .select(...catalogColumns)
+          .modify(query => { if (lockCatalog) query.forShare(); });
         if (rows.length === 1) byKey = rows[0];
         else if (rows.length > 1) logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
       });
@@ -428,7 +434,8 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         const cadenceRows = await sp('services')
           .where({ service_key: cadenceKey, is_active: true })
           .limit(2)
-          .select('id', 'name', 'service_key');
+          .select(...catalogColumns)
+          .modify(query => { if (lockCatalog) query.forShare(); });
         if (cadenceRows.length === 1) resolved = cadenceRows[0];
         return;
       }
@@ -436,7 +443,8 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select('id', 'name', 'service_key');
+        .select(...catalogColumns)
+        .modify(query => { if (lockCatalog) query.forShare(); });
       if (rows.length === 1) {
         resolved = rows[0];
       } else if (rows.length > 1) {
@@ -476,19 +484,47 @@ function notesWithServiceMix(existingNotes, serviceProfile = {}, fallback = '') 
 }
 
 async function resolveReservationServiceProfile(client, row, opts = {}) {
-  if (!estimateSlotAvailability.resolveEstimateSlotProfile) return null;
   let estimate = opts.estimate || null;
   if (!estimate && row?.source_estimate_id) {
     estimate = await client('estimates').where({ id: row.source_estimate_id }).first();
   }
   if (!estimate) return null;
-  return estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+  const profileOptions = {
     serviceMode: opts.serviceMode,
     selectedFrequency: opts.selectedFrequency,
     serviceCadences: opts.serviceCadences,
     durationMinutes: opts.durationMinutes,
     preserveCombinedCapacity: opts.preserveCombinedCapacity,
-  });
+    preserveCapacity: row?.reservation_policy_version === 2,
+  };
+  const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, profileOptions, client);
+  const held = require('./combined-visit-capacity').capacityFromReservation(row);
+  if (held) {
+    const selected = profile.services.map(service => service.service);
+    if (selected.length !== held.services.length || held.services.some(key => !selected.includes(key))) {
+      throw capacityError('service_selection_changed');
+    }
+    if (held.version === 2 && held.services.some((key, index) =>
+      profile.services.find(service => service.service === key).durationMinutes !== held.durations[index])) {
+      throw capacityError('service_duration_changed');
+    }
+    // Existing version-1 holds keep 60 minutes per member. Version-2 holds
+    // retain their resolved allowances even when the release gate is killed.
+    return { ...profile, reservationServiceMix: held, durationMinutes: held.durationMinutes,
+      services: held.services.map((key, index) => ({ ...profile.services.find(service => service.service === key),
+        durationMinutes: held.version === 1 ? 60 : held.durations[index] })) };
+  }
+  if (row?.reservation_policy_version === 2) {
+    const heldDuration = Number(row.estimated_duration_minutes);
+    if (profile.durationMinutes !== heldDuration) {
+      throw capacityError('service_duration_changed');
+    }
+    profile.durationMinutes = heldDuration;
+  } else if (capacityEnabled() && row?.reservation_expires_at) {
+    profile.durationMinutes = Math.max(Number(row.estimated_duration_minutes) || 0,
+      profile.durationMinutes);
+  }
+  return profile;
 }
 
 /**
@@ -747,14 +783,12 @@ async function reserveSlot({
         }
       }
 
-      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
-        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+      const serviceProfile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, {
           serviceMode,
           selectedFrequency,
           serviceCadences,
           durationMinutes,
-        })
-        : null;
+        }, trx);
       // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
       // is season-filtered for a seasonal mosquito selection, but the offer
       // HMAC does not bind the frequency — a list fetched under monthly12
@@ -1124,6 +1158,7 @@ async function reserveSlot({
         reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`),
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
+        ...(capacityEnabled() ? { reservation_policy_version: 2 } : {}),
         ...(serviceProfile?.reservationServiceMix
           ? { reservation_service_mix: serviceProfile.reservationServiceMix } : {}),
         notes,
