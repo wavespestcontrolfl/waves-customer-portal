@@ -2593,6 +2593,8 @@ const gates = {
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
+  // Field Team Program rev 2b: evidence and simulation only; never payroll.
+  fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -72,7 +72,12 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // customer communication the owner can still silence. The settings page
 // reports these as enabled when no row exists, so a round-trip save never
 // silently creates an "off" override (GH codex r3 P1 on #3706).
-const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request']);
+// customer_landline_from_call (PR #4341): a call-created customer's on-
+// file number resolved as a landline — actionable ops data-quality work,
+// not a customer reaching out on a channel, so it belongs here rather than
+// the TRIGGER_BELL_ALLOWLIST (owner-ruling-scoped to customer comms) —
+// same reasoning as estimate_change_request.
+const DEFAULT_ON_CATEGORIES = new Set(['estimate_change_request', 'customer_landline_from_call']);
 
 const OVERRIDABLE_CATEGORIES = [
   // Owner ruling 2026-08-28: customer communication only. These no longer
@@ -89,6 +94,7 @@ const OVERRIDABLE_CATEGORIES = [
   'estimate_measurement_review',
   'estimate_hot_view',
   'estimate_change_request',
+  'customer_landline_from_call',
   'alert',
   'system',
   'service',
