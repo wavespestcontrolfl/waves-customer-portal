@@ -312,7 +312,9 @@ async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId =
  * is just as much a leak. Same-entity records are positively excluded by
  * customer_id so legit lead→customer conversions don't over-block.
  */
-async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
+// `database` lets a caller already holding a transaction run these reads on
+// that connection instead of acquiring a second one from the pool.
+async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId, database = db) {
   const email = String(correctedEmail || '').trim().toLowerCase();
   if (!email) return false;
   const own = String(ownCustomerId || '');
@@ -323,7 +325,7 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
   // someone else, treat it as owned so recovery routes to manual, never a
   // privacy-leaking auto-resend.
   try {
-    const customerRows = await db('customers')
+    const customerRows = await database('customers')
       .where((q) => {
         for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
       })
@@ -332,15 +334,15 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
 
     // Estimates / leads carry a customer_id link; a record not tied to our own
     // customer (incl. prospect rows with no customer_id) is another party.
-    const estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
+    const estRows = await database('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
     if (estRows.some((r) => isOther(r.customer_id))) return true;
 
-    const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
+    const leadRows = await database('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
 
     // notification_prefs.billing_email is also a sendable customer address
     // (getInvoiceEmailRecipients), so it can belong to another customer too.
-    const prefRows = await db('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
+    const prefRows = await database('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
     logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
@@ -490,11 +492,12 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // held; a recheck that cannot be read fails closed through the catch.
       let fence;
       try {
-        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async () => {
+        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async (trx) => {
           // The corrected destination is revalidated immediately before the
-          // request: a party that claimed that address after the earlier
-          // ownership check must not receive the bearer link.
-          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId)) return { ok: false, reason: 'corrected_owned_by_other' };
+          // request, on the held connection: a party that claimed that
+          // address after the earlier ownership check must not receive the
+          // bearer link.
+          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, trx || db)) return { ok: false, reason: 'corrected_owned_by_other' };
           await dispatchToProvider();
           return { ok: true };
         }, { destination: correctedEmail });
