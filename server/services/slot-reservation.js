@@ -1541,7 +1541,9 @@ async function commitReservation({
       // describe the same accepted service.
       const commitLink = await catalogLinkForProfile(client, serviceProfile, {
         preserveCapacity: row.reservation_policy_version === 2,
-        validateAllowance: capacityEnabled() || row.reservation_policy_version === 2,
+        // Version-1 combined holds retain their promised hour per member.
+        validateAllowance: row.reservation_service_mix?.version !== 1
+          && (capacityEnabled() || row.reservation_policy_version === 2),
       });
       const commitCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.service_id = commitLink ? commitLink.id : null;
