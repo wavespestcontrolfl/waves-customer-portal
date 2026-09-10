@@ -1174,7 +1174,11 @@ async function resolveFulfillment(conn, commitment, call) {
       // pre-policy call keeps the legacy connected-call rule below. The gate
       // plays no part, so rollback cannot weaken a card attempt and enabling
       // the gate cannot strip an earlier attempt of its rule.
-      const policyLink = "COALESCE(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'), FALSE)";
+      // Two plain arms, no COALESCE: each arm implies one of the partial
+      // expression indexes on call_log.metadata (relatedCommitmentId;
+      // relatedCallId under the card policy), so the watchdog's per-promise
+      // probes are index lookups rather than sequential scans of call_log.
+      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
       const policyBindings = [commitment.id, commitment.call_log_id];
       const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
       const connected = await conn('call_log').where('direction', 'outbound')

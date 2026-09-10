@@ -155,6 +155,21 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
   return null;
 }
 
+// The linked customer of a source call, when the number being dialed is one
+// of their known-caller numbers. Null otherwise (unlinked source, deleted
+// customer, or a number the customer is not known by).
+async function customerOfSourceCall(callId, to) {
+  const normalizedTo = normalizePhone(to);
+  if (!normalizedTo) return null;
+  const customer = await db('customers as c')
+    .whereIn('c.id', db('call_log').select('customer_id').where({ id: callId }).whereNotNull('customer_id'))
+    .whereNull('c.deleted_at').first('c.*')
+    .catch((e) => { logger.warn(`[admin-call] source-call customer lookup failed: ${e.message}`); return null; });
+  if (!customer) return null;
+  const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+  return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
+}
+
 async function findSingleCustomerForPhone(phone) {
   // Compare on the last 10 digits so stored formats ('+19415551234',
   // '9415551234', '(941) 555-1234') all match the same dialable number —
@@ -1176,6 +1191,9 @@ router.post('/call', async (req, res, next) => {
     if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
       return res.status(400).json({ error: 'Invalid callback id' });
     }
+    if (relatedCallId && !UUID_RE.test(String(relatedCallId))) {
+      return res.status(400).json({ error: 'Invalid related call id' });
+    }
     if (!to) return res.status(400).json({ error: 'to number required' });
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
@@ -1245,7 +1263,14 @@ router.post('/call', async (req, res, next) => {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
     } else if (!relatedCommitmentId) {
-      customer = await findSingleCustomerForPhone(to).catch((e) => {
+      // The Call Log callback action omits customerId when it dials one of
+      // the linked customer's OTHER numbers (service contact, secondary):
+      // that customer is the source call's, so the attempt is linked to
+      // them — and takes their customer-level claim — when the dialed
+      // number is one they are known by. Otherwise the phone-only lookup
+      // below decides, as for any click-to-call.
+      if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
+      if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;
       });

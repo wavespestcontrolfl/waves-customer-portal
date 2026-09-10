@@ -159,6 +159,28 @@ run('callback bridge on PostgreSQL', () => {
     expect(placed.metadata).toMatchObject({ relatedCommitmentId: row.id, callback_policy: 'card' });
   });
 
+  test('a Call Log callback to one of the customer’s other numbers is linked to them and takes their interlock', async () => {
+    const row = await seed();
+    const alternate = '+15555550178';
+    await conn('customers').where({ id: customerId }).update({ service_contact_phone: alternate });
+    // The Call Log action omits customerId when the target is not customer_phone.
+    const legacy = await invoke(row, { relatedCommitmentId: undefined, customerId: undefined, source: 'call-log-callback', relatedCallId: row.call_log_id, to: alternate });
+    expect(legacy.status).toBe(200);
+    const placed = await conn('call_log').where({ from_phone: from, direction: 'outbound' }).first();
+    expect(placed.customer_id).toBe(customerId);
+    expect(placed.to_phone).toBe(alternate);
+    // The card's call to the primary number collides on the customer claim.
+    expect((await invoke(row)).status).toBe(409);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('a malformed related call id is rejected before any call is placed', async () => {
+    const row = await seed();
+    const bad = await invoke(row, { relatedCommitmentId: undefined, source: 'call-log-callback', relatedCallId: 'not-a-uuid' });
+    expect(bad.status).toBe(400);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
   test('an unlinked card bridge and the Call Log action for the same number share one interlock', async () => {
     const row = await seed({ linked: false });
     expect((await invoke(row, { customerId: undefined })).status).toBe(200);
