@@ -55,7 +55,7 @@ async function lastDeliveredAskAt(customerId, options) {
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.
 // The enrollment standdown retains its explicit fail-open wrapper.
-async function lastManualAskAt(customerId, { since } = {}) {
+async function lastManualAskAt(customerId, { since, includeReservations = true } = {}) {
   const sinceAt = since ? new Date(since) : new Date(Date.now() - 30 * 86400000);
   const outbound = await db('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
@@ -67,7 +67,9 @@ async function lastManualAskAt(customerId, { since } = {}) {
     .select('message_body', 'created_at', 'status', 'metadata');
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window. These pre-send markers survive failed delivery-log writes.
-  const reservations = outbound.filter(row => row.metadata?.review_ask_reservation === true);
+  const reservations = includeReservations
+    ? outbound.filter(row => row.metadata?.review_ask_reservation === true)
+    : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
     return at >= sinceAt && (!latest || at > latest) ? at : latest;
