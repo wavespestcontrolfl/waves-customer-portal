@@ -523,8 +523,10 @@ const { validScope, UNCLASSIFIED } = require('./scope-policy');
 // Returns the saved row's full address and its stored coordinates (null when
 // the row has none).
 function unrecognizedStateSegment(text, parsed, suppliedState, cityKey, normalizeState) {
-  // The parser strips a trailing country the same way before it reads the state.
-  const parts = text.replace(/,\s*(USA|United States)$/i, '').split(',').map(part => part.trim()).filter(Boolean);
+  // A trailing country is not a state segment whether or not a comma precedes
+  // it (the parser strips the comma form; "FL 34285 USA" reaches its state
+  // read intact and would otherwise leave "FL USA" here).
+  const parts = text.replace(/[\s,]+(USA|United States)\s*$/i, '').split(',').map(part => part.trim()).filter(Boolean);
   const cityIndex = parts.findIndex(part => cityKey(part) === cityKey(parsed.city));
   if (parts.length < 3 || cityIndex < 1) return false;
   const letters = parts.slice(cityIndex + 1).join(' ').replace(/[^a-z\s]/gi, ' ').replace(/\s+/g, ' ').trim();
