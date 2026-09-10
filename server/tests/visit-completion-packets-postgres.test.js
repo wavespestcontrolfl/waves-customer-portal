@@ -43,7 +43,12 @@ jest.mock('../services/tree-shrub-assessment', () => ({
 }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
 
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+  // The summary handoff rechecks the suppression ledger through the library.
+  loadTemplateByKey: jest.fn(async () => ({ template: { template_key: 'service.visit_summary' } })),
+  activeSuppressionFor: jest.fn(async () => null),
+}));
 jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
@@ -473,6 +478,28 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await expect(createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).rejects.toThrow('autopay_enrolled');
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     expect(await createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).toMatchObject({ behavior_version: 2 });
+    // The staff grouping route's fast path renders the same decision.
+    const { groupingRefusedByAutopay } = require('../services/visit-groups');
+    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(false);
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(true);
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+  });
+
+  test('a technician cannot close a visit that left their current window after the preflight read', async () => {
+    const { memberInTechnicianScope } = require('../services/visit-completion-packets');
+    const actor = { techRole: 'technician', technicianId: fixture.techId };
+    const today = etDateString();
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: today }, actor)).toBe(true);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'rescheduled', scheduled_date: today }, actor)).toBe(false);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: '2026-01-01' }, actor)).toBe(false);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: '2026-01-01' }, { techRole: 'admin' })).toBe(true);
+    // The locked save re-applies the predicate: the whole visit moved to an old date.
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ scheduled_date: '2026-01-01' });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ scheduled_date: '2026-01-01',
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: '2026-01-01' }) });
+    expect(await saveVisitCompletionPacket(submission({ actor }))).toMatchObject({ status: 409, body: { code: 'visit_out_of_scope' } });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
   });
 
   test('member recovery keeps forms, reports and operational records without collecting or delivering', async () => {

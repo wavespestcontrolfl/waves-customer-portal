@@ -274,21 +274,36 @@ async function retryOne(message) {
           .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
           .update({ status: 'blocked', error_message: reason, provider_retry_next_at: null,
             provider_retry_exhausted_at: new Date(), updated_at: new Date() });
+        // No provider request follows, so no webhook will ever reconcile the
+        // summary aggregate: settle it (and its alert) from the ledger now.
+        await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
+          .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
         return { sent: false, stopped: true, reason };
       }
     } else {
       await dispatchToProvider();
     }
-    const [updated] = await db('email_messages')
-      .where({ id: message.id, send_attempt_token: message.send_attempt_token })
-      .update({
-        provider_message_id: result.messageId,
-        sent_at: new Date(),
-        error_message: null,
-        updated_at: new Date(),
-        status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
-      })
-      .returning('*');
+    let updated;
+    try {
+      [updated] = await db('email_messages')
+        .where({ id: message.id, send_attempt_token: message.send_attempt_token })
+        .update({
+          provider_message_id: result.messageId,
+          sent_at: new Date(),
+          error_message: null,
+          updated_at: new Date(),
+          status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
+        })
+        .returning('*');
+    } catch (err) {
+      // SendGrid has the bearer link. A bookkeeping failure after acceptance
+      // must never put the summary back on the retry schedule.
+      if (message.template_key === 'service.visit_summary') {
+        await markRetryUncertain(message, new Error(`bookkeeping failed after acceptance: ${err.message}`)).catch(() => {});
+        return { sent: false, uncertain: true, error: err };
+      }
+      throw err;
+    }
     if (updated?.template_key === 'service.visit_summary') {
       await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
         .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));

@@ -132,8 +132,10 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
     .whereIn('status', ['closing', 'closed'])
     .modify((query) => { if (database.isTransaction) query.forShare(); }).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
+  // An unreadable account primary is a failed read (the registry keeps the
+  // replay retryable), never a recipient that changed.
   const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
-    { db: database });
+    { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
   return { eligible: true, visit };
@@ -317,6 +319,16 @@ function summaryEmailState(message) {
   return 'unknown_delivery';
 }
 
+// The suppression ledger the template library consulted before queuing can
+// gain a do_not_email or bounce row before the provider request. It is
+// rechecked at the handoff, after the recipient rows are held.
+async function summaryEmailSuppressed(email) {
+  const library = require('./email-template-library');
+  const loaded = await library.loadTemplateByKey('service.visit_summary');
+  if (!loaded?.template) return true;
+  return Boolean(await library.activeSuppressionFor(loaded.template, email, 'service_operational'));
+}
+
 // The customer's Email Messages kill switch and the Service Complete Report
 // toggle both apply; the SMS leg honors the latter through the sender policy.
 function summaryEmailRecipients(customer, prefs) {
@@ -358,8 +370,9 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
           // before dispatch, which the library records as a pre-provider abort.
           withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
             kind: 'completion_email', token: claim.token,
-            authorized: (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
-              .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase()),
+            authorized: async (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
+              .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
+              && !(await summaryEmailSuppressed(recipient.email)),
             dispatch: async () => { dispatched = true; await handoff(); return { ok: true }; } }),
         });
         if (result.sent) { sent = true; continue; }
@@ -425,6 +438,10 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   if (!flipped.length) return { reconciled: false };
   const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
   const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
+  // The review ask follows the summary. Outreach enrolled while the summary
+  // looked delivered is parked now that a required recipient failed; the
+  // coordinator re-enrolls it when the recovery settles the summary.
+  if (packet) await parkVisitReviewOutreach(packet.id, database);
   if (packet && member) {
     // Same transaction as the effect flip: a webhook that fails after this
     // point rolls both back, and SendGrid's redelivery cannot leave an alert
@@ -442,7 +459,11 @@ async function reconcileSummaryEmailBounce(message, database = db) {
 // customer's current summary recipients under their current preferences, and
 // the link must not have been revoked; the rail's own template and
 // suppression checks know nothing about visits.
-async function summaryRetryAuthorized(message, database = db) {
+// `destination` is the address the provider will actually receive when it
+// differs from the recipient snapshot (a corrected-address recovery): the
+// suppression ledger is judged on the destination, since the bounced
+// original carries the very suppression the recovery exists to route around.
+async function summaryRetryAuthorized(message, database = db, { destination = null } = {}) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: true };
   const held = Boolean(database.isTransaction);
@@ -458,13 +479,30 @@ async function summaryRetryAuthorized(message, database = db) {
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
   const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
-  return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
+  if (!current) return { ok: false, reason: 'visit_summary_recipient_changed' };
+  if (await summaryEmailSuppressed(String(destination || email).trim().toLowerCase())) {
+    return { ok: false, reason: 'visit_summary_recipient_suppressed' };
+  }
+  return { ok: true };
+}
+
+// Stops the cadence sequences and removes the pending legacy asks that were
+// enrolled for this packet's recorded service records.
+async function parkVisitReviewOutreach(packetId, database = db) {
+  const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
+    .whereNotNull('service_record_id').pluck('service_record_id');
+  if (!records.length) return { parked: 0 };
+  const sequences = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' }).select('id');
+  const Reviews = require('./review-request');
+  for (const sequence of sequences) await Reviews.stopReviewSequence(sequence.id, 'visit_summary_bounced');
+  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' }).del();
+  return { parked: sequences.length + Number(removed || 0) };
 }
 
 // The retry rail's provider request runs while the customer and preference
 // rows are held, so the recipient the fence approved is the recipient the
 // provider receives. `dispatch()` performs the request.
-async function retrySummaryThroughHandoff(message, dispatch, database = db) {
+async function retrySummaryThroughHandoff(message, dispatch, { destination = null, database = db } = {}) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
   return database.transaction(async (trx) => {
@@ -473,10 +511,12 @@ async function retrySummaryThroughHandoff(message, dispatch, database = db) {
     await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
     await createDefaultCustomerRows(trx, visit.customer_id);
     await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
-    const fence = await summaryRetryAuthorized(message, trx);
+    const fence = await summaryRetryAuthorized(message, trx, { destination });
     if (!fence.ok) return fence;
-    await dispatch();
-    return { ok: true };
+    // The caller may refuse at the last moment (a corrected destination that
+    // another party now owns); a refusal is a verdict, not a dispatch.
+    const verdict = await dispatch(trx);
+    return verdict && verdict.ok === false ? verdict : { ok: true };
   });
 }
 
@@ -495,16 +535,22 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
     if (!effect) return { reconciled: false };
     const { outcomes } = await summaryEmailEvidence(message, trx);
-    if (!outcomes.includes('sent') || outcomes.some((state) => !['sent', 'suppressed'].includes(state))) {
+    // Every recipient row must be settled: a delivery proves sent, and a
+    // ledger that ended entirely in suppressions (a refused retry with no
+    // provider request to reconcile it) settles as suppressed.
+    if (!outcomes.length || outcomes.some((state) => !['sent', 'suppressed'].includes(state))) {
       return { reconciled: false };
     }
+    const settled = outcomes.includes('sent') ? 'sent' : 'suppressed';
     await trx('visit_effects').where({ id: effect.id })
-      .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
+      .update({ status: settled, sent_at: settled === 'sent' ? trx.fn.now() : null, last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the
     // email leg was the only reason for review: an SMS leg still parked as
     // unknown_delivery is terminal and needs the office, so that alert stays.
+    // Only the summary's own legs count: an older tracker effect parked as
+    // uncertain is unrelated to this delivery and its deferred review.
     const otherUncertain = await trx('visit_effects').where({ visit_id: visitId, status: 'unknown_delivery' })
-      .whereNot('id', effect.id).first('id');
+      .whereIn('effect_type', ['completion_sms', 'completion_email']).whereNot('id', effect.id).first('id');
     const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
       .whereRaw("payload->>'visitId' = ?", [visitId])
       .where(function reviewOnlyForDelivery() {
