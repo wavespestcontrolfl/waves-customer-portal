@@ -258,6 +258,7 @@ router.post('/sms', async (req, res, next) => {
   let claimedReviewClaimToken = null;
   let reviewEmailOutcome = null;
   let reviewSettlementAttempted = false;
+  let reviewProviderStarted = false;
   // Quick Links "Both": once the text has really sent, the same ask goes out
   // by email too (ReviewService.sendInlineEmailCopy). Hoisted: the catch
   // below emails after an accepted-but-thrown send.
@@ -809,24 +810,24 @@ router.post('/sms', async (req, res, next) => {
     const dispatch = async () => {
       const sendAndSettle = async () => {
         let result;
-        let bareReviewReservationId = null;
-        const settleBareReview = async (outcome) => {
-          if (!bareReviewReservationId) return;
+        let reviewReservationId = null;
+        const settleReviewReservation = async (outcome) => {
+          if (!reviewReservationId) return;
           // A real provider log replaces the pre-send evidence. Otherwise
           // keep the reservation: even a failed UPDATE must retain the hold.
           if (require('../services/sms-auto-send').isRealProviderSend(outcome)) {
             try {
               const logged = outcome.providerMessageId && await db('sms_log')
                 .where({ twilio_sid: outcome.providerMessageId, direction: 'outbound' }).first('id');
-              if (logged) await db('sms_log').where({ id: bareReviewReservationId }).del();
-              else await db('sms_log').where({ id: bareReviewReservationId }).update({
+              if (logged) await db('sms_log').where({ id: reviewReservationId }).del();
+              else await db('sms_log').where({ id: reviewReservationId }).update({
                 status: 'sent', twilio_sid: outcome.providerMessageId || null, updated_at: new Date(),
               });
             } catch (stampErr) {
-              logger.warn(`[communications] accepted review keeps its reservation (${bareReviewReservationId}): ${stampErr.message}`);
+              logger.warn(`[communications] accepted review keeps its reservation (${reviewReservationId}): ${stampErr.message}`);
             }
-          } else if (outcome?.sent === true || outcome?.sent === false || outcome?.blocked) {
-            await db('sms_log').where({ id: bareReviewReservationId }).del();
+          } else if (outcome?.deliveryOutcome === 'not_sent') {
+            await db('sms_log').where({ id: reviewReservationId }).del();
           }
         };
         try {
@@ -836,12 +837,12 @@ router.post('/sms', async (req, res, next) => {
             return { sent: false, blocked: true, code: 'REVIEW_CLAIM_LOST', httpStatus: 409,
               reason: 'This review link was claimed by another send. Remove it and re-insert if still needed.' };
           }
-          if (reviewLooking && !claimedReviewRequestId) {
+          if (reviewLooking) {
             const metadata = JSON.stringify({ manual_send_reservation: true, review_ask_reservation: true });
             if (manualReservationId) {
-              const [reserved] = await db('sms_log').where({ id: manualReservationId }).update({ metadata }).returning('id');
-              if (!reserved?.id) throw new Error('Manual send reservation was lost before review dispatch');
-              bareReviewReservationId = manualReservationId;
+              const [reserved] = await db('sms_log').where({ id: manualReservationId }).update({ metadata, customer_id: trustedCustomerId }).returning('id');
+              if (!reserved) throw new Error('Manual send reservation was lost before review dispatch');
+              reviewReservationId = manualReservationId;
             } else {
               const [reservation] = await db('sms_log').insert({
                 customer_id: trustedCustomerId, direction: 'outbound',
@@ -849,34 +850,41 @@ router.post('/sms', async (req, res, next) => {
                 message_body: cleanBody, status: 'sending', message_type: 'manual',
                 admin_user_id: req.technicianId || null, metadata,
               }).returning('id');
-              if (!reservation?.id) throw new Error('Could not reserve review ask before sending');
-              bareReviewReservationId = reservation.id;
+              if (!reservation) throw new Error('Could not reserve review ask before sending');
+              reviewReservationId = reservation.id;
             }
             // Ownership moves to the review settlement under this lock. The
             // general cleanup and 30-minute sweep must not erase uncertainty.
             manualReservationId = null;
           }
+          reviewProviderStarted = true;
           result = await sendMessage();
-          await settleBareReview(result);
+          if (!claimedReviewRequestId) await settleReviewReservation(result);
         } catch (err) {
-          await settleBareReview(err.providerOutcome);
+          if (result) err.providerOutcome = result;
+          if (!reviewProviderStarted) err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
+          if (!claimedReviewRequestId) await settleReviewReservation(err.providerOutcome);
           if (claimedReviewRequestId) {
             reviewSettlementAttempted = true;
             try {
               await settleInlineReviewAfterThrow({ err, requestId: claimedReviewRequestId,
                 claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true });
+              await settleReviewReservation(err.providerOutcome);
             } catch (claimErr) {
               logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
             }
           }
           throw err;
         }
-        if (claimedReviewRequestId && !result.blocked && result.sent !== false) {
+        if (claimedReviewRequestId) {
           reviewSettlementAttempted = true;
           try {
             reviewEmailOutcome = await settleInlineReviewAfterSend({
               result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
             });
+            // A URL-only provider log may not classify as an ask. Preserve
+            // explicit evidence until the tracked delivery stamp succeeds.
+            await settleReviewReservation(result);
           } catch (markErr) {
             logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
             // Both: the text left but its delivery stamp (or the email copy)
@@ -916,7 +924,7 @@ router.post('/sms', async (req, res, next) => {
       // Definitive no-send: the project delivery claim is handed back (an
       // ambiguous outcome kept it above — this is a no-op then).
       await releaseProjectClaim();
-      if (claimedReviewRequestId) {
+      if (claimedReviewRequestId && !reviewSettlementAttempted) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
       await reopenScheduledSuggestions({
@@ -1014,7 +1022,6 @@ router.post('/sms', async (req, res, next) => {
     // row's delivery state is restored (the text is a re-share, not a delivery).
     await releaseProjectClaim();
 
-
     // A reply from the Comms composer is a first response to any open lead
     // with this phone — stamp the Speed-to-Lead clock (SLA truth only; lead
     // status/linkage untouched). Operator-approved AI drafts count too: a
@@ -1078,13 +1085,11 @@ router.post('/sms', async (req, res, next) => {
     // Release the in-flight reservation so a throw mid-send can't strand a
     // 'sending' row that blocks auto-sends to the thread.
     await clearManualReservation();
-    // Same for the inline review claim: a throw with NO confirmed provider
-    // acceptance means the ask never left — hand the claim back so an
-    // immediate retry isn't blocked for the 10-minute stale window. A throw
-    // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
-    // same convention) means the ask DID text: stamp it delivered instead so
-    // it can never go out twice.
+    // Before dispatch a claim can be released. Once dispatch starts, only
+    // definitive non-delivery may release it; uncertain claims reconcile
+    // through the existing provider-evidence recovery path.
     if (claimedReviewRequestId && !reviewSettlementAttempted) {
+      if (!reviewProviderStarted) err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
       try {
         await settleInlineReviewAfterThrow({
           err, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
@@ -2112,7 +2117,7 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
   const { isRealProviderSend } = require('../services/sms-auto-send');
   const ReviewService = require('../services/review-request');
   if (!isRealProviderSend(result)) {
-    await ReviewService.releaseInlineClaim(requestId, claimToken);
+    if (result?.deliveryOutcome === 'not_sent') await ReviewService.releaseInlineClaim(requestId, claimToken);
     return emailRequested ? { sent: false, reason: 'text_not_sent' } : null;
   }
   try {
@@ -2130,12 +2135,13 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
 // go out twice and, for Both, email the same row now as the happy path
 // would have (the row is delivered, so no retry can reclaim it; GH Codex
 // #3856 r5 P2), the outcome riding the error message the composer shows.
-// Anything else releases the claim so an immediate retry isn't blocked for
-// the 10-minute stale window.
+// Definitive non-delivery releases the claim. Uncertainty retains it for
+// the existing stale-claim provider reconciliation.
 async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailRequested }) {
   const ReviewService = require('../services/review-request');
-  if (err?.providerOutcome?.sent !== true) {
-    await ReviewService.releaseInlineClaim(requestId, claimToken);
+  if (err?.providerOutcome?.deliveryOutcome !== 'accepted'
+    && !require('../services/sms-auto-send').isRealProviderSend(err?.providerOutcome)) {
+    if (err?.providerOutcome?.deliveryOutcome === 'not_sent') await ReviewService.releaseInlineClaim(requestId, claimToken);
     return;
   }
   await ReviewService.markInlineDelivered(requestId, claimToken);
