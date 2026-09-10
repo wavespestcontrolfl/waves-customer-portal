@@ -856,9 +856,19 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // MAPPED services keep live inventory COGS: residential lawn/T&S also
     // expose costs.total, but freezing it there would stop the audit's
     // cost view from responding to product-cost changes (GH codex P2).
-    const explicitAnnualCost = num(item.costs?.total);
+    // Residential termite bait is the one MAPPED service whose engine line
+    // carries a costs block the inventory registry cannot express: service
+    // labor per station, label-driven cartridge replacement and the
+    // follow-up reserve are all per-STATION, while the registry costs a
+    // usage row per visit (codex #4313 P1). costs.annualTotal is that
+    // quote-time model — the station cost it used may itself have come from
+    // the catalog link — so it is the honest annual COGS for the line.
+    const termiteAnnualCost = serviceKey === 'termite_bait' ? num(item.costs?.annualTotal) : NaN;
+    const explicitAnnualCost = Number.isFinite(termiteAnnualCost) && termiteAnnualCost > 0
+      ? termiteAnnualCost
+      : num(item.costs?.total);
     const useExplicitCost = !isAdjustment
-      && !SERVICE_MAP[serviceKey]
+      && (!SERVICE_MAP[serviceKey] || (serviceKey === 'termite_bait' && Number.isFinite(termiteAnnualCost) && termiteAnnualCost > 0))
       && Number.isFinite(explicitAnnualCost) && explicitAnnualCost > 0;
     // Raw pest rows carry the customer-visible setup charge as initialFee
     // (the mapper normally converts it to the one-time membership fee) —

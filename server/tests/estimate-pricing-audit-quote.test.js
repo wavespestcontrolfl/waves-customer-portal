@@ -203,6 +203,10 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             // MAPPED residential rows also expose costs.total — inventory
             // COGS stays live for them, never the frozen engine figure.
             { service: 'tree_shrub', name: 'Tree & Shrub Program', monthly: 45, annual: 540, costs: { total: 200 } },
+            // Residential termite bait is the one mapped service whose engine
+            // line carries a per-station cost model the registry cannot
+            // express — costs.annualTotal is its honest annual COGS.
+            { service: 'termite_bait', name: 'Termite Bait', monthly: 24, annual: 288, visitsPerYear: 4, perApp: 72, stations: 15, costs: { annualTotal: 303.14, total: 999 } },
             // Termite specialties keep their raw id (honest unmapped beats
             // a bait-COGS mislabel), and adjustment rows skip COGS.
             { service: 'termite_foam', name: 'Termite Foam Treatment', price: 300, monthly: null },
@@ -216,7 +220,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         },
       },
     });
-    expect(audit.lines).toHaveLength(11); // quote-required + witness-less rows excluded
+    expect(audit.lines).toHaveLength(12); // quote-required + witness-less rows excluded
     expect(audit.lines.find((l) => l.serviceKey === 'stinging')).toMatchObject({ cadence: 'recurring', price: 285, visitsPerYear: 3 });
     expect(audit.lines.some((l) => /commercial_pest|ghost/.test(l.serviceKey))).toBe(false);
     expect(audit.lines.find((l) => l.serviceKey === 'termite_foam')).toBeTruthy(); // raw id kept
@@ -228,6 +232,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(cl.cogs.estimatedCost).toBe(1900); // persisted commercial COGS, not unmapped-zero
     const tsRow = audit.lines.find((l) => /Program/.test(l.label) && l.serviceKey === 'tree_shrub');
     expect(tsRow.cogs.status).not.toBe('explicit'); // mapped services keep live inventory COGS
+    const tb = audit.lines.find((l) => l.serviceKey === 'termite_bait');
+    expect(tb.cogs.status).toBe('explicit'); // …except termite bait, whose per-station cost model rides costs.annualTotal
+    expect(tb.cogs.estimatedCost).toBe(303.14);
     const mq = audit.lines.find((l) => l.serviceKey === 'mosquito');
     // Net wins the price; gross survives as priceBeforeDiscount.
     expect(mq).toMatchObject({ price: 864, monthly: 72, priceBeforeDiscount: 960, discount: 0.1 });

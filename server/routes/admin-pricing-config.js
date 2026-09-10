@@ -1279,6 +1279,14 @@ async function effectiveTermiteInstallBasis() {
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
+    if (!config && req.params.key === 'termite_install') {
+      // Row absence is a supported kill-value state (the bridge resets to the
+      // in-code defaults and may still apply the catalog link), so the Admin
+      // V1 fallback must still receive the engine-effective basis it prices
+      // and stamps from — a bare 404 would block every termite fallback
+      // quote (codex #4313 P2). data: null keeps the "no row" meaning.
+      return res.json({ config_key: req.params.key, data: null, featureAvailable: configKeyFeatureAvailable(req.params.key), effective: await effectiveTermiteInstallBasis() });
+    }
     if (!config) return res.status(404).json({ error: 'Config not found' });
     const subFeaturesAvailable = configKeySubFeaturesAvailable(req.params.key);
     res.json({

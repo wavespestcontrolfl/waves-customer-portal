@@ -1888,7 +1888,10 @@ function runTermitePlan(dbInfo) {
   // Validated AFTER the optional --db overlay: the engine floors every quote
   // at TERMITE.minStations (DB-tunable), so a smaller pin can never be priced.
   const minStations = Math.max(1, Number(constants.TERMITE.minStations) || 1);
-  const counts = STATIONS_ARG ? [Number(STATIONS_ARG)] : Array.from({ length: Math.max(0, 31 - minStations) }, (_, i) => i + minStations);
+  // Default walk: the live minimum through max(30, minimum + 22) — a configured
+  // floor above 30 still audits its own range instead of an empty table.
+  const defaultTop = Math.max(30, minStations + 22);
+  const counts = STATIONS_ARG ? [Number(STATIONS_ARG)] : Array.from({ length: defaultTop - minStations + 1 }, (_, i) => i + minStations);
   if (counts.some((n) => !Number.isInteger(n) || n < minStations || n > 200)) {
     console.error(`--stations must be a whole number between ${minStations} (TERMITE.minStations) and 200 (got ${JSON.stringify(STATIONS_ARG)})`);
     process.exit(2);
