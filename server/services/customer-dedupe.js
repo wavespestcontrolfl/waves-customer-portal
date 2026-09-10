@@ -3614,11 +3614,15 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // ledger row still pointing at this property counts like a referencing
       // visit, so the property transfers instead of being deleted and the
       // frozen reference survives (Codex #4113 P2).
+      // Fail closed: a lookup that errors (null sentinel) is NOT proof the
+      // ledger holds no reference — the property transfers rather than being
+      // deleted on an unverified read (pre-push audit P1).
       const ledgerRows = lockedProperty
         ? await failSoftLedgerRead(trx, (k) => k('lawn_protocol_service_completions')
-          .where({ property_id: recorded.linked_property_id }).select('id').limit(1), [])
+          .where({ property_id: recorded.linked_property_id }).select('id').limit(1), null)
         : [];
-      const ledgerReference = Array.isArray(ledgerRows) ? ledgerRows.some((row) => row?.id) : Boolean(ledgerRows?.id);
+      const ledgerReference = ledgerRows === null || ledgerRows === undefined
+        || (Array.isArray(ledgerRows) ? ledgerRows.some((row) => row?.id) : Boolean(ledgerRows?.id));
       const strandedVisits = referencingVisits.filter((v) => v.customer_id !== loserId);
       if (strandedVisits.length) {
         refuse(`${strandedVisits.length} appointment(s) referencing the linked property would not belong to the restored customer after the undo — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
