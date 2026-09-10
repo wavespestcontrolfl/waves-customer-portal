@@ -581,7 +581,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_google_ads_disapprovals": {
     "module": "google-ads-ops-tools.js",
@@ -1013,7 +1013,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_source_performance": {
     "module": "leads-tools.js",

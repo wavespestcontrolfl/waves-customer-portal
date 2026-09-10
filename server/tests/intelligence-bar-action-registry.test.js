@@ -215,6 +215,9 @@ const SCOPE_SNAPSHOT = {
     // messages and PR titles are developer free text where customer details
     // have appeared (AGENTS.md).
     'get_ad_attribution', 'get_customer_acquisition', 'get_commit_info', 'get_recent_merged_prs',
+    // Social post titles and Google Business Profile post summaries are
+    // business-authored free text a customer name or address can be typed into.
+    'get_gbp_status', 'get_social_channel_status',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],

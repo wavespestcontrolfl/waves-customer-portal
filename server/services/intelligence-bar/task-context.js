@@ -141,13 +141,18 @@ function namesRequested(prompt, filterWords = null) {
   return references.length > 0;
 }
 
-// Bare "for <word>" is also how schedule and route reads take a place or a
-// technician ("the schedule for Sarasota", "the route for Adam"). A word is a
-// filter only when the database verifies it as a customer city or an active
-// technician's name AND no customer carries it as a first or last name; an
-// unverified or shared word stays a person reference, so a misspelled name
-// still fails closed. The row check repeats the predicate so the verdict comes
-// from the returned rows themselves.
+// Bare "for <word>" is also how schedule, route and analytics reads take a
+// place, a technician, a vendor or a marketing channel ("the schedule for
+// Sarasota", "the route for Adam", "expenses for SiteOne", "attribution for
+// Facebook"). A word is a filter only when the database verifies it as a
+// customer city, an active technician's name, a vendor or expense vendor
+// name, a lead source name or channel, or it is a known marketing channel,
+// AND no customer carries it as a first or last name; an unverified or
+// shared word stays a person reference, so a misspelled name still fails
+// closed. The row checks repeat the predicate so the verdict comes from the
+// returned rows themselves.
+const MARKETING_CHANNEL_WORDS = new Set(['facebook', 'instagram', 'meta', 'google', 'gbp', 'yelp', 'nextdoor', 'tiktok', 'youtube', 'linkedin',
+  'referral', 'referrals', 'website', 'organic', 'seo', 'ppc', 'ads', 'adwords', 'thumbtack', 'angi', 'homeadvisor', 'bing']);
 async function verifiedFilterWords(prompt) {
   const normalized = normalizeName(targetClause(prompt));
   const words = [...new Set([...normalized.matchAll(/\bfor\s+([\p{L}'-]+)\b/gu)].map(m => m[1]))]
@@ -155,14 +160,25 @@ async function verifiedFilterWords(prompt) {
   if (!words.length) return new Set();
   const technicians = await db('technicians').whereRaw('coalesce(active, true)').select('name');
   const technicianWords = new Set(technicians.flatMap(technician => normalizeName(technician.name).split(' ')));
+  const hasWord = (value, word) => normalizeName(value).split(' ').includes(word);
   const filters = new Set();
   for (const word of words) {
-    const rows = await db('customers').whereNull('deleted_at')
-      .whereRaw('? = ? OR ? = ? OR ? = ?', [normalizedStoredName('city'), word, normalizedStoredName('first_name'), word, normalizedStoredName('last_name'), word])
-      .select('first_name', 'last_name', 'city');
+    const pattern = `%${word}%`;
+    const [rows, expenseVendors, vendors, sources] = await Promise.all([
+      db('customers').whereNull('deleted_at')
+        .whereRaw('? = ? OR ? = ? OR ? = ?', [normalizedStoredName('city'), word, normalizedStoredName('first_name'), word, normalizedStoredName('last_name'), word])
+        .select('first_name', 'last_name', 'city'),
+      db('expenses').whereRaw('? = ?', [normalizedStoredName('vendor_name'), word]).select('vendor_name').limit(1),
+      db('vendors').whereRaw('? LIKE ?', [normalizedStoredName('name'), pattern]).select('name').limit(5),
+      db('lead_sources').whereRaw('? LIKE ? OR ? LIKE ?', [normalizedStoredName('name'), pattern, normalizedStoredName('channel'), pattern]).select('name', 'channel').limit(5),
+    ]);
     const person = rows.some(row => normalizeName(row.first_name) === word || normalizeName(row.last_name) === word);
-    const city = rows.some(row => normalizeName(row.city) === word);
-    if (!person && (city || technicianWords.has(word))) filters.add(word);
+    const verified = rows.some(row => normalizeName(row.city) === word)
+      || technicianWords.has(word) || MARKETING_CHANNEL_WORDS.has(word)
+      || expenseVendors.some(row => normalizeName(row.vendor_name) === word)
+      || vendors.some(row => hasWord(row.name, word))
+      || sources.some(row => hasWord(row.name, word) || hasWord(row.channel, word));
+    if (!person && verified) filters.add(word);
   }
   return filters;
 }
@@ -526,7 +542,7 @@ function unrecognizedStateSegment(text, parsed, suppliedState, cityKey, normaliz
   // A trailing country is not a state segment whether or not a comma precedes
   // it (the parser strips the comma form; "FL 34285 USA" reaches its state
   // read intact and would otherwise leave "FL USA" here).
-  const parts = text.replace(/[\s,]+(USA|United States)\s*$/i, '').split(',').map(part => part.trim()).filter(Boolean);
+  const parts = text.replace(/[\s,]+(?:u\.?s\.?a?\.?|united states(?: of america)?)\.?\s*$/i, '').split(',').map(part => part.trim()).filter(Boolean);
   const cityIndex = parts.findIndex(part => cityKey(part) === cityKey(parsed.city));
   if (parts.length < 3 || cityIndex < 1) return false;
   const letters = parts.slice(cityIndex + 1).join(' ').replace(/[^a-z\s]/gi, ' ').replace(/\s+/g, ' ').trim();

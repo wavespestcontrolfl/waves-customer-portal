@@ -138,6 +138,14 @@ old list).
   it reads the `lead_sources` catalog. `get_commit_info` and
   `get_recent_merged_prs` are `broad`: commit messages and PR titles are
   developer free text where customer details have appeared (AGENTS.md).
+  `get_social_channel_status` (post titles) and `get_gbp_status` (local-post
+  summaries) return business-authored free text verbatim and are `broad`.
+- A word after "for" is a filter rather than an unresolved customer when the
+  database verifies it as a customer city, an active technician, a vendor or
+  expense vendor, a lead source name or channel, or it is a known marketing
+  channel word, and no customer carries it as a name
+  (`verifiedFilterWords`), so "expenses for SiteOne" or "attribution for
+  Facebook" reach the now-`broad` analytics readers.
 - `get_truck_status` is `broad`: the live last position of a truck during
   service hours is a customer's property, so it is refused inside a
   customer-scoped task like `get_truck_trips`.

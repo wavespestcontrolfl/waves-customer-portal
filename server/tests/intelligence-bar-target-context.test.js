@@ -852,6 +852,24 @@ test('a phone or email literal that resolved nobody fails scoped and selector-fr
   }
 });
 
+test('a vendor, lead source or marketing channel after "for" is a filter, not an unresolved customer', async () => {
+  rows.vendors = [{ name: 'SiteOne Landscape Supply' }];
+  rows.lead_sources = [{ name: 'Door Hangers', channel: 'print' }];
+  rows.expenses = [{ vendor_name: 'Univar' }];
+  for (const prompt of ['Show expenses for SiteOne', 'Show ad attribution for Facebook', 'Show acquisition for print', 'Show expenses for Univar', 'Show attribution for Hangers']) {
+    const task = await Context.resolve({ prompt, pageData: {} });
+    expect({ prompt, namesRequested: task.namesRequested, targets: task.targets }).toEqual({ prompt, namesRequested: false, targets: [] });
+    expect(await Context.prepareReadInput({}, task, { toolName: 'get_expenses', schema: { properties: {} } })).toEqual({ input: {} });
+  }
+  // An unverified word stays a person reference and the broad reader fails closed; a vendor word that is
+  // also a customer's name stays a person reference.
+  const unresolved = await Context.resolve({ prompt: 'Show expenses for Jhon', pageData: {} });
+  expect(unresolved.namesRequested).toBe(true);
+  expect((await Context.prepareReadInput({}, unresolved, { toolName: 'get_expenses', schema: { properties: {} } })).code).toBe('customer_scope_required');
+  rows.customers.push({ id: '10000000-0000-4000-8000-000000000009', first_name: 'Univar', last_name: 'Person' });
+  expect((await Context.resolve({ prompt: 'Show expenses for Univar', pageData: {} })).namesRequested).toBe(true);
+});
+
 test('an explicitly addressed unlinked sender can be drafted a reply by email id even though the contact resolved no customer', async () => {
   const email = '50000000-0000-4000-8000-000000000021';
   rows.emails = [{ id: email, customer_id: null, lead_id: null, from_address: 'Vendor@Example.invalid', gmail_thread_id: null }];
@@ -934,6 +952,9 @@ test('address-keyed readers take only a task customer\'s own active saved addres
   expect(await read('99 Beach Rd Apt 4, Venice, FL 34285, United States', context())).toEqual({ input: { address: beach } });
   expect(await read('99 Beach Rd Apt 4, Venice, FL 34285 USA', context())).toEqual({ input: { address: beach } });
   expect((await read('99 Beach Rd Apt 4, Venice, ZZ 34285 USA', context())).code).toBe('target_clarification_required');
+  for (const country of ['US', 'U.S.', 'U.S.A.', 'United States of America', 'usa.']) {
+    expect(await read(`99 Beach Rd Apt 4, Venice, FL 34285, ${country}`, context())).toEqual({ input: { address: beach } });
+  }
   expect((await read('99 Beach Rd Apt 4, Venice, ZZ 34285, USA', context())).code).toBe('target_clarification_required');
   // A supplied component the saved row cannot verify (a ZIP against a city-only row) is refused; the row still binds
   // for the components it has, and a comma-free post-directional is not read as a city.
