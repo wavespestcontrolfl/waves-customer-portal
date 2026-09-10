@@ -893,8 +893,11 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
       await Packets.lockPacketPayerRows(packetId, trx);
       const payerId = await Packets.liveThirdPartyPayerForPacket(packetId, trx);
       if (payerId) {
+        // The withdrawal names the payer: a deactivation of that payer that
+        // was waiting on this claim's payer lock requeues the invoice and
+        // lifts the hold (payer.js updatePayer), instead of stranding it.
         await trx("invoices").where({ id: invoiceId }).whereIn("status", ["scheduled", "sending"])
-          .update({ status: "draft", scheduled_send_at: null, updated_at: new Date() });
+          .update({ status: "draft", scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date() });
         await trx("service_visits").where({ id: visit.id }).update({ billing_hold: true, updated_at: new Date() });
         return { payerBilled: true, payerId };
       }
@@ -911,6 +914,19 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
     }
     return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, database: trx }) };
   });
+}
+
+// A combined-visit invoice settled entirely by account credit is paid without
+// a payment webhook or a manual payment: the packet's requested review is
+// enrolled from the coverage path itself (best-effort; the recovery sweep
+// owns retries through the packet).
+async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
+  if (!packetId) return;
+  try {
+    await require("./review-request").enrollForPaidInvoice({ id: invoiceId, visit_completion_packet_id: packetId }, { source: "credit_covered" });
+  } catch (err) {
+    logger.warn(`[invoice] review enrollment after credit coverage failed for ${invoiceId}: ${err.message}`);
+  }
 }
 
 async function restoreSendClaim(invoiceId, previousStatus, claimed) {
@@ -2433,8 +2449,9 @@ const InvoiceService = {
     // assistant's send tool, collections calls) otherwise read only the stale
     // invoice field. The wrapper (allowClaimed) already ran this fence.
     let claim;
+    let pre = null;
     if (!allowClaimed) {
-      const pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
+      pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
       const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
         ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id) : null;
       if (packetClaim?.payerBilled) {
@@ -2457,6 +2474,7 @@ const InvoiceService = {
       const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
       smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
       if (smsCreditResult?.fullyCovered) {
+        await enrollPacketReviewAfterCredit(invoiceId, pre?.visit_completion_packet_id);
         // Covered by credit IS success for the caller (the invoice is now 'prepaid',
         // settled — nothing to send). Direct callers check `sent || ok`, so flag
         // ok:true; sent stays false because no SMS went out. No claim to restore —
@@ -2884,6 +2902,7 @@ const InvoiceService = {
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
+      await enrollPacketReviewAfterCredit(invoiceId, accrualPre?.visit_completion_packet_id);
       return {
         ok: true,
         covered_by_credit: true,

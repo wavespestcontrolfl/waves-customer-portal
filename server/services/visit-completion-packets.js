@@ -316,6 +316,8 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     const owner = await liveThirdPartyPayerForPacket(packet.id, database);
     if (owner) {
       await database('service_visits').where({ id: packet.visit_id }).update({ billing_hold: true, updated_at: database.fn.now() });
+      await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
+        .whereNull('payer_id').update({ scheduled_send_error: `payer_billed:${owner}`, updated_at: database.fn.now() });
       payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
     } else {
       await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
