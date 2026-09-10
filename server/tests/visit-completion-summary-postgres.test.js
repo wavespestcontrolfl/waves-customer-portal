@@ -889,6 +889,83 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ summary_token_revoked_at: null });
   });
 
+  test('an email suppression added after queuing is rechecked at the held handoff', async () => {
+    const execute = mockPg.client.constructor.prototype._query;
+    let locks = 0;
+    let suppressed = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function suppressAfterMark(connection, query) {
+      if (!suppressed && query.sql.includes('from "customers"') && query.sql.includes('for share') && query.sql.includes('"id"')) {
+        locks += 1;
+        if (locks === 2) {
+          suppressed = true;
+          await mockPg('email_suppressions').insert({ email: fixture.serviceEmail, status: 'active', suppression_type: 'do_not_email' });
+        }
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      // The suppressed recipient is refused at the handoff; the other recipient still sends.
+      expect(await deliver()).toEqual({ state: 'delivery_pending' });
+      expect(suppressed).toBe(true);
+      expect(sendOne.mock.calls.map((call) => call[0].to)).not.toContain(fixture.serviceEmail);
+      jest.restoreAllMocks();
+      sendOne.mockImplementation(async () => ({ messageId: randomUUID() }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(sendOne.mock.calls.map((call) => call[0].to)).not.toContain(fixture.serviceEmail);
+    } finally {
+      await mockPg('email_suppressions').where({ email: fixture.serviceEmail }).del();
+    }
+  });
+
+  test('a suppressed retry settles a summary whose ledger has no remaining provider work', async () => {
+    await priorClaim('completion_email', { status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    await priorEmail(fixture.primaryEmail, { status: 'sent', provider_message_id: 'fixture-provider-id', sent_at: new Date() });
+    await priorEmail(fixture.serviceEmail, { status: 'blocked', error_message: 'Suppressed before retry: visit_summary_recipient_changed' });
+    const blocked = await mockPg('email_messages').where({ idempotency_key: emailKey(fixture.serviceEmail) }).first();
+    expect(await Summary.reconcileSummaryEmailRecovery(blocked)).toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' })
+      .update({ status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    await mockPg('email_messages').where({ idempotency_key: emailKey(fixture.primaryEmail) }).update({ status: 'blocked', sent_at: null, provider_message_id: null });
+    expect(await Summary.reconcileSummaryEmailRecovery(blocked)).toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'suppressed', last_error: null });
+  });
+
+  test('a queued replay whose account-primary read fails stays retryable instead of discarding the summary', async () => {
+    const primaryId = randomUUID();
+    const accountId = randomUUID();
+    await mockPg('customer_accounts').insert({ id: accountId, first_name: 'Primary' });
+    await mockPg('customers').insert({ id: primaryId, first_name: 'Primary', phone: '+12025550124',
+      email: `${primaryId}@example.invalid`, account_id: accountId, is_primary_profile: true });
+    const queued = await heldSummary();
+    await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: accountId, is_primary_profile: false,
+      phone: '', service_contact_phone: null, service_contacts_consent_at: null });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failPrimaryRead(connection, query) {
+      if (!interrupted && query.sql.includes('"is_primary_profile" = ')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic account primary outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      const replay = require('../services/messaging/deferred-replay-registry');
+      const verdict = await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata);
+      expect(interrupted).toBe(true);
+      expect(verdict.reason).not.toBe('visit_summary_recipient_changed');
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'pending' });
+      jest.restoreAllMocks();
+      expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: true });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: null });
+      await mockPg('customers').where({ id: primaryId }).del();
+      await mockPg('customer_accounts').where({ id: accountId }).del();
+    }
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };

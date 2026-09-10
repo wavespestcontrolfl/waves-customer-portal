@@ -11,7 +11,8 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/visit-completion-summary', () => ({
-  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
+  retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { const verdict = await dispatch(); return verdict && verdict.ok === false ? verdict : { ok: true }; }),
+  reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
 }));
 
 const db = require('../models/db');
@@ -225,7 +226,7 @@ describe('attemptRecovery codex-fix behaviors', () => {
     const summary = require('../services/visit-completion-summary');
     summary.retrySummaryThroughHandoff.mockImplementationOnce(async (message, dispatch) => {
       expect(message.id).toBe('orig1');
-      if (fence.ok) await dispatch();
+      if (fence.ok) return (await dispatch()) || fence;
       return fence;
     });
     emailLib.loadTemplateByKey.mockResolvedValue(undefined);

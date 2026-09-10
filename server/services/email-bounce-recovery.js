@@ -461,7 +461,7 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
  * Dispatch the recovery message via SendGrid and publish provider_message_id
  * LAST. Idempotent — a row already sent (e.g. a partial-retry) is not re-sent.
  */
-async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail }) {
+async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail, ownCustomerId = null }) {
   if (message.status === 'sent' && message.provider_message_id) {
     return { ok: true, messageRowId: message.id, reused: true };
   }
@@ -490,7 +490,14 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // held; a recheck that cannot be read fails closed through the catch.
       let fence;
       try {
-        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, dispatchToProvider);
+        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async () => {
+          // The corrected destination is revalidated immediately before the
+          // request: a party that claimed that address after the earlier
+          // ownership check must not receive the bearer link.
+          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId)) return { ok: false, reason: 'corrected_owned_by_other' };
+          await dispatchToProvider();
+          return { ok: true };
+        });
       } catch (err) {
         if (!result) throw err;
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
@@ -499,6 +506,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
         const reason = fence?.reason || 'visit_summary_unavailable';
         await db('email_messages').where({ id: message.id, status: 'queued' })
           .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+        // No provider request follows: settle the summary aggregate from the ledger.
+        await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
+          .catch((err) => logger.warn(`[bounce-recovery] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
         return { ok: false, suppressed: true, reason };
       }
     } else {
@@ -672,10 +682,11 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       categories: built.categories,
       bouncedMessage,
       correctedEmail: candidate.corrected,
+      ownCustomerId: match?.customerId || null,
     });
     if (sendResult.suppressed) {
       await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-        status: 'recipient_unauthorized',
+        status: sendResult.reason === 'corrected_owned_by_other' ? 'corrected_owned_by_other' : 'recipient_unauthorized',
         updated_at: new Date(),
         metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
       });

@@ -132,8 +132,10 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
     .whereIn('status', ['closing', 'closed'])
     .modify((query) => { if (database.isTransaction) query.forShare(); }).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
+  // An unreadable account primary is a failed read (the registry keeps the
+  // replay retryable), never a recipient that changed.
   const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
-    { db: database });
+    { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
   return { eligible: true, visit };
@@ -317,6 +319,16 @@ function summaryEmailState(message) {
   return 'unknown_delivery';
 }
 
+// The suppression ledger the template library consulted before queuing can
+// gain a do_not_email or bounce row before the provider request. It is
+// rechecked at the handoff, after the recipient rows are held.
+async function summaryEmailSuppressed(email) {
+  const library = require('./email-template-library');
+  const loaded = await library.loadTemplateByKey('service.visit_summary');
+  if (!loaded?.template) return true;
+  return Boolean(await library.activeSuppressionFor(loaded.template, email, 'service_operational'));
+}
+
 // The customer's Email Messages kill switch and the Service Complete Report
 // toggle both apply; the SMS leg honors the latter through the sender policy.
 function summaryEmailRecipients(customer, prefs) {
@@ -358,8 +370,9 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
           // before dispatch, which the library records as a pre-provider abort.
           withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
             kind: 'completion_email', token: claim.token,
-            authorized: (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
-              .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase()),
+            authorized: async (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
+              .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
+              && !(await summaryEmailSuppressed(recipient.email)),
             dispatch: async () => { dispatched = true; await handoff(); return { ok: true }; } }),
         });
         if (result.sent) { sent = true; continue; }
@@ -458,7 +471,9 @@ async function summaryRetryAuthorized(message, database = db) {
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
   const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
-  return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
+  if (!current) return { ok: false, reason: 'visit_summary_recipient_changed' };
+  if (await summaryEmailSuppressed(email)) return { ok: false, reason: 'visit_summary_recipient_suppressed' };
+  return { ok: true };
 }
 
 // The retry rail's provider request runs while the customer and preference
@@ -475,8 +490,10 @@ async function retrySummaryThroughHandoff(message, dispatch, database = db) {
     await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
     const fence = await summaryRetryAuthorized(message, trx);
     if (!fence.ok) return fence;
-    await dispatch();
-    return { ok: true };
+    // The caller may refuse at the last moment (a corrected destination that
+    // another party now owns); a refusal is a verdict, not a dispatch.
+    const verdict = await dispatch(trx);
+    return verdict && verdict.ok === false ? verdict : { ok: true };
   });
 }
 
@@ -495,11 +512,15 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
     if (!effect) return { reconciled: false };
     const { outcomes } = await summaryEmailEvidence(message, trx);
-    if (!outcomes.includes('sent') || outcomes.some((state) => !['sent', 'suppressed'].includes(state))) {
+    // Every recipient row must be settled: a delivery proves sent, and a
+    // ledger that ended entirely in suppressions (a refused retry with no
+    // provider request to reconcile it) settles as suppressed.
+    if (!outcomes.length || outcomes.some((state) => !['sent', 'suppressed'].includes(state))) {
       return { reconciled: false };
     }
+    const settled = outcomes.includes('sent') ? 'sent' : 'suppressed';
     await trx('visit_effects').where({ id: effect.id })
-      .update({ status: 'sent', sent_at: trx.fn.now(), last_error: null, updated_at: trx.fn.now() });
+      .update({ status: settled, sent_at: settled === 'sent' ? trx.fn.now() : null, last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the
     // email leg was the only reason for review: an SMS leg still parked as
     // unknown_delivery is terminal and needs the office, so that alert stays.
