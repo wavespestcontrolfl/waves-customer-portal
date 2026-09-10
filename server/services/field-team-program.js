@@ -2,7 +2,7 @@ const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const { hash } = require('./staff-document-source');
 const { recordAuditEvent } = require('./audit-log');
-const { resolveServiceRecord } = require('./job-costing');
+const { resolveServiceRecord, parseJsonObject } = require('./job-costing');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { etDateString, parseETDateTime, addETDays, etWeekStart } = require('../utils/datetime-et');
 const {
@@ -133,10 +133,11 @@ async function visitFacts(conn, id, lock = false) {
 // A backdated quiet closeout freezes structured_notes.backfill into its service
 // record. Such a row's completed_at is ET noon of the service day, a day-scale
 // marker, and any surviving end stamp is the closeout wall clock, so none of
-// its instants can order it against another same-day service.
+// its instants can order it against another same-day service. Historic rows
+// hold serialized or malformed notes; those read as not backfilled rather than
+// failing every request for the visit.
 function isBackfilledRecord(record) {
-  const notes = typeof record?.structured_notes === 'string' ? JSON.parse(record.structured_notes) : record?.structured_notes;
-  return notes?.backfill === true;
+  return parseJsonObject(record?.structured_notes).backfill === true;
 }
 
 // Only a recorded completion or end instant proves when a service was done;
