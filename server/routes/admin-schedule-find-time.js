@@ -188,7 +188,7 @@ router.post('/', async (req, res) => {
   try {
     const {
       customerId, address, lat, lng,
-      durationMinutes, dateFrom, dateTo,
+      durationMinutes, serviceType, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
@@ -272,6 +272,7 @@ router.post('/', async (req, res) => {
       lat: target.lat,
       lng: target.lng,
       durationMinutes: Math.max(15, parseInt(durationMinutes, 10) || 60),
+      serviceType: typeof serviceType === 'string' ? serviceType : undefined,
       dateFrom: from,
       dateTo: clampedTo,
       technicianId: technicianId || undefined,

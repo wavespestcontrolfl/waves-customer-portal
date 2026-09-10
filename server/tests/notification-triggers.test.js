@@ -5,6 +5,9 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/push-notifications', () => ({
   sendToAdminUsers: jest.fn(async () => ({ subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0, results: [] })),
 }));
+jest.mock('../services/admin-unread', () => ({
+  getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })),
+}));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
@@ -316,6 +319,83 @@ describe('triggerNotification bell outcome', () => {
     const result = await triggerNotification('twilio_failure', { channel: 'sms' });
 
     expect(result.bellWritten).toBe(true);
+  });
+
+  test('resumable events use the canonical bell identity and retain the push handoff check', async () => {
+    const beforePush = jest.fn(async () => false);
+    const result = await triggerNotification('twilio_failure', { channel: 'sms' }, {
+      dedupeKey: 'fixture_completion_record', beforePush,
+    });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.any(String),
+      expect.objectContaining({ dedupeKey: 'fixture_completion_record' }));
+    expect(result).toMatchObject({ bellWritten: true, retryable: false });
+    expect(beforePush).toHaveBeenCalled();
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
+  });
+
+  test('a failed durable bell stays retryable for a resumed event', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+    expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
+      .toMatchObject({ bellWritten: false, retryable: true });
+  });
+
+  test('the durable push check runs after badge work and immediately before sending', async () => {
+    const order = [];
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    require('../services/admin-unread').getUnreadCountForAdmin.mockImplementationOnce(async () => {
+      order.push('badge');
+      return { count: 0, at: Date.now() };
+    });
+    require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async (_ids, _build, { beforeDispatch }) => {
+      order.push('lookup');
+      await beforeDispatch();
+      order.push('send');
+      return { sent: 1 };
+    });
+    await triggerNotification('job_complete', {}, { beforePush: async ({ dispatching }) => {
+      order.push(dispatching ? 'claim' : 'eligibility');
+      return true;
+    } });
+    expect(order).toEqual(['eligibility', 'badge', 'lookup', 'claim', 'send']);
+  });
+
+  test('a push claim refused after the subscription lookup reads as superseded', async () => {
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async (_ids, _build, { beforeDispatch }) => (
+      (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 }));
+    const result = await triggerNotification('job_complete', {}, {
+      dedupeKey: 'fixture_completion_record', beforePush: async ({ dispatching }) => !dispatching,
+    });
+    expect(result.push).toEqual({ sent: 0, skipped: 'superseded_before_push' });
+    expect(result.retryable).toBe(false);
+  });
+
+  test('a push lookup failure keeps a resumed event retryable without taking the claim', async () => {
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    require('../services/push-notifications').sendToAdminUsers.mockRejectedValueOnce(new Error('Synthetic subscription lookup outage'));
+    const claim = jest.fn(async () => true);
+    const result = await triggerNotification('job_complete', {}, {
+      dedupeKey: 'fixture_completion_record', beforePush: ({ dispatching }) => (dispatching ? claim() : true),
+    });
+    expect(claim).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ push: null, retryable: true, error: 'Synthetic subscription lookup outage' });
+  });
+
+  test('an intentionally suppressed durable bell is not a retryable failure', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ suppressed: true });
+    expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
+      .toMatchObject({ bellWritten: false, retryable: false });
+  });
+
+  test('a resumed event retries an unavailable recipient lookup without dispatching', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'technicians') throw new Error('Synthetic recipient lookup outage');
+      return tableMock([]);
+    });
+    expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
+      .toMatchObject({ bellWritten: false, retryable: true });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(require('../services/push-notifications').sendToAdminUsers).not.toHaveBeenCalled();
   });
 });
 

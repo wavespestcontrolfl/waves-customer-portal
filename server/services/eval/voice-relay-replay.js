@@ -11,7 +11,8 @@
  *
  * Grades the deterministic `expect` checks in this file. A critical miss or
  * an adjudicated major fails the run; other misses lower its quality score.
- * Scenario specs remain available as notes for manual review.
+ * Scenario specs also drive optional pinned-model judging. Fallback verdicts
+ * are advisory; pinned forbidden claims are critical.
  *
  * SAFETY BY CONSTRUCTION
  *   - end() is never called: no call_log reconcile, no capture floor, no
@@ -19,21 +20,28 @@
  *   - executeTool is replaced wholesale (no lead, ticket, booking or handoff
  *     packet can be written), the capture-floor / callback writers are stubbed
  *     to throw, and the db module is proxied to REFUSE any query while a
- *     scenario's conversation runs. No database read or write is permitted.
+ *     scenario's conversation runs. The optional judge runs afterwards through
+ *     its normal ledgered lane, labelled as replay traffic. Under ledger gates
+ *     those judge calls may write ledger and trace rows; the conversation cannot.
  *   - This module must load BEFORE voice-agent/relay-conversation, which
  *     destructures resolveCallerContext / createLeadFromExtraction at load.
  *     The manual script guarantees that; jest isolates
  *     the module registry. It throws on the wrong order rather than running
  *     against the live resolvers.
  *   - Per-scenario gates mutate process.env. Run this only in its dedicated
- *     CLI process, never inside a running application server.
+ *     CLI process. The scheduled entry point spawns that process; its relay
+ *     environment and module patches never touch the application server.
+ *   - Notifications run after the conversation guard is disarmed and reuse
+ *     the call-extraction eval notification and ops-digest mechanisms.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
 const Joi = require('joi');
 const Ajv = require('ajv');
 const logger = require('../logger');
+const { attemptReplay, emailFailure, defaultNotify, defaultSendEmail } = require('./call-extraction-replay');
 const { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES } = require('./voice-relay-spoken-checks');
 
 const SCHEMA_VERSION = 'voice-relay-scenarios.v1';
@@ -41,6 +49,21 @@ const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'voice
 // The number the synthetic caller "dialled" (555 = fictional). Only a label
 // on the tool ctx: the fixture tools never resolve it.
 const EVAL_CALLER_TO = '+19415550100';
+const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'run-voice-relay-eval.js');
+const MANUAL_RERUN = 'node server/scripts/run-voice-relay-eval.js --json --judge';
+const OPS_KEY = 'voice-relay-eval';
+const OPS_HEADING = 'Voice relay conversation eval';
+// Operational ceiling for the shipped fixture plus one retry, sized for a
+// fixture of up to ninety caller turns and thirty-four scenarios (today's is
+// smaller: 28 scenarios, 77 turns). Every caller turn may use all six
+// 20-second streams (relay-conversation MAX_TOOL_ROUNDS / STREAM_TIMEOUT_MS),
+// not merely one, so ninety turns can spend three hours on Sandy per attempt.
+// Thirty-four judge chains, four-wide at the dispatcher's four-minute budget,
+// add 36 minutes. Twice that is 7h12m; eight hours leaves 48 minutes for
+// fixture-tool timeouts and other overhead. Re-derive this ceiling if the
+// live bounds change or the fixture grows past those counts.
+const CHILD_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+const JUDGE_CONCURRENCY = 4;
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
 // without re-requiring the relay modules.
@@ -328,7 +351,25 @@ function lintExpectation(e, i, knownTools) {
 // Every key a scenario may carry — a misspelled optional key (`allowedToolInput`)
 // would otherwise be ignored and grade a replay without the restriction the
 // author wrote.
-const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect']);
+const SCENARIO_KEYS = new Set(['id', 'description', 'language', 'gates', 'allowedTools', 'allowedToolInputs', 'caller', 'fixtures', 'turns', 'spec', 'expect', 'judge']);
+// The judge block and the spec are executable contracts, not notes: the judge
+// grades against exactly these fields, so a misspelt or mistyped one would
+// silently grade a weaker contract than the author wrote (a misspelt
+// `adjudicated` makes majors non-blocking; `required_fact` renders as no
+// required facts). Every key is validated, unknown keys are refused.
+const JUDGE_BLOCK_SCHEMA = Joi.object({ severity: Joi.valid(...SEVERITIES), adjudicated: Joi.boolean() });
+const FACT_LIST_SCHEMA = Joi.array().items(Joi.string().pattern(/\S/));
+const SPEC_SCHEMA = Joi.object({
+  fixture_facts: FACT_LIST_SCHEMA,
+  required_facts: FACT_LIST_SCHEMA,
+  prohibited_facts: FACT_LIST_SCHEMA,
+  acceptable_actions: FACT_LIST_SCHEMA,
+  required_action: Joi.string().pattern(/\S/),
+  ideal_move: Joi.string().pattern(/\S/),
+  transfer_required: Joi.boolean(),
+  response_range: Joi.object({ min: Joi.number().integer().min(1).required(), max: Joi.number().integer().min(Joi.ref('min')).required() }),
+  max_words_per_agent_turn: Joi.number().integer().min(1),
+});
 const FIXTURE_KEYS = new Set(['officeHours', 'toolResponses', 'resume', 'modelFailures']);
 const CALLER_KEYS = new Set(['from', 'verified', 'context']);
 const CALLER_CONTEXT_KEYS = new Set(['customer', 'tier', 'attested', 'block', 'dataTurn']);
@@ -348,7 +389,9 @@ function scenarioKeyRules(s) {
 
 function scenarioShapeRules(s) {
   const turns = Array.isArray(s.turns) ? s.turns : [];
-  const spec = s.spec && typeof s.spec === 'object' ? s.spec : null;
+  const spec = isPlainObject(s.spec) ? s.spec : null;
+  const specError = spec ? SPEC_SCHEMA.validate(spec, { convert: false }).error : null;
+  const judgeError = s.judge !== undefined ? JUDGE_BLOCK_SCHEMA.validate(s.judge, { convert: false }).error : null;
   return [
     ...scenarioKeyRules(s),
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
@@ -373,8 +416,8 @@ function scenarioShapeRules(s) {
     [!turns.length, 'needs at least one caller turn'],
     ...turns.map((t, i) => { const { error } = TURN_SCHEMA.validate(t, { convert: false }); return [!!error, `turns[${i}]: ${error ? error.message : ''}`]; }),
     [!spec, 'spec is required'],
-    ...['required_facts', 'prohibited_facts', 'acceptable_actions'].map((k) => [spec && spec[k] != null && !Array.isArray(spec[k]), `spec.${k} must be an array`]),
-    [spec && spec.required_action != null && typeof spec.required_action !== 'string', 'spec.required_action must be a string'],
+    [!!specError, `spec: ${specError ? specError.message : ''}`],
+    [!!judgeError, `judge: ${judgeError ? judgeError.message : ''}`],
     [!Array.isArray(s.expect), 'expect must be an array'],
   ];
 }
@@ -792,8 +835,10 @@ function matcherInput(record, event, name, input) {
  * The ctx side effects the real write tools perform — capture latch, booking /
  * re-service / transfer marks. Never a write. Returns the answer text and
  * whether a RECEIPT was produced: only a fixture answer that performed one of
- * these effects is a receipt — a refusal ("that time is gone", "already on
- * file", "transfer not available") is an answer, never a receipt.
+ * these effects is a receipt — there is no bare receipt marker, since a write
+ * the live tool never latched cannot back a promise; a dedupe answer is
+ * `reservice: 'existing'` (evidence, not a receipt), and a refusal ("that
+ * time is gone", "transfer not available") is an answer, never a receipt.
  */
 function applyToolSideEffects(response, { input, ctx, scenario }) {
   const text = response.text || '';
@@ -1108,18 +1153,36 @@ async function driveTurns(convo, scenario, record) {
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
-/** The labelled dialogue for manual review. Tool lines carry name, input and result. */
-function renderTranscript(events = []) {
+/**
+ * The labelled dialogue. Tool lines carry name, input and result — clipped
+ * for the reviewable record, complete (`full`) for the judge, which must see
+ * every fact Sandy saw or an accurate readback of a late fact grades as
+ * invented.
+ */
+function renderTranscript(events = [], { full = false } = {}) {
   const lines = [];
+  const evidence = (value, n) => (full ? String(value || '').replace(/\s+/g, ' ').trim() : clip(value, n));
   for (const e of events) {
     if (e.kind === 'caller') lines.push(`Caller: ${e.text}${e.ignored ? ' (not heard — the session was already ending)' : ''}`);
     else if (e.kind === 'agent') lines.push(`Agent: ${e.text}`);
     else if (e.kind === 'clock') lines.push(`[clock] ${e.text}`);
     else if (e.kind === 'resume') lines.push(`[earlier call segment]\n${e.text}\n[end earlier call segment]`);
     else if (e.kind === 'interrupt') lines.push(`[caller interrupted the agent after: "${e.text}"]`);
-    else if (e.kind === 'tool') lines.push(`[tool] ${e.name}(${clip(JSON.stringify(e.input || {}), 240)}) → ${clip(e.text, 600)}`);
+    else if (e.kind === 'tool') lines.push(`[tool] ${e.name}(${evidence(JSON.stringify(e.input || {}), 240)}) → ${evidence(e.text, 600)}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * What Sandy was told to be and do on this call — the system prompt frozen
+ * for the session, minus the per-caller block the judge receives separately.
+ * Null until the first model round composes the prompt.
+ */
+function standingInstructionsOf(convo, scenario) {
+  const frozen = convo._systemBlocks && convo._systemBlocks[0] ? String(convo._systemBlocks[0].text || '') : '';
+  if (!frozen.trim()) return null;
+  const block = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
+  return (block ? frozen.replace(block, '') : frozen).replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ── Deterministic checks ──────────────────────────────────────────────────
@@ -1298,6 +1361,49 @@ function evaluateChecks(scenario, record) {
   ];
 }
 
+// The major-tier lines of a verdict: [check, failed, detail]. The verdict
+// line grades ONLY a holistic "fail" with clean detail fields (the judge's
+// own call); a fail explained by a detail finding is counted once, on that
+// finding's line.
+function judgeMajorLines(v, scenario) {
+  // transfer_ok is graded only where the spec requires a transfer; elsewhere a
+  // verdict that fails on it alone is a holistic fail, reported on the verdict line.
+  const transferRequired = !!(scenario.spec && scenario.spec.transfer_required === true);
+  const detailFailed = v.forbidden_claims.length > 0 || v.required_facts_missing.length > 0 || v.prohibited_facts_stated.length > 0 || !v.action_ok || (transferRequired && !v.transfer_ok);
+  const verdictDetail = v.pass ? 'pass' : (detailFailed ? 'failed on the findings below' : (v.rationale ? clip(v.rationale, 200) : 'the judge failed the call'));
+  return [
+    ['judge:verdict', !v.pass && !detailFailed, verdictDetail],
+    ['judge:required_facts', v.required_facts_missing.length > 0, v.required_facts_missing.length ? `missing: ${v.required_facts_missing.join('; ')}` : 'all required facts conveyed'],
+    ['judge:prohibited_facts', v.prohibited_facts_stated.length > 0, v.prohibited_facts_stated.length ? `stated: ${v.prohibited_facts_stated.join('; ')}` : 'none stated'],
+    ['judge:action', !v.action_ok, v.action_taken || (v.action_ok ? 'acceptable' : 'not an acceptable action')],
+    ...(transferRequired ? [['judge:transfer', !v.transfer_ok, v.transfer_ok ? 'transferred' : 'the caller was not handed to a person']] : []),
+  ];
+}
+
+// The quality-tier lines of a verdict: [check, failed, detail].
+const judgeQualityLines = (v) => [
+  ['judge:empathy', !v.empathy_ok, v.empathy_ok ? 'ok' : 'concern not acknowledged specifically'],
+  ['judge:brevity', !v.brevity_ok, v.brevity_ok ? 'ok' : 'a turn ran past the spec\'s range'],
+  ['judge:tone', v.tone != null && v.tone < 3, `tone ${v.tone == null ? 'n/a' : `${v.tone}/5`}`],
+];
+
+/** The judge's verdict as checks. Fallback-leg verdicts are advisory: never pass/fail. */
+function judgeChecks(scenario, judge) {
+  if (!judge) return [];
+  const severity = (scenario.judge && scenario.judge.severity) || 'major';
+  const adjudicated = !!(scenario.judge && scenario.judge.adjudicated === true);
+  if (!judge.ok) return [{ check: 'judge:verdict', severity, adjudicated, status: 'skip', detail: `judge unavailable (${judge.reason})` }];
+  const advisory = judge.judge_fallback === true;
+  const mk = ([check, failed, detail], sev) => ({
+    check, severity: sev, adjudicated, status: advisory ? 'advisory' : (failed ? 'fail' : 'pass'), detail: advisory ? `(fallback-leg verdict, advisory) ${detail}` : detail,
+  });
+  return [
+    ...judgeMajorLines(judge.verdict, scenario).map((line) => mk(line, severity)),
+    ...judge.verdict.forbidden_claims.map((c) => mk([`judge:forbidden_claim:${c.category}`, true, c.quote ? `"${clip(c.quote, 160)}"` : 'no quote'], 'critical')),
+    ...judgeQualityLines(judge.verdict).map((line) => mk(line, 'quality')),
+  ];
+}
+
 const blocking = (c) => c.status === 'fail' && (c.severity === 'critical' || (c.severity === 'major' && c.adjudicated));
 
 function scenarioStatus(record) {
@@ -1361,7 +1467,39 @@ function errorRecord(err) {
   return { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err), code: (err && err.code) || null };
 }
 
-async function runScenario(scenario) {
+/** The judged layer for one finished record (run in a pool after the conversations). */
+async function judgeRecord(scenario, record, judgeFn) {
+  const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
+  const context = (scenario.caller && scenario.caller.context) || {};
+  const callerBlock = context.block || null;
+  // The recent-text data turn the conversation seeds into Sandy's context is
+  // agent-visible: a fact repeated from it is grounded, not invented.
+  const dataTurn = typeof context.dataTurn === 'string' && context.dataTurn.trim() ? context.dataTurn : null;
+  const { runAsReplay } = require('../llm-dispatch-metrics');
+  const transcript = renderTranscript(record.events, { full: true });
+  record.judge = await runAsReplay(() => run({ spec: scenario.spec || {}, transcript, language: record.language, toolsAvailable: record.toolsAvailable, callerBlock, dataTurn, standingInstructions: record.standingInstructions || null }), 'voice_relay_judge')
+    .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
+  record.checks.push(...judgeChecks(scenario, record.judge));
+  record.qualityScore = qualityScore(record.checks);
+  record.status = scenarioStatus(record);
+  return record;
+}
+
+/** Run `fn` over `items` at most `width` at a time, preserving order. */
+async function mapPool(items, width, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+  return out;
+}
+
+async function runScenario(scenario, { judge = false, judgeFn = null } = {}) {
   const h = installHarness();
   const record = newRecord(scenario, h);
   const restoreEnv = applyGates(scenario.gates);
@@ -1381,6 +1519,9 @@ async function runScenario(scenario) {
     await driveTurns(convo, scenario, record);
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
+    // Judge grounding, not a result: non-enumerable so the run's JSON does
+    // not repeat the prompt per scenario (promptSha fingerprints it).
+    Object.defineProperty(record, 'standingInstructions', { value: standingInstructionsOf(convo, scenario), enumerable: false, writable: true });
     // Any REAL provider error (an injected failure is expected and excluded,
     // a barge-in abort is deliberate) means the conversation did not run as
     // scripted — before the first round or after ten, the checks would be
@@ -1420,8 +1561,12 @@ async function runScenario(scenario) {
   record.durationMs = Date.now() - startedAt;
   record.transcript = renderTranscript(record.events);
   record.checks = record.error ? [] : evaluateChecks(scenario, record);
+  record.judge = null;
   record.qualityScore = qualityScore(record.checks);
   record.status = scenarioStatus(record);
+  // Conversation database access is refused above; the optional judge uses
+  // its normal replay-labelled ledger lane after that guard is disarmed.
+  if (!record.error && judge) await judgeRecord(scenario, record, judgeFn);
   return record;
 }
 
@@ -1439,6 +1584,9 @@ function tallyRecord(summary, r, all) {
   if (r.error && r.error.code === 'EVAL_MODEL_UNAVAILABLE') summary.modelUnavailable += 1;
   if (r.status === 'error') { summary.replayErrors += 1; summary.replayErrorIds.push(r.id); return; }
   if (r.status === 'fail') { summary.failed += 1; summary.failedIds.push(r.id); } else summary.passed += 1;
+  if (r.judge) {
+    if (r.judge.ok) { summary.judged += 1; if (r.judge.judge_fallback) summary.judgeFallbacks += 1; } else summary.judgeErrors += 1;
+  }
   tallyMisses(summary, r.checks || [], all);
 }
 
@@ -1453,11 +1601,11 @@ function tallyMisses(summary, checks, all) {
   }
 }
 
-function summarize(results) {
+function summarize(results, { judge = false } = {}) {
   const summary = {
     scenarios: results.length, passed: 0, failed: 0, replayErrors: 0, replayErrorIds: [], failedIds: [],
     criticalMisses: 0, adjudicatedMajorMisses: 0, majorMisses: 0, qualityMisses: 0,
-    dbRefusals: 0, unexpectedTools: 0, invalidInputs: 0, warnings: 0,
+    judge, judged: 0, judgeFallbacks: 0, judgeErrors: 0, dbRefusals: 0, unexpectedTools: 0, invalidInputs: 0, warnings: 0,
     modelRounds: 0, modelErrors: 0, modelUnavailable: 0, qualityScore: null, durationMs: 0,
   };
   const all = [];
@@ -1472,6 +1620,7 @@ function summaryLine(summary = {}) {
   const segments = [
     `scenarios=${n('scenarios')} passed=${n('passed')} failed=${n('failed')} replayErrors=${n('replayErrors')}`,
     `critical=${n('criticalMisses')} adjudicatedMajor=${n('adjudicatedMajorMisses')} major=${n('majorMisses')} quality=${n('qualityMisses')}`,
+    `judged=${n('judged')}${summary.judge === false ? ' (judge off)' : ''} judgeFallbacks=${n('judgeFallbacks')} judgeErrors=${n('judgeErrors')}`,
     `qualityScore=${pct} modelRounds=${n('modelRounds')}`,
     n('modelErrors') && `modelErrors=${n('modelErrors')}`,
     n('dbRefusals') && `dbRefusals=${n('dbRefusals')}`,
@@ -1485,7 +1634,7 @@ function summaryLine(summary = {}) {
 function isFailedVoiceRun(run) {
   if (run && run.failed === true) return true;
   const s = (run && run.summary) || {};
-  return (s.replayErrors || 0) > 0 || (s.failed || 0) > 0;
+  return (s.replayErrors || 0) > 0 || (s.failed || 0) > 0 || (s.judgeErrors || 0) > 0;
 }
 
 /** The rendered, linted fixture's scenarios, narrowed to `only` when given. Throws on a malformed fixture or an unknown id. */
@@ -1504,14 +1653,18 @@ function selectScenarios(fixture, only) {
  * model-outage scenario completes zero rounds by design, so the rule is not
  * "every scenario errored").
  */
-function assertRunConclusive(summary, results) {
+function assertRunConclusive(summary, results, judge = false) {
   if (summary.modelRounds === 0 && summary.modelUnavailable > 0) {
     const first = results.find((r) => r.error && r.error.code === 'EVAL_MODEL_UNAVAILABLE');
     throw new Error(`no scenario completed a model round — ${first.error.message}`);
   }
+  if (judge && summary.judged === 0 && summary.judgeErrors > 0) {
+    const first = results.find((r) => r.judge && !r.judge.ok);
+    throw new Error(`the judge graded no scenario — ${first.judge.reason}`);
+  }
 }
 
-async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = null, runDate = new Date() } = {}) {
+async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = null, judge = false, judgeFn = null, runDate = new Date() } = {}) {
   // One clock per run: every scenario's dated fixture is rendered against
   // the same ET date, and the lint sees the rendered strings.
   const fixture = renderDateTokens(loadFixture(fixturePath), runDate);
@@ -1528,20 +1681,191 @@ async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = 
       const record = await runScenario(scenario);
       results.push(record);
     }
+    if (judge) {
+      await mapPool(scenarios, JUDGE_CONCURRENCY, (scenario, i) => (results[i].error ? results[i] : judgeRecord(scenario, results[i], judgeFn)));
+    }
     for (const record of results) {
       logger.info(`[voice-relay-eval] ${record.id}: ${record.status}${record.error ? ` (${record.error.message})` : ''} checks=${record.checks.length} tools=${record.toolCalls.length} ${record.durationMs}ms`);
     }
   } finally {
     clearInterval(keepAlive);
   }
-  const summary = summarize(results);
-  assertRunConclusive(summary, results);
-  return { failed: isFailedVoiceRun({ summary }), fixturePath, schemaVersion: fixture.schemaVersion, runDate: runDate.toISOString(), summary, results };
+  const summary = summarize(results, { judge });
+  assertRunConclusive(summary, results, judge);
+  return { failed: isFailedVoiceRun({ summary }), fixturePath, schemaVersion: fixture.schemaVersion, runDate: runDate.toISOString(), judge, summary, results };
+}
+
+// ── Retry-once / notify wrapper (the call-replay shape) ───────────────────
+
+function failureLines(run) {
+  const lines = [];
+  for (const r of (run && run.results) || []) {
+    if (r.status === 'error') lines.push(`${r.id}: replay error (${r.error && r.error.message ? r.error.message : 'unknown error'})`);
+    if (r.judge && !r.judge.ok) lines.push(`${r.id}: unjudged — judge unavailable (${r.judge.reason || 'unknown'})`);
+    for (const c of r.checks || []) {
+      if (c.status === 'fail' && blocking(c)) lines.push(`${r.id}: ${c.severity}${c.adjudicated ? '*' : ''} ${c.check} — ${c.detail}`);
+    }
+  }
+  if (!lines.length && run && run.summary) lines.push(`summary: ${summaryLine(run.summary)}`);
+  return lines;
+}
+
+function compactAttempt(attempt) {
+  return { status: attempt.status, summary: attempt.run ? attempt.run.summary : null, error: attempt.error || null };
+}
+
+async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath }) {
+  const run = finalAttempt.run || null;
+  const lines = failureLines(run).slice(0, 20);
+  const summary = (run && run.summary) || {};
+  const retry = attempts[1] || null;
+  const retryNote = retry
+    ? (retry.status === 'inconclusive'
+        ? `\n\nRetry was inconclusive: ${retry.error && retry.error.message ? retry.error.message : 'unknown error'}. Keeping the first observed failure.`
+        : '\n\nThe retry did not clear the failure.')
+    : '';
+  const failing = (summary.failed || 0) + (summary.replayErrors || 0);
+  const unjudged = summary.judgeErrors || 0;
+  const title = failing
+    ? `Voice relay eval: ${failing} failing scenario(s)${unjudged ? `, ${unjudged} unjudged` : ''}`
+    : `Voice relay eval: ${unjudged} scenario(s) unjudged — judge unavailable`;
+  const body = `${lines.join('\n').slice(0, 1400)}\n\n${summaryLine(summary)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
+  let notifyError = null;
+  try {
+    await notify({
+      recipient_type: 'admin',
+      category: 'eval_regression',
+      title,
+      body,
+      icon: '\u{1F9EA}',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({ fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
+    });
+  } catch (err) {
+    notifyError = err;
+  }
+  await emailFailure({ sendEmail, subject: `FIX: ${title}`, textBody: body, key: OPS_KEY, heading: OPS_HEADING });
+  logger.warn(`[voice-relay-eval] failed: ${summaryLine(summary)}`);
+  return notifyError;
+}
+
+async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
+  const title = 'Voice relay eval could not run';
+  const body = `${attempt.error && attempt.error.message ? attempt.error.message : 'Unknown replay error'}\n\nThe voice relay scenario fixture was NOT verified.\n\nRe-run manually: ${MANUAL_RERUN}`;
+  let notifyError = null;
+  try {
+    await notify({
+      recipient_type: 'admin',
+      category: 'eval_regression',
+      title,
+      body,
+      icon: '\u{1F9EA}',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({ fixturePath, error: attempt.error || null }),
+    });
+  } catch (err) {
+    notifyError = err;
+  }
+  await emailFailure({ sendEmail, subject: `FIX: ${title}`, textBody: body, key: OPS_KEY, heading: OPS_HEADING });
+  logger.warn(`[voice-relay-eval] inconclusive: ${attempt.error && attempt.error.message ? attempt.error.message : 'unknown error'}`);
+  return notifyError;
+}
+
+/** The wrapper's retry-once shape: a second attempt only after a failed first one; pass-on-retry is flaky. */
+async function attemptWithRetry(runReplay, replayOptions, attemptOptions) {
+  const first = await attemptReplay(runReplay, replayOptions, attemptOptions);
+  if (first.status !== 'fail') return { finalAttempt: first, attempts: [first], flaky: false };
+  const retry = await attemptReplay(runReplay, replayOptions, attemptOptions);
+  const flaky = retry.status === 'pass';
+  if (flaky) logger.warn('[voice-relay-eval] pass-on-retry; treating as flaky, not failing');
+  return { finalAttempt: retry.status === 'inconclusive' ? first : retry, attempts: [first, retry], flaky };
+}
+
+/** The outcome's notification, if any. Returns the bell's insert error (the email channel has already fired) or null. */
+async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt, attempts, fixturePath }) {
+  if (!notifyOnFailure) {
+    logger.info(`[voice-relay-eval] manual run — ${finalAttempt.status}, no notification`);
+    return null;
+  }
+  if (finalAttempt.status === 'fail') return notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
+  if (finalAttempt.status === 'inconclusive') return notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  return null;
+}
+
+/**
+ * The scheduled shape: one attempt, retry once on failure (pass-on-retry is
+ * flaky, not a failure), one admin bell + ops email on repeated failure or
+ * when the eval could not run. Never throws for a failed eval, and never for
+ * a bell that failed to insert either: the email channel has fired
+ * independently, and a FINISHED evaluation must still return its result
+ * (with `notificationError`) rather than read as a crash to the cron.
+ */
+async function runVoiceRelayEval(opts = {}) {
+  const runReplay = opts.runReplay || runVoiceRelayReplay;
+  const notify = opts.notify || defaultNotify;
+  const sendEmail = opts.sendEmail || defaultSendEmail;
+  // notifyOnFailure: false = a manual run — no bell, no email AND no ops
+  // digest (emailFailure's deliverOpsDigest writes an in-app notification
+  // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
+  const notifyOnFailure = opts.notifyOnFailure !== false;
+  const fixturePath = opts.fixturePath || DEFAULT_FIXTURE_PATH;
+  const replayOptions = { fixturePath, only: opts.only || null, judge: opts.judge !== false, judgeFn: opts.judgeFn || null };
+  const { finalAttempt, attempts, flaky } = await attemptWithRetry(runReplay, replayOptions, { isFailed: isFailedVoiceRun, lane: 'voice_relay' });
+  const notificationError = await notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt, attempts, fixturePath });
+  if (notificationError) logger.error(`[voice-relay-eval] notification insert failed (email channel already attempted): ${notificationError.message}`);
+  const run = finalAttempt.run || null;
+  const result = {
+    status: finalAttempt.status,
+    flaky,
+    fixturePath,
+    judge: run ? run.judge : replayOptions.judge,
+    summary: run ? run.summary : null,
+    attempts: attempts.map(compactAttempt),
+    results: run ? run.results : [],
+    error: finalAttempt.error || null,
+    notificationError: notificationError ? notificationError.message : null,
+  };
+  logger.info(`[voice-relay-eval] done: status=${result.status}${flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
+  return result;
+}
+
+/**
+ * The cron's crash path: the child died (timeout, signal, startup failure,
+ * no JSON) before it could send its own notification, so the parent sends
+ * the inconclusive alert — a dead weekly monitor must never be silent.
+ */
+async function notifyEvalCrash(err, { notify = defaultNotify, sendEmail = defaultSendEmail, fixturePath = DEFAULT_FIXTURE_PATH } = {}) {
+  const notifyError = await notifyInconclusive({ notify, sendEmail, fixturePath, attempt: { status: 'inconclusive', error: { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err) } } });
+  if (notifyError) throw notifyError;
+}
+
+/**
+ * The cron entry point: the whole eval in a child process (its per-scenario
+ * gate env and its patched relay modules never touch the server). Resolves
+ * with the child's JSON result; rejects when the child crashed or produced
+ * nothing parseable. The child notifies on its own (--notify).
+ */
+function runVoiceRelayEvalProcess({ timeoutMs = CHILD_TIMEOUT_MS, scriptPath = SCRIPT_PATH, execFileImpl = execFile } = {}) {
+  return new Promise((resolve, reject) => {
+    execFileImpl(process.execPath, [scriptPath, '--json', '--judge', '--notify'], {
+      env: process.env, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, killSignal: 'SIGKILL',
+    }, (err, stdout, stderr) => {
+      const code = err && typeof err.code === 'number' ? err.code : (err ? null : 0);
+      let parsed = null;
+      try { parsed = JSON.parse(String(stdout || '').trim()); } catch { parsed = null; }
+      // Exit 1 (failed) / 3 (inconclusive) still carry a JSON result — the
+      // child has already notified; only a crash (2, a signal, no JSON) throws.
+      if (parsed && parsed.status && (code === 0 || code === 1 || code === 3)) { resolve({ ...parsed, exitCode: code }); return; }
+      const tail = String(stderr || '').trim().slice(-400);
+      reject(new Error(`voice relay eval child ${err && err.killed ? 'timed out' : `exited ${code === null ? 'abnormally' : code}`}${tail ? `: ${tail}` : ''}`));
+    });
+  });
 }
 
 module.exports = {
   SCHEMA_VERSION,
   DEFAULT_FIXTURE_PATH,
+  MANUAL_RERUN,
   GATE_ENV,
   CHECKS,
   SEVERITIES,
@@ -1553,10 +1877,14 @@ module.exports = {
   installHarness,
   runScenario,
   runVoiceRelayReplay,
+  runVoiceRelayEval,
+  runVoiceRelayEvalProcess,
+  notifyEvalCrash,
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
+    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive,
+    JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,
   },

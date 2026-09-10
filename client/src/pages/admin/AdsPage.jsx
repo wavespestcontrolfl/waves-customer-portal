@@ -166,7 +166,7 @@ function Badge({ mode }) {
         display: "inline-block",
         padding: "2px 8px",
         borderRadius: 4,
-        fontSize: 10,
+        fontSize: 12, // UI audit F0357
         fontWeight: 700,
         background: (colors[mode] || D.muted) + "22",
         color: colors[mode] || D.muted,
@@ -1699,10 +1699,14 @@ function CapacityTab() {
               </span>{" "}
             </div>{" "}
           </div>{" "}
+          {/* Seven fixed columns: each keeps room for "Sep 9" / "SPENT" at
+              the caption floor, and the row scrolls sideways on phones
+              instead of letting day labels collide (Codex round 4). */}
+          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(7, 1fr)",
+              gridTemplateColumns: "repeat(7, minmax(84px, 1fr))",
               gap: 8,
             }}
           >
@@ -1715,7 +1719,8 @@ function CapacityTab() {
                     background: color + "15",
                     border: `1px solid ${color}44`,
                     borderRadius: 10,
-                    padding: "12px 8px",
+                    padding: "12px 6px",
+                    boxSizing: "border-box",
                     textAlign: "center",
                     minWidth: 0,
                   }}
@@ -1732,7 +1737,7 @@ function CapacityTab() {
                     {day.dayName}
                   </div>{" "}
                   <div
-                    style={{ fontSize: 10, color: D.muted, marginBottom: 8 }}
+                    style={{ fontSize: 13, color: D.muted, marginBottom: 8 }}
                   >
                     {day.dayLabel}
                   </div>{" "}
@@ -1757,12 +1762,12 @@ function CapacityTab() {
                   >
                     {day.booked}/{day.slots}
                   </div>{" "}
-                  <div style={{ fontSize: 10 }}>
+                  <div style={{ fontSize: 12 }}>
                     {modeEmoji[day.budgetMode] || ""}{" "}
                     <span
                       style={{
                         fontWeight: 500,
-                        fontSize: 9,
+                        fontSize: 12,
                         letterSpacing: "0.5px",
                         color: D.muted,
                       }}
@@ -1770,13 +1775,14 @@ function CapacityTab() {
                       {day.budgetMode?.toUpperCase()}
                     </span>
                     {day.isSunday && (
-                      <span style={{ color: D.teal, fontSize: 9 }}>*</span>
+                      <span style={{ color: D.teal, fontSize: 12 }}>*</span>
                     )}
                   </div>{" "}
                 </div>
               );
             })}
           </div>{" "}
+          </div>
         </Card>
       ))}
       {/* Legend */}

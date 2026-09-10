@@ -17,26 +17,15 @@ import {
   cn,
 } from "../ui";
 import { DECLINE_REASONS, declinePayload } from "../../pages/admin/EstimatePage";
+// The canonical helper surfaces the server's `error` string (a 409 "held for
+// a re-price" reason, "No phone on file", …) instead of "HTTP 409"; it also
+// redirects on 401 and retries 429 once (UI audit F0076).
+import { adminFetch } from "../../utils/admin-fetch";
 
 // Match the EstimatesPageV2 surface — the estimates page is locked to Roboto
 // per Adam's design call, and these modals only render from that page, so
 // the panel font follows the same body.
 const ROBOTO_STYLE = { fontFamily: "'Roboto', Arial, sans-serif" };
-
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
-function adminFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json",
-    },
-    ...options,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
-  });
-}
 
 export function FollowUpModalV2({ estimate, onClose, onSent }) {
   const firstName = estimate.customerName?.split(" ")[0] || "there";

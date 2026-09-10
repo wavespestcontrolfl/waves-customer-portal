@@ -1,5 +1,6 @@
 export function buildMobileServicePayload({
   service,
+  originalService = service,
   isNew,
   name,
   duration,
@@ -32,5 +33,15 @@ export function buildMobileServicePayload({
     payload.base_price = service.base_price;
   }
 
-  return payload;
+  return isNew ? payload : omitUnchangedDurationFields(payload, originalService);
+}
+
+export function omitUnchangedDurationFields(payload, service) {
+  if (!service) return payload;
+  const result = { ...payload };
+  const numeric = value => value == null || value === "" ? null : Number(value);
+  for (const key of ["min_duration_minutes", "default_duration_minutes", "max_duration_minutes"]) {
+    if (numeric(result[key]) === numeric(service[key])) delete result[key];
+  }
+  return result;
 }

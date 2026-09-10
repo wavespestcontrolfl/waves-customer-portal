@@ -74,7 +74,8 @@ function adminFetch(path, options = {}) {
   });
 }
 
-const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
+// Tier chips stay on the file's zinc palette — the label carries the tier, not a metal colour.
+const TIER_COLORS = { Platinum: D.text, Gold: D.text, Silver: D.text, Bronze: D.text, 'One-Time': D.text };
 
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 
@@ -2381,7 +2382,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                               {customerPropertyCountLabel(c.propertyCount)}
                             </span>
                           )}
-                          {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
+                          {c.tier && <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
                         </div>
                       </button>
                     ))}
@@ -2614,7 +2615,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                               background: D.bg,
                               textTransform: 'uppercase',
                               letterSpacing: 0.5,
-                              fontSize: 10,
+                              fontSize: 11,
                             }}>
                               {accepted ? 'Accepted' : 'Not yet accepted'}
                             </span>
@@ -2686,13 +2687,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           fontSize: 12,
                           fontWeight: 500,
                           cursor: 'pointer',
-                          border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
-                          background: active ? '#DCFCE7' : D.bg,
-                          color: active ? '#166534' : D.muted,
+                          border: active ? `1.5px solid ${D.text}` : `1px solid ${D.border}`,
+                          background: active ? D.card : D.bg,
+                          color: active ? D.text : D.muted,
                         });
                         return (
                           <div style={{ marginTop: 10 }}>
-                            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+                            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
                               Billing on acceptance
                             </div>
                             <div style={{ display: 'flex', gap: 8 }}>
@@ -2804,7 +2805,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
                   </div>
                   {!isMobile && idx === 0 && services.length > 1 && (
-                    <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
                   )}
                 </div>
 
@@ -3199,16 +3200,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             fontSize: 14,
             fontWeight: 500,
             cursor: 'pointer',
-            border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
-            background: active ? '#DCFCE7' : D.bg,
-            color: active ? '#166534' : D.muted,
+            border: active ? `1.5px solid ${D.text}` : `1px solid ${D.border}`,
+            background: active ? D.card : D.bg,
+            color: active ? D.text : D.muted,
           });
           const prepayLabel = manualPrepayLoading
             ? 'Annual prepay — pricing…'
             : (eligible ? `Annual prepay — invoices ${formatMoney(manualPrepay.prepayTotal)}` : 'Annual prepay');
           return (
             <div style={sectionStyle}>
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
                 Billing
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -3287,9 +3288,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         onClick={() => setPrepayMethod(m)}
                         style={{
                           padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 500,
-                          border: prepayMethod === m ? '1.5px solid #166534' : '1px solid #D4D4D8',
-                          background: prepayMethod === m ? '#DCFCE7' : '#fff',
-                          color: prepayMethod === m ? '#166534' : '#52525B',
+                          border: prepayMethod === m ? `1.5px solid ${D.text}` : '1px solid #D4D4D8',
+                          background: prepayMethod === m ? D.bg : '#fff',
+                          color: prepayMethod === m ? D.text : '#52525B',
                           cursor: 'pointer',
                         }}
                       >
@@ -3362,7 +3363,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {timeSlots.length > 0 && (
                 <>
                 {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
-                  <div style={{ background: '#EFF6FF', border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
+                  <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
                     No route near this customer that day yet — here's what's close.
                   </div>
                 )}

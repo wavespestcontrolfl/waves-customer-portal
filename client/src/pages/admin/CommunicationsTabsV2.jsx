@@ -783,7 +783,7 @@ export function SmsTemplatesTabV2() {
                   ).map((v) => (
                     <span
                       key={v}
-                      className="text-10 px-1.5 py-0.5 rounded-xs bg-zinc-50 text-ink-tertiary border-hairline font-mono"
+                      className="text-11 px-1.5 py-0.5 rounded-xs bg-zinc-50 text-ink-tertiary border-hairline font-mono"
                     >
                       {`{${v}}`}
                     </span>
@@ -1083,7 +1083,7 @@ export function CSRCoachTabV2() {
                       {t.task_type?.replace(/_/g, " ")}
                       {t.first_name && ` ${t.first_name} ${t.last_name || ""}`}
                     </div>{" "}
-                    <span className="text-10 text-ink-tertiary font-mono u-nums">
+                    <span className="text-11 text-ink-tertiary font-mono u-nums">
                       {new Date(t.deadline).toLocaleString([], {
                         month: "short",
                         day: "numeric",
