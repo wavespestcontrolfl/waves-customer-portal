@@ -1576,7 +1576,7 @@ const ReviewService = {
     // removed, exactly as the parking operation does; the coordinator
     // re-creates it when the summary settles.
     if (request.service_record_id && await require("./visit-completion-summary").visitSummaryUncertainForRecord(request.service_record_id)) {
-      await db("review_requests").where({ id: requestId, status: "pending" }).del().catch(() => {});
+      await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: requestId }).del().catch(() => {});
       logger.info(`[review] Parked request (requestId=${requestId} reason=visit_summary_bounced)`);
       return;
     }
@@ -1716,7 +1716,7 @@ const ReviewService = {
         // is shared FOR SHARE so a bounce reconciliation (which takes it FOR
         // UPDATE) serializes with the send.
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
-        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch),
+        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId }),
       });
 
       if (result.sent) {
@@ -1741,7 +1741,7 @@ const ReviewService = {
         } else if (result.blocked && result.code === "VISIT_SUMMARY_UNCERTAIN") {
           // Parked with its summary: the pending ask is removed, exactly as
           // the parking operation does, and re-created when the summary settles.
-          await db("review_requests").where({ id: requestId, status: "pending" }).del().catch(() => {});
+          await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: requestId }).del().catch(() => {});
           logger.info(`[review] Parked request at the provider (requestId=${requestId} reason=visit_summary_bounced)`);
         } else if (result.blocked && result.code === "VISIT_SUMMARY_STATE_UNAVAILABLE") {
           const retryAt = new Date(Date.now() + 30 * 60 * 1000);
@@ -3459,7 +3459,7 @@ const ReviewService = {
         entryPoint: "review_outreach_touch",
         metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
-        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch),
+        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id }),
       });
     } catch (err) {
       if (manageRetryVia === "cron") {
@@ -3607,7 +3607,7 @@ const ReviewService = {
               started = true;
               await dispatch();
               return { ok: true };
-            });
+            }, undefined, { requestId: request?.id });
           } catch (err) {
             if (started) throw err;
             verdict = { ok: false, code: "VISIT_SUMMARY_STATE_UNAVAILABLE", reason: "The visit summary state could not be read", retryable: true };

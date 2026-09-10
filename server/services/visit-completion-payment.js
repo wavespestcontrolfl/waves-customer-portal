@@ -38,7 +38,7 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
       || !['closing', 'closed'].includes(visit.status) || !['processing', 'done'].includes(packet?.status)) {
     refuse('visit_billing_held');
   }
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = require('./visit-completion-packets').packetPayload(packet);
   const frozen = payload?.billingSnapshot;
   if (frozen?.invoiceId !== invoice.id || !Number.isSafeInteger(frozen.totalCents)
       || !Number.isSafeInteger(frozen.netSubtotalCents) || !Array.isArray(frozen.billedServiceIds)) {
