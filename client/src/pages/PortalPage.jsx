@@ -5531,7 +5531,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 { key: 'serviceReminder24h', label: '24-hour reminder', desc: 'The day before a visit', icon: 'bell' },
                 { key: 'techEnRoute', label: 'Tech en route', desc: 'Live GPS, about an hour out', icon: 'truck' },
                 { key: 'techArrived', label: 'Tech arrived', desc: 'The moment we reach the property', icon: 'door' },
-                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s notifications to your phone as well as the on-location contacts', icon: 'smartphone' },
+                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s notifications to you as well as the on-location contacts', icon: 'smartphone' },
               ];
               const onCount = options.filter((o) => o.key !== 'appointmentNotifyPrimary' && property.preferences?.[o.key] !== false).length;
               const alertCount = options.length - 1;
