@@ -70,16 +70,21 @@ function fakeLocks() {
   };
 }
 
-function loadWorker(cache, { locks, cacheNames = [] } = {}) {
+function loadWorker(cache, { locks, cacheNames = [], cachesByName = {} } = {}) {
   const listeners = {};
-  const names = new Set(cacheNames);
+  const names = new Set([...cacheNames, ...Object.keys(cachesByName)]);
   const sandbox = {
     self: {
       addEventListener(name, fn) { listeners[name] = fn; },
       navigator: locks ? { locks } : {}, location: { origin: 'https://portal.test' }, registration: {},
       skipWaiting: async () => {}, clients: { claim: async () => {} },
     },
-    caches: { names, async open(name) { names.add(name); return cache; }, async keys() { return [...names]; }, async delete(name) { return names.delete(name); } },
+    caches: {
+      names,
+      async open(name) { if (cachesByName[name]) return cachesByName[name]; names.add(name); return cache; },
+      async keys() { return [...names]; },
+      async delete(name) { return names.delete(name); },
+    },
     Request: class { constructor(url) { this.url = url; } },
     Response: FakeResponse,
     Headers,
@@ -144,6 +149,8 @@ describe('customer service-worker update contract', () => {
     expect(source).not.toMatch(/precacheCompleteShell\(\).*catch\(\(\) => \{\}\)/);
     expect(source).toContain('k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME');
     expect(source).toContain("if (!isQuotaError(err)) throw err;");
+    expect(source).toContain('await reclaimStaleCacheSpace();');
+    expect(source).not.toMatch(/isQuotaError\(err\)\) throw err;\s*await sweepStaleCaches\(\)/);
   });
 
   it('sweeps the pre-prefix legacy buckets on activate but never the badge state', () => {
@@ -653,23 +660,83 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
   });
 
-  it('frees the stale buckets and retries when the precache hits the quota at install', async () => {
-    // Codex #4335 P1: on a phone whose v11 bucket holds the origin's whole
+  it('reclaims quota from the old bucket without taking the active shell, then retries the precache', async () => {
+    // Codex #4335 P1s: on a phone whose v11 bucket holds the origin's whole
     // quota, the v12 precache rejects with QuotaExceededError and install
-    // would fail forever (stale buckets are only swept at activate),
-    // leaving the device on the slow worker.
+    // would fail forever (stale buckets are only swept at activate). The
+    // recovery must not delete the active worker's bucket outright: if
+    // the retry fails too, that worker still needs its offline shell.
     const cache = fakeCache();
+    const v11 = fakeCache();
+    await v11.put('/', fakeResponse(shellHtml(['/assets/index-OLD.js'])));
+    await v11.put('/assets/index-OLD.js', fakeResponse('old'));
+    for (let i = 0; i < 50; i += 1) await v11.put(`/assets/Chunk-${i}.js`, fakeResponse('bloat'));
+    await v11.put('/waves-logo.png', fakeResponse('png'));
     const { dispatchInstall, cacheNames, setFetch } = loadWorker(cache, {
-      cacheNames: ['waves-customer-v11-shell-atomic', 'waves-v10-admin-activation-stable', 'waves-badge-state'],
+      cachesByName: { 'waves-customer-v11-shell-atomic': v11 },
+      cacheNames: ['waves-v10-admin-activation-stable', 'waves-badge-state'],
     });
     setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-AAA.js'])) : fakeResponse(`asset:${request.url}`)));
-    cache.failPut = () => cacheNames.has('waves-customer-v11-shell-atomic'); // no room until v11 is gone
+    cache.failPut = () => v11.store.size > 3; // no room until the bloat is gone
 
     await dispatchInstall();
 
-    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v12-shell-pruned']);
+    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v12-shell-pruned']);
+    expect([...v11.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-OLD.js', '/waves-logo.png']);
     expect(await cache.match('/')).toBeTruthy();
     expect(await cache.match('/assets/index-AAA.js')).toBeTruthy();
+  });
+
+  it('leaves the active worker its shell when the quota retry fails as well', async () => {
+    const cache = fakeCache();
+    const v11 = fakeCache();
+    await v11.put('/', fakeResponse(shellHtml(['/assets/index-OLD.js'])));
+    await v11.put('/assets/index-OLD.js', fakeResponse('old'));
+    await v11.put('/assets/Chunk-1.js', fakeResponse('bloat'));
+    const { dispatchInstall, cacheNames, setFetch } = loadWorker(cache, { cachesByName: { 'waves-customer-v11-shell-atomic': v11 } });
+    let shellFetches = 0;
+    setFetch(async (request) => {
+      if (request.url === '/') { shellFetches += 1; if (shellFetches > 1) throw new TypeError('Failed to fetch'); return fakeResponse(shellHtml(['/assets/index-AAA.js'])); }
+      return fakeResponse(`asset:${request.url}`);
+    });
+    cache.failPut = () => shellFetches === 1; // first attempt hits the quota; the retry then loses connectivity
+
+    await expect(dispatchInstall()).rejects.toThrow(/Failed to fetch/);
+    expect(cacheNames.has('waves-customer-v11-shell-atomic')).toBe(true);
+    expect(await v11.match('/')).toBeTruthy();
+    expect(await v11.match('/assets/index-OLD.js')).toBeTruthy();
+  });
+
+  it('fetches the install shell under the shared refresh lock so an older installer cannot overwrite a newer commit', async () => {
+    // Codex #4335 P2: the installer's shell fetch is slow; the active worker
+    // (separate instance, same cache and lock) commits a newer build C
+    // meanwhile. The installer's non-supersedable commit of B must not
+    // then replace C. Holding the lock across the fetch orders them.
+    const cache = fakeCache();
+    const locks = fakeLocks();
+    const active = loadWorker(cache, { locks });
+    await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    const installer = loadWorker(cache, { locks });
+    let releaseInstall;
+    const installGate = new Promise(resolve => { releaseInstall = resolve; });
+    installer.setFetch(async (request) => {
+      if (request.url === '/') { await installGate; return fakeResponse(shellHtml(['/assets/index-BBB.js'])); }
+      return fakeResponse(`asset:${request.url}`);
+    });
+    active.setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-CCC.js']));
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const install = installer.dispatchInstall();
+    await tick();
+    const nav = await active.dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    await tick();
+    releaseInstall();
+    await install;
+    await nav.settled();
+
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-CCC.js']));
   });
 
   it('does not sweep buckets when the precache fails for a non-quota reason', async () => {

@@ -178,8 +178,11 @@ function claimBuilds(cache, request, fallback, claims) {
 // origin-wide for the same reason as the asset writes: an installing
 // worker's precache and the active worker's navigation refresh overlap.
 const shellRefreshChain = { promise: Promise.resolve() };
+function withShellRefresh(fn) {
+  return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, fn);
+}
 async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true } = {}) {
-  return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, () => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable));
+  return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable));
 }
 
 async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
@@ -277,9 +280,15 @@ function pruneStaleAssets(cache, retainedBuildIds) {
 }
 
 async function precacheOnce() {
-  const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
-  const shellResponse = await fetch(shellRequest);
-  await cacheCompleteShellResponse(shellResponse, navigationSeq, { supersedable: false });
+  // Fetch under the shell-refresh lock: an installing worker shares the
+  // cache with the active one but not its ordering state, so fetching
+  // only after any in-flight commit guarantees the shell it stores is at
+  // least as new as the one cached.
+  await withShellRefresh(async () => {
+    const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
+    const shellResponse = await fetch(shellRequest);
+    await replaceCompleteShell(shellResponse, navigationSeq, false);
+  });
 }
 
 function isQuotaError(err) {
@@ -293,10 +302,9 @@ async function precacheCompleteShell() {
     // The bloated v11 bucket may hold the origin's whole quota while this
     // v12 precache runs (stale buckets are normally swept at activate), so
     // the install would fail forever and the device stay on the slow
-    // worker. Free them now — the active worker still serves from the
-    // network — and retry once. Other failures propagate unchanged.
+    // worker. Reclaim space and retry once; other failures propagate.
     if (!isQuotaError(err)) throw err;
-    await sweepStaleCaches();
+    await reclaimStaleCacheSpace();
     await precacheOnce();
   }
 }
@@ -307,6 +315,27 @@ function isStaleCacheName(k) {
 async function sweepStaleCaches() {
   const keys = await caches.keys();
   await Promise.all(keys.filter(isStaleCacheName).map(k => caches.delete(k)));
+}
+
+// Free quota without taking the active worker's offline shell away: the
+// retry may still fail (connectivity), and the old worker then keeps
+// serving until a later install succeeds. Pre-prefix legacy buckets are
+// orphans and go entirely; an older app bucket keeps its shell and the
+// assets that shell references and loses everything else — the hundreds
+// of superseded builds that filled it.
+async function reclaimStaleCacheSpace() {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(isStaleCacheName).map(async k => {
+    if (!k.startsWith(APP_CACHE_PREFIX)) { await caches.delete(k); return; }
+    const old = await caches.open(k);
+    const shell = await old.match(OFFLINE_URL);
+    const keep = new Set(shell ? shellAssetUrls(await shell.text()) : []);
+    const requests = await old.keys();
+    await Promise.all(requests.map(async request => {
+      const pathname = new URL(request.url).pathname;
+      if (pathname.startsWith('/assets/') && !keep.has(pathname)) await old.delete(request);
+    }));
+  }));
 }
 
 self.addEventListener('install', event => {
