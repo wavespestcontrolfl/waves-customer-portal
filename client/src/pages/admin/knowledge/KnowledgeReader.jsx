@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ActionFeedback, Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
-import { adminFetch, errorMessage } from "./api";
+import { adminFetch } from "../../../utils/admin-fetch";
 
 function normalizeTags(tags) {
   if (Array.isArray(tags)) return tags;
@@ -40,7 +40,7 @@ export function ArticleViewer({ articleId }) {
       })
       .catch((requestError) => {
         if (active) {
-          setError(errorMessage(requestError, "Could not load this article."));
+          setError(requestError?.message || "Could not load this article.");
         }
       })
       .finally(() => {
@@ -128,7 +128,9 @@ export function HealthCheck() {
         if (active) setHealth(data);
       })
       .catch((requestError) => {
-        if (active) setError(errorMessage(requestError, "Could not run the health check."));
+        if (active) {
+          setError(requestError?.message || "Could not run the health check.");
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -206,4 +208,3 @@ export function HealthCheck() {
     </UiSurface>
   );
 }
-
