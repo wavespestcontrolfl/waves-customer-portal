@@ -469,12 +469,12 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     ['reserveSlot (services/slot-reservation.js)',
       read('services/slot-reservation.js'), 'async function reserveSlot(',
       'await acquireOccupancyLock(trx, date);',
-      'const committedClash = await findConflictingVisits({',
+      'const committedClash = ',
       "await trx('scheduled_services').insert({"],
     ['commitReservation (services/slot-reservation.js)',
       read('services/slot-reservation.js'), 'async function commitReservation(',
       'await acquireOccupancyLock(client, lockedDate);',
-      'const committedClash = await findConflictingVisits({',
+      'const committedClash = ',
       '.update(updates)'],
   ];
 
@@ -495,16 +495,29 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     const src = read('services/slot-reservation.js');
     for (const fn of ['async function reserveSlot(', 'async function commitReservation(']) {
       const startIdx = src.indexOf(fn);
-      const probeIdx = src.indexOf('const committedClash = await findConflictingVisits({', startIdx);
+      const probeIdx = src.indexOf('const committedClash = ', startIdx);
       expect(probeIdx).toBeGreaterThan(startIdx);
       expect(src.slice(probeIdx, probeIdx + 400)).toContain('includeHolds: false');
     }
     // commitReservation additionally excludes the hold row it is graduating.
     const commitProbeIdx = src.indexOf(
-      'const committedClash = await findConflictingVisits({',
+      'const committedClash = ',
       src.indexOf('async function commitReservation('),
     );
     expect(src.slice(commitProbeIdx, commitProbeIdx + 400)).toContain('excludeServiceIds: [scheduledServiceId]');
+  });
+
+  test.each([
+    ['async function reserveSlot(', 'await acquireOccupancyLock(trx, date);', "await trx('scheduled_services').insert({"],
+  ])('capacity certification stays under the occupancy lock before writes in %s', (startMarker, lockMarker, writeMarker) => {
+    const src = read('services/slot-reservation.js');
+    const start = src.indexOf(startMarker);
+    const lock = src.indexOf(lockMarker, start);
+    const proof = src.indexOf('const capacityFit = useCapacity ? await verifyArrivalCapacity(', lock);
+    const write = src.indexOf(writeMarker, lock);
+    expect(lock).toBeGreaterThan(start);
+    expect(proof).toBeGreaterThan(lock);
+    expect(write).toBeGreaterThan(proof);
   });
 
   test('every writer imports rung 1 from the shared module — no private key shapes', () => {
