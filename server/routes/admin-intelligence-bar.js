@@ -3046,6 +3046,18 @@ router.post('/confirm-action', async (req, res, next) => {
           || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
           execParams._verified_stops = livePreview.stops;
         }
+        // merge_customers / archive_customer: the fingerprint-verified
+        // preview's pins ride to the executor so it validates the APPROVED
+        // snapshot under its own locks — never a freshly sampled one.
+        if (action.tool_name === 'merge_customers' && livePreview?.winner_version && livePreview?.loser_version) {
+          execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };
+        }
+        if (action.tool_name === 'archive_customer' && livePreview?.newsletter_relink) {
+          execParams._approved_relink_plan = {
+            count: Number(livePreview.newsletter_relink.count || 0),
+            twin_ids: (livePreview.newsletter_relink.twins || []).map((t) => String(t.twin_id)).sort(),
+          };
+        }
         // Route optimizers (GH r14 P1): the verified preview's ordered
         // sequence IS the approved plan — hand the ordered ids to the
         // executor so it applies THAT order under the tech-day locks

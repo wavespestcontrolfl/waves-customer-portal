@@ -184,7 +184,7 @@ async function previewMergeCustomers(winnerId, loserId) {
   };
 }
 
-async function commitMergeCustomers(winnerId, loserId, actionContext) {
+async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVersions = null) {
   const { executeMerge } = require('../customer-dedupe');
   // Before executeMerge: re-read both customer versions and re-run
   // eligibility, then do it again immediately before the write. The
@@ -208,7 +208,10 @@ async function commitMergeCustomers(winnerId, loserId, actionContext) {
       evidence: { via: 'intelligence_bar' },
       // Validated by the executor UNDER its row locks — the preflights above
       // narrow the window, this closes it.
-      expectedVersions: { winner: before.winner.version, loser: before.loser.version },
+      // The APPROVED card's versions (route pin from the fingerprint-verified
+      // preview) — the preflight sample above is only the fallback for a
+      // direct call with no card, never a substitute for the approved pin.
+      expectedVersions: approvedVersions || { winner: before.winner.version, loser: before.loser.version },
     });
     logger.info(`[intelligence-bar] merge_customers committed loser=${loserId} -> winner=${winnerId} (journal ${result.journalId})`);
     return {
@@ -238,7 +241,9 @@ async function mergeCustomers(input, actionContext = {}) {
 
   const confirmed = input.confirmed === true || actionContext.confirmed === true;
   if (!confirmed) return previewMergeCustomers(winnerId, loserId);
-  return commitMergeCustomers(winnerId, loserId, actionContext);
+  const approved = input._approved_versions && input._approved_versions.winner && input._approved_versions.loser
+    ? { winner: String(input._approved_versions.winner), loser: String(input._approved_versions.loser) } : null;
+  return commitMergeCustomers(winnerId, loserId, actionContext, approved);
 }
 
 // ─── archive_customer ───────────────────────────────────────────────────
@@ -288,12 +293,7 @@ async function resolveTwinNames(twins) {
 // about; email_key never rides on the disclosed side, so it plays no part
 // in the comparison.
 function samePlan(a, b) {
-  if (a.relinked_count !== b.relinked_count) return false;
-  const idsA = new Set(a.twins.map((t) => t.twin_id));
-  const idsB = new Set(b.twins.map((t) => t.twin_id));
-  if (idsA.size !== idsB.size) return false;
-  for (const id of idsA) if (!idsB.has(id)) return false;
-  return true;
+  return a.count === b.count && a.twin_ids.length === b.twin_ids.length && a.twin_ids.every((id, i) => id === b.twin_ids[i]);
 }
 
 async function previewArchiveCustomer(customer, reason) {
@@ -320,8 +320,13 @@ async function previewArchiveCustomer(customer, reason) {
   };
 }
 
-async function commitArchiveCustomer(customer, reason, actionContext) {
-  const { relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer } = require('../newsletter-subscribers');
+// The card's pinned relink plan shape: count + sorted twin ids.
+function planShape(plan) {
+  return { count: Number(plan?.relinked_count ?? plan?.count ?? 0), twin_ids: (plan?.twins || []).map((t) => String(t.twin_id)).sort() };
+}
+
+async function commitArchiveCustomer(customer, reason, actionContext, approvedPlan = null) {
+  const { relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer, acquireRelinkLock } = require('../newsletter-subscribers');
   const { recordAuditEvent } = require('../audit-log');
   try {
     // Fresh, unlocked plan at the START of the confirmed call — recomputed
@@ -341,8 +346,13 @@ async function commitArchiveCustomer(customer, reason, actionContext) {
         e.previewChanged = true;
         throw e;
       }
+      // Same advisory lock the relink UPDATE takes (reentrant in this
+      // transaction): the plan is read and the relink runs under ONE lock,
+      // so no subscriber or twin can change between the check and the write.
+      await acquireRelinkLock(trx);
       const lockedPlan = await planRelinkFromArchivedCustomer(trx, customer.id);
-      if (!samePlan(freshPlan, lockedPlan)) {
+      const reference = approvedPlan || planShape(freshPlan);
+      if (!samePlan(reference, planShape(lockedPlan))) {
         const e = new Error('The newsletter relink plan changed after the card was shown — ask again for a fresh confirmation card.');
         e.previewChanged = true;
         throw e;
@@ -380,7 +390,9 @@ async function archiveCustomer(input, actionContext = {}) {
 
   const confirmed = input.confirmed === true || actionContext.confirmed === true;
   if (!confirmed) return previewArchiveCustomer(customer, reason);
-  return commitArchiveCustomer(customer, reason, actionContext);
+  const approvedPlan = input._approved_relink_plan && Array.isArray(input._approved_relink_plan.twin_ids)
+    ? { count: Number(input._approved_relink_plan.count || 0), twin_ids: input._approved_relink_plan.twin_ids.map(String).sort() } : null;
+  return commitArchiveCustomer(customer, reason, actionContext, approvedPlan);
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────

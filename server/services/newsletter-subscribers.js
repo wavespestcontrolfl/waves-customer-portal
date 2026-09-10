@@ -547,4 +547,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+module.exports = { acquireRelinkLock, subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

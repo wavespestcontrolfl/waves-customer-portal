@@ -52,9 +52,11 @@ jest.mock('../services/customer-dedupe', () => ({
 
 const mockRelink = jest.fn();
 const mockPlanRelink = jest.fn();
+const mockAcquireRelinkLock = jest.fn(async () => undefined);
 jest.mock('../services/newsletter-subscribers', () => ({
   relinkSubscribersFromArchivedCustomer: (...args) => mockRelink(...args),
   planRelinkFromArchivedCustomer: (...args) => mockPlanRelink(...args),
+  acquireRelinkLock: (...args) => mockAcquireRelinkLock(...args),
 }));
 
 const mockRecordAuditEvent = jest.fn();
@@ -233,6 +235,25 @@ describe('merge_customers', () => {
     expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 
+  test('confirmed call validates the APPROVED card versions (route pin), not freshly sampled ones (pre-push Codex P1)', async () => {
+    db.__qb.select.mockResolvedValue([winnerRow, loserRow]);
+    mockExecuteMerge.mockResolvedValueOnce({ journalId: 'journal-2', repointed: {}, backfills: {} });
+    await executeCustomerLifecycleTool(
+      'merge_customers',
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: 'approved-w', loser: 'approved-l' } },
+      { confirmed: true, technicianId: 'tech-42' },
+    );
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ expectedVersions: { winner: 'approved-w', loser: 'approved-l' } }));
+    // the executor's own under-lock refusal surfaces as preview_changed
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: the loser customer changed since this merge was approved — review a fresh proposal'), { previewChanged: true }));
+    const drift = await executeCustomerLifecycleTool(
+      'merge_customers',
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: 'approved-w', loser: 'approved-l' } },
+      { confirmed: true, technicianId: 'tech-42' },
+    );
+    expect(drift).toMatchObject({ preview_changed: true });
+  });
+
   test('confirmed call relays an executeMerge refusal without a partial write', async () => {
     db.__qb.select.mockResolvedValue([winnerRow, loserRow]);
     mockExecuteMerge.mockRejectedValueOnce(new Error('executeMerge: both customers have Stripe profiles — resolve in Stripe first'));
@@ -329,6 +350,11 @@ describe('archive_customer', () => {
     expect(result).toMatchObject({ success: true, customer_id: CUSTOMER_ID, newsletter_relinked: 2 });
     expect(mockPlanRelink).toHaveBeenNthCalledWith(1, db, CUSTOMER_ID);
     expect(mockPlanRelink).toHaveBeenNthCalledWith(2, db, CUSTOMER_ID); // trx === db in this mock
+    // The locked plan is read under the SAME advisory lock the relink takes
+    // (pre-push Codex P1): lock first, then plan, then relink.
+    expect(mockAcquireRelinkLock).toHaveBeenCalledWith(db);
+    expect(mockAcquireRelinkLock.mock.invocationCallOrder[0]).toBeLessThan(mockPlanRelink.mock.invocationCallOrder[1]);
+    expect(mockPlanRelink.mock.invocationCallOrder[1]).toBeLessThan(mockRelink.mock.invocationCallOrder[0]);
     expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ deleted_at: expect.any(Date) }));
     expect(mockRelink).toHaveBeenCalledWith(db, CUSTOMER_ID);
     expect(mockRecordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -340,6 +366,26 @@ describe('archive_customer', () => {
       critical: true,
       metadata: expect.objectContaining({ newsletterRelinked: 2, reason: 'duplicate stub', source: 'intelligence_bar' }),
     }));
+  });
+
+  test('confirmed call compares the locked plan against the APPROVED card plan (route pin) and refuses drift', async () => {
+    db.__qb.first
+      .mockResolvedValueOnce(customerRow)
+      .mockResolvedValueOnce({ id: CUSTOMER_ID, deleted_at: null })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
+    mockPlanRelink
+      .mockResolvedValueOnce({ relinked_count: 1, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }) // fresh sample (ignored when a pin exists)
+      .mockResolvedValueOnce({ relinked_count: 1, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }); // locked
+    const result = await executeCustomerLifecycleTool(
+      'archive_customer',
+      { customer_id: CUSTOMER_ID, confirmed: true, _approved_relink_plan: { count: 0, twin_ids: [] } },
+      { confirmed: true, technicianId: 'tech-7' },
+    );
+    expect(result).toMatchObject({ preview_changed: true });
+    expect(result.error).toMatch(/relink plan changed/);
+    expect(mockRelink).not.toHaveBeenCalled();
+    expect(db.__qb.update).not.toHaveBeenCalled();
   });
 
   test('confirmed call refuses with preview_changed when the row was archived since the card was shown', async () => {
