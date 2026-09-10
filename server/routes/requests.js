@@ -48,6 +48,15 @@ async function committedScopeFor(serviceRequestId) {
   }
 }
 
+// The ONE definition of "this cancellation is done": the processor reported
+// ok and either churned the account or wound down the selected families.
+// Every writer that depends on completion (portal outcome, case promotion,
+// ticket close) reads this — a churn-only reading in one place let a clean
+// scoped retry close its ticket while its case stayed 'open' (codex P1).
+function cancellationCompleted(result) {
+  return !!(result && result.ok && (result.churned || result.scopedWoundDown));
+}
+
 function cancellationOutcome(result, confirmation, effectiveAt, confirmationChannels = []) {
   let effectiveDate = null;
   try {
@@ -60,7 +69,7 @@ function cancellationOutcome(result, confirmation, effectiveAt, confirmationChan
     // Scoped cancels never churn — "processed" means the selected families'
     // visits are pulled AND the remaining plan repriced (codex r1 P2: the
     // portal showed the manual-closeout copy while the scoped SMS said done).
-    processed: !!(result && result.ok && (result.churned || result.scopedWoundDown)),
+    processed: cancellationCompleted(result),
     // The server's ACTUAL churn state, independent of `processed` (codex GH
     // #3671 r28 P1): the churn write runs FIRST, so a later best-effort
     // step failing (an in-progress visit needing manual handling) returns
@@ -183,8 +192,8 @@ async function recordCancellationCase({ customerId, requestId, value = {}, famil
 // repairable row the dedupe/inactive retry paths and the office review need.
 // Best-effort: a lost close only costs a stale digest line, never the cancel.
 // Guarded on status='new' so a staff transition that already happened wins.
-async function closeProcessedCancellation(requestId, result, processed) {
-  if (!processed || !result || !result.ok || (result.errors && result.errors.length)) return false;
+async function closeProcessedCancellation(requestId, result) {
+  if (!cancellationCompleted(result) || (result.errors && result.errors.length)) return false;
   try {
     const now = new Date();
     const closed = await db('service_requests').where({ id: requestId, status: 'new' })
@@ -361,10 +370,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           // repaired-from-nothing case still reaches the incident lane.
           resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
           snapshot: { written_on_retry: true, degraded: true },
-          processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
+          processed: cancellationCompleted(retryOutcome),
         });
         // A retry that completed a partial first run closes the ticket too.
-        if (await closeProcessedCancellation(dupe.id, retryOutcome, !!(retryOutcome && (retryOutcome.churned || retryOutcome.scopedWoundDown)))) {
+        if (await closeProcessedCancellation(dupe.id, retryOutcome)) {
           dupe.status = 'resolved';
         }
       }
@@ -454,9 +463,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         reasonText: priorCancellation.description || null,
         resolution: situationalHardStop(value.reasonCode, { adverseEvent: value.adverseEvent === true, safetyComplaint: value.safetyComplaint === true }),
         snapshot: { written_on_retry: true, degraded: true },
-        processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
+        processed: cancellationCompleted(retryOutcome),
       });
-      if (await closeProcessedCancellation(priorCancellation.id, retryOutcome, !!(retryOutcome && (retryOutcome.churned || retryOutcome.scopedWoundDown)))) {
+      if (await closeProcessedCancellation(priorCancellation.id, retryOutcome)) {
         priorCancellation.status = 'resolved';
       }
       return res.status(200).json({
@@ -663,9 +672,8 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       }
       // Scoped: "processed" means the families' visits are pulled AND the
       // remaining plan repriced — not a churn.
-      cancellationProcessed = !!(cancellationResult && cancellationResult.ok
-        && (cancellationResult.churned || cancellationResult.scopedWoundDown));
-      if (await closeProcessedCancellation(request.id, cancellationResult, cancellationProcessed)) {
+      cancellationProcessed = cancellationCompleted(cancellationResult);
+      if (await closeProcessedCancellation(request.id, cancellationResult)) {
         // The response and the confirmations read this row — reflect the close.
         request.status = 'resolved';
       }
