@@ -327,6 +327,15 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         // now calls (markSprinklerSettingsMoved): recorded like an update.
         insert(row) { this._insert = row; return this; },
         onConflict() { return this; },
+        // The flip drops the promoted house's per-property appointment
+        // toggles (app property scope, PR 3): recorded like an update.
+        async del() {
+          const preds = Object.assign({}, ...this._wheres.filter((w) => typeof w === 'object'));
+          const before = (rows[table] || []).length;
+          rows[table] = (rows[table] || []).filter((r) => !Object.entries(preds).every(([k, v]) => r[k] === v));
+          updates.push({ table, del: true, wheres: this._wheres });
+          return before - rows[table].length;
+        },
         async merge(patch) {
           rows[table] = (rows[table] || []).concat([{ ...this._insert, ...patch }]);
           updates.push({ table, upsert: true, patch });
@@ -393,6 +402,9 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
     expect(pin.whereNotIn).toEqual(['status', ['completed', 'cancelled', 'skipped', 'rescheduled', 'no_show']]);
     // 2/3. demote before promote (one_primary partial unique)
     const propUpdates = u.filter((x) => x.table === 'customer_properties');
+    // The promoted house's per-property toggles are dropped (the primary
+    // never has a row — app property scope, PR 3).
+    expect(u.find((x) => x.table === 'property_notification_prefs' && x.del)).toMatchObject({ wheres: [{ property_id: neu.id }] });
     // The demote deliberately does NOT write occupancy — the reclassification
     // rides the sibling occupancy_change proposal's compare-and-swap — and
     // every label/occupancy suggestion lands via its own predicate-fenced
