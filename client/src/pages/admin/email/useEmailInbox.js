@@ -301,6 +301,17 @@ export default function useEmailInbox(active, clearDraftResult) {
     } finally { finishAction(); }
   };
 
+  // Re-read one row after a partial-success response; a failed refresh keeps
+  // the current row rather than replacing the server's error message.
+  const refreshEmail = async (emailId) => {
+    try {
+      const r = await adminFetch(`/api/admin/email/message/${encodeURIComponent(emailId)}`);
+      if (!r.ok) return;
+      const email = await r.json();
+      if (email?.id === emailId) patchEmail(emailId, email);
+    } catch { /* keep the stale row; the error feedback still explains the outcome */ }
+  };
+
   const handleReclassify = async (emailId) => {
     if (!beginAction(`reclassify:${emailId}`)) return;
     try {
@@ -308,14 +319,23 @@ export default function useEmailInbox(active, clearDraftResult) {
         `/api/admin/email/message/${emailId}/reclassify`,
         { method: "POST" },
       );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      patchEmail(emailId, { classification: data.classification?.category, extracted_data: data.classification });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        // The endpoint's non-2xx payloads carry operator instructions (restore
+        // from Gmail Trash, retry a failed follow-up), and some 502s fire after
+        // the new category was already persisted — surface the server's own
+        // message and re-read the row so the list shows the real category.
+        await refreshEmail(emailId);
+        setActionFeedback({ error: true, message: typeof data?.error === "string" && data.error.trim() ? data.error : "Could not reclassify the email. Try again." });
+        return;
+      }
+      patchEmail(emailId, { classification: data?.classification?.category, extracted_data: data?.classification });
       setActionFeedback({ message: "Email reclassified." });
     } catch {
       setActionFeedback({ error: true, message: "Could not reclassify the email. Try again." });
     } finally { finishAction(); }
   };
+
 
   const handleBlock = async () => {
     const value = blockInput.trim().toLowerCase().replace(/^@/, "");
@@ -360,9 +380,14 @@ export default function useEmailInbox(active, clearDraftResult) {
     } finally { finishAction(); }
   };
 
+  // Only the latest download may publish an error: a retry or a second
+  // attachment supersedes an older pending request, whose late rejection
+  // would otherwise overwrite a successful newer download's blank feedback.
+  const attachmentSequenceRef = useRef(0);
   const handleDownloadAttachment = async (event, msg, att) => {
     event.preventDefault();
     clearFeedback("attachment");
+    const request = ++attachmentSequenceRef.current;
     try {
       const r = await adminFetch(
         `/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`,
@@ -381,6 +406,7 @@ export default function useEmailInbox(active, clearDraftResult) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch {
+      if (request !== attachmentSequenceRef.current) return;
       setActionFeedback({ error: true, message: "Could not download the attachment. Try again.", source: "attachment" });
     }
   };
