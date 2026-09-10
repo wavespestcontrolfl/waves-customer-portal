@@ -279,6 +279,25 @@ describe('recap interruption recovery', () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it('does not report an unverifiable draft as saved when the visit record failed to load', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const close = vi.fn();
+    const request = vi.fn(async (path) => (path.endsWith('/context')
+      ? { ...structuredClone(context), existingRecordLoadFailed: true }
+      : { ok: true }));
+    render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={close} />);
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Notes with no verifiable identity.' } });
+    await screen.findByText(/Draft cannot be saved on this device/);
+    expect(screen.queryByText(/Draft saved on this device/)).toBeNull();
+    expect(localStorage.getItem(completionDraftKey('visit-a', 'recap_local_local'))).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Close', exact: true }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    fireEvent.change(noteInput(), { target: { value: '' } });
+    await waitFor(() => expect(screen.queryByText(/Draft cannot be saved on this device/)).toBeNull());
+  });
+
   it('restores the selected visit draft after close and reopen, including actual rates', async () => {
     const request = requestFor();
     const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);

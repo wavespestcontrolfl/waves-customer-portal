@@ -3,6 +3,7 @@ import { completionDraftKey } from '../lib/completion-drafts';
 import { getAdminUser } from '../lib/adminAuth';
 
 const STORAGE_ERROR = 'Draft could not be saved on this device. Keep this visit open until completion succeeds.';
+const UNVERIFIABLE_ERROR = 'Draft cannot be saved on this device because the visit record could not be fully loaded. Keep this visit open until completion succeeds.';
 const RESTORE_ERROR = 'Could not verify this draft against the current visit. Close and reopen to refresh, or discard the draft to use the current record.';
 
 // Ownership identity of the live visit as the recap context reports it.
@@ -120,6 +121,16 @@ export default function useServiceRecapDraft({ serviceId, ctx, loading, loadErro
     if (!ready || complete.current) return;
     if (baseline.current === null) { baseline.current = { serialized, sourceIdentity }; return; }
     if (candidate) return;
+    // A context that loaded with a partial failure has no verifiable
+    // identity; a draft written now could never pass the compatibility
+    // check on reopen, so it is not written and the technician is warned
+    // instead of told it was saved (codex P2 r6).
+    if (baseline.current.sourceIdentity === null) {
+      try { localStorage.removeItem(key); } catch { /* nothing to remove */ }
+      setSaved(false);
+      setStorageError(serialized === baseline.current.serialized ? '' : UNVERIFIABLE_ERROR);
+      return;
+    }
     try {
       if (serialized === baseline.current.serialized) localStorage.removeItem(key);
       else localStorage.setItem(key, JSON.stringify({ ...JSON.parse(serialized), serviceId, sourceIdentity: baseline.current.sourceIdentity, savedAt: Date.now() }));
