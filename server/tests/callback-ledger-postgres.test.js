@@ -219,18 +219,37 @@ run('callback ledger on PostgreSQL', () => {
     expect(await ledger.refreshFulfillment(trx, other.call_log_id)).toMatchObject({ checked: 0 });
   });
 
-  test('an edited callback card is a new promise: only evidence after the edit closes it', async () => {
+  test('an edited callback card is a new promise: only evidence after the edit closes it, even once claimed', async () => {
     const ledger = require('../services/call-commitments');
     const row = await seed({ source: 'ai', last_seen_generation: 1 });
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
-    await returnedCall(new Date(now.getTime() - 60000), row.call_log_id);
+    await returnedCall(new Date(now.getTime() - 60000));
     await tick();
     const edited = await cards.actOnCallback(trx, row.id, { action: 'edit', actorId: staff.id, expectedAt: row.updated_at,
       description: 'Call about the revised quote', now: new Date() });
     expect(edited.human_state).toBe('edited');
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
-    await returnedCall(await afterReview(row.id), row.call_log_id);
+    // A later claim overwrites reviewed_at; the edit boundary survives in the audit trail.
+    const claimed = await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: edited.updated_at, now: new Date() });
+    expect(claimed.human_state).toBe('edited');
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+    const editedAt = (await trx('audit_log').where({ resource_id: row.id, action: 'callback_edit' }).first()).created_at;
+    await returnedCall(new Date(new Date(editedAt).getTime() + 1));
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+  });
+
+  test('a human-recorded callback on an old call ignores evidence from before it was typed', async () => {
+    const ledger = require('../services/call-commitments');
+    const source = await seed();
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await returnedCall(new Date(now.getTime() - 60000));
+    const added = await ledger.addHumanCommitment(trx, source.call_log_id, {
+      party: 'waves', kind: 'callback', description: 'Call back about the gate code', reviewedBy: staff.id,
+    });
+    await trx('call_commitments').where({ id: source.id }).del();
+    expect(await ledger.refreshFulfillment(trx, source.call_log_id)).toMatchObject({ fulfilled: 0 });
+    await returnedCall(new Date(new Date(added.created_at).getTime() + 1));
+    expect(await ledger.refreshFulfillment(trx, source.call_log_id)).toMatchObject({ fulfilled: 1 });
   });
 
   test('a reopen that lands while proof is being looked up keeps the callback open', async () => {

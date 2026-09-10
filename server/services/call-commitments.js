@@ -1313,18 +1313,19 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
-// When a callback card's obligation was last renewed: an edit stamps a new
-// promise at reviewed_at; a reopen is the card's audited callback_reopen
-// event (the row itself carries no reopen mark). Null for anything else.
+// When a callback card's obligation was last (re)stated: a human-recorded
+// promise exists from the moment it was typed, and the card's audited
+// callback_edit / callback_reopen events restate it (the row's reviewed_at
+// is overwritten by every later action, so it cannot carry that history).
+// Null for anything that is not a reviewed callback card.
 async function obligationRenewedAt(conn, commitment) {
   if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
-  const edited = commitment.human_state === 'edited' && commitment.reviewed_at ? new Date(commitment.reviewed_at) : null;
-  const reopen = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id, action: 'callback_reopen' })
-    .orderBy('created_at', 'desc').first('created_at');
-  const reopened = reopen?.created_at ? new Date(reopen.created_at) : null;
-  if (edited && reopened) return edited.getTime() > reopened.getTime() ? edited : reopened;
-  return edited || reopened;
+  const restated = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['callback_edit', 'callback_reopen']).orderBy('created_at', 'desc').first('created_at');
+  const times = [commitment.source === 'human' ? commitment.created_at : null, restated?.created_at]
+    .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)) : null;
 }
 
 // The rows fulfillment refresh may still write: no human verdict, or a
