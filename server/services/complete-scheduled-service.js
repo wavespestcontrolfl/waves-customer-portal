@@ -10937,7 +10937,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // retryable delivery obligation — the same release-for-resume 503
             // as a rejected text; the tech's retry re-attempts the claim.
             const claimMessage = String(claimErr?.message || '');
-            const nothingLeftToDeliver = /Cannot send a (paid|prepaid|voided) invoice|Invoice not found|Invoice is not sendable/i.test(claimMessage);
+            const nothingLeftToDeliver = /Cannot send a (paid|prepaid|voided) invoice|Cannot send an invoice while payment is processing|Invoice not found|Invoice is not sendable/i.test(claimMessage);
             if (!nothingLeftToDeliver) {
               logger.warn(`[dispatch] invoice ${invoice.id} delivery claim unavailable (${claimMessage}) — closeout saved, delivery left retryable`);
               return exitForCompletionSmsResume(new Error(`Invoice ${invoice.id} delivery claim unavailable: ${claimMessage}`));
