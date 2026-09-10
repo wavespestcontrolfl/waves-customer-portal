@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({
   serviceGroupId: jest.fn(() => 222),
@@ -227,8 +228,12 @@ describe('transactional email provider retry classification', () => {
     // The retry's handoff mock receives no transaction; the marker is written before it on the root handle.
     const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-8' });
     expect((await retry.retryOne(stored)).sent).toBe(true);
+    // The reclaimable pre-provider marker precedes the held handoff; the started marker is written at the Mail Send boundary, before the request.
+    const pending = chain.update.mock.calls.findIndex(([data]) => data.error_message === retry.HANDOFF_PENDING);
     const marker = chain.update.mock.calls.findIndex(([data]) => data.error_message === retry.HANDOFF_STARTED);
-    expect(marker).toBeGreaterThanOrEqual(0);
+    expect(pending).toBeGreaterThanOrEqual(0);
+    expect(marker).toBeGreaterThan(pending);
+    expect(chain.where).toHaveBeenCalledWith(expect.objectContaining({ error_message: retry.HANDOFF_PENDING, status: 'queued' }));
     expect(chain.update.mock.invocationCallOrder[marker]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     // Recovery: a started handoff settles as uncertain; other stale claims requeue.
     chain.update.mockClear();

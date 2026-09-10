@@ -1,4 +1,5 @@
 /** Canonical completion writes against a migrated, private nonproduction database. */
+jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../models/db', () => {
   const db = (table, ...args) => {
     const query = mockPg(table, ...args);
