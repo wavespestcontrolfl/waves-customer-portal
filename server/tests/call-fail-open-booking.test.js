@@ -730,35 +730,51 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
   // everything it incidentally backstopped must be satisfied another way.
   const AV_OK = AV_CLEAN;
 
-  test('unknown relationship demotes caller_not_authorized and books (advisory card kept)', () => {
+  // 2026-09-08 (call-agent audit): the flag no longer EXISTS for an unknown
+  // relationship — isExplicitlyNonOwner gates derivation, and a model-
+  // emitted copy is dropped before the merge — so nothing is demoted and no
+  // advisory "confirm the account holder" card files for an ordinary
+  // homeowner. What used to be backstopped by the demotion's guards is the
+  // central address-trust gate's job, pinned below.
+  test('unknown relationship never raises caller_not_authorized (no block, no advisory)', () => {
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     const r = canAutoRoute(ex, { addressValidation: AV_OK });
     expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.flags).not.toContain('caller_not_authorized');
+    expect(r.failedOpenFlags || []).not.toContain('caller_not_authorized');
   });
 
-  test('absent caller block counts as unknown and demotes too', () => {
+  test('absent caller block counts as unknown too', () => {
     const r = canAutoRoute(extraction(['caller_not_authorized']), { addressValidation: AV_OK });
     expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.flags).not.toContain('caller_not_authorized');
   });
 
-  test('NO positive AV verdict → the authorization block stays (codex round-3 P1)', () => {
+  test('spouse / partner is owner-equivalent', () => {
+    const ex = extraction(['caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'spouse_partner', on_site_authorization: false };
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
+    expect(r.allowed).toBe(true);
+    expect(r.flags).not.toContain('caller_not_authorized');
+  });
+
+  test('NO positive AV verdict → the CENTRAL address gate holds the call (codex round-3 P1)', () => {
     // With AV disabled/not_attempted, computeDeterministicTriageFlags raises
-    // no address flag for a populated address — caller_not_authorized was the
-    // only thing standing between an unvalidated address and a dispatch.
+    // no address flag for a populated address — the address-trust gate, not
+    // an incidental authorization flag, is what parks the dispatch.
     for (const av of [undefined, { status: 'not_attempted' }, { status: 'api_unavailable' },
       { status: 'validated_accept', inServiceArea: false }, { status: 'confirm_needed', inServiceArea: true }]) {
       const ex = extraction(['caller_not_authorized']);
       ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
       const r = canAutoRoute(ex, av ? { addressValidation: av } : {});
       expect(r.allowed).toBe(false);
-      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+      expect(r.appointmentBlockingFlags || []).not.toContain('caller_not_authorized');
+      expect(['address_not_validated', 'triage_flags']).toContain(r.reason);
     }
   });
 
-  test('a CORRECTED in-area verdict also satisfies the demotion', () => {
+  test('a CORRECTED in-area verdict also satisfies the address gate', () => {
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     const r = canAutoRoute(ex, { addressValidation: { status: 'corrected', inServiceArea: true } });
@@ -775,20 +791,16 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     }
   });
 
-  test('the full live-miss shape still parks — BOTH blocks stand (codex rounds 2-4)', () => {
+  test('the full live-miss shape still parks on the ADDRESS block (codex rounds 2-4)', () => {
     // The 2026-07-31 call carried both flags against an AV verdict of
-    // missing_component. After the review rounds neither is lifted:
-    // address_unverified means Google could not verify the premise, and the
-    // authorization demotion itself now requires a POSITIVELY validated
-    // address — which this call does not have. So the call reaches the
-    // office, which is the correct outcome for an unverifiable address.
+    // missing_component. address_unverified means Google could not verify
+    // the premise, so the call reaches the office — on the address alone.
     const ex = extraction(['no_sms_consent_captured', 'caller_not_authorized', 'address_unverified']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     const r = canAutoRoute(ex, { addressValidation: AV_UNVERIFIABLE });
     expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toEqual(
-      expect.arrayContaining(['address_unverified', 'caller_not_authorized'])
-    );
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+    expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
     // The SMS-only flag never blocked and still doesn't.
     expect(r.appointmentBlockingFlags).not.toContain('no_sms_consent_captured');
   });
@@ -798,24 +810,25 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     const r = canAutoRoute(ex, { addressValidation: AV_OK });
     expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.failedOpenFlags || []).not.toContain('caller_not_authorized');
   });
 
-  test('OFF-HOUR confirmed start keeps the relationship demotion blocked (windows start on the hour)', () => {
+  test('OFF-HOUR confirmed start still parks an unknown-relationship call (windows start on the hour)', () => {
     // The booking path copies confirmed_start_at's wall clock into
-    // window_start unchanged, so demoting a :30 slot would auto-create a
-    // prohibited off-hour start (AGENTS.md owner rule). It parks instead.
+    // window_start unchanged, so a :30 slot must never auto-create a
+    // prohibited off-hour start (AGENTS.md owner rule). The central hour
+    // gate parks it — no authorization flag is involved any more.
     for (const off of ['2026-07-11T09:30:00-04:00', '2026-07-11T09:00:30-04:00']) {
       const ex = extraction(['caller_not_authorized']);
       ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
       ex.scheduling.confirmed_start_at = off;
       const r = canAutoRoute(ex, { addressValidation: AV_OK });
       expect(r.allowed).toBe(false);
-      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+      expect(r.reason).toBe('off_hour_start');
     }
   });
 
-  test('a foreign offset that lands off-hour in ET keeps the block (wall clock, not raw minutes)', () => {
+  test('a foreign offset that lands off-hour in ET still parks (wall clock, not raw minutes)', () => {
     // "+05:30" carries raw :00 minutes but books a :30 ET wall time — the
     // wall clock is what the booking writes.
     const ex = extraction(['caller_not_authorized']);
@@ -823,7 +836,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     ex.scheduling.confirmed_start_at = '2026-07-11T19:00:00+05:30';
     const r = canAutoRoute(ex, { addressValidation: AV_OK });
     expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    expect(r.reason).toBe('off_hour_start');
   });
 
   test('REGRESSION: an unverifiable AV verdict is NEVER demoted, in any shape (codex round-2 P1)', () => {
@@ -940,18 +953,25 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     expect(r.reason).toBe('off_hour_start');
   });
 
-  test('a demoted flag still rides a scheduling-blocked return so its advisory card files (codex P2)', () => {
-    // Guarded on confirmedWithStart, the demotion no longer runs for an
-    // unconfirmed call — the flag stays in appointmentBlockingFlags and the
-    // card files from there. Belt-and-braces: the scheduling returns now
-    // carry failedOpenFlags too, matching low_confidence / do_not_contact.
+  test('an unconfirmed unknown-relationship call files NO authorization card (2026-09-08)', () => {
+    // Before the audit fix this shape filed a blocking "confirm the account
+    // holder" card on nearly every ordinary call (162 open in the backlog).
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     ex.scheduling = { status: 'tentative' };
     const r = canAutoRoute(ex, {});
     expect(r.allowed).toBe(false);
     const surfaced = [...(r.appointmentBlockingFlags || []), ...(r.failedOpenFlags || [])];
-    expect(surfaced).toContain('caller_not_authorized');
+    expect(surfaced).not.toContain('caller_not_authorized');
+  });
+
+  test('an EXPLICIT third party without authorization still files the card when unconfirmed', () => {
+    const ex = extraction(['caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'tenant', on_site_authorization: false };
+    ex.scheduling = { status: 'tentative' };
+    const r = canAutoRoute(ex, {});
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('coarse AV granularity (ROUTE) keeps the address hard block', () => {

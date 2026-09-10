@@ -31,7 +31,7 @@
 //   template body.
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Badge, Button, Card, Switch, cn } from "../../components/ui";
+import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Badge, Button, Card, Switch, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -1128,29 +1128,22 @@ function AiDraftModal({ onClose, onDraft }) {
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40"
-      onClick={onClose}
-    >
-      {" "}
-      <div
-        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg p-5 space-y-3"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {" "}
-        <div className="flex items-center justify-between">
+    <Dialog open onClose={onClose} layer={140}>
+        <DialogHeader className="flex items-center justify-between">
           {" "}
-          <h3 className="text-16 font-medium text-zinc-900">
+          <DialogTitle>
             Draft step with AI
-          </h3>{" "}
+          </DialogTitle>{" "}
           <button
             type="button"
             onClick={onClose}
-            className="text-ink-tertiary hover:text-zinc-900 text-14"
+            aria-label="Close"
+            className="flex h-11 w-11 shrink-0 items-center justify-center text-ink-tertiary hover:text-zinc-900 text-18"
           >
             ×
           </button>{" "}
-        </div>{" "}
+        </DialogHeader>
+        <DialogBody className="flex-1 space-y-3">
         <div>
           {" "}
           <label className="block text-11 uppercase tracking-label text-ink-secondary mb-1">
@@ -1185,8 +1178,10 @@ function AiDraftModal({ onClose, onDraft }) {
           />
           Include a call to action at the end
         </label>
-        {err && <div className="text-12 text-alert-fg">{err}</div>}
-        <div className="flex items-center justify-end gap-2 pt-2 border-t border-hairline border-zinc-200">
+
+        </DialogBody>
+        <DialogFooter className="flex-wrap">
+        {err && <div role="alert" className="basis-full text-12 text-alert-fg">{err}</div>}
           {" "}
           <Button onClick={onClose} variant="secondary" disabled={loading}>
             Cancel
@@ -1194,8 +1189,7 @@ function AiDraftModal({ onClose, onDraft }) {
           <Button onClick={run} disabled={loading}>
             {loading ? "Drafting…" : "Draft it"}
           </Button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>
+        </DialogFooter>
+    </Dialog>
   );
 }
