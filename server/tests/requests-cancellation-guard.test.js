@@ -344,6 +344,42 @@ describe('POST /api/requests cancellation guard', () => {
     expect(partial.resolved_at).toBeUndefined();
   }));
 
+  test('a clean SCOPED wind-down completed on retry closes the original row too — dedupe and inactive-account paths', () => withServer(async (baseUrl) => {
+    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+
+    // Short-window dedupe: the original row is 10s old, its committed scope recoverable.
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    let res = await postCancellation(baseUrl);
+    let body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.request.status).toBe('resolved');
+    expect(mockState.service_requests[0].status).toBe('resolved');
+    expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+
+    // Inactive-account repair: the row is hours old and the account is churned.
+    mockAuthInactive = true;
+    mockState.service_requests = [{
+      id: 'req-portal-2', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-2', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.request.status).toBe('resolved');
+    expect(mockState.service_requests[0].status).toBe('resolved');
+    expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+  }));
+
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {
     mockState.customers = [{ id: 'cust-1', monthly_rate: '89.00', waveguard_tier: 'Gold', billing_mode: null, next_charge_date: null }];
     const res = await postCancellation(baseUrl);

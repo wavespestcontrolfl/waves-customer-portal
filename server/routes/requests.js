@@ -364,7 +364,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
         });
         // A retry that completed a partial first run closes the ticket too.
-        if (await closeProcessedCancellation(dupe.id, retryOutcome, !!(retryOutcome && retryOutcome.churned))) {
+        if (await closeProcessedCancellation(dupe.id, retryOutcome, !!(retryOutcome && (retryOutcome.churned || retryOutcome.scopedWoundDown)))) {
           dupe.status = 'resolved';
         }
       }
@@ -456,7 +456,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         snapshot: { written_on_retry: true, degraded: true },
         processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
       });
-      if (await closeProcessedCancellation(priorCancellation.id, retryOutcome, !!(retryOutcome && retryOutcome.churned))) {
+      if (await closeProcessedCancellation(priorCancellation.id, retryOutcome, !!(retryOutcome && (retryOutcome.churned || retryOutcome.scopedWoundDown)))) {
         priorCancellation.status = 'resolved';
       }
       return res.status(200).json({
