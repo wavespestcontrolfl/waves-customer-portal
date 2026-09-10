@@ -166,10 +166,13 @@ function completionInstant(visit) {
   const value = visit.actual_end_time || visit.check_out_time || visit.completed_at;
   return value ? new Date(value).getTime() : null;
 }
+// Trustworthy instants order two services whatever their scheduled dates: a
+// visit can finish after Eastern midnight. Only when either side records no
+// instant does the scheduled date decide, and then only across different days.
 function returnedAfter(returned, visit) {
-  if (returned.service_date !== visit.service_date) return returned.service_date > visit.service_date;
   const [later, earlier] = [completionInstant(returned), completionInstant(visit)];
-  return later != null && earlier != null && later > earlier;
+  if (later != null && earlier != null) return later > earlier;
+  return returned.service_date !== visit.service_date && returned.service_date > visit.service_date;
 }
 
 async function validateServiceEvidence(conn, data, visit, last) {
@@ -199,7 +202,8 @@ async function validateServiceEvidence(conn, data, visit, last) {
 function validateCutoff(cutoffAt, visit) {
   if (cutoffAt > new Date() || etDateString(cutoffAt) < visit.service_date) reject('The cutoff must be on or after the service date and no later than now.');
   const completed = completionInstant(visit);
-  if (etDateString(cutoffAt) === visit.service_date && (completed == null || cutoffAt.getTime() < completed)) reject(visit.backfilled ? 'A backdated closeout records only its service day. Choose a cutoff on a later day.' : 'A same-day cutoff must follow the recorded completion time of the service.');
+  if (completed != null && cutoffAt.getTime() < completed) reject('The cutoff must follow the recorded completion time of the service, which may fall after midnight.');
+  if (completed == null && etDateString(cutoffAt) === visit.service_date) reject(visit.backfilled ? 'A backdated closeout records only its service day. Choose a cutoff on a later day.' : 'A same-day cutoff must follow the recorded completion time of the service.');
 }
 
 // Callbacks are corrective. Included follow-ups and always-free visit types
