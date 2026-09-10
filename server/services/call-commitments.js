@@ -1165,6 +1165,43 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
+      if (!phone) return null;
+      // Each attempt is judged under the policy it was placed under. An
+      // attempt under the CARD policy — the card's commitment link, or the
+      // Call Log action's policy-stamped source-call link — needs a
+      // completed customer leg plus a reviewed extraction of a real
+      // conversation; ringing the staff phone or voicemail is not proof. A
+      // pre-policy call keeps the legacy connected-call rule below. The gate
+      // plays no part, so rollback cannot weaken a card attempt and enabling
+      // the gate cannot strip an earlier attempt of its rule.
+      // Two plain arms, no COALESCE: each arm implies one of the partial
+      // expression indexes on call_log.metadata (relatedCommitmentId;
+      // relatedCallId under the card policy), so the watchdog's per-promise
+      // probes are index lookups rather than sequential scans of call_log.
+      // The source-call arm covers the Call Log action only (no commitment
+      // link): a card call for a SIBLING promise on the same source call
+      // carries both keys and must never be this promise's proof or its
+      // text-fallback suppressor.
+      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
+      const policyBindings = [commitment.id, commitment.call_log_id];
+      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      const connected = await conn('call_log').where('direction', 'outbound')
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+        .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+        .whereRaw(policyLink, policyBindings)
+        .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+        .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+        .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+        .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
+        .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+      if (connected) {
+        // The proof is the completed customer leg, so the promise is kept
+        // when that leg ended, not when the staff leg was dialed.
+        const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
+        return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+          matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
+          strength: 'direct', basis: 'callback_customer_conversation' };
+      }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
       // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound
@@ -1175,18 +1212,23 @@ async function resolveFulfillment(conn, commitment, call) {
       // with no inbound anchor). A LINKED call is returned only by a
       // record linked to the same customer (shared household numbers);
       // an unlinked call keeps the phone-level match. No outer window: a
-      // callback returned late was still returned.
-      if (!phone) return null;
-      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      // callback returned late was still returned. No card-policy attempt
+      // — this promise's or any other's, whose parent-leg duration says
+      // nothing about the customer leg — is ever judged by this rule, and
+      // once one exists for this promise a text no longer stands in for the
+      // conversation it promised.
       const outbound = await conn("call_log")
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .where("direction", "outbound")
         .where("created_at", ">", after)
+        .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
         .whereRaw("COALESCE(duration_seconds, 0) >= 60")
         .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomer(b, "customer_id"); })
         .orderBy("created_at", "asc")
         .first("id", "created_at");
       if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
+      const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
+      if (cardAttempt) return null;
       const text = await conn("sms_log as os")
         .where("os.direction", "outbound")
         .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
@@ -1354,7 +1396,10 @@ async function obligationRenewedAt(conn, commitment) {
 function refreshableVerdictSql() {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
   return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state IN ('confirmed', 'edited') AND (? OR EXISTS ("
-    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
+    + "SELECT 1 FROM call_log attempt WHERE (attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
+    // The source-call arm covers the Call Log action only: a sibling
+    // promise's card attempt (both keys) must not make THIS row refreshable.
+    + " OR (attempt.metadata->>'relatedCommitmentId' IS NULL AND attempt.metadata->>'relatedCallId' = call_commitments.call_log_id::text AND attempt.metadata->>'callback_policy' = 'card'))"
     + " AND COALESCE(attempt.source, '') <> ?))))",
   [require('./callback-cards').enabled(), VOICE_RELAY_SANDBOX_SOURCE]];
 }
