@@ -207,6 +207,10 @@ const SCOPE_SNAPSHOT = {
     // predicates, trip traces, redacted call quotes still keyed by call id.
     'get_growthbook_experiments', 'get_growthbook_features', 'get_managed_agent_runs', 'get_railway_logs', 'get_scheduled_job_health',
     'get_sentry_issue_detail', 'get_sentry_new_issues', 'get_sentry_top_issues', 'get_truck_trips', 'get_twilio_alerts', 'search_call_research',
+    // Operator free text passed through verbatim (a name or address can be
+    // typed into any of these): technician notes and call snippets, restock
+    // reasons, the pricing changelog, estimate service_interest, lost reasons.
+    'get_estimate_funnel', 'get_lost_analysis', 'get_restock_queue', 'recent_pricing_changes', 'search_field_intelligence',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],

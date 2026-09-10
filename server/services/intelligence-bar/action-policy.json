@@ -541,7 +541,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_expenses": {
     "module": "tax-tools.js",
@@ -661,7 +661,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_managed_agent_runs": {
     "module": "managed-agents-ops-tools.js",
@@ -893,7 +893,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_revenue_breakdown": {
     "module": "dashboard-tools.js",
@@ -1413,7 +1413,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "reply_via_sms": {
     "module": "email-tools.js",
@@ -1509,7 +1509,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "search_ib_history": {
     "module": "history-tools.js",

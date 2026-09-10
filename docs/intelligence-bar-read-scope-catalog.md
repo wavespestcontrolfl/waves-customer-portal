@@ -122,6 +122,15 @@ old list).
   can be tied to a customer), and vendor-invoice rows carry sender names,
   addresses and subjects like the other email readers. Mileage and activity
   readers return aggregates only and stay `none`.
+- `search_field_intelligence`, `get_restock_queue`, `recent_pricing_changes`,
+  `get_estimate_funnel` and `get_lost_analysis` are `broad` (self-sweep of
+  every `none` reader after round 11): each returns operator free text
+  verbatim — technician notes, call-research snippets and knowledge
+  summaries (heuristically redacted only), restock request reasons, pricing
+  changelog summaries and rationale, the estimate `service_interest` group
+  key, and `lost_reason` — and a name or address can be typed into any of
+  them. `compare_technicians` stays `none`: its `cities` value is a
+  de-duplicated aggregate of service-area cities, not a customer location.
 - `get_truck_status` is `broad`: the live last position of a truck during
   service hours is a customer's property, so it is refused inside a
   customer-scoped task like `get_truck_trips`.
