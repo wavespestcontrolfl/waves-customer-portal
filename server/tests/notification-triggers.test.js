@@ -36,6 +36,14 @@ describe('notification trigger push tags', () => {
     expect(second).not.toContain(payload.fromPhone);
   });
 
+  test('tracking SMS leads have a per-message tag while ordinary leads retain their tag', () => {
+    const first = __private.pushTagFor('new_lead', { twilioSid: 'SM-synthetic-first' });
+    const second = __private.pushTagFor('new_lead', { twilioSid: 'SM-synthetic-second' });
+    expect(first).toBe('waves-new_lead-SM-synthetic-first');
+    expect(second).not.toBe(first);
+    expect(__private.pushTagFor('new_lead', {})).toBe('waves-new_lead');
+  });
+
   test('non-SMS triggers keep collapsing by trigger key', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
   });
@@ -73,6 +81,27 @@ describe('notification trigger push tags', () => {
     expect(built.body).not.toContain('+18182079399');
     expect(built.body).not.toContain('1000 Riverside Drive');
     expect(built.link).toBe('/admin/leads?lead=lead-123');
+  });
+
+  test('new lead trigger without a lead record points at the SMS inbox', () => {
+    // Tracking-line texts from unknown numbers no longer mint a customer
+    // row (twilio-webhook.js domain/van branch), so the bell must not send
+    // the owner to a lead that does not exist.
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      title: 'New text from wavespestcontrol.com',
+      name: 'Unknown sender',
+      source: 'wavespestcontrol.com',
+      area: 'Bradenton',
+      phone: '+12025550101',
+      message: 'Please quote service for the garden shed.',
+      link: '/admin/communications',
+    });
+
+    expect(built.title).toBe('New text from wavespestcontrol.com');
+    expect(built.body).toContain('Unknown sender via wavespestcontrol.com (Bradenton)');
+    expect(built.body).toContain('Message in the SMS inbox');
+    expect(built.body).not.toContain('swimming pool');
+    expect(built.link).toBe('/admin/communications');
   });
 
   test('SMS reply trigger masks fallback phone and redacts sensitive message text', () => {
