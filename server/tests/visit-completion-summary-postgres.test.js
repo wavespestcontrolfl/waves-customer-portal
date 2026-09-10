@@ -1879,6 +1879,32 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a payer deactivation that follows a withdrawal returns the invoice to its queue and lifts the hold', async () => {
+    const Invoice = require('../services/invoice');
+    const Payer = require('../services/payer');
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, visit_completion_packet_id: fixture.packetId,
+      scheduled_send_at: new Date(Date.now() - 60000) });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    try {
+      expect(await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId, { requireDue: true })).toMatchObject({ payerBilled: true, payerId: payer.id });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}` });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      // The deactivation that was waiting on the claim's payer lock lands next: ownership is self-pay again.
+      expect(await Payer.updatePayer(payer.id, { active: false })).toMatchObject({ payer: { active: false } });
+      const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(invoice).toMatchObject({ status: 'scheduled', scheduled_send_error: null, scheduled_send_attempts: 0 });
+      expect(invoice.scheduled_send_at).not.toBeNull();
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('payer writers see an in-flight combined-visit send for the customer and for a billed service', async () => {
     const { packetInvoiceSendInFlight } = require('../services/visit-completion-packets');
     const invoiceId = randomUUID();
@@ -1940,6 +1966,42 @@ postgres('visit summary recipient recovery', () => {
     // The next review handoff is refused.
     expect(await Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => ({ ok: true }))).toMatchObject({ ok: false, code: 'VISIT_SUMMARY_UNCERTAIN' });
     expect(await Summary.reviewSendThroughSummaryHandoff(randomUUID(), async () => ({ ok: true }))).toEqual({ ok: true });
+  });
+
+  test('recovery resumes one parked sequence per customer and retires the rest', async () => {
+    const first = randomUUID();
+    const second = randomUUID();
+    await mockPg('review_sequences').insert([
+      { id: first, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'stopped', stop_reason: 'visit_summary_bounced',
+        plan: JSON.stringify({ touches: [] }), updated_at: new Date(Date.now() - 60000) },
+      { id: second, customer_id: fixture.customerId, service_record_id: fixture.recordIds[1], status: 'stopped', stop_reason: 'visit_summary_bounced',
+        plan: JSON.stringify({ touches: [] }), updated_at: new Date() },
+    ]);
+    try {
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(1);
+      expect(await mockPg('review_sequences').where({ id: second }).first()).toMatchObject({ status: 'active', stop_reason: null });
+      expect(await mockPg('review_sequences').where({ id: first }).first()).toMatchObject({ status: 'stopped', stop_reason: 'summary_park_superseded' });
+      // A second recovery pass finds the active sequence and resumes nothing more.
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(0);
+    } finally {
+      await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
+    }
+  });
+
+  test('a pre-provider refusal inside the review handoff returns the ask to pending in the same transaction', async () => {
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', token: randomUUID().replace(/-/g, '') });
+    try {
+      let seenDuringDispatch = null;
+      expect(await Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async (trx) => {
+        seenDuringDispatch = (await trx('review_requests').where({ id: askId }).first('status')).status;
+        return { ok: false, code: 'NO_CONSENT_RECORD', reason: 'refused before the request' };
+      }, undefined, { requestId: askId })).toMatchObject({ ok: false, code: 'NO_CONSENT_RECORD' });
+      expect(seenDuringDispatch).toBe('sending');
+      expect(await mockPg('review_requests').where({ id: askId }).first()).toMatchObject({ status: 'pending' });
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
   });
 
   test('a manual stop recorded while a step was running is not overwritten by parking', async () => {
