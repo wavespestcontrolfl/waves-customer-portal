@@ -22,17 +22,19 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
 - Output: `.tmp/glass-audit/<run>/<scenario>/<state>-<width>.png|json` and
   `summary.json`.
 - Exit status is non-zero when any capture failed (readiness timeout, HTTP >= 400
-  on navigation, screenshot or metrics error); the remaining captures still run.
-- `server-html` scenarios are rendered on demand: if any file under
-  `client/glass-audit-html/` is missing the runner invokes `render-server-html.cjs`
-  first. Their `ready` text is page-specific copy so Vite's fallback document
+  on navigation, screenshot or metrics error, or any failed interaction); the
+  remaining captures still run.
+- `server-html` scenarios are re-rendered by `render-server-html.cjs` on every run
+  that selects one, so `client/glass-audit-html/` always reflects the current
+  `email-template.js` / `public-newsletter.js`. Their `ready` text is page-specific copy so Vite's fallback document
   can never be captured in their place.
 - Metrics notes: `controls[].inFooter` marks universal-footer controls (they are
   counted, not hidden); `contrast` composites translucent text over the sampled
   background; `layout.footer.top` is in document space, `belowFold` = outside the
   initial viewport, `beyondDocument` = pushed past the document end; the focus
-  probe treats a `box-shadow` as a ring only when it differs from the resting
-  shadow. `analyze.cjs` lets the LAST run in argument order supersede earlier
+  probe drives real `Tab` presses (only elements in the Tab order are reported)
+  and treats a `box-shadow` as a ring only when it differs from the resting
+  shadow; every capture records its `engine`. `analyze.cjs` lets the LAST run in argument order supersede earlier
   captures of the same scenario/state/width; `matrix.cjs` derives expected states
   from the scenario declaration (honouring a state's `widths`).
 
@@ -59,6 +61,7 @@ module.exports = [{
     { name: 'paid', handle: (...) => ..., ready: '…' },
     { name: 'error', handle: () => ({ status: 500, body: { error: 'x' } }), ready: 'try again' },
     { name: 'reduced-motion', reducedMotion: true, widths: [390] },
+    { name: 'forced-colors', forcedColors: true, widths: [390] },   // Playwright forcedColors: 'active' (Chromium)
   ],
   interactions: [                 // optional; screenshot + metrics after each
     { name: 'open-dialog', widths: [390, 1440], fullPage: false, run: async (page, { width, mobile }) => { await page.getByRole('button', { name: /…/ }).click(); } },

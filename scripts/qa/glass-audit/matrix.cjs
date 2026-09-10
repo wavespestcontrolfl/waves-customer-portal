@@ -18,7 +18,9 @@ for (const run of runs) {
   try { engine = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8')).engine || engine; } catch (e) { /* no summary */ }
   for (const sc of fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
     for (const f of fs.readdirSync(path.join(dir, sc.name)).filter((x) => x.endsWith('.json'))) {
-      captures.push({ run, engine, ...JSON.parse(fs.readFileSync(path.join(dir, sc.name, f), 'utf8')) });
+      // Each capture records its own engine (run.cjs); the run summary is only a fallback for older captures.
+      const rec = JSON.parse(fs.readFileSync(path.join(dir, sc.name, f), 'utf8'));
+      captures.push({ run, ...rec, engine: rec.engine || engine });
     }
   }
 }

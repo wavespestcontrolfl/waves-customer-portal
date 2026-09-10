@@ -175,7 +175,16 @@ function renderNewsletterLanding() {
           <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">If you didn't sign up, just close this tab — nothing happens until you click the button.</p>
         `));
   write('newsletter-confirmed', renderConfirmPage("You're in.", `<p>${emailSpan} is confirmed. The next Waves Newsletter lands in your inbox this week.</p><p style="margin-bottom:0">Until then, browse recent issues at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
-  write('newsletter-unsubscribed', renderConfirmPage("You're unsubscribed.", `<p>No more newsletters will be sent to ${emailSpan}.</p><p style="margin-bottom:0">Changed your mind? Sign up again at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
+  // Unsubscribe branches mirror GET /unsubscribe (pending confirm form, already-unsubscribed, invalid) and
+  // the POST form-submit result page.
+  write('newsletter-unsubscribe-confirm', renderConfirmPage('Confirm unsubscribe.', `
+        <p>Stop newsletter emails to ${emailSpan}?</p>
+        <form method="POST" action="#"><button type="submit" name="confirm_unsubscribe" value="1" class="btn">Unsubscribe</button></form>
+        <p style="margin-bottom:0; font-size:14px; color:#4F5B70;">Nothing changes until you click the button.</p>`));
+  write('newsletter-already-unsubscribed', renderConfirmPage("You're already unsubscribed.", `<p>No more newsletters will be sent to ${emailSpan}.</p>`));
+  write('newsletter-unsubscribe-invalid', renderConfirmPage('Link expired or invalid.', `<p>This unsubscribe link no longer matches a subscription.</p><p style="margin-bottom:0">Email <a href="mailto:hello@example.invalid">hello@example.invalid</a> and we'll help.</p>`));
+  write('newsletter-unsubscribed', renderConfirmPage("You're unsubscribed.", `<p>We won't send any more newsletters to ${emailSpan}.</p>
+         <p style="margin-bottom:0">If this was a mistake, sign up again at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
   // Quiz + feedback landings (GET confirm form, POST result) — mirrors public-newsletter.js quiz/feedback routes.
   const fine = 'margin-bottom:0; font-size:14px; color:#4F5B70;';
   write('newsletter-quiz-confirm', renderConfirmPage('One tap to confirm.', `

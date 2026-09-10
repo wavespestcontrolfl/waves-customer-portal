@@ -17,7 +17,11 @@ for (const run of runs) {
     }
   }
 }
-const withMetrics = results.filter((r) => r.metrics);
+// Runs are read in argument order; a later run's capture of the same scenario/state/width SUPERSEDES an
+// earlier one everywhere (summary table and every detail section), so a corrective rerun retires issues.
+const latest = new Map();
+for (const r of results.filter((x) => x.metrics)) latest.set(`${r.scenario}/${r.state}@${r.width}`, r);
+const withMetrics = [...latest.values()];
 const key = (r) => `${r.scenario}/${r.state}`;
 const byScenario = {};
 for (const r of withMetrics) (byScenario[key(r)] = byScenario[key(r)] || []).push(r);

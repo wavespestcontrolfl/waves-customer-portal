@@ -42,11 +42,11 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
   const context = await browser.newContext({
     viewport: { width, height }, hasTouch: mobile, isMobile: mobile && engineName === 'chromium', deviceScaleFactor: 1,
     timezoneId: 'America/New_York', serviceWorkers: 'block', reducedMotion: state.reducedMotion ? 'reduce' : 'no-preference',
-    colorScheme: 'light',
+    colorScheme: 'light', forcedColors: state.forcedColors ? 'active' : 'none',
   });
   const page = await context.newPage();
   page.setDefaultTimeout(20000);
-  const rec = { scenario: scenario.id, state: state.name, width, url: null, pageErrors: [], consoleErrors: [], unmatched: [], external: [], apiCalls: [], screenshot: null, metrics: null, contrast: [], interactions: [], failure: null };
+  const rec = { scenario: scenario.id, state: state.name, width, engine: engineName, url: null, pageErrors: [], consoleErrors: [], unmatched: [], external: [], apiCalls: [], screenshot: null, metrics: null, contrast: [], interactions: [], failure: null };
   page.on('pageerror', (e) => rec.pageErrors.push(String(e.message).slice(0, 300)));
   page.on('console', (m) => { if (m.type() === 'error') rec.consoleErrors.push(m.text().slice(0, 300)); });
   await page.addInitScript((seed) => {
@@ -123,7 +123,7 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
         let n; const seen = new Set();
         while ((n = walker.nextNode())) {
           const el = n.parentElement; if (!el || seen.has(el) || !n.textContent.trim()) continue; if (el.closest('svg, script, style, [aria-hidden="true"], .glass-scene-orbs')) continue; if (!vis(el)) continue; seen.add(el);
-          const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size > 18) continue;
+          const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue; // large-text (3:1) threshold applies from 24px; 18.66+/700 handled below
           const r = el.getBoundingClientRect();
           out.push({ sel: el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left, y: r.top + window.scrollY, w: r.width, h: r.height } });
         }
@@ -139,6 +139,47 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
       }
       rec.contrastSampled = items.length;
     } catch (e) { rec.contrastError = String(e.message); }
+    // Keyboard focus ring probe on the PRISTINE page (before interactions open sheets / menus that trap or
+    // drop focus): real Tab traversal (page.keyboard), so only elements actually in the
+    // Tab order are reported and :focus-visible behaves as it does for a keyboard user. Resting
+    // outline / box-shadow are snapshotted for every control first: glass controls carry decorative
+    // elevation shadows, so a box-shadow only counts as a ring when it CHANGES on focus.
+    if (!state.skipFocusProbe) {
+      try {
+        await page.evaluate(() => {
+          window.__glassResting = new Map();
+          for (const el of document.querySelectorAll('a, button, input, select, textarea, [tabindex], [contenteditable]')) {
+            const cs = getComputedStyle(el);
+            window.__glassResting.set(el, { shadow: cs.boxShadow, outline: `${cs.outlineStyle} ${cs.outlineWidth}` });
+          }
+          if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+          window.scrollTo(0, 0);
+        });
+        // Interactions (dialogs, sheets) can leave the document without focus; Tab then goes nowhere.
+        await page.bringToFront();
+        await page.evaluate(() => window.focus());
+        const out = []; const seen = new Set();
+        for (let i = 0; i < 25; i++) {
+          await page.keyboard.press('Tab');
+          const row = await page.evaluate(() => {
+            const el = document.activeElement;
+            if (!el || el === document.body) return { end: true, active: el ? el.tagName : null, hasFocus: document.hasFocus() };
+            const cs = getComputedStyle(el);
+            const resting = window.__glassResting.get(el) || { shadow: cs.boxShadow, outline: '' };
+            const outlineVisible = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0;
+            const shadowChanged = cs.boxShadow !== resting.shadow && cs.boxShadow !== 'none';
+            el.__glassProbeId = el.__glassProbeId || `${el.tagName}#${Math.random().toString(36).slice(2, 8)}`;
+            return { id: el.__glassProbeId, sel: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), name: (el.getAttribute('aria-label') || el.innerText || el.placeholder || '').trim().slice(0, 30), outline: `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`, restingOutline: resting.outline, shadow: cs.boxShadow.slice(0, 60), restingShadow: resting.shadow.slice(0, 60), shadowChanged, ring: outlineVisible || shadowChanged };
+          });
+          if (row.end || seen.has(row.id)) { if (!out.length) rec.focusProbeNote = JSON.stringify(row); break; } // focus left the document or wrapped around
+          seen.add(row.id); delete row.id; out.push(row);
+        }
+        // Tab traversal scrolls the page; restore the pristine scroll position for the interactions that follow.
+        await page.evaluate(() => { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); window.scrollTo(0, 0); });
+        await page.waitForTimeout(150);
+        rec.focusProbe = out;
+      } catch (e) { rec.focusProbeError = String(e.message); }
+    }
     // Interactions (hover / focus / open overlay), each captured as its own shot.
     for (const ix of (state.interactions || scenario.interactions || [])) {
       if (ix.widths && !ix.widths.includes(width)) continue;
@@ -155,30 +196,9 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
       } catch (e) { ixRec.error = String(e.message).slice(0, 300); }
       rec.interactions.push(ixRec);
     }
-    // Keyboard focus ring probe: tab through the first N focusables and record whether a visible ring paints.
-    if (!state.skipFocusProbe) {
-      try {
-        rec.focusProbe = await page.evaluate(() => {
-          const els = Array.from(document.querySelectorAll('a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; }).slice(0, 25);
-          const out = [];
-          for (const el of els) {
-            // Snapshot the resting styles first: glass controls carry decorative elevation shadows, so a
-            // box-shadow only counts as a focus ring when it CHANGES on focus (outline is checked directly).
-            const before = getComputedStyle(el);
-            const restingShadow = before.boxShadow; const restingOutline = `${before.outlineStyle} ${before.outlineWidth}`;
-            el.focus({ preventScroll: true });
-            if (document.activeElement !== el) { out.push({ sel: el.tagName.toLowerCase(), focusable: false }); continue; }
-            const cs = getComputedStyle(el);
-            const outlineVisible = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0;
-            const shadowChanged = cs.boxShadow !== restingShadow && cs.boxShadow !== 'none';
-            const ring = outlineVisible || shadowChanged;
-            out.push({ sel: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), name: (el.getAttribute('aria-label') || el.innerText || el.placeholder || '').trim().slice(0, 30), outline: `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`, restingOutline, shadow: cs.boxShadow.slice(0, 60), restingShadow: restingShadow.slice(0, 60), shadowChanged, ring });
-          }
-          if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-          return out;
-        });
-      } catch (e) { rec.focusProbeError = String(e.message); }
-    }
+    // A failed interaction is missing evidence: mark the capture failed (the main shot + metrics are kept).
+    const badIx = rec.interactions.filter((i) => !i.ok);
+    if (badIx.length) rec.failure = `interaction(s) failed: ${badIx.map((i) => `${i.name} (${i.error})`).join('; ')}`.slice(0, 500);
   } catch (e) {
     rec.failure = String(e.message).slice(0, 500);
     try { const s = path.join(dir, `${state.name}-${width}-FAILED.png`); await page.screenshot({ path: s, fullPage: true }); rec.screenshot = path.relative(root, s); } catch (e2) { /* ignore */ }
@@ -192,16 +212,16 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
   fs.writeFileSync(path.join(dir, `${state.name}-${width}.json`), JSON.stringify(rec, null, 2));
 }
 
-// Server-rendered scenarios read static files from client/glass-audit-html/ (gitignored). Render them on
-// demand so a fresh checkout never captures Vite's fallback document in their place.
+// Server-rendered scenarios read static files from client/glass-audit-html/ (gitignored). They are
+// re-rendered on every run that selects one, so neither a fresh checkout nor a stale cache is captured.
 function ensureServerHtml(scenarios) {
   const needed = scenarios.filter((s) => s.surface === 'server-html');
   if (!needed.length) return;
-  const missing = needed.filter((s) => !fs.existsSync(path.join(root, 'client', s.url.replace(/^\//, ''))));
-  if (!missing.length) return;
-  console.log(`glass-audit: rendering server HTML (${missing.length} file(s) missing)`);
+  // Always re-render: the renderer is cheap and the gitignored files must reflect the CURRENT
+  // email-template.js / public-newsletter.js, never a cached copy from an earlier checkout state.
+  console.log(`glass-audit: rendering server HTML for ${needed.length} scenario(s)`);
   require('node:child_process').execFileSync(process.execPath, [path.join(__dirname, 'render-server-html.cjs')], { stdio: 'inherit' });
-  const still = missing.filter((s) => !fs.existsSync(path.join(root, 'client', s.url.replace(/^\//, ''))));
+  const still = needed.filter((s) => !fs.existsSync(path.join(root, 'client', s.url.replace(/^\//, ''))));
   if (still.length) throw new Error(`server HTML not rendered for: ${still.map((s) => s.id).join(', ')}`);
 }
 

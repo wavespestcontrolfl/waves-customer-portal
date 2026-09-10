@@ -27,6 +27,7 @@ module.exports = [
     states: [
       { name: 'default' },
       { name: 'reduced-motion', reducedMotion: true, widths: [390] },
+      { name: 'forced-colors', forcedColors: true, widths: [390], skipFocusProbe: true },
     ],
     interactions: [
       hoverFirstCard,
@@ -52,7 +53,7 @@ module.exports = [
     id: `estimate-${s}`, family: 'estimate', surface: 'customer', role: 'public token', route: '/estimate/:token',
     url: `/preview-estimate.html?scenario=${s}&chrome=0`, ready: 'css:[data-glass-theme]', handle: noApi,
     extraWidths: s === 'pest', settle: 1200,
-    states: s === 'pest' ? [{ name: 'default' }, { name: 'reduced-motion', reducedMotion: true, widths: [390, 1440] }] : undefined,
+    states: s === 'pest' ? [{ name: 'default' }, { name: 'reduced-motion', reducedMotion: true, widths: [390, 1440] }, { name: 'forced-colors', forcedColors: true, widths: [390], skipFocusProbe: true }] : undefined,
     interactions: s === 'pest' ? [hoverFirstCard, { name: 'pick-slot', fullPage: false, run: async (page) => { const b = page.getByRole('button', { name: /^Choose|AM|PM/ }).first(); await b.scrollIntoViewIfNeeded(); await b.click(); } }] : s === 'lawn' ? [hoverFirstCard] : undefined,
   })),
 

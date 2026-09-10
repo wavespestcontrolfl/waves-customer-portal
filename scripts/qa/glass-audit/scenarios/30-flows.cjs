@@ -15,7 +15,7 @@ const HEX64_A = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9
 const HEX64_B = '0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0';
 const HEX64_C = 'deadbeef00112233445566778899aabbccddeeff00112233445566778899aabb';
 const HEX32 = '5f6e7d8c9b0a1f2e3d4c5b6a79880011';
-const OUTLINE_TOKEN = 'Qx7Lm2Np9Rt4Vw6Yz8Ab1Cd3Ef5Gh7Jk9Mn2Pq4Rs6'; // 43 chars [A-Za-z0-9_-]
+const OUTLINE_TOKEN = 'Qx7Lm2Np9Rt4Vw6Yz8Ab1Cd3Ef5Gh7Jk9Mn2Pq4Rs6T'; // 43 chars [A-Za-z0-9_-] (service-outlines-public.js gate)
 const NEWS_ID = '3f2a9c1e-7b4d-4e8f-9a6c-1d2e3f4a5b6c';
 
 const ok = (body) => ({ status: 200, body });

@@ -20,7 +20,10 @@ const emails = [
 const landing = [
   ['newsletter-confirm-pending', 'GET /api/public/newsletter/confirm/:token (pending)', 'One last click'],
   ['newsletter-confirmed', 'POST /api/public/newsletter/confirm/:token (confirmed)', "You're in"],
-  ['newsletter-unsubscribed', 'GET /api/public/newsletter/unsubscribe/:token (done)', "You're unsubscribed"],
+  ['newsletter-unsubscribe-confirm', 'GET /api/public/newsletter/unsubscribe/:token (pending confirm form)', 'Confirm unsubscribe'],
+  ['newsletter-already-unsubscribed', 'GET /api/public/newsletter/unsubscribe/:token (already unsubscribed)', 'already unsubscribed'],
+  ['newsletter-unsubscribe-invalid', 'GET /api/public/newsletter/unsubscribe/:token (invalid)', 'no longer matches'],
+  ['newsletter-unsubscribed', 'POST /api/public/newsletter/unsubscribe/:token (form-submit result)', "You're unsubscribed"],
   ['newsletter-invalid-link', 'GET /api/public/newsletter/confirm/:token (invalid)', 'Link expired or invalid'],
   ['newsletter-quiz-confirm', 'GET /api/public/newsletter/quiz/:token/:quizId/:answer (confirm form)', 'One tap to confirm'],
   ['newsletter-quiz-thanks', 'POST /api/public/newsletter/quiz/:token/:quizId/:answer (thank-you + book CTA)', "we've got you"],
