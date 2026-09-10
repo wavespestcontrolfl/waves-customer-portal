@@ -243,7 +243,7 @@ export default function EquipmentPage() {
       {tab === "tank-mixes" && <TankMixTab showToast={showToast} />}
       {tab === "job-costs" && isAdminRole && <JobCostTab />}
       {tab === "calibrations" && <EquipmentCalibrationPanel />}
-      {toast && <Card role="status" className="fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
+      {toast && <Card role="status" className="pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
     </UiSurface>;
