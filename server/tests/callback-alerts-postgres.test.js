@@ -108,6 +108,17 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect(active).toHaveLength(1); expect(active[0].id).not.toBe(first.id);
   });
 
+  test('yesterday’s read aggregate does not acknowledge today’s individual reminders', async () => {
+    const rows = [];
+    for (let i = 0; i < 6; i += 1) rows.push(await seed());
+    await runSweep();
+    const [aggregate] = await unread();
+    await trx('notifications').where({ id: aggregate.id }).update({ read_at: now });
+    await trx('call_commitments').where({ id: rows[5].id }).update({ status: 'fulfilled' });
+    await require('../services/call-commitments-watchdog').runInner({ now: new Date(now.getTime() + 86400000) });
+    expect(await unread()).toHaveLength(5);
+  });
+
   test('returning to a prior aggregate resurfaces it after individual reminders', async () => {
     const rows = [];
     for (let i = 0; i < 6; i += 1) rows.push(await seed());

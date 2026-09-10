@@ -190,7 +190,10 @@ async function runInner({ now = new Date() } = {}) {
         });
       if (!persisted(notif)) { unannounced += 1; continue; }
       const meta = typeof notif.metadata === 'string' ? JSON.parse(notif.metadata) : notif.metadata;
-      const acknowledged = priorAggregate?.read_at && !aggregateMeta?.retired && aggregateMeta?.overdue_versions?.[r.id] === versions[r.id];
+      // An acknowledgment transfers only from TODAY's aggregate: a backlog
+      // read yesterday says nothing about today's overdue escalation.
+      const acknowledged = priorAggregate?.read_at && !aggregateMeta?.retired && aggregateMeta?.dedupeKey === `call-commitments-overdue:${today}`
+        && aggregateMeta?.overdue_versions?.[r.id] === versions[r.id];
       if (acknowledged || meta?.batchedBy) {
         await noticeRows().where({ id: notif.id }).update({ read_at: acknowledged ? priorAggregate.read_at : null,
           metadata: trx.raw("metadata - 'batchedBy'") });
