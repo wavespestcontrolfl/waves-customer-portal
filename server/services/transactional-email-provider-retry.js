@@ -256,12 +256,6 @@ async function retryOne(message) {
       // Blocks are a provider-specific suppression distinct from hard bounces.
       // If it remains, SendGrid will drop the retry before attempting delivery.
       await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
-      if (message.template_key === 'service.visit_summary') {
-        // Durable before the request: an interrupted worker leaves a row
-        // stale-claim recovery settles as uncertain, never re-sends.
-        await db('email_messages').where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-          .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
-      }
       dispatchStarted = true;
       result = await sendgrid.sendOne({
         to: message.recipient_email_snapshot,
@@ -281,6 +275,14 @@ async function retryOne(message) {
       });
     };
     if (withProviderHandoff) {
+      // Durable before the held handoff and on this worker's own connection
+      // (never a second slot inside the held transaction): an interrupted
+      // worker leaves a row stale-claim recovery settles as uncertain. The
+      // update must own the queued row, or the claim has moved on.
+      const marked = await db('email_messages')
+        .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+        .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
+      if (Number(marked) !== 1) return { sent: false, stopped: true, reason: 'claim_lost' };
       let fence;
       try {
         fence = await withProviderHandoff(dispatchToProvider);
