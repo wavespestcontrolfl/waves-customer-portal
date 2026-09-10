@@ -82,10 +82,34 @@ async function cachedBuildId(cache) {
 // start. Never used to decide what the previous build was — that comes
 // from the cached shell itself (cachedBuildId), or pruning would never fire.
 let liveBuildId = null;
-let liveBuildSeq = 0; // bumped by every navigation that advances liveBuildId
+let navigationSeq = 0; // issued to each navigation as its HTML arrives, in order
+let liveBuildSeq = 0; // token of the navigation that last advanced liveBuildId
+// Navigation bodies and queued refreshes finish out of order; only the
+// newest navigation's build may take the memo, never an older one that
+// finished late (it would mis-tag the newer page's chunks).
+function advanceLiveBuild(buildId, seq) {
+  if (seq < liveBuildSeq) return;
+  liveBuildSeq = seq;
+  liveBuildId = buildId;
+}
 async function currentBuildId(cache) {
-  if (!liveBuildId) liveBuildId = await cachedBuildId(cache);
+  if (liveBuildId) return liveBuildId;
+  // Cold worker: seed from the cached shell. A navigation can land while
+  // that read is in flight, and it is the newer truth — never overwrite it.
+  const seeded = await cachedBuildId(cache);
+  if (!liveBuildId) liveBuildId = seeded;
   return liveBuildId;
+}
+
+// Asset-cache writes — the prune, a cache hit's re-tag, a miss's store —
+// run one at a time. Unserialized, the prune reads a chunk's old tag, a
+// page of the retained build re-tags it meanwhile, and the prune's delete
+// then removes an entry whose new tag it would have kept.
+let assetWriteChain = Promise.resolve();
+function withAssetWrites(fn) {
+  const run = assetWriteChain.then(fn);
+  assetWriteChain = run.catch(() => {});
+  return run;
 }
 
 // Every navigation kicks off a background shell refresh, so two can overlap
@@ -96,8 +120,7 @@ async function currentBuildId(cache) {
 // a promise chain; overlap only exists within one worker lifetime, so a
 // module-level chain is the right scope (Web Locks would outlive it).
 let shellRefreshChain = Promise.resolve();
-async function cacheCompleteShellResponse(shellResponse) {
-  const enqueuedSeq = liveBuildSeq;
+async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq) {
   const run = shellRefreshChain.then(() => replaceCompleteShell(shellResponse, enqueuedSeq));
   shellRefreshChain = run.catch(() => {});
   return run;
@@ -129,7 +152,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
   // navigation already advanced the live build — writing its own build back
   // would mis-tag the newer page's chunks. Only claim the memo if no
   // navigation moved it since this refresh was requested (install path).
-  if (enqueuedSeq === liveBuildSeq) liveBuildId = buildId;
+  advanceLiveBuild(buildId, enqueuedSeq);
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
   // navigation may read the old shell moments before its replacement. Two
@@ -144,15 +167,17 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
 // (or with no tag at all). Runs only when the shell's build changed (a deploy),
 // never on a plain navigation, so page chunks cached on use stay with their
 // build until it is two deploys old.
-async function pruneStaleAssets(cache, retainedBuildIds) {
+function pruneStaleAssets(cache, retainedBuildIds) {
   const retained = new Set(retainedBuildIds.filter(Boolean));
-  const requests = await cache.keys();
-  await Promise.all(requests.map(async request => {
-    if (!new URL(request.url).pathname.startsWith('/assets/')) return;
-    const cached = await cache.match(request);
-    const tag = cached && cached.headers.get(BUILD_HEADER);
-    if (!retained.has(tag)) await cache.delete(request);
-  }));
+  return withAssetWrites(async () => {
+    const requests = await cache.keys();
+    await Promise.all(requests.map(async request => {
+      if (!new URL(request.url).pathname.startsWith('/assets/')) return;
+      const cached = await cache.match(request);
+      const tag = cached && cached.headers.get(BUILD_HEADER);
+      if (!retained.has(tag)) await cache.delete(request);
+    }));
+  });
 }
 
 async function precacheCompleteShell() {
@@ -196,13 +221,15 @@ self.addEventListener('fetch', event => {
           // Advance the live build before the (serialized, possibly slow)
           // refresh lands, so chunks this page loads meanwhile are tagged
           // with its own build. A shell without assets is not a build.
+          // The order token is taken now, not when the body finishes:
+          // an older response's body can resolve after a newer one's.
+          const navSeq = ++navigationSeq;
           event.waitUntil(response.clone().text().then(html => {
             const assets = shellAssetUrls(html);
             if (!assets.length) return;
-            liveBuildSeq += 1;
-            liveBuildId = buildIdOf(assets);
+            advanceLiveBuild(buildIdOf(assets), navSeq);
           }).catch(() => {}));
-          event.waitUntil(cacheCompleteShellResponse(response.clone()).catch(() => {}));
+          event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}));
         }
         return response;
       } catch {
@@ -227,9 +254,15 @@ self.addEventListener('fetch', event => {
           // A chunk unchanged between builds keeps its hash, so a hit under
           // the live build may still carry an older tag; re-stamp it so the
           // prune sees it as the live build's when that older one ages out.
+          const tag = cached.headers.get(BUILD_HEADER);
+          if (liveBuildId && tag === liveBuildId) return cached;
+          // Clone before handing `cached` to respondWith: on a cold worker the
+          // build lookup awaits the cached shell, and the page can lock the
+          // body in that window, making a later clone() throw.
+          const copy = cached.clone();
           const touch = currentBuildId(cache).then(buildId => {
-            if (buildId && cached.headers.get(BUILD_HEADER) !== buildId) {
-              return cache.put(event.request, tagWithBuild(cached.clone(), buildId));
+            if (buildId && tag !== buildId) {
+              return withAssetWrites(() => cache.put(event.request, tagWithBuild(copy, buildId)));
             }
             return undefined;
           }).catch(() => {});
@@ -242,7 +275,7 @@ self.addEventListener('fetch', event => {
             // Tag the chunk with the build it was loaded for, so the prune
             // keeps it with that build's shell instead of guessing from HTML.
             const store = currentBuildId(cache)
-              .then(buildId => cache.put(event.request, tagWithBuild(clone, buildId || 'untagged')))
+              .then(buildId => withAssetWrites(() => cache.put(event.request, tagWithBuild(clone, buildId || 'untagged'))))
               .catch(() => {});
             // The respondWith promise is still pending here, so the event
             // can still be extended; if a browser disagrees, fall back to

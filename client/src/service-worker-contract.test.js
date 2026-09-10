@@ -12,9 +12,12 @@ function fakeCache() {
   return {
     store,
     gate: null, // a test may park keys() (the prune's first step) on a promise
-    async match(key) { return store.get(asRequest(key).url); },
+    // Like the browser, every match hands out a fresh Response over the
+    // stored body — the caller's text()/clone() never lock the stored copy.
+    async match(key) { const hit = store.get(asRequest(key).url); return hit && hit.clone(); },
+    deleteGate: null, // a test may park delete() (the prune's last step)
     async put(key, response) { store.set(asRequest(key).url, response); },
-    async delete(key) { return store.delete(asRequest(key).url); },
+    async delete(key) { if (this.deleteGate) await this.deleteGate; return store.delete(asRequest(key).url); },
     async keys() { if (this.gate) await this.gate; return [...store.keys()].map(url => ({ url })); },
   };
 }
@@ -29,11 +32,22 @@ class FakeResponse {
     this.statusText = init.statusText || '';
     this.headers = new Headers(init.headers);
     this.body = body;
+    this.bodyUsed = false;
   }
-  clone() { return new FakeResponse(this.body, { status: this.status, statusText: this.statusText, headers: this.headers }); }
-  async text() { return String(this.body); }
+  clone() {
+    // The real Response throws once its body is locked by a consumer.
+    if (this.bodyUsed) throw new TypeError('Response body is already used');
+    return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate });
+  }
+  async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
+}
+// A response whose body read is parked on a promise the test releases.
+class GatedResponse extends FakeResponse {
+  constructor(body, init = {}) { super(body, init); this.gate = init.gate; }
 }
 const fakeResponse = (body, ok = true) => new FakeResponse(body, { status: ok ? 200 : 500 });
+const gatedResponse = (body, gate) => new GatedResponse(body, { gate });
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // Evaluate the worker in a sandbox whose fetch() serves any /assets/* URL, and
 // hand back the functions the shell-refresh path is built from plus a way to
@@ -79,13 +93,13 @@ const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.ur
 
 describe('customer service-worker update contract', () => {
   it('preloads hashed shell assets before storing the replacement HTML', () => {
-    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse)');
+    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq)');
     expect(source).toContain('async function precacheCompleteShell()');
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
     expect(source).toContain('await Promise.all(assetResponses.map');
     expect(source.indexOf('await Promise.all(assetResponses.map'))
       .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse)'));
-    expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone()).catch(() => {}))');
+    expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
   });
 
@@ -334,18 +348,129 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
   it('serves a cached chunk without refetching and tags a fresh one with the live build', async () => {
     const cache = fakeCache();
-    const { cacheCompleteShellResponse, dispatchFetch, buildIdOf } = loadWorker(cache);
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    let fetches = 0;
+    setFetch(async (request) => { fetches += 1; return fakeResponse(`asset:${request.url}`); });
 
     const { response: first } = await dispatchFetch('/assets/Chunk-AAA.js');
     expect(first.headers.get('x-waves-build')).toBeNull(); // the page gets the network response untouched
     const cached = await cache.match('/assets/Chunk-AAA.js');
     expect(cached.headers.get('x-waves-build')).toBe(buildIdOf(['/assets/index-AAA.js']));
     expect(await cached.text()).toBe('asset:https://portal.test/assets/Chunk-AAA.js');
+    expect(fetches).toBe(1);
 
+    const stored = cache.store.get('https://portal.test/assets/Chunk-AAA.js');
     const { response: second } = await dispatchFetch('/assets/Chunk-AAA.js');
     expect(await second.text()).toBe('asset:https://portal.test/assets/Chunk-AAA.js');
-    expect(second).toBe(cached); // same build → the hit is served as-is, no re-stamp
+    expect(fetches).toBe(1); // served from cache
+    expect(cache.store.get('https://portal.test/assets/Chunk-AAA.js')).toBe(stored); // same build → no re-stamp
+  });
+
+  it('does not let a cold-start seed overwrite a navigation that landed while it was reading', async () => {
+    // Codex #4335 P1: a cold worker serves an /assets/ miss by seeding the
+    // live build from the cached shell A; a navigation to B arrives while
+    // that read is in flight. The seed's continuation must not write A back
+    // over B, or B's chunks are tagged A and C's prune removes them.
+    const cache = fakeCache();
+    let releaseShell;
+    const shellGate = new Promise(resolve => { releaseShell = resolve; });
+    await cache.put('/', gatedResponse(shellHtml(['/assets/index-AAA.js']), shellGate));
+    await cache.put('/assets/index-AAA.js', fakeResponse('a'));
+    const { dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const miss = await dispatchFetch('/assets/DashboardPageV2-BBB.js', { settle: false }); // seed parked on A's body
+    const nav = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    await tick(); // B's navigation advanced the live build
+    releaseShell();
+    await miss.settled();
+    await nav.settled();
+
+    const bbb = buildIdOf(['/assets/index-BBB.js']);
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build')).toBe(bbb);
+    await dispatchFetch('/assets/Later-BBB.js');
+    expect((await cache.match('/assets/Later-BBB.js')).headers.get('x-waves-build')).toBe(bbb);
+  });
+
+  it('keeps a chunk that a retained build re-tagged while the prune was deleting it', async () => {
+    // Codex #4335 P1: C's prune has read Shared-XYZ.js as tagged A and is
+    // about to delete it; a page still on the retained build hits the same
+    // chunk and re-tags it. Unserialized, the delete lands after the re-tag
+    // and the retained build loses a chunk it just used.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/Shared-XYZ.js'); // tagged A
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])));
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+
+    let releaseDelete;
+    cache.deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+    const refreshC = cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    await tick(); // C's prune has read the tags and is parked on delete()
+    const hit = await dispatchFetch('/assets/Shared-XYZ.js', { settle: false }); // re-tag under the live build
+    await tick();
+    releaseDelete();
+    await refreshC;
+    await hit.settled();
+
+    expect(await cache.match('/assets/Shared-XYZ.js')).toBeTruthy();
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
+  });
+
+  it('ignores an older navigation whose body finishes after a newer one', async () => {
+    // Codex #4335 P1: navigations A then B overlap a deploy; A's HTML body
+    // resolves after B's. A's callback must not reset the live build to A,
+    // or B's lazy chunks are tagged A and C's prune drops them.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    let navResponse = () => gatedResponse(shellHtml(['/assets/index-AAA.js']), gateA);
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return navResponse();
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const navA = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    navResponse = () => fakeResponse(shellHtml(['/assets/index-BBB.js']));
+    const navB = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    await tick(); // B's body parsed; A's is still parked
+    releaseA();
+    await navA.settled();
+    await navB.settled();
+
+    await dispatchFetch('/assets/DashboardPageV2-BBB.js');
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build'))
+      .toBe(buildIdOf(['/assets/index-BBB.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
+  });
+
+  it('re-tags a cache hit on a cold worker even after the page has consumed the body', async () => {
+    // Codex #4335 P1: on a cold worker the hit is returned to respondWith
+    // before the build lookup (which reads the cached shell) resolves. The
+    // page locks the body in that window; a clone() taken afterwards throws
+    // and the swallowed error leaves the older tag in place.
+    const cache = fakeCache();
+    let releaseShell;
+    const shellGate = new Promise(resolve => { releaseShell = resolve; });
+    await cache.put('/', gatedResponse(shellHtml(['/assets/index-BBB.js']), shellGate));
+    await cache.put('/assets/Shared-XYZ.js', new FakeResponse('shared', { headers: { 'x-waves-build': '/assets/index-AAA.js' } }));
+    const { dispatchFetch, buildIdOf } = loadWorker(cache);
+
+    const hit = await dispatchFetch('/assets/Shared-XYZ.js', { settle: false });
+    expect(await hit.response.text()).toBe('shared'); // the page consumes the body first
+    releaseShell();
+    await hit.settled();
+
+    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build')).toBe(buildIdOf(['/assets/index-BBB.js']));
   });
 
   it('derives the build id from the asset set regardless of order', () => {
