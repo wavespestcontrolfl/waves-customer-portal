@@ -2428,7 +2428,22 @@ const InvoiceService = {
     // down — applying before the claim strands credit the winner can't see and we
     // can't reverse off the winner's 'sending' row (reverseAppliedCredit refuses
     // 'sending').
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    // A combined-visit invoice minted self-pay is re-judged against live
+    // Bill-To ownership under held rows here too: the direct SMS callers (the
+    // assistant's send tool, collections calls) otherwise read only the stale
+    // invoice field. The wrapper (allowClaimed) already ran this fence.
+    let claim;
+    if (!allowClaimed) {
+      const pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id");
+      const packetClaim = pre?.visit_completion_packet_id && !pre.payer_id
+        ? await claimPacketInvoiceForSend(invoiceId, pre.visit_completion_packet_id) : null;
+      if (packetClaim?.payerBilled) {
+        return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
+      }
+      claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed });
+    } else {
+      claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    }
     const { invoice, previousStatus, claimed } = claim;
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
