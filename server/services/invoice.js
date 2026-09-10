@@ -879,44 +879,10 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
         .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5)).first("id");
       if (!due) return { payerBilled: false, claim: null };
     }
-    const packet = await trx("visit_completion_packets").where({ id: packetId }).first("visit_id", "payload");
-    const visit = packet && await trx("service_visits").where({ id: packet.visit_id }).first("id", "customer_id");
-    if (visit) {
-      await trx("customers").where({ id: visit.customer_id }).forShare().first("id");
-      const payload = Packets.packetPayload(packet);
-      const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
-        : await trx("visit_completion_packet_items").where({ packet_id: packetId }).pluck("scheduled_service_id");
-      if (billed.length) await trx("scheduled_services").whereIn("id", billed).forShare().select("id");
-      // The payer rows the resolver consults are held too: a reactivation of
-      // an inactive payer (which flips the same ownership decision without
-      // touching a customer or member row) serializes behind the claim.
-      await Packets.lockPacketPayerRows(packetId, trx);
-      const payerId = await Packets.liveThirdPartyPayerForPacket(packetId, trx);
-      if (payerId) {
-        // The withdrawal names the payer: a deactivation of that payer that
-        // was waiting on this claim's payer lock requeues the invoice and
-        // lifts the hold (payer.js updatePayer), instead of stranding it.
-        await trx("invoices").where({ id: invoiceId }).whereIn("status", ["scheduled", "sending"])
-          .update({ status: "draft", scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date() });
-        await trx("service_visits").where({ id: visit.id }).update({ billing_hold: true, updated_at: new Date() });
-        // The same office-review state the coordinator records when it finds
-        // the payer itself: the closed packet carries the office_required
-        // error and the visit_closeout_review alert is raised once, so the
-        // withdrawn collection has an operator signal instead of a silent
-        // draft (a later deactivation of the payer resolves both, payer.js).
-        await trx("visit_completion_packets").where({ id: packetId, status: "done" })
-          .update({ error: JSON.stringify({ payment: "office_required", reason: "payer_assigned", payerId }), updated_at: new Date() });
-        const member = await trx("scheduled_services").where({ id: billed[0] }).first("id", "technician_id");
-        const open = await trx("dispatch_alerts").where({ type: "visit_closeout_review" }).whereNull("resolved_at")
-          .whereRaw("payload->>'packetId' = ?", [packetId]).whereRaw("payload->>'reason' = 'payer_assigned'").first("id");
-        if (member && !open) {
-          await require("./dispatch-alerts").createAlert({
-            type: "visit_closeout_review", severity: "warn", techId: member.technician_id, jobId: member.id, trx,
-            payload: { visitId: visit.id, packetId, payment: "office_required", reason: "payer_assigned", payerId },
-          });
-        }
-        return { payerBilled: true, payerId };
-      }
+    const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packetId, trx);
+    if (visit && payerId) {
+      await Packets.withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId });
+      return { payerBilled: true, payerId };
     }
     if (requireDue) {
       // The status transition carries the queue predicates: a reschedule

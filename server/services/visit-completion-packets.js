@@ -324,18 +324,31 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
   return { status: 202, body: { visitId: packet.visit_id, packetId: packet.id, state: 'member_effects_ready' } };
 }
 
-// The same predicate technicianCurrentVisitFilter applies to reads, judged
-// on a locked member row for a technician actor; administrators are unscoped.
+// The canonical technician scope (technician-visit-scope.js), judged on a
+// locked member row; administrators are unscoped.
 function memberInTechnicianScope(member, actor) {
-  const scope = require('./technician-visit-scope');
-  if (!scope.isTechnicianRequest(actor)) return true;
-  return String(member.technician_id || '') === String(actor.technicianId || '')
-    && !scope.TECH_DEAD_ASSIGNMENT_STATUSES.includes(String(member.status || ''))
-    && dateOnly(member.scheduled_date) >= scope.techAccessCutoff();
+  return require('./technician-visit-scope').technicianVisitRowInScope(actor, member);
+}
+
+// The resume boundary re-applies the actor's scope on the locked member rows,
+// exactly as the save does: a reassignment or reschedule that committed after
+// the route's unlocked preflight must not let the former technician trigger
+// billing and customer-summary effects. Retained history is not judged.
+async function packetInTechnicianScope(packetId, actor, database) {
+  return database.transaction(async (trx) => {
+    const packet = await trx('visit_completion_packets').where({ id: packetId }).first('id', 'visit_id', 'payload');
+    if (!packet) return true;
+    const members = await visitCloseoutMemberQuery(packet.visit_id, trx).orderBy('id').forShare();
+    const retainedIds = new Set(retainedCloseoutMembers(members, { payload: packetPayload(packet) }).map((member) => member.serviceId));
+    return members.filter((member) => !retainedIds.has(member.id)).every((member) => memberInTechnicianScope(member, actor));
+  });
 }
 
 /** Run summary and financial effects only after every member is ready. */
-async function runVisitCompletionPacketEffects(packetId, database = db) {
+async function runVisitCompletionPacketEffects(packetId, database = db, { actor = null } = {}) {
+  if (actor && require('./technician-visit-scope').isTechnicianRequest(actor) && !await packetInTechnicianScope(packetId, actor, database)) {
+    return failure(409, 'visit_out_of_scope', 'This visit is no longer in your current schedule. Refresh the schedule.');
+  }
   const members = await runVisitCompletionPacketMemberEffects(packetId, database);
   if (members.body.state !== 'member_effects_ready') return members;
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
@@ -356,19 +369,22 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     // receive a pay link for debt that now belongs to AP: the visit goes on
     // billing hold for the office instead. A lookup failure rethrows so the
     // recovery sweep retries rather than assuming self-pay.
-    const owner = await liveThirdPartyPayerForPacket(packet.id, database);
-    if (owner) {
-      await database('service_visits').where({ id: packet.visit_id }).update({ billing_hold: true, updated_at: database.fn.now() });
-      await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
-        .whereNull('payer_id').update({ scheduled_send_error: `payer_billed:${owner}`, updated_at: database.fn.now() });
-      payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
-    } else {
-      await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
+    // Decided and applied under the same held rows the scheduled-send claim
+    // uses, so a payer change cannot land between the decision and the
+    // withdrawal or the scheduling.
+    payment = await database.transaction(async (trx) => {
+      const { visit, billed, payerId: owner } = await resolvePacketOwnershipLocked(packet.id, trx);
+      if (owner) {
+        await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: payment.invoiceId, visit, billed, payerId: owner });
+        return { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
+      }
+      await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
         .whereNull('payer_id').whereNull('payer_statement_id').update({
-          status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
-          updated_at: database.fn.now(),
+          status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null,
+          updated_at: trx.fn.now(),
         });
-    }
+      return payment;
+    });
   }
   let delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
   // Canonical completion gives these two effects different eligibility: a
@@ -437,11 +453,12 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
         const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
         await require('./dispatch-alerts').createAlert({
           type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
-          payload: { visitId: packet.visit_id, packetId: packet.id, payment: payment.state, delivery: delivery.state },
+          payload: { visitId: packet.visit_id, packetId: packet.id, ...officeReviewState({ payment: payment.state, delivery: delivery.state, reason: payment.reason, payerId: payment.payerId }) },
         });
       }
       await trx('visit_completion_packets').where({ id: packet.id }).update({
-        status: 'done', error: closeReview ? JSON.stringify({ payment: payment.state, delivery: delivery.state }) : null,
+        status: 'done',
+        error: closeReview ? JSON.stringify(officeReviewState({ payment: payment.state, delivery: delivery.state, reason: payment.reason, payerId: payment.payerId })) : null,
         updated_at: trx.fn.now(),
       });
       // A recovery reopens only the packet: a visit that already closed keeps
@@ -487,6 +504,92 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
         .select('packet_id')));
   }
   return Boolean(await query.first('id'));
+}
+
+// The live Bill-To decision for a packet, made under held rows: the customer
+// and the billed members FOR SHARE and every payer row the resolver consults,
+// so a payer assignment, activation or deactivation serializes behind the
+// decision instead of racing it. Returns the visit and the owning payer (null
+// = self-pay). Both the coordinator and the scheduled-send claim decide here.
+async function resolvePacketOwnershipLocked(packetId, trx) {
+  const packet = await trx('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
+  const visit = packet && await trx('service_visits').where({ id: packet.visit_id }).first('id', 'customer_id');
+  if (!visit) return { visit: null, payerId: null, billed: [] };
+  await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
+  const payload = packetPayload(packet);
+  const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
+    : await trx('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
+  if (billed.length) await trx('scheduled_services').whereIn('id', billed).forShare().select('id');
+  await lockPacketPayerRows(packetId, trx);
+  return { visit, billed, payerId: await liveThirdPartyPayerForPacket(packetId, trx) };
+}
+
+// The one withdrawal for a self-pay combined-visit invoice whose live owner
+// is a payer: the invoice leaves the send queue as a draft stamped with the
+// payer it was withdrawn for, the visit goes on billing hold, and a packet
+// that already closed records the office-review state (error + one open
+// visit_closeout_review alert). A packet still processing gets that state
+// from its own close. The stamp is what the reconciliation below keys on.
+async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
+  await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
+    .update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: trx.fn.now() });
+  await trx('service_visits').where({ id: visit.id }).update({ billing_hold: true, updated_at: trx.fn.now() });
+  const closed = await trx('visit_completion_packets').where({ id: packetId, status: 'done' })
+    .update({ error: JSON.stringify(officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId })), updated_at: trx.fn.now() });
+  if (!closed) return;
+  const open = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+    .whereRaw("payload->>'packetId' = ?", [packetId]).whereRaw("payload->>'reason' = 'payer_assigned'").first('id');
+  const member = billed.length ? await trx('scheduled_services').where({ id: billed[0] }).first('id', 'technician_id') : null;
+  if (member && !open) {
+    await require('./dispatch-alerts').createAlert({
+      type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
+      payload: { visitId: visit.id, packetId, ...officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId }) },
+    });
+  }
+}
+
+// One shape for the packet's office-review error and the alert payload,
+// whichever writer records it (the coordinator's close or a late withdrawal).
+function officeReviewState({ payment, delivery = null, reason = null, payerId = null }) {
+  return { payment, ...(delivery ? { delivery } : {}), ...(reason ? { reason, payerId } : {}) };
+}
+
+// Every Bill-To transition that can turn a withdrawn invoice self-pay again
+// (a payer deactivated, a customer's or a job's payer link cleared, a self-pay
+// override set) reconciles here, inside the writer's own transaction: each
+// withdrawn draft in scope whose live owner is now nobody returns to the
+// send queue (the worker re-judges ownership on its claim), its visit's
+// hold is lifted, and the office-review state the withdrawal recorded — the
+// packet error and the open alert — is cleared. Only a row that is still the
+// withdrawn draft is requeued: an invoice voided or settled since keeps its
+// terminal state.
+async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerId = null, scheduledServiceId = null } = {}) {
+  const query = trx('invoices').where({ status: 'draft' }).whereNull('payer_id').whereNotNull('visit_completion_packet_id')
+    .where('scheduled_send_error', 'like', 'payer_billed:%');
+  if (customerId) query.where({ customer_id: customerId });
+  if (payerId) query.where({ scheduled_send_error: `payer_billed:${payerId}` });
+  if (scheduledServiceId) {
+    query.whereIn('visit_completion_packet_id', trx('visit_completion_packet_items').where({ scheduled_service_id: scheduledServiceId }).select('packet_id'));
+  }
+  const withdrawn = await query.select('id', 'visit_completion_packet_id', 'scheduled_send_error');
+  let requeued = 0;
+  for (const invoice of withdrawn) {
+    if (await liveThirdPartyPayerForPacket(invoice.visit_completion_packet_id, trx)) continue;
+    const moved = await trx('invoices').where({ id: invoice.id, status: 'draft', scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
+      .update({ status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() });
+    if (!moved) continue;
+    requeued += 1;
+    const packet = await trx('visit_completion_packets').where({ id: invoice.visit_completion_packet_id }).first('id', 'visit_id', 'status', 'error');
+    await trx('service_visits').where({ id: packet.visit_id }).update({ billing_hold: false, updated_at: trx.fn.now() });
+    const state = packet.error ? (typeof packet.error === 'string' ? JSON.parse(packet.error) : packet.error) : null;
+    if (packet.status === 'done' && state?.reason === 'payer_assigned') {
+      await trx('visit_completion_packets').where({ id: packet.id }).update({ error: null, updated_at: trx.fn.now() });
+    }
+    const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+      .whereRaw("payload->>'packetId' = ?", [packet.id]).whereRaw("payload->>'reason' = 'payer_assigned'").select('id');
+    for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
+  }
+  return requeued;
 }
 
 // Holds FOR SHARE every payer row the live Bill-To resolution for this
@@ -670,4 +773,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { memberInTechnicianScope, liveThirdPartyPayerForPacket, lockPacketPayerRows, visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, packetInvoiceSendInFlight, packetPayload };
+module.exports = { memberInTechnicianScope, liveThirdPartyPayerForPacket, lockPacketPayerRows, visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, packetInvoiceSendInFlight, packetPayload, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices };
