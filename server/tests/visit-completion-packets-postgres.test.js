@@ -234,6 +234,21 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  test('an implausibly large item array is refused before any per-item lock is taken', async () => {
+    const input = submission();
+    const flood = Array.from({ length: 51 }, () => ({ serviceId: randomUUID(), body: { ...input.items[0].body } }));
+    const execute = mockPg.client.constructor.prototype._query;
+    const spy = jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function record(connection, query) {
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await saveVisitCompletionPacket({ ...input, items: flood })).toMatchObject({ status: 400, body: { code: 'visit_closeout_members_invalid' } });
+      expect(spy.mock.calls.some(([, query]) => /advisory/i.test(query.sql))).toBe(false);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
   test('status-only completed members still require canonical closeout forms', async () => {
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ status: 'completed' });
     const input = submission();
