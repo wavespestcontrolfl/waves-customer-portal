@@ -1020,6 +1020,39 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reselecting a same-total offer replaces stale combined member allowances', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const capabilities = jest.spyOn(require('../services/technician-capabilities'), 'assertCapabilitiesActive')
+      .mockResolvedValue();
+    try {
+      const oldMix = { version: 2, services: ['pest_control', 'lawn_care'], durations: [30, 40], durationMinutes: 70 };
+      const newMix = { ...oldMix, durations: [40, 30] };
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        durationMinutes: 70, serviceLabel: 'Pest Control + Lawn Care', reservationServiceMix: newMix,
+        services: [{ service: 'pest_control', visitsPerYear: 4 }, { service: 'lawn_care', visitsPerYear: 6 }],
+      });
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-stale', scheduled_date: '2027-05-20', window_start: '09:00:00', technician_id: 'tech-1',
+        estimated_duration_minutes: 70, reservation_service_mix: oldMix,
+      }]);
+      const deleted = makeDeleteBuilder();
+      const inserted = makeInsertBuilder({ id: 'held-fresh', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [liveHoldsBuilder, deleted, makeConflictBuilder(null), makeGlobalProbeBuilder([]), inserted],
+      });
+      db.transaction = jest.fn(async callback => callback(trx));
+      await expect(slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId({
+        estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 70,
+      }) })).resolves.toMatchObject({ scheduledServiceId: 'held-fresh' });
+      expect(deleted.whereIn).toHaveBeenCalledWith('id', ['held-stale']);
+      expect(deleted.del).toHaveBeenCalledTimes(1);
+      expect(inserted.insert).toHaveBeenCalledWith(expect.objectContaining({ reservation_service_mix: newMix }));
+    } finally { capabilities.mockRestore(); jest.useRealTimers(); }
+  });
+
   test('reserveSlot: a COMMITTED visit the tech/zone checks never see blocks the hold (global probe, round-3 P1)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));

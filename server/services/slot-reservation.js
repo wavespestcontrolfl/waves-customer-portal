@@ -969,7 +969,9 @@ async function reserveSlot({
       const sameSlotHold = (liveHolds || []).find((hold) => dateOnly(hold.scheduled_date) === date
         && String(hold.window_start).slice(0, 5) === String(windowStart).slice(0, 5)
         && (hold.technician_id || null) === (techId || null)
-        && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes);
+        && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes
+        && require('node:util').isDeepStrictEqual(hold.reservation_service_mix || null,
+          serviceProfile?.reservationServiceMix || null));
       if (sameSlotHold) {
         const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
         if (staleIds.length) {
