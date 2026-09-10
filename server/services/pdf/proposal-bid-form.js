@@ -21,8 +21,8 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 // `node server/scripts/bid-form-fingerprint.js <pdf> <page>` on the original
 // and record all three values here.
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: 'f56ba209011ca8db6793e1f5f75b2099106881c1905979655f2714700f2352e3', packet: 'feddb448e9b0b775ba9096dddab497c91b9d665ddb817757ea772550aa99131e' },
-  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7', packet: '1067d901f4a3eb7590b8e8f23eae81ee5156f2d7f2eca08e51af87f23d8d7b13' },
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: 'f56ba209011ca8db6793e1f5f75b2099106881c1905979655f2714700f2352e3', packet: '1f24b0b7dbbd74b53a9d9b8fbf97d5bb93be15c184ed87143400a001b8cbf682' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7', packet: '51e450425fc1a88ac923b939cec23b379dd5f18fc0f1761466d8736548090976' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 // Hash every object the page's /Resources reaches (dictionaries by sorted
@@ -32,10 +32,13 @@ const invalid = (message) => Object.assign(new Error(message), { statusCode: 400
 // entries) are skipped so a fingerprint recorded from a reviewed export of
 // the original equals the original's; the approved content stream never
 // references them.
-function pageResourceHash(document, page) {
-  const hash = crypto.createHash('sha256');
+const sortedEntries = (dict) => [...dict.entries()].sort((a, b) => (a[0].toString() < b[0].toString() ? -1 : 1));
+// Feeds a PDF object graph into `hash`: dictionaries by sorted key, streams
+// by dictionary + raw bytes, references followed once. `/Parent` and `/P`
+// back-links are skipped so a widget hashes without its field's `/V` (checked
+// separately) or its whole page.
+function objectHasher(document, hash) {
   const seen = new Set();
-  const sortedEntries = (dict) => [...dict.entries()].sort((a, b) => (a[0].toString() < b[0].toString() ? -1 : 1));
   const visitDict = (dict) => {
     hash.update('<<');
     for (const [key, value] of sortedEntries(dict)) {
@@ -63,6 +66,11 @@ function pageResourceHash(document, page) {
     if (value instanceof PDFArray) { hash.update('['); value.asArray().forEach(visit); hash.update(']'); return; }
     hash.update(String(value));
   };
+  return visit;
+}
+function pageResourceHash(document, page) {
+  const hash = crypto.createHash('sha256');
+  const visit = objectHasher(document, hash);
   const resources = page.node.Resources();
   if (!resources) return hash.update('none').digest('hex');
   for (const [key, value] of sortedEntries(resources)) {
@@ -85,19 +93,29 @@ function pageFingerprint(document, page) {
   return { contents: pageContentHash(document, page), resources: pageResourceHash(document, page) };
 }
 // Every page except the selected form page, in order: the page count, each
-// page's drawing commands and resources, and how many annotations (the
-// original's own blank widgets) it carries. Flattening a filled field
-// rewrites the content stream and drops the widget; a stamp or an added or
-// removed page changes the sequence. The selected page is excluded because
-// it is fingerprinted on its own, which also lets the value be recorded from
-// a reviewed export whose only change is that page.
+// page's visible geometry (media/crop box, rotation), drawing commands,
+// resources and its annotation objects — the original's own blank widgets
+// with their appearance streams, hashed as objects rather than counted, so a
+// cropped or rotated attestation page or a widget whose appearance was
+// altered without setting `/V` is refused too (GH codex P2 r4 on #4270).
+// Flattening a filled field rewrites the content stream and drops the
+// widget; a stamp or an added or removed page changes the sequence. The
+// selected page is excluded because it is fingerprinted on its own, which
+// also lets the value be recorded from a reviewed export whose only change
+// is that page.
 function packetFingerprint(document, selectedIndex) {
   const hash = crypto.createHash('sha256');
+  const visit = objectHasher(document, hash);
   const pages = document.getPages();
   hash.update(`pages:${pages.length};selected:${selectedIndex};`);
   pages.forEach((page, index) => {
     if (index === selectedIndex) return;
-    hash.update(`${index}:${pageContentHash(document, page)}:${pageResourceHash(document, page)}:${page.node.Annots()?.size() || 0};`);
+    const box = (b) => [b.x, b.y, b.width, b.height].join(',');
+    hash.update(`${index}:media=${box(page.getMediaBox())};crop=${box(page.getCropBox())};rotate=${page.getRotation().angle};`);
+    hash.update(`${pageContentHash(document, page)}:${pageResourceHash(document, page)};annots:`);
+    const annots = page.node.Annots();
+    if (annots) visit(annots); else hash.update('none');
+    hash.update(';');
   });
   return hash.digest('hex');
 }

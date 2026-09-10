@@ -3,7 +3,7 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(); db.fn = { now: jest.fn() };
   return db;
 });
-const { PDFDocument, PDFName } = require('pdf-lib');
+const { PDFDocument, PDFName, degrees } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
@@ -229,7 +229,7 @@ describe('bid form original integrity beyond the content streams', () => {
     const sourcePdf = await blankPage(async (pdf, page) => { pdf.getForm().createTextField('bidder').addToPage(page, { x: 50, y: 50, width: 200, height: 20 }); });
     await expect(build(sourcePdf)).rejects.toThrow(/annotations or form fields/);
   });
-  const packet = (text, { flatten = false, extraPage = false } = {}) => blankPage(async (pdf) => {
+  const packet = (text, { flatten = false, extraPage = false, mutateOther = () => {} } = {}) => blankPage(async (pdf) => {
     const other = pdf.addPage([612, 792]);
     other.drawText('Bidder attestation page');
     const field = pdf.getForm().createTextField('company');
@@ -237,6 +237,7 @@ describe('bid form original integrity beyond the content streams', () => {
     if (text) field.setText(text);
     if (flatten) pdf.getForm().flatten();
     if (extraPage) pdf.addPage([612, 792]);
+    mutateOther(other, field);
   });
   test('blank fields elsewhere in the packet are allowed; filled ones are refused', async () => {
     await approve(await packet(null));
@@ -252,6 +253,14 @@ describe('bid form original integrity beyond the content streams', () => {
     await expect(build(await packet('Previously filled bidder', { flatten: true }))).rejects.toThrow(/other pages of this PDF differ/);
     await expect(build(await packet(null, { extraPage: true }))).rejects.toThrow(/other pages of this PDF differ/);
     await expect(build(await blankPage())).rejects.toThrow(/other pages of this PDF differ/);
+  });
+  test.each([
+    ['cropped', (other) => other.setCropBox(0, 0, 300, 792)],
+    ['rotated', (other) => other.setRotation(degrees(90))],
+    ['widget moved without a value', (other, field) => { field.acroField.getWidgets()[0].setRectangle({ x: 60, y: 50, width: 200, height: 20 }); }],
+  ])('a %s attestation page elsewhere in the packet is refused (GH codex P2 r4 on #4270)', async (name, mutateOther) => {
+    await approve(await packet(null));
+    await expect(build(await packet(null, { mutateOther }))).rejects.toThrow(/other pages of this PDF differ/);
   });
   test('a reviewed export of the original fingerprints like the original', async () => {
     // pdf-lib adds `/Helvetica-<n>` fonts and an empty `/XObject` dictionary
