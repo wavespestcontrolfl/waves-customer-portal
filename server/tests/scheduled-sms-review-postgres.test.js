@@ -12,6 +12,7 @@ jest.mock('../utils/cron-lock', () => ({
 }));
 const { randomUUID } = require('node:crypto');
 const { dispatchScheduledSms, markScheduledSmsSent } = require('../services/scheduled-sms-delivery');
+const { recoverStaleScheduledSmsClaims } = require('../services/scheduler');
 
 postgres('queued review ask settlement against migrated PostgreSQL', () => {
   let database, trx, customerId;
@@ -62,5 +63,33 @@ postgres('queued review ask settlement against migrated PostgreSQL', () => {
     expect(saved.created_at.getTime()).toBeGreaterThan(queuedAt.getTime());
     expect(new Date(saved.metadata.queued_at)).toEqual(queuedAt);
     expect(saved.metadata).toMatchObject({ finalize_pending: true, provider_message_id: 'SM-synthetic', entry_point: 'invoice_send_deferred' });
+  });
+
+  test('stale final-attempt uncertainty waits for its pre-provider safety deadline', async () => {
+    const now = new Date();
+    const safetyUntil = new Date(now.getTime() + 71 * 3600000);
+    const row = await message({
+      status: 'sending',
+      scheduled_for: new Date(now.getTime() - 3600000),
+      updated_at: new Date(now.getTime() - 31 * 60000),
+      metadata: {
+        scheduled_sms_attempts: 3,
+        review_ask_reservation: true,
+        review_delivery_uncertain_exhausted: true,
+        review_delivery_safety_until: safetyUntil,
+      },
+    });
+
+    await recoverStaleScheduledSmsClaims(now);
+
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.status).toBe('scheduled');
+    expect(saved.scheduled_for).toEqual(safetyUntil);
+    expect(saved.metadata).toMatchObject({
+      scheduled_sms_attempts: 3,
+      review_ask_reservation: true,
+      review_delivery_uncertain_exhausted: true,
+    });
+    expect(saved.metadata.terminal_pending).toBeUndefined();
   });
 });

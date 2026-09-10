@@ -136,9 +136,27 @@ function scheduledSmsAttemptSql() {
   `;
 }
 
+async function holdFinalReviewUncertainty(msgId, meta, failedAt) {
+  const safetyUntil = meta.review_delivery_safety_until
+    ? new Date(meta.review_delivery_safety_until)
+    : null;
+  if (meta.review_delivery_uncertain_exhausted !== true
+      || !safetyUntil || Number.isNaN(safetyUntil.getTime())
+      || safetyUntil <= failedAt) return false;
+  const held = await db('sms_log').where({ id: msgId, status: 'sending' }).update({
+    status: 'scheduled',
+    scheduled_for: safetyUntil,
+    updated_at: failedAt,
+  });
+  if (!held) throw new Error(`Scheduled review claim lost while restoring uncertainty hold (${msgId})`);
+  logger.warn(`[scheduled-sms] Ambiguous final review handoff on ${msgId} — holding terminal recovery until ${safetyUntil.toISOString()}`);
+  return true;
+}
+
 async function recoverStaleScheduledSmsClaims(now) {
   const staleBefore = new Date(now.getTime() - SCHEDULED_SMS_STALE_CLAIM_MS);
   const attemptsSql = scheduledSmsAttemptSql();
+  const reviewSafetyUntilSql = "NULLIF(metadata->>'review_delivery_safety_until', '')::timestamptz";
   const { DURABLE_FINALIZE_ENTRY_POINTS, TERMINAL_HOOK_ENTRY_POINTS } = require('./messaging/deferred-replay-registry');
   const DURABLE_FINALIZE_PLACEHOLDERS = DURABLE_FINALIZE_ENTRY_POINTS.map(() => '?').join(', ') || "''";
   const TERMINAL_HOOK_PLACEHOLDERS = TERMINAL_HOOK_ENTRY_POINTS.map(() => '?').join(', ') || "''";
@@ -222,8 +240,13 @@ async function recoverStaleScheduledSmsClaims(now) {
   const result = await db.raw(`
     UPDATE sms_log
     SET status = CASE
+          WHEN ${reviewSafetyUntilSql} > ? THEN 'scheduled'
           WHEN ${attemptsSql} >= ? THEN 'failed'
           ELSE 'scheduled'
+        END,
+        scheduled_for = CASE
+          WHEN ${reviewSafetyUntilSql} > ? THEN ${reviewSafetyUntilSql}
+          ELSE scheduled_for
         END,
         updated_at = ?,
         metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
@@ -235,7 +258,8 @@ async function recoverStaleScheduledSmsClaims(now) {
         -- obligation the terminal-hook sweep can find. Entry-point list =
         -- registry entries with an onTerminal hook.
         || CASE
-          WHEN ${attemptsSql} >= ? AND COALESCE(metadata->>'entry_point', '') IN (${TERMINAL_HOOK_PLACEHOLDERS})
+          WHEN COALESCE(${reviewSafetyUntilSql} <= ?, true)
+            AND ${attemptsSql} >= ? AND COALESCE(metadata->>'entry_point', '') IN (${TERMINAL_HOOK_PLACEHOLDERS})
             THEN jsonb_build_object('terminal_pending', true)
           ELSE '{}'::jsonb
         END
@@ -244,7 +268,7 @@ async function recoverStaleScheduledSmsClaims(now) {
       AND scheduled_for <= ?
       AND updated_at <= ?
     RETURNING id, status, metadata
-  `, [SCHEDULED_SMS_MAX_ATTEMPTS, now, now, SCHEDULED_SMS_MAX_ATTEMPTS, ...TERMINAL_HOOK_ENTRY_POINTS, now, staleBefore]);
+  `, [now, SCHEDULED_SMS_MAX_ATTEMPTS, now, now, now, now, SCHEDULED_SMS_MAX_ATTEMPTS, ...TERMINAL_HOOK_ENTRY_POINTS, now, staleBefore]);
 
   const recovered = result.rows || [];
   if (recovered.length > 0) {
@@ -302,6 +326,15 @@ async function claimDueScheduledSms(now) {
           'scheduled_sms_claimed_at', ?::timestamptz,
           'scheduled_sms_attempts',
           CASE
+            -- An exhausted ambiguous review handoff is claimed only so the
+            -- terminal hook can run after its 72-hour safety hold. It must not
+            -- consume a fourth send attempt.
+            WHEN s.metadata->>'review_delivery_uncertain_exhausted' = 'true'
+              THEN CASE
+                WHEN COALESCE(s.metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
+                  THEN (s.metadata->>'scheduled_sms_attempts')::int
+                ELSE 0
+              END
             WHEN COALESCE(s.metadata->>'scheduled_sms_attempts', '') ~ '^[0-9]+$'
               THEN (s.metadata->>'scheduled_sms_attempts')::int + 1
             ELSE 1
@@ -3796,7 +3829,7 @@ function initScheduledJobs() {
                 ? claimMeta.parked_decision_ids
                 : undefined,
             },
-          }), purpose);
+          }), purpose, SCHEDULED_SMS_MAX_ATTEMPTS);
           if (smsResult.scheduledHold) continue;
           const completedAt = new Date();
           if (smsResult.sent) {
@@ -3958,8 +3991,9 @@ function initScheduledJobs() {
                   metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 logger.warn(`[scheduled-sms] Blocked/failed scheduled SMS ${msg.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-                // Terminal block on a deferred replay: the message provably
-                // never delivered — hand the obligation off per the entry
+                // Terminal block on a deferred replay: delivery was refused,
+                // or an exhausted ambiguous review passed its safety hold.
+                // Hand the obligation off per the entry
                 // point's registry hook (release once-ever claims, arm the
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
@@ -4006,15 +4040,13 @@ function initScheduledJobs() {
               }
               logger.warn(`[scheduled-sms] Settled ${msg.id} as sent after post-accept error`);
             } else {
-              // Pre-accept exception (no provider row proves a send): the
-              // text never left, so retry on the bounded rail while
-              // attempts remain; at exhaustion, run the registry terminal
-              // hook so deferred obligations (review fallbacks, once-ever
-              // claims, referral/report state) hand off instead of
-              // silently dying with the row — parallel to the
-              // provider-result terminal paths.
+              // Without a provider row, ordinary failures retry on the bounded
+              // rail. A final review handoff can still be ambiguous, so its
+              // pre-provider safety deadline wins before terminal hooks run.
               const failedMeta = await readFreshMeta().catch(() => ({}));
-              if ((Number(failedMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+              if (await holdFinalReviewUncertainty(msg.id, failedMeta, failedAt)) {
+                // Durable hold owns the row until the safety deadline.
+              } else if ((Number(failedMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'scheduled',
                   scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
@@ -6721,6 +6753,8 @@ module.exports = {
   resolveScheduledRecipient,
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
+  holdFinalReviewUncertainty,
+  recoverStaleScheduledSmsClaims,
   runContentRegistryMaintenance,
   runAutonomousOpportunityMining,
   parseListEnv,

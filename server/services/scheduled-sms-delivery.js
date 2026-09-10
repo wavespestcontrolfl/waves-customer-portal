@@ -1,15 +1,15 @@
 const db = require('../models/db');
-const { looksLikeReviewAsk } = require('./review-ask-history');
+const { ASK_SPACING_MS, looksLikeReviewAsk } = require('./review-ask-history');
 const { dispatchReviewAsk } = require('./review-ask-dispatch');
 const { requiresDurableFinalize } = require('./messaging/deferred-replay-registry');
 
 async function acceptedScheduledSms(id, err) {
-  if (require('./sms-auto-send').isRealProviderSend(err?.providerOutcome)) return err.providerOutcome;
+  if (err?.providerOutcome?.deliveryOutcome === 'accepted') return err.providerOutcome;
   const row = await db('sms_log').where({ direction: 'outbound' })
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [String(id)])
     .first('id', 'twilio_sid');
-  return row ? { sent: true, providerMessageId: row.twilio_sid || null } : null;
+  return row ? { sent: true, deliveryOutcome: 'accepted', providerMessageId: row.twilio_sid || null } : null;
 }
 
 async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundled_review_request_id || meta.replay_purpose === 'review_request' || looksLikeReviewAsk(msg.message_body)) {
@@ -17,7 +17,7 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   // Preserve the queue time while ordering the conversation by delivery.
   // Finalization evidence rides the same atomic update so a crash cannot
   // lose the owed replay hooks or the accepted SID they need.
-  let metadataSql = "(COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation') || jsonb_build_object('queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))";
+  let metadataSql = "(COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation' - 'review_delivery_uncertain_exhausted' - 'review_delivery_safety_until') || jsonb_build_object('queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))";
   const bindings = [];
   if (requiresDurableFinalize(meta.entry_point)) {
     metadataSql += " || jsonb_build_object('finalize_pending', true, 'provider_message_id', ?::text)";
@@ -35,14 +35,53 @@ async function markScheduledSmsSent(msg, meta, result, reviewAsk = !!meta.bundle
   });
 }
 
-async function dispatchScheduledSms(msg, meta, send, purpose) {
-  let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id || looksLikeReviewAsk(msg.message_body);
+async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
+  let reviewAsk = purpose === 'review_request' || !!meta.bundled_review_request_id
+    || meta.review_delivery_uncertain_exhausted === true || looksLikeReviewAsk(msg.message_body);
+  const attemptsExhausted = (Number(meta.scheduled_sms_attempts) || 1) >= maxAttempts;
+  let finalAttemptSafetyUntil = null;
+  // A final ambiguous provider handoff stays quiet for the full ask-spacing
+  // window. Once that hold expires, return to the scheduler's existing
+  // terminal rail without making a fourth provider call; that rail owns the
+  // durable terminal hook and any parked-decision reopening.
+  if (reviewAsk && meta.review_delivery_uncertain_exhausted === true) {
+    return {
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      retryable: false,
+      uncertaintyExhausted: true,
+      code: 'REVIEW_DELIVERY_UNCERTAIN_EXHAUSTED',
+    };
+  }
   const clearUnsentReservation = async () => {
     if (!reviewAsk) return;
     await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation'"),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'review_ask_reservation' - 'review_delivery_uncertain_exhausted' - 'review_delivery_safety_until'"),
     });
     delete meta.review_ask_reservation;
+    delete meta.review_delivery_uncertain_exhausted;
+    delete meta.review_delivery_safety_until;
+  };
+  const holdUncertainReservation = async outcome => {
+    const nextAllowedAt = finalAttemptSafetyUntil || new Date(Date.now() + ASK_SPACING_MS);
+    const heldAt = new Date();
+    const holdError = err => Object.assign(err, {
+      providerOutcome: outcome,
+      scheduledReviewAsk: true,
+      reviewUncertaintyHoldFailed: true,
+    });
+    let held;
+    try {
+      held = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
+        status: 'scheduled',
+        scheduled_for: nextAllowedAt,
+        updated_at: heldAt,
+      });
+    } catch (err) {
+      throw holdError(err);
+    }
+    if (!held) throw holdError(new Error('Scheduled review claim lost while holding uncertain delivery'));
+    return { ...outcome, sent: false, scheduledHold: true, attemptsExhausted, nextAllowedAt };
   };
   const dispatch = async () => {
     let result;
@@ -51,26 +90,38 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
         // Persist conservative evidence BEFORE the provider boundary. If
         // provider logging and every settlement write fail, other dispatchers
         // still see this attempt while outer recovery finishes the row.
+        const reservedAt = new Date();
+        finalAttemptSafetyUntil = attemptsExhausted
+          ? new Date(reservedAt.getTime() + ASK_SPACING_MS)
+          : null;
+        const reservationSql = "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('review_ask_reservation', true, 'queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))"
+          + (finalAttemptSafetyUntil
+            ? " || jsonb_build_object('review_delivery_uncertain_exhausted', true, 'review_delivery_safety_until', ?::timestamptz)"
+            : '');
         const reserved = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('review_ask_reservation', true, 'queued_at', COALESCE(metadata->'queued_at', to_jsonb(created_at)))"),
-          created_at: new Date(), updated_at: new Date(),
+          metadata: db.raw(reservationSql, finalAttemptSafetyUntil ? [finalAttemptSafetyUntil] : []),
+          created_at: reservedAt, updated_at: reservedAt,
         });
         if (!reserved) throw new Error('Scheduled review claim lost before provider dispatch');
       }
       result = await send();
-      if (reviewAsk && result.sent && !require('./sms-auto-send').isRealProviderSend(result)) {
+      const deliveryOutcome = result?.deliveryOutcome;
+      if (deliveryOutcome === 'not_sent' && result.sent) {
         // The scheduler owns the sending -> blocked transition and stamps
         // its durable terminal-hook obligation in that same update.
         await clearUnsentReservation();
-        return { ...result, sent: false, blocked: true, code: 'REVIEW_SEND_SUPPRESSED' };
+        return { ...result, sent: false, blocked: true, code: reviewAsk ? 'REVIEW_SEND_SUPPRESSED' : 'DELIVERY_SUPPRESSED' };
       }
-      if (result.sent === false) await clearUnsentReservation();
-      if (result.sent) await markScheduledSmsSent(msg, meta, result, reviewAsk);
+      if (deliveryOutcome === 'not_sent') await clearUnsentReservation();
+      if (deliveryOutcome === 'accepted') await markScheduledSmsSent(msg, meta, result, reviewAsk);
+      if (reviewAsk && deliveryOutcome !== 'accepted' && deliveryOutcome !== 'not_sent') {
+        return holdUncertainReservation({ ...result, deliveryOutcome: 'uncertain' });
+      }
       return result;
     } catch (err) {
+      if (err.reviewUncertaintyHoldFailed) throw err;
       err.scheduledReviewAsk = reviewAsk;
       if (result) err.providerOutcome = result;
-      if (err.providerOutcome?.sent === false) await clearUnsentReservation();
       const accepted = await acceptedScheduledSms(msg.id, err);
       if (accepted) {
         err.providerOutcome = accepted;
@@ -81,6 +132,11 @@ async function dispatchScheduledSms(msg, meta, send, purpose) {
           stampErr.scheduledReviewAsk = reviewAsk;
           throw stampErr;
         }
+      }
+      const deliveryOutcome = err.providerOutcome?.deliveryOutcome;
+      if (deliveryOutcome === 'not_sent') await clearUnsentReservation();
+      if (reviewAsk && deliveryOutcome !== 'accepted' && deliveryOutcome !== 'not_sent') {
+        return holdUncertainReservation({ ...err.providerOutcome, deliveryOutcome: 'uncertain' });
       }
       throw err;
     }
