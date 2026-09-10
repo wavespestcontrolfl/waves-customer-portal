@@ -1366,15 +1366,25 @@ async function obligationRenewedAt(conn, commitment) {
   const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
     .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
   const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
-  // A save that changed nothing (metadata.restated === false) restates nothing.
+  // A save that changed nothing (metadata.restated === false) restates
+  // nothing — but the first such save on a card edited before callback
+  // cards existed carries legacy_boundary: the reviewed_at that pre-card
+  // edit left, captured before the save advanced it.
+  const edits = events.filter((e) => e.action === 'callback_edit');
   const restatements = events.filter((e) => !(e.action === 'callback_edit' && meta(e).restated === false));
-  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => e.created_at)];
+  // The boundary is the event's renewed_at, stamped after the action took
+  // its row lock: the row's created_at defaults to the transaction start,
+  // and a call returned while the action waited for the lock preceded it.
+  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => meta(e).renewed_at || e.created_at),
+    ...edits.map((e) => meta(e).legacy_boundary)];
   // A card edited before callback cards existed went through the generic
-  // path, which wrote no callback_edit event: its reviewed_at is the only
-  // boundary on record (at worst later than the edit, never earlier), so
-  // an outbound call from before that historical edit cannot close the
-  // revised obligation.
-  if (commitment.human_state === 'edited' && !restatements.some((e) => e.action === 'callback_edit')) times.push(commitment.reviewed_at);
+  // path, which wrote no callback_edit event: while none exists at all its
+  // reviewed_at is the only boundary on record (at worst later than the
+  // edit, never earlier), so an outbound call from before that historical
+  // edit cannot close the revised obligation. Once any callback_edit event
+  // exists, reviewed_at may have been advanced by a save that restated
+  // nothing and is not a boundary.
+  if (commitment.human_state === 'edited' && !edits.length) times.push(commitment.reviewed_at);
   const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
   return ms.length ? new Date(Math.max(...ms)) : null;
 }
@@ -1796,6 +1806,11 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
       if (!items.length) return summary;
       const result = await upsertCommitments(trx, call.id, items, { generation: null, extractorVersion: RELAY_EXTRACTOR_VERSION });
       summary.written = result.written;
+      // A late relay pass re-upserting an unreviewed callback clears its
+      // prepared deadline (the upsert's callback_due_at reset): prepare it
+      // again here, in the same transaction, the way recordCallCommitments
+      // does, so no pure consumer sees a dated card turn undated.
+      if (result.written && require('./callback-cards').enabled()) await require('./callback-cards').prepareCallbackCards(trx, { callId: call.id });
       return summary;
     });
   } catch (err) {
@@ -1825,8 +1840,10 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
     return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
   }
+  // Locked: the edit is classified (restated or not) against the row the
+  // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
-    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'description', 'due_at') : null;
+    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
@@ -1886,12 +1903,26 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   const updated = await conn('call_commitments').where({ id }).update(patch);
   if (!updated) throw Object.assign(new Error('Commitment not found'), { status: 404 });
   if (before && before.kind === 'callback' && before.party === 'waves') {
-    const restated = action === 'reopen' || editRestatesRow(before, { description, due_at });
+    const renewal = action === 'edit' ? await callbackEditEventMetadata(conn, before, { description, due_at }) : {};
+    // renewed_at is taken here, after the locked pre-read and the update —
+    // not the audit row's created_at, which is the transaction start.
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
-      metadata: { via: 'ledger', ...(action === 'edit' ? { restated } : {}) }, critical: true, trx: conn });
+      metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
+}
+
+// The callback_edit event's metadata, read against the LOCKED pre-update
+// row: whether the obligation was restated, and — for the first save that
+// restates nothing on a card edited before callback cards existed (no
+// callback_edit event yet) — legacy_boundary, the reviewed_at that pre-card
+// edit left, so obligationRenewedAt keeps it once reviewed_at moves on.
+async function callbackEditEventMetadata(conn, row, { description, due_at }) {
+  const restated = editRestatesRow(row, { description, due_at });
+  if (restated || row.human_state !== 'edited') return { restated };
+  const prior = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: row.id, action: 'callback_edit' }).first('id');
+  return prior ? { restated } : { restated, legacy_boundary: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null };
 }
 
 // Whether an edit changes the obligation itself: the wording, or the stated
@@ -2073,6 +2104,7 @@ module.exports = {
   refreshFulfillment,
   applyHumanUpdate,
   editRestatesRow,
+  callbackEditEventMetadata,
   addHumanCommitment,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,

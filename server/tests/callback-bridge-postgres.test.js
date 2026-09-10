@@ -236,8 +236,7 @@ run('callback bridge on PostgreSQL', () => {
     expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
     expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('open');
     // The sibling's text fallback is not suppressed by the other card's attempt either.
-    const [text] = await conn('sms_log').insert({ direction: 'outbound', message_type: 'manual', status: 'sent', customer_id: customerId, to_phone: phone, from_phone: from,
-      body: 'Following up on the fence quote', created_at: new Date(Date.now() + 2000) }).returning('id');
+    const [text] = await conn('sms_log').insert({ direction: 'outbound', message_type: 'manual', status: 'sent', customer_id: customerId, to_phone: phone, from_phone: from, created_at: new Date(Date.now() + 2000) }).returning('id');
     try {
       expect(await ledger.refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
       expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('fulfilled');

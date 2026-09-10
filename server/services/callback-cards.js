@@ -103,20 +103,23 @@ async function decorateCallbackRows(conn, rows) {
   });
 }
 
-// The edit action's ledger write. Returns whether the obligation was restated.
+// The edit action's ledger write. Returns the callback_edit event metadata
+// (restated, and legacy_boundary for the first unchanged save on a card
+// edited before callback cards existed — see callbackEditEventMetadata).
 async function applyEdit(trx, row, { actorId, description, due_at, note, patch }) {
   const ledger = require('./call-commitments');
   patch.snoozed_until = null;
-  if (ledger.editRestatesRow(row, { description, due_at })) {
+  const event = await ledger.callbackEditEventMetadata(trx, row, { description, due_at });
+  if (event.restated) {
     const changed = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', reviewedBy: actorId, description, due_at, note, renewalAudit: false });
     if (due_at !== undefined && changed.due_at == null) patch.callback_due_at = null;
-    return true;
+    return event;
   }
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   // Saving an unreviewed AI callback unchanged is still the office vouching
   // for it (the same review a claim records).
-  if (row.human_state == null) await ledger.applyHumanUpdate(trx, row.id, { action: 'confirm', reviewedBy: actorId });
-  return false;
+  if (row.human_state == null) await ledger.applyHumanUpdate(trx, row.id, { action: 'confirm', reviewedBy: actorId, renewalAudit: false });
+  return event;
 }
 
 async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, description, due_at, note, now = new Date() } = {}) {
@@ -167,7 +170,7 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     // still takes ownership, clears the snooze and keeps a note, but leaves
     // reviewed_at alone — for a card edited before callback cards existed
     // that is the only edit boundary on record.
-    const restated = action === 'edit' ? await applyEdit(trx, row, { actorId, description, due_at, note, patch }) : null;
+    const editEvent = action === 'edit' ? await applyEdit(trx, row, { actorId, description, due_at, note, patch }) : {};
     if (['fulfill', 'dismiss', 'reopen', 'confirm'].includes(action)) {
       await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, note, renewalAudit: false });
       patch.snoozed_until = null;
@@ -176,7 +179,12 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     await prepareCallbackCards(trx, { callId: row.call_log_id });
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
       resource_type: 'call_commitment', resource_id: id,
-      metadata: { snoozed_until: until?.toISOString() || null, ...(action === 'edit' ? { restated } : {}) }, critical: true, trx });
+      // renewed_at: the boundary fulfillment refresh honours for a reopen or
+      // edit, stamped here after the row lock and the writes — the audit
+      // row's own created_at is the transaction start, which a call returned
+      // during a lock wait would post-date.
+      metadata: { snoozed_until: until?.toISOString() || null, ...editEvent,
+        ...(['edit', 'reopen'].includes(action) ? { renewed_at: new Date().toISOString() } : {}) }, critical: true, trx });
     // Every action retires the reminder for the version staff just acted on
     // AND releases its per-day dedupe identity: a snoozed, released or
     // edited callback that is still open rings again the next time the
