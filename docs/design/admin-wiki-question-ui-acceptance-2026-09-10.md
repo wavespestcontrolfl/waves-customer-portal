@@ -15,3 +15,5 @@ Final split-specific checks passed: 5 focused tests, scoped ESLint, production b
 The local actual-route proof (`node .tmp/wiki-question/proof.cjs`) uses fictional responses, blocks external traffic and WebSockets, and records request methods/payloads. No unexpected requests or page errors occurred. Evidence is retained under `.tmp/wiki-question/`; desktop and mobile screenshots are attached to the PR.
 
 No live knowledge query, provider call, database mutation, or customer communication was exercised. Browser-emulated touch does not establish physical iPhone/PWA safe-area or keyboard behavior. The remaining legacy page typography is outside this focused migration.
+
+The two relocated Q&A POST sites are recorded with exact fingerprints as `reviewed_unmapped` in the Intelligence Bar census. Their endpoints, bodies, and server guards were checked against `server/routes/admin-knowledge.js`; this preserves the unsupported/unverified capability backlog and does not claim tool parity.
