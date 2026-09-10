@@ -3,6 +3,10 @@
 // One transaction, no invoice creation, balance changes, or communications.
 // An error, lock timeout, eligibility change, or digest drift aborts the batch.
 //
+// The default dry run is a faithful rehearsal: it connects, takes the same
+// locks, re-evaluates every pairing, performs the same updates, reports what
+// execution would do, and then rolls the transaction back. Only --execute commits.
+//
 // REPAIR_DATABASE_URL must explicitly identify the intended database.
 // node ops/agents/execute-visit-invoice-plan.js --plan=/tmp/link-plan.json
 // node ops/agents/execute-visit-invoice-plan.js --execute --plan=/tmp/link-plan.json
@@ -10,7 +14,12 @@ const { isDeepStrictEqual } = require('util');
 const { evaluate, readPlan, formatPairing } = require('./link-unlinked-visit-invoices');
 const { acquireScheduledInvoiceMintLock } = require('../../server/services/scheduled-invoice-mint');
 
-async function executePlan(database, reviewed) {
+class DryRunRollback extends Error {
+  constructor(applied) { super('dry run rolled back'); this.applied = applied; }
+}
+
+// commit=false rehearses the identical locked path and rolls back at the end.
+async function executePlan(database, reviewed, { commit = true } = {}) {
   if (!reviewed.length) throw new Error('Empty plan — nothing to execute');
   const invoiceIds = [...new Set(reviewed.map((p) => p.invoiceId))].sort();
   const visitIds = [...new Set(reviewed.map((p) => p.visitId))].sort();
@@ -58,6 +67,7 @@ async function executePlan(database, reviewed) {
     await trx('service_completion_attempts').whereIn('service_id', visitIds).orderBy('id').forUpdate().noWait().select('id');
     const payerIds = [...new Set([...customers, ...visits, ...invoices].map((r) => r.payer_id).filter((id) => id != null))].sort((a, b) => a - b);
     await trx('payers').whereIn('id', payerIds).orderBy('id').forUpdate().noWait().select('id');
+    const applied = [];
     for (const p of reviewed) {
       const again = await evaluate(trx, p.invoiceId);
       if (!isDeepStrictEqual(again.pairing, p)) {
@@ -71,9 +81,23 @@ async function executePlan(database, reviewed) {
         .update({ scheduled_service_id: live.visitId, service_record_id: live.serviceRecordId,
           technician_id: live.technicianId, tech_name: live.techName, updated_at: trx.fn.now() });
       if (updated !== 1) throw new Error(`Invoice ${p.invoiceId}: update count changed — batch aborted`);
+      applied.push(live);
     }
+    if (!commit) throw new DryRunRollback(applied);
     return reviewed.length;
   }, { isolationLevel: 'read committed' });
+}
+
+// Same locks, revalidation, and updates as --execute; the transaction is
+// rolled back, so a drift that would abort execution aborts the rehearsal too.
+async function rehearsePlan(database, reviewed) {
+  try {
+    await executePlan(database, reviewed, { commit: false });
+  } catch (err) {
+    if (err instanceof DryRunRollback) return err.applied;
+    throw err;
+  }
+  throw new Error('Dry run did not roll back');
 }
 
 async function main() {
@@ -82,16 +106,16 @@ async function main() {
   const planArg = args.find((a) => a.startsWith('--plan='));
   if (!planArg) throw new Error('--plan=FILE is required');
   const reviewed = readPlan(planArg.slice(7));
-  if (!args.includes('--execute')) {
-    console.log(`DRY RUN — ${reviewed.length} saved pairing(s), not revalidated; no database connection or writes`);
-    for (const p of reviewed) console.log(formatPairing(p));
-    return;
-  }
+  const execute = args.includes('--execute');
   if (!process.env.REPAIR_DATABASE_URL) throw new Error('REPAIR_DATABASE_URL is required');
   const knex = require('knex')({ client: 'pg', connection: process.env.REPAIR_DATABASE_URL, pool: { min: 0, max: 1 } });
-  try { console.log(`Linked ${await executePlan(knex, reviewed)} invoice(s) from the reviewed plan.`); }
-  finally { await knex.destroy(); }
+  try {
+    if (execute) { console.log(`Linked ${await executePlan(knex, reviewed)} invoice(s) from the reviewed plan.`); return; }
+    const applied = await rehearsePlan(knex, reviewed);
+    console.log(`DRY RUN — ${applied.length} pairing(s) revalidated under the execution locks; would link (rolled back, no writes):`);
+    for (const p of applied) console.log(formatPairing(p));
+  } finally { await knex.destroy(); }
 }
 
 if (require.main === module) void main().catch((err) => { console.error(err.message); process.exitCode = 1; });
-module.exports = { executePlan };
+module.exports = { executePlan, rehearsePlan };

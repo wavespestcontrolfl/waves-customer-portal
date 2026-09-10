@@ -6,7 +6,7 @@ const { spawnSync } = require('child_process');
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice', () => ({ CANCELLED_SERVICE_RESOLVED_STATUSES: ['void', 'refunded', 'canceled', 'cancelled'] }));
-const { executePlan } = require('../../ops/agents/execute-visit-invoice-plan');
+const { executePlan, rehearsePlan } = require('../../ops/agents/execute-visit-invoice-plan');
 const { evaluate } = require('../../ops/agents/link-unlinked-visit-invoices');
 const { createRepairDatabase, seedPair } = require('./helpers/invoice-repair-db');
 
@@ -211,6 +211,32 @@ jest.setTimeout(30000);
     await completed;
     expect((await invoice(ids)).scheduled_service_id).toBe(ids.visitId);
   });
+  test('the dry run revalidates under the execution locks and rolls back', async () => {
+    const ids = await seedPair(db); const reviewed = [await review(ids)];
+    const before = await invoice(ids);
+    const applied = await rehearsePlan(db, reviewed);
+    expect(applied).toEqual([expect.objectContaining({ invoiceId: ids.invoiceId, visitId: ids.visitId })]);
+    expect(await invoice(ids)).toEqual(before);
+    await db('invoices').where({ id: ids.invoiceId }).update({ total: 150 });
+    await expect(rehearsePlan(db, reviewed)).rejects.toThrow('reviewed pairing changed');
+    expect((await invoice(ids)).scheduled_service_id).toBeNull();
+  });
+  test('the dry run CLI reports what execution would do without writing', async () => {
+    const ids = await seedPair(db); const reviewed = [await review(ids)];
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repair-executor-rehearsal-'));
+    const file = path.join(dir, 'plan.json');
+    fs.writeFileSync(file, JSON.stringify({ version: 2, pairings: reviewed }));
+    const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
+    url.searchParams.set('options', `-c search_path=${fixture.schema}`);
+    try {
+      const result = spawnSync(process.execPath, ['ops/agents/execute-visit-invoice-plan.js', `--plan=${file}`],
+        { cwd: path.join(__dirname, '../..'), env: { PATH: process.env.PATH, NODE_ENV: 'test', REPAIR_DATABASE_URL: url.toString() }, encoding: 'utf8' });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('DRY RUN — 1 pairing(s) revalidated under the execution locks');
+      expect(result.stdout).toContain(`invoice ${ids.invoiceId}`);
+      expect((await invoice(ids)).scheduled_service_id).toBeNull();
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
   test('refuses a second execution of the same reviewed plan', async () => {
     const ids = await seedPair(db); const reviewed = [await review(ids)];
     await executePlan(db, reviewed);
@@ -219,15 +245,15 @@ jest.setTimeout(30000);
 });
 
 describe('executor CLI dry-run default', () => {
-  test('shows a saved plan without connecting or requiring database credentials', () => {
+  test('refuses to rehearse without an explicit database', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'repair-executor-cli-'));
     const file = path.join(dir, 'plan.json');
     fs.writeFileSync(file, JSON.stringify({ version: 2, pairings: [{ invoiceId: randomUUID(), visitId: randomUUID(), digest: 'a'.repeat(64) }] }));
     try {
       const result = spawnSync(process.execPath, ['ops/agents/execute-visit-invoice-plan.js', `--plan=${file}`],
         { cwd: path.join(__dirname, '../..'), env: { PATH: process.env.PATH, NODE_ENV: 'test' }, encoding: 'utf8' });
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain('not revalidated; no database connection or writes');
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('REPAIR_DATABASE_URL is required');
     } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   });
 });
