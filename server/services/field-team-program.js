@@ -226,7 +226,9 @@ async function allocationForVisit(conn, data, visit) {
   }
   const allocation = await conn('field_credit_allocations').where({ id: data.allocation_id }).forUpdate().first();
   const owners = await allocationCustomers(conn, visit.customer_id);
-  if (!allocation || !owners.includes(allocation.customer_id) || allocation.property_id !== visit.property_id || allocation.service_key !== visit.service_key) reject('Use this property’s allocation for the same service key.');
+  const properties = await equivalentProperties(conn, owners, visit.property_id);
+  const sameProperty = properties.length ? properties.includes(allocation?.property_id) : allocation?.property_id == null;
+  if (!allocation || !owners.includes(allocation.customer_id) || !sameProperty || allocation.service_key !== visit.service_key) reject('Use this property’s allocation for the same service key.');
   if (visit.service_date < dateOnly(allocation.coverage_start) || visit.service_date > dateOnly(allocation.coverage_end)) reject('The service date is outside the allocation coverage period.');
   if (data.ordinal == null || data.ordinal > allocation.planned_visits) reject('Choose an application number within the original scheduled count.');
   const claim = await conn('field_service_evidence').where({ allocation_id: data.allocation_id, ordinal: data.ordinal, claims_allocation: true }).first();
@@ -450,9 +452,12 @@ async function visitOptions(technicianId, selectedMonth) {
 async function evidenceDetail(serviceId) {
   const visit = await visitFacts(db, serviceId);
   const owners = await allocationCustomers(db, visit.customer_id);
+  const properties = await equivalentProperties(db, owners, visit.property_id);
   const [revisions, allocations, returns] = await Promise.all([
     db('field_service_evidence').where({ service_id: serviceId }).orderBy('revision', 'desc').then(rows => rows.map(row => calendarRow(row, ['service_date']))),
-    db('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: visit.property_id, service_key: visit.service_key }).orderBy('coverage_start', 'desc').then(rows => rows.map(row => calendarRow(row, ['coverage_start', 'coverage_end']))),
+    db('field_credit_allocations').whereIn('customer_id', owners).where({ service_key: visit.service_key })
+      .where(q => properties.length ? q.whereIn('property_id', properties) : q.whereNull('property_id'))
+      .orderBy('coverage_start', 'desc').then(rows => rows.map(row => calendarRow(row, ['coverage_start', 'coverage_end']))),
     db('scheduled_services as ss').leftJoin('services as s', 's.id', 'ss.service_id')
       .where({ 'ss.customer_id': visit.customer_id, 'ss.property_id': visit.property_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
       .where('ss.scheduled_date', '>=', visit.service_date).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
