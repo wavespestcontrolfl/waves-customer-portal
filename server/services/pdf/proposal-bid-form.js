@@ -21,8 +21,8 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 // `node server/scripts/bid-form-fingerprint.js <pdf> <page>` on the original
 // and record all three values here.
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: 'f56ba209011ca8db6793e1f5f75b2099106881c1905979655f2714700f2352e3', packet: 'aa885d3f6874cbb05f3e63b20726e3c398e39ff2077b20c3e9082527ad886d8a' },
-  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7', packet: '215dee4565fe48425e07df4d6c9bdb3b2e2db3bf13f7c96e28ad850b0ef92afa' },
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: 'f189787f282ffc77a2c0a8bb915570aaa77294e42daaafebacca764ab1e6b456' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: 'ec0f145251056ed72a6a7ae6ccaa594603d6a95d5b501ab6e242e0e970da6972' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 // Hash every object the page's /Resources reaches (dictionaries by sorted
@@ -34,7 +34,10 @@ const invalid = (message) => Object.assign(new Error(message), { statusCode: 400
 // references them.
 const sortedEntries = (dict) => [...dict.entries()].sort((a, b) => (a[0].toString() < b[0].toString() ? -1 : 1));
 // Feeds a PDF object graph into `hash`: dictionaries by sorted key, streams
-// by dictionary + raw bytes, references followed once. `/Parent` and `/P`
+// by dictionary + raw bytes, references followed once, every primitive
+// framed with its type and terminated so neighbouring values cannot be
+// re-split into the same bytes — `[300 50 500 80]` and `[30 0 50500 80]`
+// hash apart (GH codex P2 r6 on #4270). `/Parent` and `/P`
 // back-links are skipped so a widget hashes without its field's `/V` (checked
 // separately), and a reference to a page object hashes as the reference
 // alone — pages are fingerprinted on their own, and an outline, destination
@@ -46,7 +49,7 @@ function objectHasher(document, hash) {
     for (const [key, value] of sortedEntries(dict)) {
       const name = key.toString();
       if (name === '/Parent' || name === '/P') continue;
-      hash.update(name);
+      hash.update(`${name}=`);
       visit(value);
     }
     hash.update('>>');
@@ -54,20 +57,24 @@ function objectHasher(document, hash) {
   const visit = (value) => {
     if (value instanceof PDFRef) {
       const key = value.toString();
-      if (seen.has(key)) { hash.update('ref-seen'); return; }
+      if (seen.has(key)) { hash.update(`ref-seen:${key};`); return; }
       seen.add(key);
       value = document.context.lookup(value);
-      if (value instanceof PDFDict && value.get(PDFName.of('Type')) === PDFName.of('Page')) { hash.update(`page-ref:${key}`); return; }
+      if (value instanceof PDFDict && value.get(PDFName.of('Type')) === PDFName.of('Page')) { hash.update(`page-ref:${key};`); return; }
     }
     if (value instanceof PDFStream) {
+      const bytes = value instanceof PDFRawStream ? Buffer.from(value.contents) : Buffer.from(value.getContents ? value.getContents() : []);
       hash.update('stream');
       visitDict(value.dict);
-      hash.update(value instanceof PDFRawStream ? Buffer.from(value.contents) : Buffer.from(value.getContents ? value.getContents() : []));
+      hash.update(`${bytes.length}:`);
+      hash.update(bytes);
+      hash.update(';');
       return;
     }
     if (value instanceof PDFDict) { visitDict(value); return; }
-    if (value instanceof PDFArray) { hash.update('['); value.asArray().forEach(visit); hash.update(']'); return; }
-    hash.update(String(value));
+    if (value instanceof PDFArray) { hash.update('['); value.asArray().forEach((item) => { visit(item); hash.update(','); }); hash.update(']'); return; }
+    const text = String(value);
+    hash.update(`${value?.constructor?.name || typeof value}:${text.length}:${text};`);
   };
   return visit;
 }
@@ -132,16 +139,18 @@ function packetFingerprint(document, selectedIndex) {
   }
   return hash.digest('hex');
 }
-// Fields are covered by their widgets and the value check; `/DR` holds only
-// the fonts an export may add. Everything else (DA, SigFlags, XFA, CO,
-// NeedAppearances) is pinned.
+// The whole field tree is pinned — parent fields sit above the widgets the
+// page annotations reach and could carry their own `/AA` scripts or other
+// active state (GH codex P2 r6 on #4270) — along with DA, SigFlags, XFA, CO
+// and NeedAppearances. `/DR` alone is skipped: it holds only the default
+// fonts an export may add.
 function visitAcroFormSettings(document, value, hash, visit) {
   const acroForm = document.context.lookup(value);
   hash.update('<<');
   if (acroForm instanceof PDFDict) {
     for (const [key, entry] of sortedEntries(acroForm)) {
-      if (key.toString() === '/Fields' || key.toString() === '/DR') continue;
-      hash.update(key.toString()); visit(entry);
+      if (key.toString() === '/DR') continue;
+      hash.update(`${key.toString()}=`); visit(entry);
     }
   }
   hash.update('>>');

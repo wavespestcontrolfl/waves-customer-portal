@@ -759,7 +759,14 @@ function CommercialProposalEditor() {
   });
 
   const downloadBidForm = async ({ file, ...options }) => {
+    // The row mapping was captured against the lines on screen when the
+    // operator clicked. Ordinary proposal inputs stay editable while the
+    // save runs, and save() persists any edit that lands mid-flight — so an
+    // export after such an edit would pair the newest saved lines with a
+    // stale row assignment (GH codex P2 r6 on #4270). Refuse it instead.
+    const genAtClick = editGenRef.current;
     if (!locked && !(await save())) throw new Error('Save the proposal successfully before exporting the form.');
+    if (editGenRef.current !== genAtClick) throw new Error('The proposal changed while the form was being prepared. Review the form row for each line and download again.');
     const body = new FormData();
     body.append('sourcePdf', file);
     body.append('options', JSON.stringify({ ...options, expectedEditVersion: loadedVersionRef.current }));

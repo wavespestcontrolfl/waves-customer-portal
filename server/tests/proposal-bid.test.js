@@ -292,6 +292,24 @@ describe('bid form original integrity beyond the content streams', () => {
     await approve(await packet(null));
     await expect(build(await packet(null, { mutateOther: (other, field, pdf) => mutateDocument(pdf, other) }))).rejects.toThrow(message);
   });
+  test('primitive values are framed so re-split numbers and a parent field\'s action change the packet (GH codex P2 r6 on #4270)', async () => {
+    // [300 50 500 80] and [30 0 50500 80] concatenate to the same digits.
+    const rect = (x, y, width, height) => (other, field) => field.acroField.getWidgets()[0].setRectangle({ x, y, width, height });
+    const a = await PDFDocument.load(await packet(null, { mutateOther: rect(300, 50, 200, 30) }));
+    const b = await PDFDocument.load(await packet(null, { mutateOther: rect(30, 0, 50470, 80) }));
+    expect(form.packetFingerprint(a, 0)).not.toBe(form.packetFingerprint(b, 0));
+    // A hierarchical field's parent sits above every widget the page
+    // annotations reach; its own action must still be pinned.
+    const parentAction = (other, field, pdf) => {
+      const parent = pdf.getForm().createTextField('bidder.name');
+      parent.addToPage(other, { x: 50, y: 100, width: 200, height: 20 });
+      pdf.context.lookup(parent.acroField.dict.get(PDFName.of('Parent'))).set(PDFName.of('AA'), pdf.context.obj({ F: { S: 'JavaScript', JS: PDFString.of('app.alert(1)') } }));
+    };
+    const plainParent = (other, field, pdf) => pdf.getForm().createTextField('bidder.name').addToPage(other, { x: 50, y: 100, width: 200, height: 20 });
+    await approve(await packet(null, { mutateOther: plainParent }));
+    await expect(build(await packet(null, { mutateOther: plainParent }))).resolves.toBeInstanceOf(Buffer);
+    await expect(build(await packet(null, { mutateOther: parentAction }))).rejects.toThrow(/other pages of this PDF differ/);
+  });
   test('a reviewed export of the original fingerprints like the original', async () => {
     // pdf-lib adds `/Helvetica-<n>` fonts and an empty `/XObject` dictionary
     // to the drawn page; neither may move the resource hash, or the real
