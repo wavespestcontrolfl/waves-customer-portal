@@ -307,6 +307,14 @@ run('callback bridge on PostgreSQL', () => {
     expect((await conn('call_commitments').where({ id: row.id }).first()).fulfillment).toMatchObject({ record_id: legacy.id, basis: 'callback_returned_connected_outbound_call' });
   });
 
+  test('a card attempt for a sibling promise is never legacy proof for this one', async () => {
+    const row = await seed();
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: true } },
+      metadata: { relatedCommitmentId: randomUUID(), callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 5 } } });
+    expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+  });
+
   test.each(['conversation', 'unanswered', 'voicemail'])('gate rollback retains customer-leg proof: %s', async (evidence) => {
     const row = await seed();
     const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,

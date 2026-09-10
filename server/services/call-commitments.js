@@ -1204,14 +1204,16 @@ async function resolveFulfillment(conn, commitment, call) {
       // with no inbound anchor). A LINKED call is returned only by a
       // record linked to the same customer (shared household numbers);
       // an unlinked call keeps the phone-level match. No outer window: a
-      // callback returned late was still returned. Card-policy attempts are
-      // never judged by this rule (above), and once one exists a text no
-      // longer stands in for the conversation it promised.
+      // callback returned late was still returned. No card-policy attempt
+      // — this promise's or any other's, whose parent-leg duration says
+      // nothing about the customer leg — is ever judged by this rule, and
+      // once one exists for this promise a text no longer stands in for the
+      // conversation it promised.
       const outbound = await conn("call_log")
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .where("direction", "outbound")
         .where("created_at", ">", after)
-        .whereRaw(`NOT ${policyLink}`, policyBindings)
+        .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
         .whereRaw("COALESCE(duration_seconds, 0) >= 60")
         .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomer(b, "customer_id"); })
         .orderBy("created_at", "asc")
