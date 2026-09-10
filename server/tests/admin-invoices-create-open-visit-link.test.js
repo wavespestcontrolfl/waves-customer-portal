@@ -51,22 +51,30 @@ jest.mock('../services/payer', () => ({
 }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async (u) => u), invoiceShortCodePrefix: jest.fn(() => 'INV') }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.example.test') }));
+// The completion-side-effects fence (GitHub P1 #4131 r3): defaults to "no
+// attempt in flight" so schedule-send tests that don't care about it are
+// unaffected; individual tests override the state to exercise the fence.
+jest.mock('../services/completion-attempts', () => ({
+  completionStatusForService: jest.fn(async () => ({ state: 'none' })),
+}));
 
 const express = require('express');
 const db = require('../models/db');
 const InvoiceService = require('../services/invoice');
 const { acquireScheduledInvoiceMintLock, mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
 const { reconcileSetupFeeAlert } = require('../services/setup-fee-alert-reconcile');
-const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+const { annualPrepayCoversVisit, ANNUAL_PREPAY_PREPAID_METHOD } = require('../services/annual-prepay-renewals');
+const { completionStatusForService } = require('../services/completion-attempts');
 const router = require('../routes/admin-invoices');
 
 const CUSTOMER = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
 const VISIT = '33333333-3333-4333-8333-333333333333';
+const PAYER_VISIT = '55555555-5555-4555-8555-555555555555';
 
 function qb(overrides = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'whereNull', 'whereNot', 'modify']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'whereNull', 'whereNot', 'whereNotExists', 'modify']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => null);
   q.then = undefined;
   Object.assign(q, overrides);
@@ -168,20 +176,62 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
-  test('a prepaid visit is refused — a recorded prepayment or annual-prepay coverage means no new collectible invoice', async () => {
-    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 50 };
+  // The default POST body bills a single $117 line item, so invoiceAmount
+  // (billedLineTotal) is 117 for every case below.
+  test('a prepaid visit is refused when the recorded prepayment covers the invoice amount', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 200 };
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT });
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ code: 'visit_prepaid' });
+      expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
     });
-    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: null };
+  });
+
+  // Codex P2 #4131 r3 — payer/method-aware coverage: a prepayment that does
+  // not reach the amount being billed is only a partial credit, not full
+  // coverage, and the completion would still bill the rest — so the office
+  // create must still be allowed (Charge Now / completion own crediting it).
+  test('a prepayment that only partially covers the invoice amount still gets a new invoice', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 50 };
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(201);
+    });
+  });
+
+  // Codex P2 #4131 r3 — the annual-prepay branch is gated on the stamped
+  // method: a stale amount left by a voided/refunded term (no matching
+  // method) covers nothing, whatever the number says.
+  test('annual-prepay coverage refuses only when the visit is actually stamped for it', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: null, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD };
     annualPrepayCoversVisit.mockResolvedValueOnce(true);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT });
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ code: 'visit_prepaid' });
       expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a stale annual-prepay stamp (term voided/refunded) covers nothing, however large the recorded amount', async () => {
+    // annualPrepayCoversVisit defaults to false in this suite (voided/refunded
+    // term) — the amount on the stamp must not override that.
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 999999, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD };
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(201);
+    });
+    expect(annualPrepayCoversVisit).toHaveBeenCalled();
+  });
+
+  // Codex P2 #4131 r3 — a homeowner's prepayment never hides a PAYER's
+  // invoice: the third party's AP invoice must still be cut.
+  test('a payer-billed visit is never covered by the homeowner prepayment, however large', async () => {
+    visitRow = { id: PAYER_VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 999 };
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: PAYER_VISIT });
+      expect(res.status).toBe(201);
     });
   });
 
@@ -276,6 +326,28 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
+  // Codex P2 #4131 r3 — a 36-character near-miss (36 hyphens) passed the old
+  // /^[0-9a-f-]{36}$/i regex and was bound against the Postgres uuid column,
+  // turning an intended 400 into a 500. Enforce the full 8-4-4-4-12 shape.
+  test('a 36-character non-uuid value (36 hyphens) is rejected as a 400, never reaches the query', async () => {
+    await withServer(async (baseUrl) => {
+      const nearMiss = '-'.repeat(36);
+      expect(nearMiss).toHaveLength(36);
+      const res = await post(baseUrl, { scheduledServiceId: nearMiss });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/uuid/);
+      expect(InvoiceService.create).not.toHaveBeenCalled();
+      expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a well-formed uuid of any case is accepted by shape', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT.toUpperCase() });
+      expect(res.status).toBe(201);
+    });
+  });
+
   test('without a visit id the create stays the unlinked, unlocked path', async () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, {});
@@ -287,7 +359,7 @@ describe('POST /admin/invoices with an open visit link', () => {
   });
 });
 
-describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4131 r2)', () => {
+describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4131 r2/r3)', () => {
   const INVOICE = '44444444-4444-4444-8444-444444444444';
   const scheduleSend = (baseUrl) => fetch(`${baseUrl}/admin/invoices/${INVOICE}/schedule-send`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scheduledFor: '2040-03-04T08:00' }),
@@ -296,6 +368,7 @@ describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4
   let update;
   beforeEach(() => {
     jest.clearAllMocks();
+    completionStatusForService.mockResolvedValue({ state: 'none' });
     update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: INVOICE, status: 'scheduled' }]) }));
     db.mockImplementation((table) => {
       if (table === 'invoices') return qb({ first: jest.fn(async () => ({ payer_statement_id: null, scheduled_service_id: VISIT })), update });
@@ -311,15 +384,40 @@ describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ code: 'LINKED_VISIT_OPEN', error: expect.stringContaining('open visit') });
       expect(update).not.toHaveBeenCalled();
+      expect(completionStatusForService).not.toHaveBeenCalled();
     });
   });
 
-  test('schedules normally once the linked visit is completed', async () => {
+  test('schedules normally once the linked visit is completed and its completion side effects have finished', async () => {
     visitStatus = 'completed';
+    completionStatusForService.mockResolvedValue({ state: 'succeeded_other_key' });
     await withServer(async (baseUrl) => {
       const res = await scheduleSend(baseUrl);
       expect(res.status).toBe(200);
       expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled' }));
+    });
+  });
+
+  // GitHub P1 #4131 r3 — a committed `completed` status alone does not prove
+  // completion delivery finished: the closeout flips the attempt row to
+  // side_effects_running/succeeded only as it runs. Fence on that signal.
+  test.each([['running'], ['resumable']])('refuses while the completion side effects are still %s — nothing scheduled', async (state) => {
+    visitStatus = 'completed';
+    completionStatusForService.mockResolvedValue({ state });
+    await withServer(async (baseUrl) => {
+      const res = await scheduleSend(baseUrl);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'COMPLETION_IN_PROGRESS' });
+      expect(update).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a legacy completion with no attempt row (state "none"/"completed_no_attempt") schedules normally', async () => {
+    visitStatus = 'completed';
+    completionStatusForService.mockResolvedValue({ state: 'completed_no_attempt', serviceRecordId: 'sr-1' });
+    await withServer(async (baseUrl) => {
+      const res = await scheduleSend(baseUrl);
+      expect(res.status).toBe(200);
     });
   });
 });

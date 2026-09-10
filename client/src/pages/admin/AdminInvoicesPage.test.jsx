@@ -14,11 +14,15 @@ import {
   isAllowedAttachmentFile,
   VISIT_STATE_CONFLICT_CODES,
   confirmedBalanceFromError,
+  createInvoiceBlocker,
+  isLinkedVisitGone,
   openVisitBalanceKey,
   openVisitCreateExpectations,
   openVisitSendTimingBlocked,
+  previewLinkedBalance,
   reconcileSelectedOpenVisit,
   reloadsVisitPickerAfterCreateError,
+  resolveLinkedBalance,
   noticeCandidateLabel,
   orderNoticeCandidates,
   persistedSendDisposition,
@@ -121,6 +125,62 @@ describe("AdminInvoicesPage open-visit link: picker refresh after a create confl
     expect(reconcileSelectedOpenVisit(stale, [])).toBe(stale);
     expect(reconcileSelectedOpenVisit(stale, [{ id: "v1", deposit_credit: 20 }])).toEqual({ id: "v1", deposit_credit: 20 });
     expect(reconcileSelectedOpenVisit(null, [{ id: "v1" }])).toBeNull();
+  });
+});
+
+describe("AdminInvoicesPage CreateInvoice flattening (Codex P2 r3)", () => {
+  it("isLinkedVisitGone: true only when a selected visit dropped out of the open list", () => {
+    expect(isLinkedVisitGone({ id: "v1" }, [{ id: "v2" }])).toBe(true);
+    expect(isLinkedVisitGone({ id: "v1" }, [{ id: "v1" }])).toBe(false);
+    expect(isLinkedVisitGone(null, [])).toBe(false);
+    expect(isLinkedVisitGone({ id: "v1" }, undefined)).toBe(true);
+  });
+
+  it("previewLinkedBalance: caps the credit at the total and rounds the remainder to the cent", () => {
+    expect(previewLinkedBalance({ selectedOpenVisit: { deposit_credit: 49 }, total: 117 }))
+      .toEqual({ depositCredit: 49, previewBalanceDue: 68 });
+    expect(previewLinkedBalance({ selectedOpenVisit: { deposit_credit: 200 }, total: 117 }))
+      .toEqual({ depositCredit: 117, previewBalanceDue: 0 });
+    expect(previewLinkedBalance({ selectedOpenVisit: null, total: 117 }))
+      .toEqual({ depositCredit: 0, previewBalanceDue: 117 });
+    expect(previewLinkedBalance({ selectedOpenVisit: { deposit_credit: -5 }, total: 117 }))
+      .toEqual({ depositCredit: 0, previewBalanceDue: 117 });
+  });
+
+  it("resolveLinkedBalance: the server-confirmed balance wins only while the form matches the key it was computed for", () => {
+    const confirmed = { key: "k1", balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49 };
+    expect(resolveLinkedBalance({ confirmedBalance: confirmed, balanceKey: "k1", previewBalanceDue: 68 }))
+      .toEqual({ serverBalance: confirmed, balanceDue: 68 });
+    expect(resolveLinkedBalance({ confirmedBalance: confirmed, balanceKey: "k2", previewBalanceDue: 111.5 }))
+      .toEqual({ serverBalance: null, balanceDue: 111.5 });
+    expect(resolveLinkedBalance({ confirmedBalance: null, balanceKey: "k1", previewBalanceDue: 68 }))
+      .toEqual({ serverBalance: null, balanceDue: 68 });
+  });
+
+  it("createInvoiceBlocker: one rule per reason, first failing rule wins, null when nothing blocks", () => {
+    const ready = {
+      selectedCustomer: { id: "c1" },
+      lineItems: [{ _kind: "service", description: "Quarterly", unit_price: 117 }],
+      serviceDate: "2040-03-04",
+      dueDate: "2040-03-18",
+      sendTiming: "now",
+      scheduledFor: null,
+      requestReview: false,
+      reviewDelay: null,
+      linkedVisitGone: false,
+      selectedOpenVisit: null,
+    };
+    expect(createInvoiceBlocker(ready)).toBeNull();
+    expect(createInvoiceBlocker({ ...ready, selectedCustomer: null })).toMatch(/Select a customer/);
+    expect(createInvoiceBlocker({ ...ready, lineItems: [{ _kind: "service", description: "", unit_price: 0 }] })).toMatch(/line item/);
+    expect(createInvoiceBlocker({ ...ready, serviceDate: null })).toMatch(/service date/);
+    expect(createInvoiceBlocker({ ...ready, dueDate: null })).toMatch(/due date/);
+    expect(createInvoiceBlocker({ ...ready, sendTiming: "custom", scheduledFor: null })).toMatch(/send time/);
+    expect(createInvoiceBlocker({ ...ready, sendTiming: "custom", scheduledFor: "2040-03-05T08:00" })).toBeNull();
+    expect(createInvoiceBlocker({ ...ready, sendTiming: "now", requestReview: true, reviewDelay: null })).toMatch(/review request time/);
+    expect(createInvoiceBlocker({ ...ready, linkedVisitGone: true })).toMatch(/no longer open/);
+    expect(createInvoiceBlocker({ ...ready, sendTiming: "custom", scheduledFor: "2040-03-05T08:00", selectedOpenVisit: { id: "v1" } }))
+      .toMatch(/sent now or saved as a draft/);
   });
 });
 
