@@ -926,7 +926,7 @@ function identityAwareComboMatches(reservedRows, combo, idMap) {
 // standalone identity silently drops the companion completion lane
 // (pre-push P1). Null identity falls back to label resolution, which knows
 // the combined name.
-function combinedRewriteUpdate(combo, catalogRow) {
+function combinedRewriteUpdate(combo, catalogRow, protectedDuration) {
   const update = {
     service_type: combo.route.name,
     service_id: null,
@@ -939,10 +939,39 @@ function combinedRewriteUpdate(combo, catalogRow) {
     // standalone (codex #3485 r6 P2).
     update.service_key_snapshot = combo.route.catalogServiceKey;
     if (catalogRow.default_duration_minutes) {
-      update.estimated_duration_minutes = serviceDurationMinutes(catalogRow);
+      update.estimated_duration_minutes = protectedDuration
+        || serviceDurationMinutes(catalogRow);
     }
   }
   return update;
+}
+
+// A version-2 reservation freezes one allowance per service. Converter
+// identity lookups happen later than reserve/commit, so an inactive or absent
+// catalog row can become selectable in between. Lock the row chosen by the
+// converter and refuse to attach a catalog identity whose current canonical
+// allowance no longer fits the member's certified minutes.
+function assertV2CatalogAllowance(catalogRow, allocatedMinutes) {
+  if (!catalogRow) return null;
+  const allocated = Number(allocatedMinutes);
+  const catalogDuration = serviceDurationMinutes(catalogRow, 60, { preserveCapacity: true });
+  if (!Number.isInteger(allocated) || allocated <= 0 || catalogDuration > allocated) {
+    throw require('./scheduling/arrival-route').capacityError('service_duration_changed');
+  }
+  // A shorter current policy does not erase a larger certified floor.
+  return allocated;
+}
+
+function v2CapacityMinutesForCatalog(capacity, catalogServiceKey) {
+  if (capacity?.version !== 2) return null;
+  const family = RecurringAppointmentSeeder.serviceKeyFor({ service_key: catalogServiceKey });
+  const index = capacity.services.indexOf(family);
+  return index >= 0 ? capacity.durations[index] : null;
+}
+
+function isCatalogCapacityError(error) {
+  return error?.code === 'SLOT_UNAVAILABLE'
+    && ['service_duration_changed', 'catalog_unavailable'].includes(error?.reason);
 }
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
@@ -5710,22 +5739,31 @@ const EstimateConverter = {
               notes: `Auto-scheduled from estimate #${estimateId} (${unit.noteKind || 'standalone bait program'} alongside reserved visit). Frequency: ${unitFrequencyLabel}.`,
               source_estimate_id: estimateId,
             };
+            const protectV2Member = combinedCapacity?.version === 2 && sameTrip;
             try {
-              const catalogRow = await database('services')
-                .where({ service_key: unit.catalogServiceKey })
-                .first('id', 'name', 'default_duration_minutes', 'scheduling_duration_policy');
+              const catalogQuery = database('services').where({ service_key: unit.catalogServiceKey });
+              if (protectV2Member) catalogQuery.forShare();
+              const catalogRow = await catalogQuery.first('id', 'name', 'default_duration_minutes', 'min_duration_minutes',
+                  'max_duration_minutes', 'scheduling_duration_policy');
               if (catalogRow) {
+                const protectedDuration = protectV2Member
+                  ? assertV2CatalogAllowance(catalogRow,
+                    v2CapacityMinutesForCatalog(combinedCapacity, unit.catalogServiceKey))
+                  : null;
                 standaloneRow.service_id = catalogRow.id;
                 standaloneRow.service_type = Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)
                   ? (catalogRow.name || standaloneRow.service_type) : standaloneRow.service_type;
                 unit.service.name = standaloneRow.service_type;
                 if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                  standaloneRow.estimated_duration_minutes = Math.max(serviceDurationMinutes(catalogRow),
-                    require('./scheduling/policy').capacityEnabled()
+                  standaloneRow.estimated_duration_minutes = Math.max(
+                    protectedDuration || serviceDurationMinutes(catalogRow),
+                    (protectV2Member || require('./scheduling/policy').capacityEnabled())
                       ? firstPositiveNumber(unit.service.estimatedDurationMinutes, unit.service.estimated_duration_minutes) || 0 : 0);
                 }
               }
             } catch (lookupErr) {
+              if (isCatalogCapacityError(lookupErr)) throw lookupErr;
+              if (protectV2Member) throw require('./scheduling/arrival-route').capacityError('catalog_unavailable');
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
               // Same abort as the auto-schedule path (codex r21 pre-push
               // P1): an errored palm lookup is unknown state, not a
@@ -5903,14 +5941,25 @@ const EstimateConverter = {
           // Identity contract lives in combinedRewriteUpdate (pre-push P1:
           // a missing row / failed lookup CLEARS the standalone identity).
           let catalogRow = null;
+          let protectedDuration = null;
+          const protectV2Rewrite = row.reservation_policy_version === 2 && capacitySnapshot?.version !== 1;
           try {
-            catalogRow = await database('services')
-              .where({ service_key: combo.route.catalogServiceKey })
-              .first('id', 'default_duration_minutes', 'scheduling_duration_policy');
+            const catalogQuery = database('services').where({ service_key: combo.route.catalogServiceKey });
+            if (protectV2Rewrite) catalogQuery.forShare();
+            catalogRow = await catalogQuery.first('id', 'default_duration_minutes', 'min_duration_minutes',
+                'max_duration_minutes', 'scheduling_duration_policy');
+            if (protectV2Rewrite) {
+              protectedDuration = assertV2CatalogAllowance(catalogRow,
+                combinedCapacity?.version === 2
+                  ? v2CapacityMinutesForCatalog(combinedCapacity, combo.route.catalogServiceKey)
+                  : row.estimated_duration_minutes);
+            }
           } catch (lookupErr) {
+            if (isCatalogCapacityError(lookupErr)) throw lookupErr;
+            if (protectV2Rewrite) throw require('./scheduling/arrival-route').capacityError('catalog_unavailable');
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
           }
-          const update = combinedRewriteUpdate(combo, catalogRow);
+          const update = combinedRewriteUpdate(combo, catalogRow, protectedDuration);
           if (update.estimated_duration_minutes) {
             combo.service.estimatedDurationMinutes = update.estimated_duration_minutes;
           }
@@ -5947,6 +5996,7 @@ const EstimateConverter = {
         // P0): this fail-soft catch would otherwise complete
         // acceptance/billing without the sold palm series.
         if (combinedCapacity) throw comboErr;
+        if (isCatalogCapacityError(comboErr)) throw comboErr;
         if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
           || comboErr.code === 'PALM_RECURRING_LINE_INVALID'
           || comboErr.code === 'RESERVED_CATALOG_IDENTITY_UNKNOWN') throw comboErr;
@@ -6093,10 +6143,16 @@ const EstimateConverter = {
                       ? (PEST_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
                       : null;
                 if (reservedCatalogKey) {
+                  const protectV2Parent = reservedStart.reservation_policy_version === 2
+                    && capacitySnapshot?.version !== 1;
                   try {
-                    const catalogRow = await trx('services')
-                      .where({ service_key: reservedCatalogKey })
-                      .first('id', 'service_key');
+                    const catalogQuery = trx('services').where({ service_key: reservedCatalogKey });
+                    if (protectV2Parent) catalogQuery.forShare();
+                    const catalogRow = await catalogQuery.first('id', 'service_key', 'default_duration_minutes', 'min_duration_minutes',
+                        'max_duration_minutes', 'scheduling_duration_policy');
+                    if (catalogRow && protectV2Parent) {
+                      assertV2CatalogAllowance(catalogRow, reservedStart.estimated_duration_minutes);
+                    }
                     if (catalogRow && reservedStart.service_id !== catalogRow.id) {
                       // Snapshot rides along (durable identity — completion
                       // trusts id, then snapshot). service_type is NEVER
@@ -6123,8 +6179,12 @@ const EstimateConverter = {
                       throw palmCatalogMissingError();
                     }
                   } catch (relinkErr) {
+                    if (isCatalogCapacityError(relinkErr)) throw relinkErr;
                     // Unknown identity state = fail closed for palm too.
                     if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;
+                    if (protectV2Parent) {
+                      throw require('./scheduling/arrival-route').capacityError('catalog_unavailable');
+                    }
                     logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
                     if (reservedCatalogKey === 'palm_injection_semiannual') {
                       throw palmCatalogMissingError();
@@ -6175,6 +6235,7 @@ const EstimateConverter = {
           }
         } catch (seedErr) {
           if (combinedCapacity) throw seedErr;
+          if (isCatalogCapacityError(seedErr)) throw seedErr;
           // The palm identity abort must surface — swallowing it would
           // complete the acceptance around the very rollback it exists to
           // force (codex r17 pre-push P0).
