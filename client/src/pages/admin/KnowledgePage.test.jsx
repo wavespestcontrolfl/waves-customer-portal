@@ -100,6 +100,50 @@ describe("KnowledgePage embedded navigation", () => {
     );
   });
 
+  it("retries recent-query reads while preserving tab and query context", async () => {
+    let queryReads = 0;
+    fetch.mockImplementation(async (url) => {
+      if (!url.endsWith("/admin/knowledge/queries")) return response({ articles: [] });
+      queryReads += 1;
+      if (queryReads === 1) {
+        return response({ error: "Queries unavailable" }, { ok: false, status: 503 });
+      }
+      return response({
+        queries: [{
+          id: "query-1",
+          query: "Fixture prior question",
+          answer: "Prior synthetic answer.",
+          asked_by: "Fixture operator",
+          created_at: "2026-09-10T15:00:00Z",
+          response_quality: 4,
+          filed_back: true,
+        }],
+      });
+    });
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderWiki("/admin/knowledge?source=bookmark&wikiTab=queries");
+
+    expect(document.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Queries unavailable");
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "?source=bookmark&wikiTab=queries",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
+    expect(screen.getByText("Fixture operator")).toBeInTheDocument();
+    expect(screen.getByText("4/5")).toBeInTheDocument();
+    expect(screen.getByText("Filed back")).toBeInTheDocument();
+    expect(queryReads).toBe(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Articles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recent Queries" }));
+    await waitFor(() => expect(queryReads).toBe(3));
+    expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "?source=bookmark&wikiTab=queries",
+    );
+  });
+
   it("does not expose the admin-only Health area to non-admin staff", () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     renderWiki("/admin/knowledge?wikiTab=health");

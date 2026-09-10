@@ -2,6 +2,7 @@ import React, { Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
 import { BookOpen, Brain, Library } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { UiSurface } from "../../components/ui";
 
 const KnowledgePage = React.lazy(() => import("./KnowledgePage"));
 const KnowledgeBasePage = React.lazy(() => import("./KnowledgeBasePage"));
@@ -29,15 +30,18 @@ export default function KnowledgeHubPage() {
 
   return (
     <div className="mx-auto max-w-[1300px]">
-      <AdminCommandHeader
-        title="Knowledge"
-        icon={Library}
-        sections={AREAS}
-        activeKey={area}
-        onSectionChange={setArea}
-        ariaLabel="Knowledge area"
-        navGridClassName="grid-cols-2"
-      />
+      <UiSurface density="comfortable">
+        <AdminCommandHeader
+          variant="workspace"
+          title="Knowledge"
+          icon={Library}
+          sections={AREAS}
+          activeKey={area}
+          onSectionChange={setArea}
+          ariaLabel="Knowledge area"
+          navGridClassName="grid-cols-2"
+        />
+      </UiSurface>
 
       <Suspense
         fallback={(
