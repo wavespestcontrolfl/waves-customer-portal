@@ -16,7 +16,12 @@ function fakeCache() {
     // stored body — the caller's text()/clone() never lock the stored copy.
     async match(key) { const hit = store.get(asRequest(key).url); return hit && hit.clone(); },
     deleteGate: null, // a test may park delete() (the prune's last step)
-    async put(key, response) { store.set(asRequest(key).url, response); },
+    failPut: null, // a test may make put() reject for some URLs (quota)
+    async put(key, response) {
+      const url = asRequest(key).url;
+      if (this.failPut && this.failPut(url)) { const e = new Error('Quota exceeded'); e.name = 'QuotaExceededError'; throw e; }
+      store.set(url, response);
+    },
     async delete(key) { if (this.deleteGate) await this.deleteGate; return store.delete(asRequest(key).url); },
     async keys() { if (this.gate) await this.gate; return [...store.keys()].map(url => ({ url })); },
   };
@@ -65,14 +70,16 @@ function fakeLocks() {
   };
 }
 
-function loadWorker(cache, { locks } = {}) {
+function loadWorker(cache, { locks, cacheNames = [] } = {}) {
   const listeners = {};
+  const names = new Set(cacheNames);
   const sandbox = {
     self: {
       addEventListener(name, fn) { listeners[name] = fn; },
       navigator: locks ? { locks } : {}, location: { origin: 'https://portal.test' }, registration: {},
+      skipWaiting: async () => {}, clients: { claim: async () => {} },
     },
-    caches: { async open() { return cache; }, async keys() { return []; }, async delete() { return true; } },
+    caches: { names, async open(name) { names.add(name); return cache; }, async keys() { return [...names]; }, async delete(name) { return names.delete(name); } },
     Request: class { constructor(url) { this.url = url; } },
     Response: FakeResponse,
     Headers,
@@ -98,7 +105,13 @@ function loadWorker(cache, { locks } = {}) {
     return { response, settled: () => Promise.all(pending) };
   }
   const setFetch = (fn) => { sandbox.fetch = fn; };
-  return { ...sandbox.__exports, dispatchFetch, setFetch };
+  // Fire the install event and resolve when its extend-lifetime work settles.
+  async function dispatchInstall() {
+    const pending = [];
+    listeners.install({ waitUntil(promise) { pending.push(promise); } });
+    await Promise.all(pending);
+  }
+  return { ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, cacheNames: names };
 }
 
 const shellHtml = (assets) => `<html><head>${assets.map(a => `<script src="${a}"></script>`).join('')}</head></html>`;
@@ -109,8 +122,8 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq)');
     expect(source).toContain('async function precacheCompleteShell()');
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
-    expect(source).toContain('await withAssetWrites(() => Promise.all(assetResponses.map');
-    expect(source.indexOf('await withAssetWrites(() => Promise.all(assetResponses.map'))
+    expect(source).toContain('await Promise.allSettled(assetResponses.map');
+    expect(source.indexOf('await Promise.allSettled(assetResponses.map'))
       .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse)'));
     expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
@@ -130,6 +143,7 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain('event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()))');
     expect(source).not.toMatch(/precacheCompleteShell\(\).*catch\(\(\) => \{\}\)/);
     expect(source).toContain('k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME');
+    expect(source).toContain("if (!isQuotaError(err)) throw err;");
   });
 
   it('sweeps the pre-prefix legacy buckets on activate but never the badge state', () => {
@@ -635,6 +649,90 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     setFetch(async (request) => fakeResponse(`asset:${request.url}`));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
+  });
+
+  it('frees the stale buckets and retries when the precache hits the quota at install', async () => {
+    // Codex #4335 P1: on a phone whose v11 bucket holds the origin's whole
+    // quota, the v12 precache rejects with QuotaExceededError and install
+    // would fail forever (stale buckets are only swept at activate),
+    // leaving the device on the slow worker.
+    const cache = fakeCache();
+    const { dispatchInstall, cacheNames, setFetch } = loadWorker(cache, {
+      cacheNames: ['waves-customer-v11-shell-atomic', 'waves-v10-admin-activation-stable', 'waves-badge-state'],
+    });
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-AAA.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = () => cacheNames.has('waves-customer-v11-shell-atomic'); // no room until v11 is gone
+
+    await dispatchInstall();
+
+    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v12-shell-pruned']);
+    expect(await cache.match('/')).toBeTruthy();
+    expect(await cache.match('/assets/index-AAA.js')).toBeTruthy();
+  });
+
+  it('does not sweep buckets when the precache fails for a non-quota reason', async () => {
+    const cache = fakeCache();
+    const { dispatchInstall, cacheNames, setFetch } = loadWorker(cache, { cacheNames: ['waves-customer-v11-shell-atomic'] });
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-AAA.js'])) : fakeResponse('down', false)));
+    await expect(dispatchInstall()).rejects.toThrow(/Shell asset failed/);
+    expect(cacheNames.has('waves-customer-v11-shell-atomic')).toBe(true);
+  });
+
+  it('does not let a stale shell read reset the cached-build memo after a refresh', async () => {
+    // Codex #4335 P1: a miss's read of shell A is still parked when a refresh
+    // commits shell B. Publishing A into the memo afterwards makes the hit
+    // fast path believe A is the cached build, so a chunk tagged C,A (C the
+    // live build) never gains B's claim and D's prune drops it under B.
+    const cache = fakeCache();
+    let releaseShell;
+    const shellGate = new Promise(resolve => { releaseShell = resolve; });
+    await cache.put('/', gatedResponse(shellHtml(['/assets/index-AAA.js']), shellGate));
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+
+    const miss = await dispatchFetch('/assets/Early-AAA.js', { settle: false }); // shell read parked
+    await tick();
+    cache.store.set('https://portal.test/', fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js']))); // memo → B
+    releaseShell();
+    await miss.settled(); // the stale read must not publish A
+
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-CCC.js']));
+      if (request.url.includes('index-CCC.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' }); // C live, never cached
+    const ccc = buildIdOf(['/assets/index-CCC.js']);
+    const aaa = buildIdOf(['/assets/index-AAA.js']);
+    await cache.put('/assets/Shared-XYZ.js', new FakeResponse('shared', { headers: { 'x-waves-build': `${ccc},${aaa}` } }));
+    await dispatchFetch('/assets/Shared-XYZ.js'); // a B tab's hit must add B
+    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+      .toContain(buildIdOf(['/assets/index-BBB.js']));
+
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
+    expect(await cachedAssets(cache)).toContain('/assets/Shared-XYZ.js');
+  });
+
+  it('keeps the cached build\'s claim on a shared asset through refreshes that fail mid-write', async () => {
+    // Codex #4335 P1: refreshes C1..C3 each re-write the shared asset, then
+    // fail storing a new asset (quota). The shell stays B, but the shared
+    // entry's tags would fill with uncommitted builds and shed B; D's prune
+    // (retaining D and B) would then delete an asset B's shell needs.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js', '/assets/Shared-XYZ.js'])));
+
+    cache.failPut = (url) => /index-C\d\.js$/.test(url);
+    for (const build of ['C1', 'C2', 'C3']) {
+      await expect(cacheCompleteShellResponse(fakeResponse(shellHtml([`/assets/index-${build}.js`, '/assets/Shared-XYZ.js']))))
+        .rejects.toThrow(/Quota/);
+    }
+    cache.failPut = null;
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js', '/assets/Shared-XYZ.js']));
+
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js', '/assets/index-DDD.js']);
   });
 
   it('merges a queued re-tag into the entry a refresh re-wrote meanwhile', async () => {

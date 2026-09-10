@@ -93,13 +93,19 @@ function tagWithBuild(response, buildIds) {
 // termination, so read it from the cache each time (one small parse, and
 // only on an /assets/ cache miss).
 // `knownCachedBuild` mirrors the last value read or written, so the asset
-// hit fast path can check a chunk's claims without touching the cache.
+// hit fast path can check a chunk's claims without touching the cache. A
+// read that started before a refresh wrote a newer shell must not set it
+// back: `cachedShellSeq` advances on every shell write, and a read only
+// publishes its result if no write happened while it was in flight.
 let knownCachedBuild = null;
+let cachedShellSeq = 0;
 async function cachedBuildId(cache) {
+  const seq = cachedShellSeq;
   const shell = await cache.match(OFFLINE_URL);
   if (!shell) return null;
-  knownCachedBuild = buildIdOf(shellAssetUrls(await shell.text()));
-  return knownCachedBuild;
+  const buildId = buildIdOf(shellAssetUrls(await shell.text()));
+  if (seq === cachedShellSeq) knownCachedBuild = buildId;
+  return buildId;
 }
 
 // The build pages are running right now. A navigation hands the page build
@@ -196,12 +202,21 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
   // Read the previous build BEFORE overwriting its shell: a different id
   // means a deploy shipped, and everything older than that build is dead weight.
   const previousBuildId = await cachedBuildId(cache);
-  // Under the write lock, keeping the claims an existing entry already holds.
-  await withAssetWrites(() => Promise.all(assetResponses.map(async ([assetUrl, response]) => {
-    const existing = await cache.match(assetUrl);
-    await cache.put(assetUrl, tagWithBuild(response, [buildId, ...buildTagsOf(existing)]));
-  })));
+  // Under the write lock, keeping the claims an existing entry already
+  // holds. The previous build claims these too: if a write fails (quota)
+  // the shell is not replaced, and a run of such failures must not push
+  // the still-cached build off the tag cap of an asset it shares. Every
+  // started write settles before the lock is released.
+  await withAssetWrites(async () => {
+    const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
+      const existing = await cache.match(assetUrl);
+      await cache.put(assetUrl, tagWithBuild(response, [buildId, previousBuildId, ...buildTagsOf(existing)]));
+    }));
+    const failed = results.find(r => r.status === 'rejected');
+    if (failed) throw failed.reason;
+  });
   await cache.put(OFFLINE_URL, shellResponse);
+  cachedShellSeq += 1;
   knownCachedBuild = buildId;
   // Refreshes are queued, so an older one can finish after a newer
   // navigation already advanced the live build — writing its own build back
@@ -234,10 +249,37 @@ function pruneStaleAssets(cache, retainedBuildIds) {
   });
 }
 
-async function precacheCompleteShell() {
+async function precacheOnce() {
   const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
   const shellResponse = await fetch(shellRequest);
   await cacheCompleteShellResponse(shellResponse);
+}
+
+function isQuotaError(err) {
+  return !!err && (err.name === 'QuotaExceededError' || /quota/i.test(String(err.message || '')));
+}
+
+async function precacheCompleteShell() {
+  try {
+    await precacheOnce();
+  } catch (err) {
+    // The bloated v11 bucket may hold the origin's whole quota while this
+    // v12 precache runs (stale buckets are normally swept at activate), so
+    // the install would fail forever and the device stay on the slow
+    // worker. Free them now — the active worker still serves from the
+    // network — and retry once. Other failures propagate unchanged.
+    if (!isQuotaError(err)) throw err;
+    await sweepStaleCaches();
+    await precacheOnce();
+  }
+}
+
+function isStaleCacheName(k) {
+  return (k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME) || LEGACY_CACHE_PATTERN.test(k);
+}
+async function sweepStaleCaches() {
+  const keys = await caches.keys();
+  await Promise.all(keys.filter(isStaleCacheName).map(k => caches.delete(k)));
 }
 
 self.addEventListener('install', event => {
@@ -245,12 +287,7 @@ self.addEventListener('install', event => {
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys => Promise.all(
-      keys.filter(k => (k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME) || LEGACY_CACHE_PATTERN.test(k))
-        .map(k => caches.delete(k))
-    )).then(() => self.clients.claim())
-  );
+  event.waitUntil(sweepStaleCaches().then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', event => {
