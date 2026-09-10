@@ -1676,6 +1676,24 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('the SMS-only send path re-judges Bill-To ownership for a combined-visit invoice too', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    try {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      expect(await require('../services/invoice').sendViaSMS(invoiceId)).toMatchObject({ sent: false, code: 'payer_billed' });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test.each(['excluded member', 'self-pay override'])('the live Bill-To check honors per-job precedence: %s', async (scenario) => {
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,

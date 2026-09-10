@@ -1205,6 +1205,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Repoint every FK. Each table gets its own savepoint (knex nested
     // transaction) so a unique-collision on a droppable singleton can be
     // handled without poisoning the outer transaction.
+    // A payer-linked winner absorbing a self-pay loser makes the loser's debt
+    // payer-owned: a self-pay combined-visit invoice of the loser whose send
+    // claim already committed (its provider handoff pending) defers the merge.
+    // Judged here, under the customer locks and BEFORE the FK sweep repoints
+    // those invoices to the winner (the send fence keys on customer_id).
+    if (winner.payer_id && !loser.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
+      throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
+    }
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -1809,15 +1818,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // A payer-changing merge is the same live-ownership writer the customer
     // and job Bill-To routes are: a self-pay combined-visit invoice whose
     // send claim already committed (its provider handoff pending) must not
-    // have its debt handed to AP underneath it, on either side of the merge.
-    {
-      const { packetInvoiceSendInFlight } = require('./visit-completion-packets');
-      if (backfills.payer_id && await packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
-        throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
-      }
-      if (winner.payer_id && !loser.payer_id && await packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
-        throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
-      }
+    // have its debt handed to AP underneath it. After the FK sweep the
+    // winner's ownership covers the repointed loser invoices too, so this
+    // one query fences both records for the loser-payer direction (the
+    // winner-payer direction was fenced before the sweep).
+    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+      throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
