@@ -152,6 +152,22 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
   });
 
+  test('a failure clearing the provider block before the visit summary request keeps the ordinary retry schedule', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockRejectedValueOnce(new Error('unblock timed out'));
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
+      send_attempt_token: 'attempt-5', provider_retry_count: 0 });
+    expect(await retry.retryOne(stored)).toMatchObject({ sent: false });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: expect.any(Date) }));
+  });
+
   test('other templates never consult the visit summary fence', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
