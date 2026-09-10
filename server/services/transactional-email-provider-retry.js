@@ -212,6 +212,12 @@ async function retryOne(message) {
       })
       .returning('*');
     if (updated && suppression.suppression_type === 'template_unavailable') await alertExhausted(updated, reason);
+    // A summary blocked here never reaches a provider, so no webhook will
+    // reconcile its aggregate: settle it from the ledger now.
+    if (message.template_key === 'service.visit_summary') {
+      await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...(updated || {}), status: updated?.status || 'blocked' })
+        .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
+    }
     return { sent: false, stopped: true, reason };
   }
 
