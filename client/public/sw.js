@@ -133,12 +133,15 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
   // navigation may read the old shell moments before its replacement. Two
-  // generations bound the cache.
-  if (previousBuildId !== buildId) await pruneStaleAssets(cache, [buildId, previousBuildId]);
+  // generations bound the cache. The live build is also protected: when
+  // this refresh is an older one landing late, a newer navigation may have
+  // cached its own chunks already, and its queued refresh only restores the
+  // shell's direct assets — not the routes that page already loaded.
+  if (previousBuildId !== buildId) await pruneStaleAssets(cache, [buildId, previousBuildId, liveBuildId]);
 }
 
-// Drop every cached /assets/* entry tagged with neither retained build (or
-// with no tag at all). Runs only when the shell's build changed (a deploy),
+// Drop every cached /assets/* entry tagged with none of the retained builds
+// (or with no tag at all). Runs only when the shell's build changed (a deploy),
 // never on a plain navigation, so page chunks cached on use stay with their
 // build until it is two deploys old.
 async function pruneStaleAssets(cache, retainedBuildIds) {

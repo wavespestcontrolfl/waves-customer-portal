@@ -288,6 +288,36 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
   });
 
+  it('lets an older refresh landing late keep the chunks the newest navigation cached', async () => {
+    // Codex pre-push P1: refresh A is parked; navigation B arrives and its
+    // page caches a lazy chunk tagged B. When A finally lands, its prune must
+    // protect B (the live build), not just A and A's predecessor — B's own
+    // queued refresh restores the shell's direct assets only.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    let navHtml = shellHtml(['/assets/index-AAA.js']);
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(navHtml);
+      if (request.url.includes('index-AAA.js')) await gateA;
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const navA = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    navHtml = shellHtml(['/assets/index-BBB.js']);
+    const navB = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    await dispatchFetch('/assets/DashboardPageV2-BBB.js'); // B's page loads a route while A is parked
+
+    releaseA();
+    await navA.settled();
+    expect(await cache.match('/assets/DashboardPageV2-BBB.js')).toBeTruthy();
+    await navB.settled();
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-AAA.js', '/assets/index-BBB.js']);
+  });
+
   it('does not touch cached page chunks when the same shell is refreshed', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse, dispatchFetch } = loadWorker(cache);
