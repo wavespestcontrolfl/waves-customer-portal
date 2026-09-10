@@ -440,6 +440,38 @@ suite('existing-customer estimates from another workspace', () => {
     expect(refused).toMatchObject({ success: false, code: 'estimate_send_scheduled' });
   }, 60000);
 
+  test.each(['before preview', 'after preview'])('a scheduled group sibling blocks an IB revision of an unscheduled member %s', async timing => {
+    const fixture = await customerFixture();
+    const created = await confirm(await propose(fixture));
+    const estimateId = created.body.result.estimate_id, groupId = crypto.randomUUID();
+    await db('estimates').where({ id: estimateId }).update({ estimate_group_id: groupId });
+    const member = await db('estimates').where({ id: estimateId }).first();
+    // The scheduled anchor: a second property's row in the same group.
+    const anchor = { ...member, id: crypto.randomUUID(), property_id: null, estimate_group_id: groupId,
+      status: 'scheduled', scheduled_at: new Date(Date.now() + 86400000),
+      estimate_data: JSON.stringify(member.estimate_data), address: `${member.address} Unit B`,
+      token: crypto.randomBytes(16).toString('hex'), estimate_slug: member.estimate_slug ? `${member.estimate_slug}-b` : null };
+    const queue = () => db('estimates').insert(anchor);
+    if (timing === 'before preview') await queue();
+    const proposed = await propose(fixture, { estimate_id: estimateId, lawn_applications: 12 });
+    if (timing === 'before preview') {
+      expect(proposed.body.pendingActions || []).toHaveLength(0);
+    } else {
+      expect(proposed.body.pendingActions).toHaveLength(1);
+      await queue();
+      const before = await db('estimates').where({ id: estimateId }).first();
+      const refused = await confirm(proposed);
+      expect(refused.status).toBe(409);
+      expect(await db('estimates').where({ id: estimateId }).first()).toEqual(before);
+    }
+    const refused = await require('../services/intelligence-bar/customer-estimate-tools')
+      .executeCustomerEstimateTool('save_customer_estimate', {
+        customer_id: fixture.customer.id, property_id: fixture.property.id, estimate_id: estimateId,
+      });
+    expect(refused).toMatchObject({ success: false, code: 'estimate_send_scheduled' });
+    expect(refused.error || refused.message || JSON.stringify(refused)).toMatch(/multi-property group/);
+  }, 60000);
+
   test.each([false, true])('revision cache invalidation waits for durable commit (rollback=%s)', async rollback => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));

@@ -2426,15 +2426,35 @@ async function assertNoRevisionDuringGroupSend(trx, row, writeFields) {
 // lockScheduledGroupGuardGroups (taken before the row lock), and the dryRun
 // preflight reads unlocked, best-effort — the locked recheck in the write is
 // authoritative.
+// The queued member of a group, if any: the scheduled anchor pins every
+// viewable sibling's offer in its receipt (reviewedGroupVersions), so a
+// revision of ANY member while one is 'scheduled' parks that delivery as
+// send_failed at claim time. `excludeId` skips the row being written when
+// the caller judges its own status separately.
+async function findScheduledGroupMember(database, groupId, { excludeId = null } = {}) {
+  if (!groupId) return null;
+  const query = database('estimates')
+    .where({ estimate_group_id: groupId, status: 'scheduled' })
+    .whereNull('archived_at');
+  if (excludeId) query.whereNot({ id: excludeId });
+  return query.first('id');
+}
+
+// Gate-independent: the row itself, or any sibling of its current group,
+// with a queued send. Callers that cannot clear a schedule refuse the
+// revision outright (GH codex P1: an unscheduled sibling of a scheduled
+// anchor must not slip past a row-only status check).
+async function findQueuedGroupSend(database, row) {
+  if (String(row?.status || '') === 'scheduled') return { id: row.id, self: true };
+  const sibling = await findScheduledGroupMember(database, row?.estimate_group_id, { excludeId: row?.id });
+  return sibling ? { id: sibling.id, self: false } : null;
+}
+
 async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
   await assertNoRevisionDuringGroupSend(trx, row, writeFields);
   const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
   for (const groupId of groupIds) {
-    const scheduledMember = await trx('estimates')
-      .where({ estimate_group_id: groupId, status: 'scheduled' })
-      .whereNot({ id: row?.id })
-      .whereNull('archived_at')
-      .first('id');
+    const scheduledMember = await findScheduledGroupMember(trx, groupId, { excludeId: row?.id });
     if (!scheduledMember) continue;
     const destination = String(row?.estimate_group_id || '') !== groupId;
     throw errorWithStatus(
@@ -3142,6 +3162,7 @@ module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisi
 module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
 module.exports.lockEstimateGroupAddressRevision = lockEstimateGroupAddressRevision;
 module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
+module.exports.findQueuedGroupSend = findQueuedGroupSend;
 module.exports.assertNoRevisionDuringGroupSend = assertNoRevisionDuringGroupSend;
 module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;
 module.exports.linkedDraftCarriesProposal = linkedDraftCarriesProposal;

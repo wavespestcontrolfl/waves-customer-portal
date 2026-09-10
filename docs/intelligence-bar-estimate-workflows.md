@@ -32,8 +32,11 @@ lead, appointment, customer message or scheduled send is created.
   without reconstructable allocation refuses for editor review instead of
   silently losing the discount.
 - Estimates with a queued send refuse revision until the operator clears the
-  schedule in the estimate editor. This is checked at preview and again under
-  the confirmation's row lock, preserving the reviewed delivery offer.
+  schedule in the estimate editor. The whole multi-property group is judged,
+  not only the targeted row: a scheduled anchor pins every sibling's offer in
+  its receipt, so an unscheduled sibling refuses too. This is checked at
+  preview and again under the confirmation's group and row locks, preserving
+  the reviewed delivery offer.
 - Revision pricing and slot caches clear only after the outer transaction
   commits. An audit/receipt rollback leaves the committed estimate and caches
   intact; public reads during the save cannot repopulate a prematurely cleared
