@@ -44,6 +44,7 @@ const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
 const { capacityEnabled } = require('./scheduling/policy');
 const { capacityError } = require('./scheduling/arrival-route');
+const { serviceDurationMinutes } = require('./service-library');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -338,12 +339,25 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   return null;
 }
 
-async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false } = {}) {
+async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false, validateAllowance = false } = {}) {
   const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const validatedLink = (link) => {
+    // A missing match locks no row: activation/mapping can happen after the
+    // duration read. Validate the actual identity before stamping it, while
+    // its shared row lock protects this allowance through the outer commit.
+    if (validateAllowance && link) {
+      const allocatedMinutes = Number(primary?.durationMinutes);
+      if (!Number.isFinite(allocatedMinutes) || allocatedMinutes <= 0
+        || serviceDurationMinutes(link, DEFAULT_DURATION_MINUTES, { preserveCapacity }) > allocatedMinutes) {
+        throw capacityError('service_duration_changed');
+      }
+    }
+    return link;
+  };
   // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
   // stinging_insect) all collapse to 'pest_control', which is keyed to nothing
   // in the catalog. `engineKey` is the row's RAW pricing-engine key, carried
@@ -394,9 +408,10 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
       });
     } catch (err) {
       logger.warn(`[slot-reservation] catalog lookup failed for catalog key "${catalogKey}": ${err.message}`);
+      if (validateAllowance) throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
       if (strictAllowanceRead) throw err;
     }
-    return byKey;
+    return validatedLink(byKey);
   }
   const isOneTime = serviceProfile?.serviceMode === 'one_time';
   const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
@@ -457,10 +472,11 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
     // Identity-only callers retain the legacy fail-open behavior; duration
     // authorities opt into a strict read so a stale allowance cannot book.
     logger.warn(`[slot-reservation] catalog lookup failed for engine key "${engineKey}": ${err.message}`);
+    if (validateAllowance) throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
     if (strictAllowanceRead) throw err;
     return null;
   }
-  return resolved;
+  return validatedLink(resolved);
 }
 
 
@@ -883,7 +899,7 @@ async function reserveSlot({
       // whitelist; the whitelist handles cadence families whose shared engine
       // key can't resolve a single row, and unmapped keys keep the legacy
       // service_interest fallback.
-      const catalogLink = await catalogLinkForProfile(trx, serviceProfile);
+      const catalogLink = await catalogLinkForProfile(trx, serviceProfile, { validateAllowance: capacityEnabled() });
       const catalogServiceId = catalogLink ? catalogLink.id : null;
       const holdCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const serviceType = catalogLink?.name
@@ -1503,7 +1519,10 @@ async function commitReservation({
       // resolves to nothing, a stale specialty id must be CLEARED, not kept.
       // Same rule for the snapshot and the label: id, key, and label must
       // describe the same accepted service.
-      const commitLink = await catalogLinkForProfile(client, serviceProfile);
+      const commitLink = await catalogLinkForProfile(client, serviceProfile, {
+        preserveCapacity: row.reservation_policy_version === 2,
+        validateAllowance: capacityEnabled() || row.reservation_policy_version === 2,
+      });
       const commitCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.service_id = commitLink ? commitLink.id : null;
       updates.service_key_snapshot = commitLink?.service_key || null;
