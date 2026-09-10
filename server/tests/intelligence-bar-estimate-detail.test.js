@@ -27,11 +27,11 @@ jest.mock('../services/estimate-converter', () => {
     }),
   };
 });
-const mockDeriveCorrectiveWork = jest.fn(() => ({ correctiveWork: null, warning: 'not reconciled' }));
-jest.mock('../services/estimate-proposal-generate', () => ({ deriveCorrectiveWork: (...a) => mockDeriveCorrectiveWork(...a) }));
+const mockBuildPricingBundle = jest.fn(async () => ({ frequencies: [] }));
 jest.mock('../routes/estimate-public', () => {
   const unpublished = ['draft', 'scheduled'];
   return {
+    buildPricingBundle: (...a) => mockBuildPricingBundle(...a),
     isEstimateCustomerViewable: (e) => !e.archived_at && !unpublished.includes(e.status) && !['expired', 'send_failed'].includes(e.status),
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
   };
@@ -60,8 +60,8 @@ const estimateRow = (overrides = {}) => ({
 });
 
 beforeEach(() => {
-  mockDeriveCorrectiveWork.mockReset();
-  mockDeriveCorrectiveWork.mockReturnValue({ correctiveWork: null, warning: 'not reconciled' });
+  mockBuildPricingBundle.mockReset();
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [] });
 });
 
 test('tool definition names the per-application use, takes either selector, types the ids', () => {
@@ -73,15 +73,15 @@ test('tool definition names the per-application use, takes either selector, type
   expect(props.customer_id.format).toBe('uuid');
 });
 
-test('shapes recurring lines with per-visit prices, extracted one-time discounts and credits, totals, customer link', () => {
-  const shaped = shapeEstimate(estimateRow(), [{ amount: '50.00', credited_amount: '0', refunded_amount: '0', status: 'received', received_at: '2026-09-06T10:00:00Z' }]);
+test('shapes recurring lines with per-visit prices, one-time discounts and credits, totals, customer link', async () => {
+  const shaped = await shapeEstimate(estimateRow(), [{ amount: '50.00', credited_amount: '0', refunded_amount: '0', status: 'received', received_at: '2026-09-06T10:00:00Z' }]);
   expect(shaped.recurring_services).toEqual([
     { service: 'Quarterly Pest Control', frequency: 'quarterly', visits_per_year: 4, monthly: 47, annual: 564, per_visit: 141 },
     { service: 'lawn_care', frequency: 'every_6_weeks', visits_per_year: 8, monthly: null, annual: null, per_visit: null, quote_required: true },
   ]);
   expect(shaped.one_time_items).toEqual([
-    { item: 'Initial cleanup', amount: 150, source: 'extracted' },
-    { item: 'Referral credit', amount: -25, source: 'extracted' },
+    { item: 'Initial cleanup', amount: 150 },
+    { item: 'Referral credit', amount: -25, credit: true },
   ]);
   expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
   expect(shaped.deposits).toEqual([{ amount: 50, credited: 0, refunded: 0, status: 'received', received_at: '2026-09-06T10:00:00Z' }]);
@@ -91,8 +91,8 @@ test('shapes recurring lines with per-visit prices, extracted one-time discounts
   expect(JSON.stringify(shaped)).not.toContain('internal only');
 });
 
-test('operator-accepted finals outrank engine figures on recurring and one-time lines (Codex r1 P1 ×2)', () => {
-  const shaped = shapeEstimate(estimateRow({
+test('operator-accepted finals outrank engine figures on recurring and one-time lines (Codex r1 P1 ×2)', async () => {
+  const shaped = await shapeEstimate(estimateRow({
     estimate_data: JSON.stringify({
       recurring: { services: [
         // legacy aliases: mo / ann, package visits under `apps`
@@ -111,43 +111,80 @@ test('operator-accepted finals outrank engine figures on recurring and one-time 
     { service: 'Flea treatment', frequency: null, visits_per_year: 3, monthly: 0, annual: 0, per_visit: 0, comped: true },
   ]);
   expect(shaped.one_time_items).toEqual([
-    { item: 'Bed bug prep', amount: 650, source: 'extracted' },
-    { item: 'Comped inspection', amount: 0, source: 'extracted' },
+    { item: 'Bed bug prep', amount: 650 },
+    { item: 'Comped inspection', amount: 0, comped: true },
   ]);
 });
 
-test('one-time work comes from the corrective-work deriver when it reconciles; engineResult shapes feed both readers (Codex r1 P1, P2)', () => {
-  mockDeriveCorrectiveWork.mockReturnValue({ correctiveWork: [{ label: 'Bed bug treatment', amount: 1200, service: 'bed_bug' }], warning: null });
+test('raw engineResult lines count as one-time work, twins merge, credits and comped rows survive (Codex r2 P1 ×2)', async () => {
   const row = estimateRow({
     monthly_total: null, annual_total: null, onetime_total: null,
-    estimate_data: JSON.stringify({ engineResult: { summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 1200 }, lineItems: [{ name: 'Bed bug treatment', price: 1200 }] } }),
+    estimate_data: JSON.stringify({ engineResult: {
+      summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 1175 },
+      lineItems: [
+        { service: 'bed_bug', name: 'Bed bug treatment', price: 1200 },
+        { service: 'flea', name: 'Flea knockdown', price: 250, manualFinalOneTime: 0 },
+        { service: 'credit', name: 'Referral credit', price: -25 },
+        // package visits on a priced row are not recurring evidence
+        { service: 'roach', name: 'German roach cleanout', price: 300, visits: 3 },
+        // recurring dollars or annual cadence keep a line out of one-time work
+        { service: 'pest_control', name: 'Quarterly Pest', mo: 47, ann: 564, visitsPerYear: 4 },
+        { service: 'lawn_care', name: 'Lawn', price: 90, appsPerYear: 8 },
+        // included on a program: never bills again
+        { service: 'perimeter', name: 'Perimeter spray', price: 80, onProg: true },
+      ],
+    } }),
   });
-  const shaped = shapeEstimate(row);
-  expect(mockDeriveCorrectiveWork).toHaveBeenCalledWith(expect.objectContaining({ engineResult: expect.any(Object) }), row);
-  expect(shaped.one_time_items).toEqual([{ item: 'Bed bug treatment', amount: 1200, source: 'reconciled' }]);
-  // totals fallback selects engineResult, not the outer object
-  expect(shaped.totals).toEqual({ monthly: 0, annual: 0, one_time: 1200 });
+  const shaped = await shapeEstimate(row);
+  expect(shaped.one_time_items).toEqual([
+    { item: 'Bed bug treatment', amount: 1200 },
+    { item: 'Flea knockdown', amount: 0, comped: true },
+    { item: 'Referral credit', amount: -25, credit: true },
+    { item: 'German roach cleanout', amount: 300 },
+  ]);
+  // totals fallback selects engineResult, not the outer object (Codex r1 P2)
+  expect(shaped.totals).toEqual({ monthly: 0, annual: 0, one_time: 1175 });
 
-  // deriver cannot reconcile → extractor fallback still descends engineResult
-  mockDeriveCorrectiveWork.mockReturnValue({ correctiveWork: null, warning: 'nope' });
-  const fallback = shapeEstimate(estimateRow({
-    estimate_data: JSON.stringify({ engineResult: { oneTime: { items: [{ name: 'Exclusion work', price: 450 }] } } }),
+  // mapped item + raw twin = one charge; the accepted net on the raw side wins
+  const twins = await shapeEstimate(estimateRow({
+    estimate_data: JSON.stringify({
+      oneTime: { items: [{ service: 'exclusion', label: 'Exclusion work', price: 450 }] },
+      result: { lineItems: [{ service: 'exclusion', name: 'Exclusion work', price: 450, manualFinalOneTime: 400 }] },
+    }),
   }));
-  expect(fallback.one_time_items).toEqual([{ item: 'Exclusion work', amount: 450, source: 'extracted' }]);
+  expect(twins.one_time_items).toEqual([{ item: 'Exclusion work', amount: 400 }]);
 });
 
-test('links follow the public route: customer link only when viewable, staff preview for drafts, nothing for expired or archived (Codex r1 P2)', () => {
-  expect(shapeEstimate(estimateRow({ status: 'draft' }))).toMatchObject({ customer_link: null, staff_preview_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx?adminPreview=1', link_state: 'staff_preview_only' });
-  expect(shapeEstimate(estimateRow({ status: 'expired' }))).toMatchObject({ customer_link: null, staff_preview_link: null, link_state: 'not_openable' });
-  expect(shapeEstimate(estimateRow({ status: 'draft', archived_at: '2026-09-01T00:00:00Z' }))).toMatchObject({ customer_link: null, staff_preview_link: null, link_state: 'not_openable' });
-  expect(shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-07T00:00:00Z' }))).toMatchObject({ link_state: 'customer_viewable', accepted: { at: '2026-09-07T00:00:00Z', service_mode: null, frequency: null } });
-  expect(shapeEstimate(estimateRow({ token: null }))).toMatchObject({ customer_link: null, link_state: 'no_token' });
+test('offered cadences come from the public pricing bundle; a relabeled service shows its displayName (Codex r2 P1, P2)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, perVisit: 141, oneTimeTotal: null },
+    { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, perVisit: 110, oneTimeTotal: null },
+  ] });
+  const row = estimateRow({ estimate_data: JSON.stringify({ recurring: { services: [{ name: 'Bi-monthly Pest', displayName: 'Every-Other-Month Pest Protection', monthly: 55, annual: 660, visitsPerYear: 6 }] } }) });
+  const shaped = await shapeEstimate(row);
+  expect(mockBuildPricingBundle).toHaveBeenCalledWith(row);
+  expect(shaped.offered_frequencies).toEqual([
+    { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, per_visit: 141, one_time_total: null },
+    { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, per_visit: 110, one_time_total: null },
+  ]);
+  expect(shaped.recurring_services[0].service).toBe('Every-Other-Month Pest Protection');
+  // a bundle failure never blanks the answer
+  mockBuildPricingBundle.mockRejectedValue(new Error('no customer row'));
+  expect((await shapeEstimate(row)).offered_frequencies).toBeNull();
 });
 
-test('totals fall back to the engine summary when the columns are empty, and bad JSON still answers', () => {
-  const fromSummary = shapeEstimate(estimateRow({ monthly_total: null, annual_total: null, onetime_total: null }));
+test('links follow the public route: customer link only when viewable, staff preview for drafts, nothing for expired or archived (Codex r1 P2)', async () => {
+  expect(await shapeEstimate(estimateRow({ status: 'draft' }))).toMatchObject({ customer_link: null, staff_preview_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx?adminPreview=1', link_state: 'staff_preview_only' });
+  expect(await shapeEstimate(estimateRow({ status: 'expired' }))).toMatchObject({ customer_link: null, staff_preview_link: null, link_state: 'not_openable' });
+  expect(await shapeEstimate(estimateRow({ status: 'draft', archived_at: '2026-09-01T00:00:00Z' }))).toMatchObject({ customer_link: null, staff_preview_link: null, link_state: 'not_openable' });
+  expect(await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-07T00:00:00Z' }))).toMatchObject({ link_state: 'customer_viewable', accepted: { at: '2026-09-07T00:00:00Z', service_mode: null, frequency: null } });
+  expect(await shapeEstimate(estimateRow({ token: null }))).toMatchObject({ customer_link: null, link_state: 'no_token' });
+});
+
+test('totals fall back to the engine summary when the columns are empty, and bad JSON still answers', async () => {
+  const fromSummary = await shapeEstimate(estimateRow({ monthly_total: null, annual_total: null, onetime_total: null }));
   expect(fromSummary.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
-  const broken = shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: null }));
+  const broken = await shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: null }));
   expect(broken.recurring_services).toEqual([]);
   expect(broken.one_time_items).toEqual([]);
   expect(broken.totals).toEqual({ monthly: 12.5, annual: 0, one_time: 0 });
