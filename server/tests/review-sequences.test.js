@@ -4631,6 +4631,36 @@ describe('shared ask history foundation', () => {
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toEqual(new Date(base));
   });
 
+  test('a confirmed review reservation is staff-ask evidence even when reservations are excluded and only a short link remains', async () => {
+    installHistory({
+      sms: [{ at: base, status: 'sent', body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true } }],
+    });
+    expect(history.looksLikeReviewAsk('https://wavespest.co/l/abc123')).toBe(false);
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer', {
+      since: new Date(base - 1), returnAt: true, failClosed: true, includeReservations: false,
+    })).toEqual(new Date(base));
+  });
+
+  test('a confirmed reservation still correlates to its automated request, while an unresolved one stays excluded', async () => {
+    installHistory({
+      sms: [{ at: base, status: 'sent', body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true } }],
+      sends: [base],
+    });
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base - 1), includeReservations: false,
+    })).toBeNull();
+
+    installHistory({
+      sms: [{ at: base, status: 'sending', body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true } }],
+    });
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base - 1), includeReservations: false,
+    })).toBeNull();
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base - 1), includeReservations: true,
+    })).toEqual(new Date(base));
+  });
+
   test('ordinary in-flight messages do not count as accepted review asks', async () => {
     installHistory({ sms: [{ at: base, status: 'sending' }] });
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
