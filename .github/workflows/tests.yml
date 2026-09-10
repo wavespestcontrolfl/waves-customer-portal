@@ -233,6 +233,9 @@ jobs:
           path: |
             .tmp/qa/
             .tmp/email-workspace/
+          # Both paths live under a dot-directory, which upload-artifact@v4
+          # skips unless hidden files are opted in.
+          include-hidden-files: true
           retention-days: 7
 
   application-qa:
