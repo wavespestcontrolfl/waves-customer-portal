@@ -1043,6 +1043,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
             : null,
           estData,
           rowServiceType: committed.service_type,
+          reservation: committed,
         });
         if (tierStamp) {
           await trx('scheduled_services').where({ id: committed.id }).update(tierStamp);
