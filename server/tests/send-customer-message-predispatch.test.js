@@ -37,7 +37,7 @@ jest.mock('../services/messaging/audit', () => ({
   persistAudit: jest.fn(async () => ({ id: 'audit-1' })),
 }));
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
-  sendViaTwilio: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-real' })),
+  sendViaTwilio: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' })),
 }));
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -54,7 +54,7 @@ const BASE_INPUT = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  sendViaTwilio.mockResolvedValue({ sent: true, providerMessageId: 'SM-real' });
+  sendViaTwilio.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-real' });
   persistAudit.mockResolvedValue({ id: 'audit-1' });
 });
 
@@ -64,6 +64,7 @@ test('a failing check blocks the send after all validators — no provider call,
     preDispatchCheck: async () => ({ ok: false, code: 'CLARIFY_SUPERSEDED', reason: 'answered mid-send' }),
   });
   expect(result).toMatchObject({ sent: false, blocked: true, code: 'CLARIFY_SUPERSEDED' });
+  expect(result.deliveryOutcome).toBe('not_sent');
   expect(sendViaTwilio).not.toHaveBeenCalled();
   expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
     validatorsFailed: ['pre_dispatch_check'],
@@ -95,6 +96,32 @@ test('no hook — the legacy pipeline is untouched', async () => {
   const result = await sendCustomerMessage(BASE_INPUT);
   expect(result.sent).toBe(true);
   expect(sendViaTwilio).toHaveBeenCalledTimes(1);
+});
+
+test('a pre-provider exception carries definitive non-delivery provenance', async () => {
+  require('../services/messaging/validators/consent').loadContactState
+    .mockRejectedValueOnce(Object.assign(new Error('contact lookup unavailable'), { status: 503 }));
+
+  await expect(sendCustomerMessage(BASE_INPUT)).rejects.toMatchObject({
+    providerOutcome: { sent: false, deliveryOutcome: 'not_sent' },
+  });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
+test('an uncertain provider result stays uncertain on return and audit failure', async () => {
+  const uncertain = { sent: false, deliveryOutcome: 'uncertain', provider: 'twilio', retryable: true, error: 'socket hang up' };
+  sendViaTwilio.mockResolvedValueOnce(uncertain);
+  expect(await sendCustomerMessage(BASE_INPUT)).toMatchObject({
+    sent: false,
+    deliveryOutcome: 'uncertain',
+    retryable: true,
+  });
+
+  sendViaTwilio.mockResolvedValueOnce(uncertain);
+  persistAudit.mockRejectedValueOnce(new Error('audit unavailable'));
+  await expect(sendCustomerMessage(BASE_INPUT)).rejects.toMatchObject({
+    providerOutcome: uncertain,
+  });
 });
 
 test('lead handoff closure reaches only the provider hook, never message or audit state', async () => {
@@ -142,7 +169,7 @@ test.each([{ channel: 'push' }, { audience: 'customer' }, { purpose: 'appointmen
 describe('invoice-specific receipt SMS evidence', () => {
   const db = require('../models/db');
   const input = { ...BASE_INPUT, audience: 'customer', customerId: 'c1', invoiceId: 'invoice-1', purpose: 'payment_receipt', metadata: { original_message_type: 'receipt' }, operatorInitiated: true };
-  const accepted = { sent: true, provider: 'twilio', providerMessageId: `SM${'a'.repeat(32)}`, sentAt: '2026-08-30T15:00:00Z' };
+  const accepted = { sent: true, deliveryOutcome: 'accepted', provider: 'twilio', providerMessageId: `SM${'a'.repeat(32)}`, sentAt: '2026-08-30T15:00:00Z' };
   let query;
   beforeEach(() => {
     query = { where: jest.fn().mockReturnThis(), whereIn: jest.fn().mockReturnThis(), whereNull: jest.fn().mockReturnThis(), update: jest.fn(async () => 1) };
@@ -189,7 +216,7 @@ describe('invoice-specific receipt SMS evidence', () => {
     await sendCustomerMessage(input);
     expect(query.update).not.toHaveBeenCalled();
     query.update.mockRejectedValueOnce(new Error('evidence write unavailable'));
-    expect((await sendCustomerMessage(input)).sent).toBe(true);
+    expect(await sendCustomerMessage(input)).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
   });
 
   test('an audit failure after acceptance leaves the independent delivery fact', async () => {
