@@ -17,6 +17,7 @@ const INLINE_CLAIM_STALE_MS = 10 * 60 * 1000;
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
+const TWILIO_NUMBERS = require("../config/twilio-numbers");
 
 // Neutral technician labels for customer copy when no name resolves — never a
 // person's name (Field Team Program: the visiting tech is whoever the row says).
@@ -692,6 +693,37 @@ function retryAtForDeferredSend(result) {
     return nextAllowedAt;
   }
   return new Date(Date.now() + 5 * 60 * 1000);
+}
+
+async function reserveReviewSms({ request, to, body }) {
+  const reservedAt = new Date();
+  const [reservation] = await db("sms_log").insert({
+    customer_id: request.customer_id,
+    direction: "outbound",
+    from_phone: TWILIO_NUMBERS.getOutboundNumber(request.location_id),
+    to_phone: to,
+    message_body: body,
+    status: "sending",
+    message_type: "review",
+    metadata: JSON.stringify({
+      review_ask_reservation: true,
+      review_request_id: request.id,
+    }),
+    created_at: reservedAt,
+    updated_at: reservedAt,
+  }).returning("id");
+  if (!reservation?.id) throw new Error(`Could not reserve review ask before sending (requestId=${request.id})`);
+  return { id: reservation.id, reservedAt, requestId: request.id };
+}
+
+async function releaseReviewSmsReservation(reservation) {
+  if (!reservation?.id) return;
+  try {
+    await db("sms_log").where({ id: reservation.id }).del();
+  } catch (err) {
+    // A stranded reservation is conservative: history ignores it after 72 h.
+    logger.warn(`[review] review SMS reservation cleanup failed (requestId=${reservation.requestId || "n/a"}): ${err.message}`);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1894,30 +1926,60 @@ const ReviewService = {
     // cooldown). Here we just make sure the channel is permitted at
     // send time — sms_enabled, suppression list, segment count, no
     // emoji / customer voice policy.
+    let result = null;
+    let reservation = null;
+    let providerStarted = false;
+    let deliveryOutcome = null;
     try {
       const {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
-      const result = await sendCustomerMessage({
-        to: contact.phone,
-        body,
-        channel: "sms",
-        audience: "customer",
-        purpose: "review_request",
-        customerId: customer.id,
-        entryPoint: "review_request_send",
-      });
-
-      if (result.sent) {
-        await db("review_requests").where({ id: requestId }).update({
-          sms_sent_at: new Date(),
-          status: "sent",
+      if (OUTREACH.isAskTemplate(request.template_key)) {
+        reservation = await reserveReviewSms({ request, to: contact.phone, body });
+      }
+      providerStarted = true;
+      try {
+        result = await sendCustomerMessage({
+          to: contact.phone,
+          body,
+          channel: "sms",
+          audience: "customer",
+          purpose: "review_request",
+          customerId: customer.id,
+          entryPoint: "review_request_send",
         });
+      } catch (err) {
+        if (!err?.providerOutcome) throw err;
+        result = err.providerOutcome;
+      }
+
+      deliveryOutcome = result?.deliveryOutcome;
+      if (deliveryOutcome === "accepted") {
+        const stamped = await stampWithRetry(
+          () => db("review_requests").where({ id: requestId }).update({
+            sms_sent_at: new Date(), status: "sent",
+          }),
+          `SMS sent stamp (requestId=${requestId})`,
+        );
+        if (!stamped) return { sent: true, unrecorded: true };
+        await releaseReviewSmsReservation(reservation);
+        reservation = null;
         // PII: ID-only per AGENTS.md.
         logger.info(
           `[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"})`,
         );
       } else {
+        if (reservation && deliveryOutcome !== "not_sent") {
+          const retryAt = new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS);
+          await db("review_requests").where({ id: requestId }).update({
+            status: "pending",
+            scheduled_for: retryAt,
+          });
+          logger.warn(`[review] SMS delivery uncertain; reservation held (customerId=${customer.id} requestId=${requestId})`);
+          return { deferred: "provider_uncertain", nextAllowedAt: retryAt };
+        }
+        await releaseReviewSmsReservation(reservation);
+        reservation = null;
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
           await db("review_requests").where({ id: requestId }).update({
@@ -1993,10 +2055,19 @@ const ReviewService = {
         }
       }
     } catch (err) {
-      // Same retry contract on a thrown exception (network down etc.):
-      // re-queue for the cron rather than leave the row stranded.
+      // The canonical wrapper attaches providerOutcome to throws. A legacy or
+      // unexpected throw after the provider boundary is still ambiguous, so
+      // retain the reservation and hold the retry for the full ask spacing.
       try {
-        const retryAt = new Date(Date.now() + 5 * 60 * 1000);
+        if (deliveryOutcome === "accepted") {
+          logger.error(`[review] accepted SMS delivery stamp failed (requestId=${requestId} errType=${err?.name || "Error"})`);
+          return { sent: true, unrecorded: true };
+        }
+        const uncertain = !!reservation && (deliveryOutcome === "uncertain" || (providerStarted && !deliveryOutcome));
+        const retryAt = uncertain
+          ? new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS)
+          : new Date(Date.now() + 5 * 60 * 1000);
+        if (!uncertain) await releaseReviewSmsReservation(reservation);
         await db("review_requests").where({ id: requestId }).update({
           scheduled_for: retryAt,
         });
@@ -2007,7 +2078,7 @@ const ReviewService = {
         logger.error(
           `[review] SMS dispatch threw — queued for retry at ${retryAt.toISOString()} (requestId=${requestId} errType=${err?.name || "Error"})`,
         );
-        return { deferred: "provider_retry", nextAllowedAt: retryAt };
+        return { deferred: uncertain ? "provider_uncertain" : "provider_retry", nextAllowedAt: retryAt };
       } catch (dbErr) {
         // Last resort — couldn't even update the row. Log error classes
         // only for both failures (same PII reasoning). Reported as not

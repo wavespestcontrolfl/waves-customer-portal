@@ -1,5 +1,5 @@
 // Cadence-engine behavior: start → advance → auto-stop on review → complete.
-const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: 'audit-1' }));
+const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' }));
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
 
 jest.mock('../models/db', () => jest.fn());
@@ -143,6 +143,7 @@ function makeMock(initial = {}, opts = {}) {
 
 beforeEach(() => {
   mockSendCustomerMessage.mockClear();
+  mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' });
   mockEmailSendTemplate.mockClear();
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
@@ -555,7 +556,7 @@ describe('review sequences — cadence engine', () => {
   test('a NOT-sent result whose bookkeeping fails stays retryable (no false terminal)', async () => {
     // Provider returned a transient non-send (not delivered), and the post-send
     // status update throws → must remain retryable, not become terminal.
-    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_FAILURE' });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_FAILURE' });
     const mock = makeMock(
       { customers: [{ id: 'bk2', first_name: 'Bea', last_name: 'K', phone: '+19410000051', nearest_location_id: 'venice' }] },
       { throwUpdateFor: ['review_requests'] },
@@ -570,7 +571,7 @@ describe('review sequences — cadence engine', () => {
   });
 
   test('a terminal SMS failure (invalid number) is suppressed, not retried forever', async () => {
-    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, retryable: false, code: 'INVALID_NUMBER' });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', terminal: true, retryable: false, code: 'INVALID_NUMBER' });
     const mock = makeMock({ customers: [{ id: 't1', first_name: 'Bad', last_name: 'N', phone: '+10000000000', nearest_location_id: 'bradenton' }] });
     db.mockImplementation(mock);
 
@@ -773,7 +774,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     test('a send-window hold records the planned send; a sent touch records the scheduled follow-up', async () => {
       mockGates.reviewSequences = true;
       const nextAllowedAt = new Date(Date.now() + 9 * 3600000);
-      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, nextAllowedAt: nextAllowedAt.toISOString(), code: 'QUIET_HOURS_HOLD' });
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', deferred: true, nextAllowedAt: nextAllowedAt.toISOString(), code: 'QUIET_HOURS_HOLD' });
       const mock = makeMock({
         customers: [{ id: 'dc-4', first_name: 'Mae', last_name: 'R', phone: '+19410000135', nearest_location_id: 'venice' }],
         review_sequences: [{
@@ -800,7 +801,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
     test('a provider blip with a synthesized retry time is a re-check, not a send-window hold (codex #4140 r1)', async () => {
       mockGates.reviewSequences = true;
-      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, retryable: true, nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE' });
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', deferred: true, retryable: true, nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE' });
       const mock = makeMock({
         customers: [{ id: 'dc-6', first_name: 'Mae', last_name: 'R', phone: '+19410000136', nearest_location_id: 'venice' }],
         review_sequences: [{
@@ -1305,6 +1306,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(out.deferred).toBeUndefined();
     });
 
+    test('a non-ask uncertain shared send never expects an ask reservation', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'uq-checkin', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-checkin', customer_id: 'uq-checkin', status: 'pending', channel: 'sms', template_key: 'resolution_check', token: 'tuqc', location_id: 'venice', created_at: new Date() }],
+      }, { throwUpdateFor: ['review_requests'] });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_ERROR' });
+
+      const out = await ReviewService.sendSMS('rr-uq-checkin');
+
+      expect(out).toEqual({ sent: false, failed: 'send_failed_unqueued' });
+    });
+
     test('processScheduled counts only delivered sends — a held row is reported held (codex #4156 r1 P2)', async () => {
       const due = new Date(Date.now() - 60000);
       const mock = makeMock({
@@ -1358,7 +1372,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         review_requests: [{ id: 'rr-bk1', customer_id: 'bk-1', service_record_id: 'sr-bk1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tbk1', location_id: 'venice', triggered_by: 'tech', created_at: new Date(Date.now() - 600000) }],
       });
       db.mockImplementation(mock);
-      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'OPTED_OUT', auditLogId: 'audit-bk' });
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', blocked: true, code: 'OPTED_OUT', auditLogId: 'audit-bk' });
 
       const request = await ReviewService.create({ customerId: 'bk-1', serviceRecordId: 'sr-bk1', triggeredBy: 'tech' });
 
@@ -1481,7 +1495,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         review_requests: [{ id: 'rr-pf1', customer_id: 'pf-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tpf1', location_id: 'venice', created_at: new Date() }],
       });
       db.mockImplementation(mock);
-      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, code: 'PROVIDER_ERROR' });
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', blocked: false, code: 'PROVIDER_ERROR' });
 
       const out = await ReviewService.sendSMS('rr-pf1');
 
@@ -1489,6 +1503,53 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(new Date(row.scheduled_for).getTime()).toBe(new Date(out.nextAllowedAt).getTime());
       expect(row.status).toBe('pending');
+    });
+
+    test('a transient accepted stamp failure is repaired without sending the queued request again', async () => {
+      let failStamp = true;
+      const mock = makeMock({
+        customers: [{ id: 'stamp-c', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'stamp-r', customer_id: 'stamp-c', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'stamp-token', location_id: 'venice', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() }],
+      }, {
+        onUpdate(table, patch) {
+          if (table === 'review_requests' && patch.sms_sent_at && failStamp) {
+            failStamp = false;
+            throw new Error('transient stamp failure');
+          }
+        },
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.sendSMS('stamp-r');
+
+      expect(mock.__state.rows.review_requests[0]).toMatchObject({ status: 'sent', sms_sent_at: expect.any(Date) });
+      expect(mock.__state.rows.sms_log).toHaveLength(0);
+      jest.useFakeTimers().setSystemTime(new Date(Date.now() + 73 * 3600000));
+      try {
+        await ReviewService.processScheduled();
+        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('an uncertain shared-sender handoff retains its reservation and schedules no retry inside 72h', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'pf-u1', first_name: 'Ida', last_name: 'V', phone: '+19410000163', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-pfu1', customer_id: 'pf-u1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tpfu1', location_id: 'venice', created_at: new Date() }],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_ERROR' });
+
+      const out = await ReviewService.sendSMS('rr-pfu1');
+
+      expect(out).toMatchObject({ deferred: 'provider_uncertain' });
+      expect(new Date(out.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 1000);
+      expect(mock.__state.rows.review_requests[0].status).toBe('pending');
+      expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeUndefined();
+      const reservation = mock.__state.rows.sms_log[0];
+      expect(reservation.status).toBe('sending');
+      expect(JSON.parse(reservation.metadata).review_ask_reservation).toBe(true);
     });
 
     test('the runner anchors to the LATER delivered channel — a Both ask whose email retried after the text (codex #4154 r2 P1)', async () => {
