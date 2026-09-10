@@ -4,11 +4,15 @@
 // (find_similar_estimates, the conversation thread) but not the amounts
 // inside them: "what did we quote him per application?" ended with the
 // operator being sent to the Estimates tab. The priced contents live in
-// estimates.estimate_data (JSONB, engine-shaped); the converter owns the
-// supported containers, so the rows come from its extractors rather than a
-// re-listing of shapes here. Record scope: estimate_id resolves to its
-// customer through the task-context RECORDS map, customer_id is the
-// customer selector itself.
+// estimates.estimate_data (JSONB, engine-shaped). Amounts, containers, and
+// customer viewability are read through the repository's existing owners
+// of those rules — the estimate converter (recurring amounts, visit
+// vocabulary, one-time containers), the proposal generator's corrective-
+// work deriver (operator-accepted one-time nets, raw engineResult lines,
+// mapped/raw twins), and the public estimate route (which links a customer
+// can open) — never a parallel reading of the stored shapes.
+// Record scope: estimate_id resolves to its customer through the
+// task-context RECORDS map, customer_id is the customer selector itself.
 const db = require('../../models/db');
 const { deriveTotals } = require('../estimator-engine/draft-builder');
 
@@ -23,6 +27,7 @@ const ESTIMATE_COLUMNS = [
 
 const MAX_PER_CUSTOMER = 10;
 const DEFAULT_PER_CUSTOMER = 3;
+const PUBLIC_ESTIMATE_BASE = 'https://portal.wavespestcontrol.com/estimate/';
 
 function money(value) {
   if (value == null || value === '') return null;
@@ -41,15 +46,53 @@ function parseStoredJson(value) {
   }
 }
 
+// The converter and the public route pull in the full estimate pipeline;
+// estimate-public does the same lazy require of the converter for that
+// reason, and the registry must not load either with the tool list.
+const lazy = {
+  converter: () => require('../estimate-converter'),
+  proposal: () => require('../estimate-proposal-generate'),
+  publicRoute: () => require('../../routes/estimate-public'),
+};
+
 function lineName(row, Converter) {
   return row.name || row.label || row.displayName || row.serviceName || row.service_name
     || row.description || Converter.recurringServiceKey(row) || 'Service';
 }
 
-// Mirrors estimate-public's oneTimeItemAmount: a discounted figure wins
-// when present, a negative raw amount (credit) keeps its sign.
+// Final recurring amounts: an operator-accepted net (manualFinalAnnual,
+// zero = fully comped) outranks the engine figures; otherwise the
+// converter's alias-aware reader (annualAfterDiscount / annual / ann, or
+// mo / monthly × 12). Same precedence as the proposal generator.
+function recurringLine(svc, Converter) {
+  const overridden = svc.manualFinalAnnual != null && Number.isFinite(Number(svc.manualFinalAnnual));
+  const annual = overridden ? money(svc.manualFinalAnnual) : money(Converter.recurringLineAnnualAmount(svc));
+  const monthly = overridden
+    ? money(annual / 12)
+    : (money(svc.monthlyAfterDiscount ?? svc.mo ?? svc.monthly) ?? (annual > 0 ? money(annual / 12) : null));
+  const visits = Converter.visitsPerYearForRecurringService(svc) || null;
+  const priced = annual > 0 || overridden;
+  const line = {
+    service: lineName(svc, Converter),
+    frequency: svc.frequency || svc.frequencyKey || svc.frequency_key || null,
+    visits_per_year: visits,
+    monthly: priced ? monthly : null,
+    annual: priced ? annual : null,
+    // The per-application figure the operator is usually asking for.
+    per_visit: priced && visits ? money(annual / visits) : null,
+  };
+  if (overridden && annual === 0) line.comped = true;
+  if (svc.quoteRequired === true) line.quote_required = true;
+  return line;
+}
+
+// One-time amount precedence from the proposal generator's mapped-row
+// resolver: operator-accepted net first, then discounted, then gross; a
+// negative gross (credit) keeps its sign unless a non-zero discounted
+// figure replaces it.
 function oneTimeAmount(item = {}) {
-  const raw = Number(item.amount ?? item.price ?? item.total);
+  if (item.manualFinalOneTime != null && Number.isFinite(Number(item.manualFinalOneTime))) return money(item.manualFinalOneTime);
+  const raw = Number(item.amount ?? item.price ?? item.total ?? item.installation?.price);
   const discounted = Number(item.priceAfterDiscount ?? item.totalAfterDiscount);
   const amount = Number.isFinite(raw) && raw < 0
     ? (Number.isFinite(discounted) && discounted !== 0 ? discounted : raw)
@@ -57,38 +100,73 @@ function oneTimeAmount(item = {}) {
   return Number.isFinite(amount) ? Math.round(amount * 100) / 100 : null;
 }
 
-function recurringLine(svc, Converter) {
-  const monthly = money(svc.monthlyAfterDiscount ?? svc.monthly);
-  const annual = money(svc.annualAfterDiscount ?? svc.annual);
-  const visits = Number(svc.visitsPerYear ?? svc.visits_per_year ?? svc.visits) || null;
-  const yearly = annual ?? (monthly == null ? null : money(monthly * 12));
-  const line = {
-    service: lineName(svc, Converter),
-    frequency: svc.frequency || svc.frequencyKey || svc.frequency_key || null,
-    visits_per_year: visits,
-    monthly,
-    annual: yearly,
-    // The per-application figure the operator is usually asking for.
-    per_visit: visits && yearly != null ? money(yearly / visits) : null,
-  };
-  if (svc.quoteRequired === true) line.quote_required = true;
-  return line;
+// One-time lines: the corrective-work deriver is the canonical reading
+// (mapped containers AND raw engineResult lineItems, twins merged,
+// operator nets honored, reconciled to the stored onetime_total). When it
+// cannot reconcile (it fails the whole draft rather than guess) the
+// converter's extractors over both stored shapes are the fallback, with
+// the amount precedence above.
+function oneTimeLines(data, row, Converter) {
+  try {
+    const { correctiveWork } = lazy.proposal().deriveCorrectiveWork(data, row);
+    if (Array.isArray(correctiveWork)) {
+      return correctiveWork.map((w) => ({ item: w.label, amount: money(w.amount), source: 'reconciled' }));
+    }
+  } catch {
+    // fall through to the extractor reading
+  }
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const engineShaped = data.engineResult && typeof data.engineResult === 'object' ? { result: data.engineResult } : null;
+  let items = [];
+  try {
+    items = [
+      ...list(Converter.estimateOneTimeItemsFromData(data)),
+      ...(engineShaped ? list(Converter.estimateOneTimeItemsFromData(engineShaped)) : []),
+    ];
+  } catch {
+    items = [];
+  }
+  const seen = new Set();
+  const lines = [];
+  for (const item of items) {
+    const line = { item: lineName(item, Converter), amount: oneTimeAmount(item), source: 'extracted' };
+    const key = `${line.item.toLowerCase()}|${line.amount}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(line);
+  }
+  return lines;
+}
+
+// Links only where the public route would serve them: the customer link
+// when isEstimateCustomerViewable says so, the staff draft preview for an
+// unpublished, unarchived row, nothing otherwise — a bare token URL for a
+// draft, expired, send_failed, or archived estimate is a 404 in the
+// customer's hands.
+function estimateLinks(row) {
+  if (!row.token) return { customer_link: null, staff_preview_link: null, link_state: 'no_token' };
+  const publicRoute = lazy.publicRoute();
+  if (publicRoute.isEstimateCustomerViewable(row)) {
+    return { customer_link: `${PUBLIC_ESTIMATE_BASE}${row.token}`, staff_preview_link: null, link_state: 'customer_viewable' };
+  }
+  if (publicRoute.adminDraftPreviewEligible(row, '1')) {
+    return { customer_link: null, staff_preview_link: `${PUBLIC_ESTIMATE_BASE}${row.token}?adminPreview=1`, link_state: 'staff_preview_only' };
+  }
+  return { customer_link: null, staff_preview_link: null, link_state: 'not_openable' };
 }
 
 function shapeEstimate(row, deposits = []) {
-  // Lazy like estimate-public: the converter pulls in the full estimate
-  // pipeline and must not load with the tool registry.
-  const Converter = require('../estimate-converter');
+  const Converter = lazy.converter();
   const data = parseStoredJson(row.estimate_data);
   let recurring = [];
-  let oneTime = [];
   try {
     recurring = Converter.recurringServicesFromEstimateData(data) || [];
-    oneTime = Converter.estimateOneTimeItemsFromData(data) || [];
   } catch {
     // Malformed stored data: totals below still come from the columns.
   }
-  const result = data.result && typeof data.result === 'object' ? data.result : data;
+  // Same engine-result selection as the corrective-work deriver: agent
+  // and website rows persist { engineResult: { summary, lineItems } }.
+  const result = data.result || data.engineResult || data;
   const derived = deriveTotals(result);
   const stored = { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: money(row.onetime_total) };
   return {
@@ -111,13 +189,13 @@ function shapeEstimate(row, deposits = []) {
       one_time: stored.one_time ?? derived.oneTime,
     },
     recurring_services: recurring.map((svc) => recurringLine(svc, Converter)),
-    one_time_items: oneTime.map((item) => ({ item: lineName(item, Converter), amount: oneTimeAmount(item) })),
+    one_time_items: oneTimeLines(data, row, Converter),
     accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
     deposits: deposits.map((d) => ({
       amount: money(d.amount), credited: money(d.credited_amount), refunded: money(d.refunded_amount), status: d.status, received_at: d.received_at,
     })),
     customer_notes: row.notes || null,
-    link: row.token ? `https://portal.wavespestcontrol.com/estimate/${row.token}` : null,
+    ...estimateLinks(row),
     sent_at: row.sent_at,
     viewed_at: row.viewed_at,
     view_count: row.view_count || 0,
@@ -163,7 +241,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate actually priced: every recurring service with its monthly, annual, and per-visit (per-application) amount, one-time items, totals, deposits, status, view/sent/accepted timestamps, and the customer link. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
+  description: `Read what an estimate actually priced: every recurring service with its monthly, annual, and per-visit (per-application) amount, one-time items, totals, deposits, status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "did the estimate include the one-time cleanup", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread.`,
   input_schema: {
     type: 'object',
