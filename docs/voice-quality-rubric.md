@@ -350,6 +350,20 @@ Uncovered exemptions (a replay fails although the line discloses nothing):
 - Direct verification requests naming the account holder: "Please confirm the
   account holder has an appointment".
 
+Examples the pre-push audit found on 2026-09-10 (#4340, contextual answers) after
+seven audit passes each surfaced a new construction; accepted by the owner on the
+same terms as the #4307 list above. Uncovered disclosure:
+
+- A time answer followed by a same-sentence redirect: "When is her appointment?"
+  answered "Tomorrow, please ask her to check the portal" (the time answer is
+  recognised only when it ends the sentence).
+
+Uncovered exemption:
+
+- A timed question about a phone call rather than a visit: "Is she able to call
+  the office tomorrow?" answered "Yes" (a pronoun plus a time reads as a visit
+  question without a visit noun or predicate).
+
 The third-party check conservatively rejects a public office phone number:
 it has no trusted public-contact allowlist, and calling a number “our office”
 cannot establish that it is public. A future exemption needs fixture-owned
