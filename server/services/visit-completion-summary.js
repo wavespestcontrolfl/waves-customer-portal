@@ -104,6 +104,14 @@ async function getVisitCompletionSummary(token, database = db) {
   };
 }
 
+// Two phone strings name the same destination when they normalize to the
+// same E.164 number (the canonical sender normalizes before Twilio).
+function sameSmsDestination(a, b) {
+  const { toE164 } = require('../utils/phone');
+  const left = toE164(a);
+  return Boolean(left) && left === toE164(b);
+}
+
 // Queue ownership and the visit marker commit together. Packet recovery then
 // waits on this row; only the existing scheduled-SMS worker dispatches it.
 async function deferSummarySms({ visit, member, customer, recipient, body, claim, nextAllowedAt }) {
@@ -144,9 +152,7 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
   // Contact saves keep their formatting and the canonical sender normalizes
   // before Twilio, so the frozen number and the live one are compared by
   // destination identity, not by string.
-  const { toE164 } = require('../utils/phone');
-  const sameNumber = recipient.phone && toE164(recipient.phone) && toE164(recipient.phone) === toE164(meta.to_phone);
-  if (!sameNumber) return { eligible: false, reason: 'visit_summary_recipient_changed' };
+  if (!sameSmsDestination(recipient.phone, meta.to_phone)) return { eligible: false, reason: 'visit_summary_recipient_changed' };
   return { eligible: true, visit };
 }
 
@@ -324,9 +330,12 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       // a retryable block, so the requested SMS stays retryable.
       withSmsHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
         kind: 'completion_sms', token: claim.token, phone: recipient.phone,
+        // Compared by destination identity: a resave of the same number with
+        // different punctuation between resolution and the locked recheck is
+        // not a recipient change.
         authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
           && currentPrefs.service_completed !== false
-          && getServiceContactSmsRecipient(current).phone === recipient.phone,
+          && sameSmsDestination(getServiceContactSmsRecipient(current).phone, recipient.phone),
         dispatch: (trx, onProviderStart) => handoff(trx, async () => { await onProviderStart(); dispatched = true; }) }),
     });
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {

@@ -426,6 +426,48 @@ postgres('visit summary recipient recovery', () => {
     expect(blockedCode).toBe('55P03');
   });
 
+  test('a provider event for the recipient takes the address key before touching the message row', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = false; });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: delivered.recipient_email_snapshot };
+    let blockedCode = null;
+    let rowTouched = null;
+    // The retry handoff holds the destination key; a bounce webhook for that row must wait on the key first, not hold the row while waiting.
+    expect(await Summary.retrySummaryThroughHandoff(message, async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'bounce', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID(), email: delivered.recipient_email_snapshot }, delivered, trx);
+      }).catch((err) => { blockedCode = err.code; });
+      rowTouched = (await mockPg('email_message_events').where({ email_message_id: delivered.id })).length;
+      return { ok: true };
+    })).toEqual({ ok: true });
+    expect(blockedCode).toBe('55P03');
+    expect(rowTouched).toBe(0);
+  });
+
+  test('a formatting-only edit of the recipient number between resolution and the locked recheck still sends the summary SMS', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const execute = mockPg.client.constructor.prototype._query;
+    let edited = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function resaveDuringClaim(connection, query) {
+      if (!edited && query.sql.includes('pg_advisory_xact_lock') && String(query.bindings?.[0] || '').startsWith('customer-comms:')) {
+        edited = true;
+        await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '(202) 555-0124' });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(edited).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'sent' });
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
   test('a service-contact save assigning the recovery destination waits for the held retry handoff', async () => {
     const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
     const destination = `${randomUUID()}@example.invalid`;
