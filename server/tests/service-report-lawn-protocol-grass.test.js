@@ -91,6 +91,13 @@ describe('lawn protocol report context — actuals rows recorded without a plan'
     expect(getProtocolWindowContext).not.toHaveBeenCalled();
   });
 
+  test('a failed table-existence probe fails closed the same way', async () => {
+    const knex = makeKnex({ customer_turf_profiles: [{ track_key: 'zoysia', active: true }] });
+    knex.schema = { hasTable: () => Promise.reject(new Error('probe timeout')) };
+    await expect(buildLawnProtocolReportContext(RECORD, knex, AT)).rejects.toThrow('probe timeout');
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+  });
+
   test('a protocol-attributed row still resolves its own protocol window', async () => {
     const knex = makeKnex({
       'lawn_protocol_service_completions as lpsc': [{ id: 'c-2', protocol_key: 'st_augustine', lawn_protocol_id: 'proto-1', window_key: 'summer_insect', metadata: { attribution: 'protocol' } }],

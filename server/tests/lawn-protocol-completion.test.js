@@ -400,14 +400,51 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
     expect(completions[0]).toMatchObject({ carrier_gal_per_1000: carrier, total_carrier_gal: total });
   });
 
-  test('a plan whose protocol attribution is withheld still supplies the calibrated rig carrier', async () => {
+  test('a plan whose protocol attribution is withheld still supplies the carrier of the visit\'s own verified rig', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const completions = [];
     await recordLawnProtocolCompletion(fakeTrx(completions, []), {
-      service: visit, serviceRecord: { id: 'record-3' }, plan: { ...insectPlan, protocol: null, mixCalculator: { ...insectPlan.mixCalculator, carrierGalPer1000: 1.5 } },
+      service: visit, serviceRecord: { id: 'record-3' },
+      plan: { ...insectPlan, protocol: null, mixCalculator: { ...insectPlan.mixCalculator, carrierGalPer1000: 1.5, equipmentSystemId: 'rig-1' }, equipmentCalibration: { inferred: false, selected: { id: 'cal-1' } } },
       completionInput: { treatedSqft: 4000 },
     });
-    expect(completions[0]).toMatchObject({ protocol_key: null, carrier_gal_per_1000: 1.5, total_carrier_gal: 6 });
+    expect(completions[0]).toMatchObject({ protocol_key: null, carrier_gal_per_1000: 1.5, total_carrier_gal: 6, equipment_system_id: 'rig-1' });
     expect(JSON.parse(completions[0].metadata).attribution).toBe('none');
+  });
+
+  test.each([
+    ['an inferred rig', { equipmentSystemId: 'rig-1' }, { inferred: true }, false],
+    ['no rig at all (protocol-window default carrier)', {}, {}, false],
+    ['a cleared calibration', { equipmentSystemId: 'rig-1' }, { inferred: false }, true],
+  ])('under the gate the plan carrier from %s is not recorded as a visit actual', async (_label, mix, calibration, calibrationCleared) => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, []), {
+      service: visit, serviceRecord: { id: 'record-3' }, calibrationCleared,
+      plan: { ...insectPlan, protocol: null, mixCalculator: { ...insectPlan.mixCalculator, carrierGalPer1000: 1.5, ...mix }, equipmentCalibration: calibration },
+      completionInput: { treatedSqft: 4000 },
+    });
+    expect(completions[0]).toMatchObject({ carrier_gal_per_1000: null, total_carrier_gal: null });
+    // A carrier the technician submitted is still the visit's actual.
+    const submitted = [];
+    await recordLawnProtocolCompletion(fakeTrx(submitted, []), {
+      service: visit, serviceRecord: { id: 'record-3' }, calibrationCleared,
+      plan: { ...insectPlan, protocol: null, mixCalculator: { ...insectPlan.mixCalculator, carrierGalPer1000: 1.5, ...mix }, equipmentCalibration: calibration },
+      completionInput: { treatedSqft: 4000, carrierGalPer1000: 2 },
+    });
+    expect(submitted[0]).toMatchObject({ carrier_gal_per_1000: 2, total_carrier_gal: 8 });
+  });
+
+  test('withheld attribution also withholds the plan\'s substitution labels: the applied substitute is a plain application', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const actuals = []; const completions = [];
+    const applied = { id: 'sp-9', product_id: 'sub-1', product_name: 'Substitute iron', application_rate: 3, rate_unit: 'fl oz', total_amount: 7.5, amount_unit: 'fl oz', application_method: 'broadcast_spray', area_value: '4000', area_unit: 'sqft' };
+    const plan = { ...insectPlan, protocol: null, mixCalculator: { ...insectPlan.mixCalculator, items: [{ selected: true, product: { id: 'sub-1' }, substitution: { originalProductId: 'prod-2', substituteProductId: 'sub-1', approvedBy: 'office' } }] } };
+    await recordLawnProtocolCompletion(fakeTrx(completions, actuals), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan, serviceProducts: [applied], completionInput: { treatedSqft: 4000 },
+    });
+    expect(actuals[0]).toMatchObject({ status: 'applied', product_id: 'sub-1' });
+    expect(JSON.parse(actuals[0].metadata).substitution ?? null).toBeNull();
+    expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'none', substitutions: [] });
   });
 });

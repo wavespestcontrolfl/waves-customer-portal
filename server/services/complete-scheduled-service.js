@@ -4191,6 +4191,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         waveguardPlan = null;
       }
     }
+    // A ledgered non-WaveGuard or incomplete lawn visit skips the WaveGuard
+    // advisories below, but an assignment whose calibration the planner
+    // marks `unresolved` (deactivated or deleted since) must be cleared
+    // before its ledger row too — recordLawnProtocolCompletion gives the
+    // explicit IDs precedence and would record the stale rig as equipment
+    // actually used (Codex #4113 P2).
+    if (claim.action === 'proceed' && lawnLedgerVisit && !waveguardCloseout && waveguardPlan?.equipmentCalibration?.unresolved) {
+      waveguardEquipmentSystemId = null;
+      waveguardCalibrationId = null;
+      waveguardCalibrationCleared = true;
+    }
     if (claim.action === 'proceed' && waveguardCloseout) {
       const plan = waveguardPlan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
@@ -5567,6 +5578,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ...(billingModeColumnsExist ? ['billing_mode'] : []),
             ));
           } catch { snapshotCustomer = null; }
+          // Ledger attribution was derived from the handler-entry tier the
+          // plan carries (propertyGate.serviceTier). A membership edit that
+          // committed since would freeze attribution contradicting the tier
+          // snapshot below — abort with the same retryable shape as the
+          // owner/property/service-type changes; the retry rebuilds the plan
+          // from the current tier (Codex #4113 P2).
+          if (lawnLedgerVisit && waveguardPlan && snapshotCustomer
+            && String(snapshotCustomer.waveguard_tier || '') !== String(waveguardPlan.propertyGate?.serviceTier || '')) {
+            const err = new Error('This customer\'s membership tier changed while completing — reload the job and complete it again.');
+            err.statusCode = 409;
+            err.isOperational = true;
+            err.code = 'VISIT_TIER_CHANGED';
+            throw err;
+          }
           Object.assign(recordInsert, completionTierSnapshotFields({
             serviceRecordCols,
             waveguardTier: snapshotCustomer ? snapshotCustomer.waveguard_tier : svc.cust_waveguard_tier,

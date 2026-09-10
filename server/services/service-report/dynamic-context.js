@@ -74,7 +74,9 @@ function numberOrNull(value) {
 
 async function loadLawnProtocolCompletion(record, knex) {
   if (!record?.id) return null;
-  const hasTable = await knex.schema.hasTable('lawn_protocol_service_completions').catch(() => false);
+  // The existence probe propagates like the lookup below: a transient error
+  // must not read as "no completion" (Codex #4113).
+  const hasTable = await knex.schema.hasTable('lawn_protocol_service_completions');
   if (!hasTable) return null;
 
   return knex('lawn_protocol_service_completions as lpsc')

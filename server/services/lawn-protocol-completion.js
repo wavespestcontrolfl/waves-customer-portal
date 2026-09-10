@@ -207,7 +207,18 @@ function resolveChecklist(completionInput, requiredTasks) {
 // all-lawn ledger an explicitly missing area stays NULL — the planned turf
 // area is never substituted for it (scope 2026-09-06). Legacy keeps the
 // plan fallback so the WaveGuard-only rows are unchanged while dark.
-function resolveTreatedArea(completionInput, plan, allLawn) {
+// Under the ledger gate the plan's carrier is an actual only when it belongs
+// to the visit's own verified rig assignment: the planner may otherwise carry
+// a globally inferred tank or the protocol window's default, which
+// resolveEquipment already refuses to record as equipment used. Recording
+// that number would invent gallons the estimate actuals and customer reports
+// then treat as observed (Codex #4113 P2). Legacy WaveGuard rows are unchanged.
+function planCarrierUsable(plan, allLawn, calibrationCleared) {
+  if (!allLawn) return true;
+  return !calibrationCleared && !plan?.equipmentCalibration?.inferred && Boolean(plan?.mixCalculator?.equipmentSystemId);
+}
+
+function resolveTreatedArea(completionInput, plan, allLawn, calibrationCleared = false) {
   const enteredSqft = firstPositiveNumber(completionInput.treatedSqft);
   const treatedSqft = enteredSqft || (allLawn ? null : firstPositiveNumber(plan?.mixCalculator?.lawnSqft));
   const source = enteredSqft ? 'visit' : (treatedSqft ? 'plan' : 'missing');
@@ -215,7 +226,7 @@ function resolveTreatedArea(completionInput, plan, allLawn) {
     CARRIER_GAL_PER_1000_MAX,
     completionInput.carrierGalPer1000,
     completionInput.carrier_gal_per_1000,
-    plan?.mixCalculator?.carrierGalPer1000,
+    planCarrierUsable(plan, allLawn, calibrationCleared) ? plan?.mixCalculator?.carrierGalPer1000 : null,
   );
   const totalCarrier = boundedPositive(TOTAL_CARRIER_GAL_MAX, completionInput.totalCarrierGal, completionInput.total_carrier_gal)
     || (treatedSqft && carrier ? boundedPositive(TOTAL_CARRIER_GAL_MAX, Number(((treatedSqft / 1000) * carrier).toFixed(3))) : null);
@@ -405,12 +416,13 @@ function completionMetadata({ window, attributed, completionInput, area, checkli
 }
 
 function buildCompletionRow({
+  calibrationCleared = false,
   service, serviceRecord, plan, completionInput, serviceDate, allLawn,
   attribution: { attributed }, structured, window, rows, equipment, substitutions, skips,
 }) {
   const requiredTasks = window.requiredTasks || [];
   const { provided: checklistProvided, checklist, missingTasks } = resolveChecklist(completionInput, requiredTasks);
-  const area = resolveTreatedArea(completionInput, plan, allLawn);
+  const area = resolveTreatedArea(completionInput, plan, allLawn, calibrationCleared);
   const watchItems = Array.isArray(completionInput.watchItems)
     ? completionInput.watchItems
     : requiredTasks.map((task) => String(task).replace(/_/g, ' '));
@@ -464,12 +476,16 @@ async function recordLawnProtocolCompletion(trx, {
 
   const rows = await loadProtocolRows(trx, attribution);
   const equipment = resolveEquipment({ plan, equipmentSystemId, calibrationId, calibrationCleared });
-  const { substitutions, bySubstituteProductId } = resolveSubstitutions(plan);
+  // A plan whose protocol attribution is withheld contributes no
+  // substitution labels either: an applied product that happens to be the
+  // calendar plan's substitute is a plain application on a visit with no
+  // applicable protocol, never an approved protocol substitution (Codex #4113).
+  const { substitutions, bySubstituteProductId } = resolveSubstitutions(attribution.attributed ? plan : null);
   const skips = await revalidateSkippedProducts(trx, partitionSkippedProducts(completionInput, plan, attribution.structured, allLawn));
 
   const [completion] = await trx('lawn_protocol_service_completions')
     .insert(buildCompletionRow({
-      service: service || {}, serviceRecord, plan, completionInput, serviceDate, allLawn,
+      service: service || {}, serviceRecord, plan, completionInput, serviceDate, allLawn, calibrationCleared,
       attribution, structured: attribution.structured || {}, window: attribution.window || {},
       rows, equipment, substitutions, skips,
     }))

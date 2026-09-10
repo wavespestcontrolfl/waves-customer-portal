@@ -3353,7 +3353,7 @@ describe('revertMerge', () => {
     expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
   });
 
-  it('transfers (never deletes) the link-as-property row when the ledger lookup itself fails — an unverified read is not proof of no reference', async () => {
+  it('refuses the undo (zero writes) when the ledger-reference probe itself fails — an unverified read is not proof of no reference', async () => {
     const journal = baseJournal();
     journal.evidence = { via: 'admin_link_as_property' };
     journal.repointed_ids.linked_property_id = 'prop-9';
@@ -3372,9 +3372,10 @@ describe('revertMerge', () => {
       return route(table);
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
-    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' })).rejects.toThrow('ledger lookup failed');
     expect(state.propertyDeleted).toBe(null);
-    expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
+    expect(state.propertyTransferred ?? null).toBe(null);
+    expect(state.journalUpdate).toBe(null);
   });
 
   it('refuses (409) a link-as-property merge whose created property was never journaled', async () => {
