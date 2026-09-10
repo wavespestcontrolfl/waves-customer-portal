@@ -263,8 +263,8 @@ run('callback ledger on PostgreSQL', () => {
     const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
     await returnedCall(new Date(now.getTime() - 60000));
     await tick();
-    // The generic commitments path: human_state = 'edited', reviewed_at stamped, no callback_edit audit event.
-    const edited = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', description: 'Call about the fence line', reviewedBy: staff.id });
+    // A pre-card row: human_state = 'edited', reviewed_at stamped, and no callback_edit event on record.
+    const edited = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', description: 'Call about the fence line', reviewedBy: staff.id, renewalAudit: false });
     expect(await trx('audit_log').where({ resource_id: row.id, action: 'callback_edit' })).toEqual([]);
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
     // A later claim under callback cards leaves that boundary in place.
@@ -279,6 +279,39 @@ run('callback ledger on PostgreSQL', () => {
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
     await returnedCall(await afterReview(row.id));
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+  });
+
+  test('a card reopened through the generic path after gate rollback is a new promise', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at, now });
+    // A persisted card attempt keeps the row refreshable once the gate is off.
+    await trx('call_log').insert({ id: randomUUID(), direction: 'outbound', from_phone: '+15555550100', to_phone: phone,
+      status: 'no-answer', duration_seconds: 5, created_at: new Date(), updated_at: new Date(), metadata: { relatedCommitmentId: row.id } });
+    // Returned before the claim (a claim hides nothing), and before the
+    // transaction clock the audit rows below are stamped with.
+    await returnedCall(new Date(now.getTime() - 60000));
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    try {
+      await tick();
+      // The PATCH route uses the generic ledger action while cards are off.
+      await ledger.applyHumanUpdate(trx, row.id, { action: 'reopen', reviewedBy: staff.id });
+      const reopen = await trx('audit_log').where({ resource_id: row.id, action: 'callback_reopen' }).first();
+      expect(reopen).toMatchObject({ actor_type: 'technician', actor_id: staff.id });
+      expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+      expect((await trx('call_commitments').where({ id: row.id }).first()).status).toBe('open');
+      // A generic no-op save restates nothing; a changed wording does.
+      await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', description: 'Synthetic callback', due_at: null, reviewedBy: staff.id });
+      await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', description: 'Call about the new quote', reviewedBy: staff.id });
+      const edits = await trx('audit_log').where({ resource_id: row.id, action: 'callback_edit' }).orderBy('created_at', 'asc');
+      expect(edits.map((e) => e.metadata.restated)).toEqual([false, true]);
+      await returnedCall(new Date(new Date(edits[1].created_at).getTime() + 1));
+      expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    } finally {
+      process.env.GATE_CALLBACK_CARD = 'true';
+    }
   });
 
   test('a human-recorded callback on an old call ignores evidence from before it was typed', async () => {
