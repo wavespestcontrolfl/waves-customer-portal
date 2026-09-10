@@ -4646,6 +4646,8 @@ describe('shared ask history foundation', () => {
     'https://portal.wavespestcontrol.com/rate/abc',
     'portal.wavespestcontrol.com/api/rate/abc/go',
     'We’d appreciate a Google review.',
+    'We’d be grateful for a Google review.',
+    'A quick Google review would make my day.',
     'A quick Google review would mean the world.',
     'A Google review would be greatly appreciated.',
     'A 5-star Google review would mean the world.',
