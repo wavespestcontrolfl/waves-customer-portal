@@ -380,6 +380,36 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('visit_effects').where({ id: effect.id }).first()).toMatchObject({ status: 'sent', last_error: null });
   });
 
+  // A contact correction locks the customer row and then takes the address
+  // key; a handoff taking the key first would deadlock against it.
+  async function rowThenKeyWriter(email) {
+    return mockPg.transaction(async (trx) => {
+      await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, email);
+      await trx('customers').where({ id: fixture.customerId }).update({ updated_at: trx.fn.now() });
+      return 'committed';
+    });
+  }
+
+  test('the email summary handoff takes the customer row before the address key, so a row-first writer never deadlocks it', async () => {
+    const writer = rowThenKeyWriter(fixture.primaryEmail);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const delivery = deliver();
+    await expect(writer).resolves.toBe('committed');
+    expect(await delivery).toEqual({ state: 'delivered' });
+    expect(sendOne).toHaveBeenCalled();
+  });
+
+  test('the retry handoff takes the customer row before the address key, so a row-first writer never deadlocks it', async () => {
+    const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
+    const writer = rowThenKeyWriter(fixture.primaryEmail);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const handoff = Summary.retrySummaryThroughHandoff(message, async () => ({ ok: true }));
+    await expect(writer).resolves.toBe('committed');
+    expect(await handoff).toEqual({ ok: true });
+  });
+
   test('a proven provider-boundary quiet-hours hold can retry its pending scheduled handoff', async () => {
     const queued = await heldSummary();
     expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
