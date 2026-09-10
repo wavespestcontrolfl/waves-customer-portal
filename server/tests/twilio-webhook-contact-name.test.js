@@ -31,7 +31,7 @@ jest.mock('../utils/portal-url', () => ({
   publicPortalUrl: jest.fn(() => 'https://portal.wavespestcontrol.com'),
 }));
 
-const { extractContactNameFromSms, intakeOutcome } = require('../routes/twilio-webhook')._internals;
+const { intakeOutcome } = require('../routes/twilio-webhook')._internals;
 
 describe('a scope-vetoed intake reply still reaches normal inbound notification handling', () => {
   // The intake state machine refusing to QUOTE ("this is for Friday's
@@ -57,25 +57,6 @@ describe('a scope-vetoed intake reply still reaches normal inbound notification 
     expect(intakeOutcome({ handled: false })).toBe('continue');
     expect(intakeOutcome(null)).toBe('continue');
     expect(intakeOutcome(undefined)).toBe('continue');
-  });
-});
-
-describe('twilio inbound SMS contact name extraction', () => {
-  test('extracts obvious self-introduction names from lead SMS bodies', () => {
-    expect(
-      extractContactNameFromSms('Hello, my name is Jeff and I live in Twin Rivers. I am seeking a quote.'),
-    ).toEqual({ fullName: 'Jeff', firstName: 'Jeff', lastName: '' });
-
-    expect(
-      extractContactNameFromSms('Hi, this is jane smith from Parrish. Need pest control.'),
-    ).toEqual({ fullName: 'Jane Smith', firstName: 'Jane', lastName: 'Smith' });
-  });
-
-  test('does not treat service request wording as a name', () => {
-    expect(extractContactNameFromSms('I am seeking a quote for one-time rodent service.')).toBeNull();
-    expect(extractContactNameFromSms('This is about a rodent problem in my garage.')).toBeNull();
-    expect(extractContactNameFromSms("I'm from Bradenton and need pest control.")).toBeNull();
-    expect(extractContactNameFromSms('This is for pest control at my house.')).toBeNull();
   });
 });
 

@@ -44,7 +44,7 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     for (const request of requests) {
       const result = await Context.resolve(request);
       expect(result.target).toMatchObject({ customer_id: customerId, version });
-      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase() }, result)).toBeNull();
+      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase() }, result, { toolName: 'update_customer' })).toBeNull();
     }
   });
 
@@ -76,13 +76,13 @@ suite('IB target resolution against isolated PostgreSQL', () => {
       label: `Synthetic ${i}`, address_line1: `${100 + i} Test Street` })));
     for (const word of ['this', 'that', 'selected']) {
       const task = await Context.resolve({ prompt: `Update ${word} property label`, pageData: { property_id: ids[0] } });
-      expect(await Context.validateRecordTarget({ property_id: ids[0] }, task)).toBeNull();
-      expect((await Context.validateRecordTarget({ property_id: ids[1] }, task)).code).toBe('target_clarification_required');
+      expect(await Context.validateRecordTarget({ property_id: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
+      expect((await Context.validateRecordTarget({ property_id: ids[1] }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     }
     const missing = await Context.resolve({ prompt: 'Update this property label', pageData: { customer_id: customerId } });
-    expect((await Context.validateRecordTarget({ property_id: ids[1] }, missing)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ property_id: ids[1] }, missing, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     const explicit = await Context.resolve({ prompt: 'Update Synthetic Targetfixture property label', pageData: { property_id: ids[0] } });
-    expect(await Context.validateRecordTarget({ property_id: ids[1] }, explicit)).toBeNull();
+    expect(await Context.validateRecordTarget({ property_id: ids[1] }, explicit, { toolName: 'update_customer' })).toBeNull();
   });
 
   test('scoped email lookup selects the allowed older thread and its latest unlinked reply before drafting', async () => {
@@ -185,7 +185,7 @@ suite('IB target resolution against isolated PostgreSQL', () => {
       const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Targetfixture canceled`,
         pageData: { customer_id: recipientId } });
       expect(task.target.customer_id).toBe(recipientId);
-      expect((await Context.validateRecordTarget({ customer_id: customerId }, task)).code).toBe('target_clarification_required');
+      expect((await Context.validateRecordTarget({ customer_id: customerId }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     }
   });
 
