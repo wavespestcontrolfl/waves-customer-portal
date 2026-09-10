@@ -695,6 +695,23 @@ function retryAtForDeferredSend(result) {
   return new Date(Date.now() + 5 * 60 * 1000);
 }
 
+const REVIEW_SEND_UNCERTAIN_REASON =
+  "SMS delivery may have occurred, but no automatic retry was queued. Check the SMS delivery log before sending another review request.";
+
+async function persistedReviewRetryAt(requestId) {
+  if (!requestId) return null;
+  try {
+    const row = await db("review_requests")
+      .where({ id: requestId, status: "pending" })
+      .whereNotNull("scheduled_for")
+      .first("scheduled_for");
+    if (!row?.scheduled_for || Number.isNaN(new Date(row.scheduled_for).getTime())) return null;
+    return row.scheduled_for;
+  } catch {
+    return null;
+  }
+}
+
 async function reserveReviewSms({ request, to, body }) {
   const reservedAt = new Date();
   const [reservation] = await db("sms_log").insert({
@@ -3846,8 +3863,22 @@ const ReviewService = {
       // for the full ask-spacing window. Definitive non-delivery stays on the
       // ordinary retry rail.
       if (reservation && deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent") {
+        const nextAllowedAt = new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS);
+        // Direct/portal/admin asks promise an automatic retry to their caller.
+        // Only make that promise after confirming processScheduled can see the
+        // row. The reservation remains either way: the provider may have
+        // accepted the SMS, so another ask must stay held for reconciliation.
+        if (manageRetryVia === "cron") {
+          const persistedRetryAt = await persistedReviewRetryAt(request.id);
+          if (!persistedRetryAt) {
+            return { ok: false, blocked: true, channel: "sms", requestId: request.id,
+              code: "SMS_DELIVERY_UNCERTAIN", reason: REVIEW_SEND_UNCERTAIN_REASON, nextAllowedAt };
+          }
+          return { ok: false, retryable: true, deferred: true, channel: "sms", requestId: request.id,
+            reason: "provider_uncertain", nextAllowedAt: persistedRetryAt };
+        }
         return { ok: false, retryable: true, deferred: true, channel: "sms", requestId: request.id,
-          reason: "provider_uncertain", nextAllowedAt: new Date(reservation.reservedAt.getTime() + ASK_SPACING_MS) };
+          reason: "provider_uncertain", nextAllowedAt };
       }
       return deliveryOutcome === "accepted"
         ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId }
@@ -4238,10 +4269,28 @@ const ReviewService = {
         };
       }
       if (touch.deferred) {
+        // A cron-owned deferred result is caller-visible as "queued". Verify
+        // the worker can really select it before suppressing the caller's
+        // fallback or promising an automatic retry. Provider uncertainty is
+        // different from an ordinary unqueued failure: its reservation stays
+        // live, and the caller must be told to inspect delivery before retrying.
+        if (manageRetryVia === "cron") {
+          const persistedRetryAt = await persistedReviewRetryAt(touch.requestId);
+          if (!persistedRetryAt) {
+            if (touch.reason === "provider_uncertain") {
+              return { outcome: "blocked", code: "SMS_DELIVERY_UNCERTAIN", reason: REVIEW_SEND_UNCERTAIN_REASON,
+                nextAllowedAt: touch.nextAllowedAt || null, requestId: touch.requestId };
+            }
+            return { outcome: "error", code: touch.code || null, reason: touch.reason || null,
+              requestId: touch.requestId };
+          }
+          return { outcome: "deferred", nextAllowedAt: persistedRetryAt, requestId: touch.requestId };
+        }
         return { outcome: "deferred", nextAllowedAt: touch.nextAllowedAt, requestId: touch.requestId };
       }
       if (touch.blocked || touch.terminal) {
         return { outcome: "blocked", code: touch.code || null, reason: touch.reason || null, nextAllowedAt: touch.nextAllowedAt || null,
+          ...(touch.requestId ? { requestId: touch.requestId } : {}),
           ...(touch.httpStatus ? { httpStatus: touch.httpStatus } : {}) };
       }
       // 'send_failed' is a QUEUED outcome to callers (the satisfaction route
