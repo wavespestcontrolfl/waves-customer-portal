@@ -1,5 +1,13 @@
 const APP_CACHE_PREFIX = 'waves-customer-';
-const CACHE_NAME = 'waves-customer-v11-shell-atomic';
+// v12: v11 buckets grew without bound (one owner phone held 263 builds /
+// 13.8k entries / 1.5 GB, and WebKit reads the whole index on the first
+// caches.open() after a cold start — an 11 s blank screen). Bumping the
+// name drops that bucket once via the activate sweep; pruneStaleAssets
+// keeps the new one bounded to the current build.
+const CACHE_NAME = 'waves-customer-v12-shell-pruned';
+// Pre-prefix buckets (e.g. 'waves-v10-admin-activation-stable') that the
+// APP_CACHE_PREFIX sweep never matched and so outlived every update.
+const LEGACY_CACHE_PATTERN = /^waves-v\d+-/;
 const OFFLINE_URL = '/';
 
 const OFFLINE_FALLBACK_HTML = `<!doctype html>
@@ -55,8 +63,35 @@ async function cacheCompleteShellResponse(shellResponse) {
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
     return [assetUrl, response];
   }));
+  // Read the previous shell's asset set BEFORE overwriting it: a changed set
+  // means a new build shipped and every hashed file outside it is dead weight.
+  const previousShell = await cache.match(OFFLINE_URL);
+  const previousAssets = previousShell ? shellAssetUrls(await previousShell.text()) : [];
   await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, response)));
   await cache.put(OFFLINE_URL, shellResponse);
+  if (!sameAssetSet(previousAssets, assets)) await pruneStaleAssets(cache, assets);
+}
+
+function sameAssetSet(a, b) {
+  if (a.length !== b.length) return false;
+  const set = new Set(a);
+  return b.every(url => set.has(url));
+}
+
+// Drop every cached /assets/* entry the current shell does not reference.
+// Runs only when the shell's asset set changed (a deploy), never on a plain
+// navigation, so lazily loaded page chunks of the live build stay cached
+// between deploys and are re-fetched at most once per build. Hashed names
+// carry no build id, so "referenced by the current shell" is the only
+// signal that survives SW termination.
+async function pruneStaleAssets(cache, keepUrls) {
+  const keep = new Set(keepUrls);
+  const requests = await cache.keys();
+  await Promise.all(requests.map(request => {
+    const pathname = new URL(request.url).pathname;
+    if (pathname.startsWith('/assets/') && !keep.has(pathname)) return cache.delete(request);
+    return undefined;
+  }));
 }
 
 async function precacheCompleteShell() {
@@ -72,7 +107,8 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => Promise.all(
-      keys.filter(k => k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME).map(k => caches.delete(k))
+      keys.filter(k => (k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME) || LEGACY_CACHE_PATTERN.test(k))
+        .map(k => caches.delete(k))
     )).then(() => self.clients.claim())
   );
 });
@@ -112,7 +148,8 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Hashed assets (/assets/index-CRewFOq2.js) — cache forever, they're immutable
+  // Hashed assets (/assets/index-CRewFOq2.js) — immutable, so cache on first
+  // use; pruneStaleAssets evicts them once the shell moves to a newer build.
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(
       caches.open(CACHE_NAME).then(cache => cache.match(event.request)).then(cached => {
