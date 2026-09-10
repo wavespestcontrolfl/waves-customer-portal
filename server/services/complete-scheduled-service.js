@@ -4837,6 +4837,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
               ['invoice-issued-closeout', String(svc.customer_id)],
             );
+            // Ownership re-read AFTER the gate (GitHub r7 P2 #4127): a merge
+            // that held the gate first repointed this visit and its invoice
+            // to the winner and retired the loser, and the svc row loaded
+            // before the wait still names the loser — the customer snapshot,
+            // the record insert and every later customer_id write would
+            // attach to a deleted customer. Adopt the current owner; the
+            // invoice recheck below still requires the invoice to name THIS
+            // visit.
+            const gatedOwner = await trx('scheduled_services').where({ id: svc.id }).first('customer_id');
+            if (gatedOwner && String(gatedOwner.customer_id) !== String(svc.customer_id)) {
+              logger.info(`[completion] issued-invoice closeout: visit ${svc.id} re-homed ${svc.customer_id} → ${gatedOwner.customer_id} by a merge — adopting the current owner`);
+              svc.customer_id = gatedOwner.customer_id;
+            }
             const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
             await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
             const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');
@@ -12275,6 +12288,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
     } else if (!markedSucceeded && !durableCompletionCommitted) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
     } else {
+      // Committed, then failed in post-commit work: release the attempt
+      // from side_effects_running to side_effects_pending NOW (GitHub r7
+      // P2 #4127) so the advertised retry — the operator's resend receipt,
+      // the next delivery of the same invoice, a panel re-POST — can claim
+      // it at once instead of waiting out the stale-running window; there
+      // is no background sweep for a non-packet completion. A row already
+      // succeeded (or not running) is left untouched by the release.
+      if (!markedSucceeded && completionAttempt) {
+        await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, err);
+      }
       logger.error(
         `[dispatch] Post-commit error in /complete (attempt ${completionAttempt?.id} remains resumable): ${err.message}`
       );

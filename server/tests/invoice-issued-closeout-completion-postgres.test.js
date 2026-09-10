@@ -65,7 +65,7 @@ describe('source contracts', () => {
   const path = require('path');
   test('the issued invoice is re-checked LOCKED inside the record transaction and a miss 409s without committing', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,400}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,1600}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
     expect(source).toMatch(/if \(err && err\.code === 'issued_invoice_not_reusable'\) \{\s*\n\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
   });
   test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
@@ -104,6 +104,24 @@ describe('source contracts', () => {
     expect(source).toMatch(/\} else if \(inv && await issuedCloseoutOwnsRecord\(inv\.service_record_id\)\) \{[\s\S]*?\} else if \(inv\) \{\s*\n\s*await ReviewService\.enrollPostService\(\{\s*\n\s*customerId: inv\.customer_id,/);
     // markDeliverySent: same order on the durable linkage.
     expect(source).toMatch(/\} else if \(await issuedCloseoutOwnsRecord\(linkage\.service_record_id\)\) \{[\s\S]*?\} else \{\s*\n\s*const ReviewService = require\("\.\/review-request"\);\s*\n\s*await ReviewService\.enrollPostService\(\{\s*\n\s*customerId: invoice\.customer_id,\s*\n\s*serviceRecordId: linkage\.service_record_id/);
+  });
+  test('GitHub r7 P2 set: ownership re-read after the gate, revertMerge takes the gate, batch receipts retry the closeout, post-commit failures are released for resume', () => {
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    // The gate, then the ownership re-read, then the mint lock and the invoice row.
+    expect(completion).toMatch(/\['invoice-issued-closeout', String\(svc\.customer_id\)\],\s*\);[\s\S]{0,900}?const gatedOwner = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.first\('customer_id'\);[\s\S]{0,400}?svc\.customer_id = gatedOwner\.customer_id;[\s\S]{0,200}?acquireScheduledInvoiceMintLock\(trx, svc\.id\);/);
+    // Committed-then-failed: released to side_effects_pending before the rethrow.
+    expect(completion).toMatch(/if \(!markedSucceeded && completionAttempt\) \{\s*await CompletionAttempts\.releaseCompletionAttemptForResume\(completionAttempt, err\);\s*\}\s*logger\.error\(\s*`\[dispatch\] Post-commit error/);
+    const dedupe = fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8');
+    const revert = dedupe.slice(dedupe.indexOf('async function revertMerge('));
+    const gateAt = revert.indexOf("['invoice-issued-closeout', custId]");
+    const rowsAt = revert.indexOf("const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate()");
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(rowsAt).toBeGreaterThan(gateAt);
+    const invoices = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    const batch = invoices.slice(invoices.indexOf("router.post('/batch/send-receipts'"), invoices.indexOf("router.post('/:id/send-receipt'"));
+    const retryAt = batch.indexOf("closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null })");
+    expect(retryAt).toBeGreaterThan(batch.indexOf("skipped.push({ invoiceId, reason: `status=${invoice.status}` })"));
+    expect(retryAt).toBeLessThan(batch.indexOf('sendReceiptEmail(invoiceId)'));
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -313,7 +331,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
-    expect(out).toMatchObject({ closed: false, reason: 'no_invoice' });
+    expect(out).toMatchObject({ closed: false, reason: 'invoice_void', visitId: f.serviceId });
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
@@ -331,7 +349,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
   });
 
-  test('a COMMITTED closeout whose invoice is voided after the commit still reaches its resume through the wrapper — never no_invoice / not-reusable (pre-push P1 r7)', async () => {
+  test('a COMMITTED closeout whose invoice is voided after the commit still reaches its resume through the wrapper — never invoice_void / not-reusable (pre-push P1 r7)', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     const idempotencyKey = `invoice-issued:${f.invoiceId}`;
     // The completion committed (record + status) and still owes side effects.
@@ -344,13 +362,13 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     // stands in the way. Whatever the resume claim then decides, no
     // replacement invoice is minted.
     expect(out).toMatchObject({ visitId: f.serviceId, resumed: true });
-    expect(out.reason).not.toBe('no_invoice');
+    expect(out.reason).not.toBe('invoice_void');
     expect(out.reason).not.toBe('issued_invoice_not_reusable');
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
     // A void with NO committed attempt of its own still closes nothing.
     await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).del();
     await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'confirmed' });
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg })).toMatchObject({ closed: false, reason: 'no_invoice' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg })).toMatchObject({ closed: false, reason: 'invoice_void', visitId: f.serviceId });
   });
 
   test('a reschedule that lands between the unlocked read and the record transaction refuses the closeout — the locked day decides (GitHub r6 P2)', async () => {

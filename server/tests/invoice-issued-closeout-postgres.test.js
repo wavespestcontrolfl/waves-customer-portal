@@ -174,6 +174,16 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: svc2.id, actor_type: 'admin', actor_id: techId }));
   });
 
+  test('a linked invoice voided before the closeout reads it is audited as refused (invoice_void) against its visit (GitHub r7 P2)', async () => {
+    const svc = await visit();
+    const inv = await invoice({ scheduled_service_id: svc.id });
+    await trx('invoices').where({ id: inv.id }).update({ status: 'void' });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', actorTechnicianId: 'admin-1', conn: trx, today: TODAY });
+    expect(out).toMatchObject({ closed: false, reason: 'invoice_void', visitId: svc.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: svc.id, action: 'visit.completion_on_invoice_issued_refused', metadata: expect.objectContaining({ code: 'invoice_void' }) }));
+  });
+
   test('a linked visit left open is audited as refused with the reason; an invoice with no visit link is logged only', async () => {
     const future = await visit({ date: '2040-03-05' });
     const inv = await invoice({ scheduled_service_id: future.id, date: '2040-03-05' });

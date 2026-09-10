@@ -2672,6 +2672,17 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // the journal → comms → customers order cannot cycle. The later
     // email/name-guard acquisitions of this same key are reentrant no-ops.
     await lockCustomerComms(trx, winnerId);
+    // The invoice-issued-closeout gate lock, sorted, BEFORE the customer
+    // rows (GitHub r7 P2 #4127) — the same reason as executeMerge: this undo
+    // locks the customers first and later the journaled invoices FOR
+    // UPDATE, while the closeout locks invoice → customer; the shared gate
+    // serializes the two before either takes a row lock.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['invoice-issued-closeout', custId],
+      );
+    }
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);

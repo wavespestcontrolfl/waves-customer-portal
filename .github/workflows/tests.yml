@@ -90,6 +90,11 @@ jobs:
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js
+      - name: Invoice-issued closeout resolver transaction tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/invoice-issued-closeout-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:

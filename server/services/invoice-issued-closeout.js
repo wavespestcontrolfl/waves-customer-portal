@@ -183,7 +183,18 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
     if (String(invoice.status) === 'void') {
       const ownCommitted = invoice.scheduled_service_id
         && await resumableIssuedCloseoutAttempt(conn, { serviceId: invoice.scheduled_service_id, idempotencyKey });
-      if (!ownCommitted) return { closed: false, reason: 'no_invoice' };
+      if (!ownCommitted) {
+        // A linked visit left open by the void is audited like every other
+        // refusal (GitHub r7 P2 #4127) — the invoice still names the visit,
+        // so the refusal row explains why it stayed open after the delivery.
+        if (invoice.scheduled_service_id) {
+          linkedVisitId = invoice.scheduled_service_id;
+          logger.info(`[invoice-issued-closeout] ${label} → visit ${linkedVisitId} left open (invoice_void)`);
+          await audit({ closed: false, visitId: linkedVisitId, code: 'invoice_void' });
+          return { closed: false, reason: 'invoice_void', visitId: linkedVisitId };
+        }
+        return { closed: false, reason: 'no_invoice' };
+      }
     }
     const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today });
     linkedVisitId = resolved.visit?.id || null;
