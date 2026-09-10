@@ -560,6 +560,29 @@ it('a cold feature-flag cache defers the first plan request: no ungoverned legac
   expect(within(totals()[0].parentElement).getAllByRole('combobox')[2].value).toBe('broadcast_spray');
 });
 
+it('a governed draft restored under an initial plan outage still submits its removed defaults as skipped products, named from the catalog', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnRemovedDefaultIds).toEqual([products[0].id]));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  const card = within(totals()[0].parentElement);
+  fireEvent.change(card.getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } });
+  fireEvent.change(card.getAllByRole('combobox')[1], { target: { value: 'fl_oz' } });
+  fireEvent.change(card.getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
+  fireEvent.change(totals()[0], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  // No plan loaded, yet the removed default reaches the server's unlisted-skip audit (Codex #4113 P2).
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.skippedProducts).toEqual([{ productId: products[0].id, productName: products[0].name }]);
+});
+
 it('changing only the rate unit withdraws a plan-suggested rate and total instead of relabeling them, and returning to the plan unit restores them', async () => {
   enableDefaults();
   mount();

@@ -33,7 +33,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
   // asserted. Table name keeps its "as" alias, hence startsWith.
   function fakeTrx(insertedCompletions, insertedActuals = [], deletes = []) {
     return (table) => ({
-      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
+      whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: (criteria) => ({
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
@@ -87,7 +87,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     const completions = [];
     const actuals = [];
     const trx = (table) => ({
-      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
+      whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
       insert: (row) => {
@@ -193,7 +193,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
 
   function fakeTrx(completions, actuals, deletes) {
     return (table) => ({
-      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
+      whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: (criteria) => ({
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
@@ -266,7 +266,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const protocolRow = { id: 'pp-1', product_id: 'orig-1', catalog_product_name: 'Original iron', role: 'micronutrient', rate_per_1000: 3, rate_unit: 'fl oz' };
     const trx = (table) => ({
-      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
+      whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve({ id: 'row-1' }), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
       insert: (row) => {
@@ -352,7 +352,7 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
   afterEach(() => { delete process.env.GATE_LAWN_ACTUALS_LEDGER; });
   function fakeTrx(completions, actuals, catalogIds = null) {
     return (table) => ({
-      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog')
+      whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(String(table).startsWith('products_catalog')
         ? ids.filter((id) => (catalogIds || ids).includes(id)).map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),

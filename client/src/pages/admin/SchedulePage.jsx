@@ -15040,14 +15040,19 @@ export function CompletionPanel({
       // A removed default keeps its name from the catalog when the refreshed
       // plan (or a draft restored under an outage) no longer lists it, so the
       // server still receives it for its unlisted-skip audit (Codex #4113 P2).
-      const lawnSkippedDefaults = lawnDefaultsEnabled
+      // Governed state survives a plan outage: a draft restored while the
+      // plan request failed carries its removed defaults even though no
+      // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
+      // server's unlisted-skip audit (Codex #4113 P2).
+      const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
         ? lawnRemovedDefaultIds.flatMap((id) => {
-            const item = lawnCompletionDefaults.items.find((row) => String(row.product.id) === String(id));
+            const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
             const productName = item?.product?.name || catalogProduct?.name;
             return productName ? [{ productId: item?.product?.id || id, productName }] : [];
           })
         : [];
+      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined);
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
@@ -15098,9 +15103,9 @@ export function CompletionPanel({
         // audit P1). Plan defaults the tech removed ride along as skipped
         // products for the lawn actuals ledger — id + name only, no reason
         // demanded.
-        lawnProtocolCompletion: lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined)
+        lawnProtocolCompletion: lawnAreaSubmitted || lawnSkippedDefaults.length
           ? {
-              treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea),
+              ...(lawnAreaSubmitted ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : {}),
               ...(lawnSkippedDefaults.length ? { skippedProducts: lawnSkippedDefaults } : {}),
             } : null,
         treeShrubCompletion: treeShrubCloseoutRequired

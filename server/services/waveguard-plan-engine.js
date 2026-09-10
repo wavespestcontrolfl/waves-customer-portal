@@ -1639,6 +1639,10 @@ async function buildPlanForService(serviceId, options = {}) {
       // The saved whole-property area, untouched by a visit-only override: the
       // denominator every annual per-1,000 nutrient figure shares.
       profileLawnSqft: profile?.lawn_sqft || null,
+      // The profile version this plan was built from: the completion
+      // transaction re-reads it under the customer lock and aborts when a
+      // turf-profile edit committed in between (Codex #4113 P2).
+      turfProfile: { id: profile?.id || null, updatedAt: profile?.updated_at ? new Date(profile.updated_at).toISOString() : null },
       municipality: resolvedOrdinanceCity,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',

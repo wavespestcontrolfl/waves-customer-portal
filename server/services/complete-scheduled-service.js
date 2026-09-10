@@ -4801,6 +4801,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
             .where({ id: svc.customer_id })
             .forShare()
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
+          // The ledger plan was built from the turf profile at handler entry:
+          // a PUT turf-profile that committed since would attribute the visit
+          // to the former grass track and protocol. Re-read the profile
+          // version under the customer lock and abort with the same retryable
+          // shape as the owner/property/service/tier changes (Codex #4113 P2).
+          if (lawnLedgerVisit && waveguardPlan?.propertyGate?.turfProfile) {
+            const planProfile = waveguardPlan.propertyGate.turfProfile;
+            const lockedProfile = await savepointRead(trx, (k) => k('customer_turf_profiles')
+              .where({ customer_id: svc.customer_id, active: true }).forShare().first('id', 'updated_at'));
+            const lockedUpdatedAt = lockedProfile?.updated_at ? new Date(lockedProfile.updated_at).toISOString() : null;
+            if (String(lockedProfile?.id || '') !== String(planProfile.id || '') || String(lockedUpdatedAt || '') !== String(planProfile.updatedAt || '')) {
+              const err = new Error('This customer\'s turf profile changed while completing — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_TURF_PROFILE_CHANGED';
+              throw err;
+            }
+          }
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }

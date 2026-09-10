@@ -300,7 +300,10 @@ function partitionSkippedProducts(completionInput, plan, structured, allLawn) {
 async function revalidateSkippedProducts(trx, skips) {
   if (!skips.skipped.length) return skips;
   const ids = skips.skipped.map((row) => String(row.productId));
-  const known = new Set((await trx('products_catalog').whereIn('id', ids).select('id')).map((row) => String(row.id)));
+  // FOR SHARE: the accepted rows stay locked through the skipped-actual
+  // inserts, so a catalog delete racing this transaction blocks instead of
+  // winning the FK race after the check (Codex #4113 P2).
+  const known = new Set((await trx('products_catalog').whereIn('id', ids).forShare().select('id')).map((row) => String(row.id)));
   const retired = skips.skipped.filter((row) => !known.has(String(row.productId)));
   return {
     skipped: skips.skipped.filter((row) => known.has(String(row.productId))),
