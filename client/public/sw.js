@@ -47,18 +47,41 @@ function shellAssetUrls(html) {
   return [...urls];
 }
 
-// Every cached /assets/* entry carries the build it belongs to, so pruning
+// Every cached /assets/* entry carries the builds it belongs to, so pruning
 // can keep whole generations — the shell's direct assets AND the page chunks
-// it lazy-loads later — without a dependency manifest. The id is the shell's
-// asset set; hashed chunk names carry no build id of their own.
+// it lazy-loads later — without a dependency manifest. The id derives from
+// the shell's asset set; hashed chunk names carry no build id of their own.
+// It is a short digest, not the asset list itself: ~300 assets × ~30 chars
+// per entry would put megabytes of header text into the cache index that
+// WebKit reads on the first open — the very cost this worker is removing.
 const BUILD_HEADER = 'x-waves-build';
 function buildIdOf(assets) {
-  return [...assets].sort().join('|');
+  const key = [...assets].sort().join('|');
+  let a = 5381; let b = 0;
+  for (let i = 0; i < key.length; i += 1) {
+    const c = key.charCodeAt(i);
+    a = ((a * 33) ^ c) >>> 0; // djb2
+    b = (c + (b << 6) + (b << 16) - b) >>> 0; // sdbm
+  }
+  return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}`;
+}
+
+// A chunk unchanged across builds is used by several of them at once, and a
+// retained build must not lose its claim because a newer page also used the
+// chunk (a navigation whose shell refresh failed is live but never cached, so
+// its build is never retained). The header lists the last builds that used
+// the entry, newest first; retention only needs the current, previous and
+// live builds, so three is enough.
+const BUILD_TAGS_KEPT = 3;
+function buildTagsOf(response) {
+  const raw = response && response.headers.get(BUILD_HEADER);
+  return raw ? raw.split(',').map(t => t.trim()).filter(Boolean) : [];
 }
 
 function tagWithBuild(response, buildId) {
   const headers = new Headers(response.headers);
-  headers.set(BUILD_HEADER, buildId);
+  const tags = [buildId, ...buildTagsOf(response).filter(t => t !== buildId)].slice(0, BUILD_TAGS_KEPT);
+  headers.set(BUILD_HEADER, tags.join(','));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -174,8 +197,7 @@ function pruneStaleAssets(cache, retainedBuildIds) {
     await Promise.all(requests.map(async request => {
       if (!new URL(request.url).pathname.startsWith('/assets/')) return;
       const cached = await cache.match(request);
-      const tag = cached && cached.headers.get(BUILD_HEADER);
-      if (!retained.has(tag)) await cache.delete(request);
+      if (!buildTagsOf(cached).some(tag => retained.has(tag))) await cache.delete(request);
     }));
   });
 }
@@ -252,16 +274,17 @@ self.addEventListener('fetch', event => {
       caches.open(CACHE_NAME).then(cache => cache.match(event.request).then(cached => {
         if (cached) {
           // A chunk unchanged between builds keeps its hash, so a hit under
-          // the live build may still carry an older tag; re-stamp it so the
-          // prune sees it as the live build's when that older one ages out.
-          const tag = cached.headers.get(BUILD_HEADER);
-          if (liveBuildId && tag === liveBuildId) return cached;
+          // the live build may not carry its tag yet; add it (keeping the
+          // older builds' claims) so the prune sees it as the live build's
+          // when those older ones age out.
+          const tags = buildTagsOf(cached);
+          if (liveBuildId && tags.includes(liveBuildId)) return cached;
           // Clone before handing `cached` to respondWith: on a cold worker the
           // build lookup awaits the cached shell, and the page can lock the
           // body in that window, making a later clone() throw.
           const copy = cached.clone();
           const touch = currentBuildId(cache).then(buildId => {
-            if (buildId && tag !== buildId) {
+            if (buildId && !tags.includes(buildId)) {
               return withAssetWrites(() => cache.put(event.request, tagWithBuild(copy, buildId)));
             }
             return undefined;

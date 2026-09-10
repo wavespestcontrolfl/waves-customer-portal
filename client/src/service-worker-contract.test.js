@@ -470,12 +470,45 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     releaseShell();
     await hit.settled();
 
-    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build')).toBe(buildIdOf(['/assets/index-BBB.js']));
+    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build'))
+      .toBe(`${buildIdOf(['/assets/index-BBB.js'])},/assets/index-AAA.js`);
   });
 
-  it('derives the build id from the asset set regardless of order', () => {
+  it('derives a short build id from the asset set regardless of order', () => {
     const { buildIdOf } = loadWorker(fakeCache());
     expect(buildIdOf(['/assets/a.js', '/assets/b.css'])).toBe(buildIdOf(['/assets/b.css', '/assets/a.js']));
     expect(buildIdOf(['/assets/a.js'])).not.toBe(buildIdOf(['/assets/a.js', '/assets/b.css']));
+    // A digest, not the asset list: ~300 assets per build would otherwise put
+    // megabytes of header text into the index WebKit reads on first open.
+    const many = Array.from({ length: 300 }, (_, i) => `/assets/Chunk-${i.toString(36).padStart(8, 'x')}.js`);
+    expect(buildIdOf(many)).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('keeps a retained build\'s claim on a chunk that a never-cached live build also used', async () => {
+    // Pre-push Codex P1: shell A and its route chunk are cached. A navigation
+    // to B advances the live build, but B's shell refresh fails (asset
+    // preload 500), so the cached shell stays A. An A tab then hits its
+    // chunk: the re-tag must ADD B, not replace A — when C ships, retention
+    // is {C, A} and a chunk tagged only B would be deleted from under A.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/DashboardPageV2-AAA.js');
+
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' }); // B is live; its refresh failed
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-AAA.js']));
+
+    await dispatchFetch('/assets/DashboardPageV2-AAA.js'); // A's tab loads its route
+    expect((await cache.match('/assets/DashboardPageV2-AAA.js')).headers.get('x-waves-build'))
+      .toBe(`${buildIdOf(['/assets/index-BBB.js'])},${buildIdOf(['/assets/index-AAA.js'])}`);
+
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
   });
 });
