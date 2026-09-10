@@ -58,4 +58,28 @@ The combined local gallery in `wt-equipment-acceptance-20260909` is `.tmp/admin-
 
 Repeat the main browser pass with `node scripts/qa/admin-equipment-foundation.js`; it starts and stops its own local Vite preview. Run the existing unit suite with `npm run test --workspace=client -- src/pages/admin/EquipmentPage.tank.test.jsx` and the production build with `npm run build` under Node 20.
 
-Migrations and database/provider flows were not run. Installed-iPhone keyboard and notch/safe-area behavior still require a physical-device check. This task prepares review PRs; no merge or production deployment was performed. Draft children have not passed the repository’s main-based final merge gate. The financial API permission gap and date-only/UTC day-shift defects have separate fixes, [#4231](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4231) and [#4238](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4238), recorded as [ADMIN-BUG-003 and ADMIN-BUG-004](../audits/admin-ui-non-ui-bugs.md). Backend authorization and calendar-day behavior stay outside this presentation slice. Integration must retain the date corrections and update the combined QA verification timestamp expectation when #4238 is incorporated.
+Migrations and database/provider flows were not run. The September 10 physical-device follow-up below closes the installed-iPhone keyboard and notch/safe-area prerequisite. This task prepares review PRs; no merge or production deployment was performed. Draft children have not passed the repository’s main-based final merge gate. The financial API permission gap and date-only/UTC day-shift defects have separate fixes, [#4231](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4231) and [#4238](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4238), recorded as [ADMIN-BUG-003 and ADMIN-BUG-004](../audits/admin-ui-non-ui-bugs.md). Backend authorization and calendar-day behavior stay outside this presentation slice. Integration must retain the date corrections and update the combined QA verification timestamp expectation when #4238 is incorporated.
+
+## Current-main combined verification — September 10, 2026
+
+The final Equipment stack commit `24094ba946b6d03da66aea90203c2157b2e45ee0` was merged locally with refreshed prerequisite `556ee36c11f2efafbf2a316579bcc70adbcc076f` on the verification-only branch `codex/equipment-combined-verify-20260910`. The resulting clean merge commit is `4f9b3bd9ec629fffcff3bac166efe85c3ac47565`. Documentation conflicts retain the newer main non-Equipment records and the final-stack Equipment records. No product source was changed during verification.
+
+The isolated worktree setup and frontend doctor passed on Node 20.20.2 with integration credentials excluded, background jobs disabled and migrations not checked. The clean-commit browser run started at `2026-09-10T22:07:57.768Z` and passed all 214 geometry cases (107 Chromium and 107 touch WebKit), all 66 recorded behavior checks and all 60 screenshot captures. There were no page errors, unmatched synthetic API routes, backend-forwarded requests or unexpected console errors; the recorded 503 responses were deliberate failure/retry fixtures. Desktop and phone screenshots were visually inspected, including Assets, Maintenance, the equipment edit dialog, mileage actions and calibration verification actions. The updated shared dialog and CSS keep the form and action regions visible in the captured responsive layouts.
+
+The focused Equipment, command-header and shared-overlay run passed 35 tests across six files. The date-only/timestamp regression run passed 12 tests under UTC and the same 12 under `America/New_York` (24 executions). The production build passed its blog-schema, affiliate-registry, portal-brand and domain-rule checks, then compiled 2,776 Vite modules. No backend, database, provider or production environment was accessed.
+
+The source hashes recorded by `.tmp/admin-equipment-foundation/report.json` are:
+
+| Source | SHA-256 |
+| --- | --- |
+| `client/src/components/admin/AdminCommandHeader.jsx` | `6f8c2f349196321cacfeb1617355b2a092dbf97354c6c3df8ddeed014e12fe8f` |
+| `client/src/pages/admin/EquipmentPage.jsx` | `acfc8a2e784af47f9e9498f3cca72c933f2d388011340895e0c60eb9e1bd6949` |
+| `client/src/pages/admin/EquipmentMaintenancePage.jsx` | `5beb79a59f2a412c9ef39b0c32c0e6c6afcb826d649c61b41ac16f4fb1c385be` |
+| `client/src/pages/admin/EquipmentCalibrationPanel.jsx` | `20690e4863751ba7d71986f95db1c251fd31bfae49c1b40998b0b992d8300129` |
+| `scripts/qa/admin-equipment-foundation.js` | `29b546f8f83bf3ce5aef7837ee961f6e5bcb0791138bd2446107ad8fadee0664` |
+| `client/src/components/ui/Dialog.jsx` | `aa408ac34c48b99b71982051cc37b0e3fbdc9937ed30a2ed6c3df91a46755f1a` |
+| `client/src/index.css` | `b13e90499b82d23c7a50fc35091d2c006789ee7dc363b3c349a5393e7cb3c71d` |
+
+Current local artifacts are `.tmp/admin-equipment-foundation/report.json`, `.tmp/admin-equipment-foundation/review.html` and the 60 report-listed PNG captures in that directory.
+
+Three real-iPhone installed-PWA captures attached to [#4280](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4280) show the notch/safe area clear and Save/Cancel visible while scrolling. On September 10 the owner also confirmed in this session that the full physical iPhone software-keyboard check passed in the installed `Equipment QA` PWA. That owner confirmation closes the keyboard prerequisite; the automated browser run does not emulate a full native keyboard, and the verification agent did not capture that full-keyboard evidence.
