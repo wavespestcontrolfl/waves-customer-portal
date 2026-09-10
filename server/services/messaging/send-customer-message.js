@@ -445,7 +445,9 @@ async function sendCustomerMessage(input) {
       // provider request so a wait across it returns the ordinary hold.
       const windowVerdict = checkSendWindow(sendInput, policy, currentState);
       if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
-      if (typeof onProviderStart === 'function') onProviderStart();
+      // Awaited: the caller's durable pre-provider transition must commit
+      // before the SDK request.
+      if (typeof onProviderStart === 'function') await onProviderStart();
       await dispatch();
       return { ok: true };
     })),
