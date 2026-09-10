@@ -963,7 +963,17 @@ const ReviewService = {
     );
 
     if (shouldSendImmediately) {
-      const outcome = await this.sendSMS(request.id, { expectedPhone });
+      let outcome;
+      try {
+        outcome = await this.sendSMS(request.id, { expectedPhone });
+      } catch (err) {
+        if (err?.code === "approved_phone_persistence_failed") {
+          // This call created the row and the provider was never entered.
+          // Remove it so creation-time cooldown readers do not block a retry.
+          await this._parkRequestVerified(request.id, { preferDelete: true });
+        }
+        throw err;
+      }
       // Not delivered — held by the 3-day rule, its lookup, the send window
       // or a provider retry. The row stays queued for the retry owner, and
       // the caller learns that it was NOT sent (codex #4141 r3 P2: the tech
