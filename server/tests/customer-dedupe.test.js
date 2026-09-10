@@ -1350,6 +1350,33 @@ describe('executeMerge', () => {
       .rejects.toThrow(/different third-party payers/);
   });
 
+  it('defers a payer-changing merge while a combined-visit invoice send is in flight on either side', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockImplementation(async ({ customerId }) => customerId === WINNER);
+    try {
+      const { trx } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+        .rejects.toThrow(/surviving record is being sent/);
+      // The merged-away side: a self-pay loser absorbed by a payer-linked winner.
+      inFlight.mockImplementation(async ({ customerId }) => customerId === LOSER);
+      const reverse = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: 5 },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: null },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(reverse.trx));
+      await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
+        .rejects.toThrow(/merged-away record is being sent/);
+    } finally {
+      inFlight.mockRestore();
+    }
+  });
+
   it('transfers a loser-only payer default and clears it on the retired row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 };
