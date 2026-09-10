@@ -101,7 +101,10 @@ async function saveAllocation(input, actor) {
     if (!await trx('services').where({ service_key: data.service_key }).first('id')) reject('Service key not found.', 404);
     if (data.property_id && !await trx('customer_properties').where({ id: data.property_id, customer_id: data.customer_id }).first('id')) reject('The property does not belong to this customer.');
     const owners = await allocationCustomers(trx, data.customer_id);
-    const overlap = await trx('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: data.property_id, service_key: data.service_key, credit_type: data.credit_type })
+    // Allocation identity is customer, property, service and period; the credit
+    // type never separates two pools for the same service, so an overlap of any
+    // type is a duplicate of the same retained value.
+    const overlap = await trx('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: data.property_id, service_key: data.service_key })
       .where('coverage_start', '<=', data.coverage_end).where('coverage_end', '>=', data.coverage_start).first();
     if (overlap) reject('An allocation already covers this service and period. Use its original scheduled count.', 409);
     const [row] = await trx('field_credit_allocations').insert({ ...data, ...baseRow(data, actor) }).returning('*');
@@ -123,7 +126,7 @@ async function allocationCustomers(conn, customerId) {
 
 async function visitFacts(conn, id, lock = false) {
   const query = conn('scheduled_services').where({ id });
-  const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback', 'followup_included', 'completed_at', 'actual_end_time');
+  const visit = await (lock ? query.forUpdate() : query).first('id', 'customer_id', 'property_id', 'technician_id', 'service_id', 'service_key_snapshot', 'service_type', 'scheduled_date', 'status', 'is_callback', 'followup_included', 'completed_at', 'actual_end_time', 'check_out_time');
   if (!visit) reject('Service not found.', 404);
   const catalog = visit.service_id ? await conn('services').where({ id: visit.service_id }).first('service_key') : null;
   const record = await resolveServiceRecord(conn, visit, { scheduled_service_id: true });
@@ -140,12 +143,13 @@ function isBackfilledRecord(record) {
   return parseJsonObject(record?.structured_notes).backfill === true;
 }
 
-// Only a recorded completion or end instant proves when a service was done;
-// a start time cannot, because the visit may still be in progress, and a
-// backfilled closeout records only the service day.
+// Only a recorded end instant proves when a service was done; a start time
+// cannot, because the visit may still be in progress, and a backfilled closeout
+// records only the service day. The operational end outranks completed_at,
+// which may be a later closeout stamp (service-duration-capture precedence).
 function completionInstant(visit) {
   if (visit.backfilled) return null;
-  const value = visit.completed_at || visit.actual_end_time;
+  const value = visit.actual_end_time || visit.check_out_time || visit.completed_at;
   return value ? new Date(value).getTime() : null;
 }
 function returnedAfter(returned, visit) {
