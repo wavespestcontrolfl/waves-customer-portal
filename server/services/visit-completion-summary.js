@@ -195,14 +195,16 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // Lock order (customer-comms-lock.js): the per-customer comms lock
     // first — the per-property toggle writer commits under it, so a
     // property opt-out that lands during the request serializes behind the
-    // handoff instead of slipping past the consent recheck — then the
-    // leg's canonical per-address lock (the SMS phone lock the STOP /
-    // suppression writers take, or the email-address lock the suppression
-    // and address writers take), then the rows.
+    // handoff instead of slipping past the consent recheck — then the SMS
+    // phone lock (customer-comms → phone → rows, the STOP / suppression
+    // writers' order), then the rows. The email-address key comes AFTER
+    // every row hold: its other holders (contact correction, the email
+    // fanout claim guard, the Customer-360 and IB writers) lock the customer
+    // row first and take the key second, so taking it before the rows would
+    // deadlock against them.
     const locks = require('../utils/customer-comms-lock');
     await locks.lockCustomerComms(trx, customerId);
     if (phone) await locks.lockSmsPhone(trx, phone);
-    if (email) await locks.lockCustomerEmail(trx, email);
     await trx('customers').where({ id: customerId }).forShare().first('id');
     // FOR SHARE cannot lock an absent row. The canonical seed serializes
     // missing-row creation without inventing marketing consent or replacing
@@ -220,6 +222,10 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     const live = await trx('service_visits').where({ id: visitId }).whereNull('summary_token_revoked_at')
       .whereIn('status', ['closing', 'closed']).forShare().first('id');
     if (!live) return false;
+    // Held through the request so a suppression or an address claim that
+    // commits during it serializes behind the handoff; the ledger fence in
+    // `authorized` reads a settled ledger.
+    if (email) await locks.lockCustomerEmail(trx, email);
     return authorized(customer, prefs, trx, phase);
   };
   const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
@@ -639,15 +645,22 @@ async function retrySummaryThroughHandoff(message, dispatch, { destination = nul
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
   return database.transaction(async (trx) => {
-    // The destination address lock is taken first: suppression and address
-    // writers serialize on it, so the fence below reads a settled ledger and
-    // the request cannot be overtaken by an opt-out or an address claim.
-    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, destination || message.recipient_email_snapshot);
     const visit = await trx('service_visits').where({ id: match[1] }).forShare().first('customer_id');
     if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
-    await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
+    const customer = await trx('customers').where({ id: visit.customer_id }).forShare().first();
+    if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
     await createDefaultCustomerRows(trx, visit.customer_id);
     await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
+    // The account-primary row is held before the address key too (an
+    // unreadable primary is a failed claim read, not a different recipient).
+    await withAccountPrimaryContact(customer, { db: trx, forShare: true, rethrow: true });
+    // The destination address key is taken after every row hold — its other
+    // holders lock the customer row first, so the reverse order would
+    // deadlock against a contact correction — and stays held through the
+    // request: suppression and address writers serialize on it, so the
+    // fence below reads a settled ledger and the request cannot be overtaken
+    // by an opt-out or an address claim.
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, destination || message.recipient_email_snapshot);
     const fence = await summaryRetryAuthorized(message, trx, { destination });
     if (!fence.ok) return fence;
     // The caller may refuse at the last moment (a corrected destination that
