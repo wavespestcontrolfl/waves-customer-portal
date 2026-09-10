@@ -75,11 +75,14 @@ async function cachedBuildId(cache) {
 // The build pages are running right now. A navigation hands the page build
 // B's HTML before B's background shell refresh finishes, so chunks B loads
 // in that window must not be stamped with the still-cached build A; the
-// navigation handler advances this memo from the fresh HTML immediately.
+// navigation handler advances this memo from the fresh HTML immediately,
+// and a refresh requested before that never writes its build back over it
+// (see replaceCompleteShell).
 // Memoized per worker lifetime, seeded from the cached shell after a cold
 // start. Never used to decide what the previous build was — that comes
 // from the cached shell itself (cachedBuildId), or pruning would never fire.
 let liveBuildId = null;
+let liveBuildSeq = 0; // bumped by every navigation that advances liveBuildId
 async function currentBuildId(cache) {
   if (!liveBuildId) liveBuildId = await cachedBuildId(cache);
   return liveBuildId;
@@ -94,12 +97,13 @@ async function currentBuildId(cache) {
 // module-level chain is the right scope (Web Locks would outlive it).
 let shellRefreshChain = Promise.resolve();
 async function cacheCompleteShellResponse(shellResponse) {
-  const run = shellRefreshChain.then(() => replaceCompleteShell(shellResponse));
+  const enqueuedSeq = liveBuildSeq;
+  const run = shellRefreshChain.then(() => replaceCompleteShell(shellResponse, enqueuedSeq));
   shellRefreshChain = run.catch(() => {});
   return run;
 }
 
-async function replaceCompleteShell(shellResponse) {
+async function replaceCompleteShell(shellResponse, enqueuedSeq) {
   const cache = await caches.open(CACHE_NAME);
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
 
@@ -121,7 +125,11 @@ async function replaceCompleteShell(shellResponse) {
   const previousBuildId = await cachedBuildId(cache);
   await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, tagWithBuild(response, buildId))));
   await cache.put(OFFLINE_URL, shellResponse);
-  liveBuildId = buildId;
+  // Refreshes are queued, so an older one can finish after a newer
+  // navigation already advanced the live build — writing its own build back
+  // would mis-tag the newer page's chunks. Only claim the memo if no
+  // navigation moved it since this refresh was requested (install path).
+  if (enqueuedSeq === liveBuildSeq) liveBuildId = buildId;
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
   // navigation may read the old shell moments before its replacement. Two
@@ -187,7 +195,9 @@ self.addEventListener('fetch', event => {
           // with its own build. A shell without assets is not a build.
           event.waitUntil(response.clone().text().then(html => {
             const assets = shellAssetUrls(html);
-            if (assets.length) liveBuildId = buildIdOf(assets);
+            if (!assets.length) return;
+            liveBuildSeq += 1;
+            liveBuildId = buildIdOf(assets);
           }).catch(() => {}));
           event.waitUntil(cacheCompleteShellResponse(response.clone()).catch(() => {}));
         }

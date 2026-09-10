@@ -249,6 +249,45 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
   });
 
+  it('keeps the newest navigation as the live build when an older refresh finishes later', async () => {
+    // Codex pre-push P1: navigation A's preload is still parked when
+    // navigation B arrives and advances the live build to B. When A's queued
+    // refresh completes afterwards it must not write A back, or a chunk B
+    // loads next is tagged A and C's prune removes it while B is retained.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+
+    const gates = {};
+    const park = (name) => new Promise(resolve => { gates[name] = resolve; });
+    const gateA = park('A');
+    const gateB = park('B');
+    let navHtml = shellHtml(['/assets/index-AAA.js']);
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(navHtml);
+      if (request.url.includes('index-AAA.js')) await gateA;
+      if (request.url.includes('index-BBB.js')) await gateB;
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const navA = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    navHtml = shellHtml(['/assets/index-BBB.js']);
+    const navB = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+
+    gates.A();
+    await navA.settled(); // A's refresh landed after B's navigation
+    await dispatchFetch('/assets/DashboardPageV2-BBB.js');
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build'))
+      .toBe(buildIdOf(['/assets/index-BBB.js']));
+
+    gates.B();
+    await navB.settled();
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
+  });
+
   it('does not touch cached page chunks when the same shell is refreshed', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse, dispatchFetch } = loadWorker(cache);
