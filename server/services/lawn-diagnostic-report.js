@@ -723,9 +723,11 @@ const DEFINITIVE_PREDICATE = /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!
 function residualDefinitiveClaim(text) {
   // Clause-level, so "The schedule was confirmed with the customer, while large
   // patch remains only a possibility" is not read as a confirmed cause. A comma
-  // pair is a parenthetical, not a clause break: "Large patch, in the shaded
-  // area, is confirmed" keeps its subject with its predicate.
-  const flattened = String(text || '').replace(/,\s[^,.!?;:]{1,80},\s/g, ' ');
+  // pair is a parenthetical, not a clause break: its commas are dropped but the
+  // text is kept, so "Large patch, in the shaded area, is confirmed" and "Large
+  // patch, which is confirmed in the shade, is spreading" both keep the cause
+  // and the definitive predicate in one clause.
+  const flattened = String(text || '').replace(/,\s([^,.!?;:]{1,80}),\s/g, ' $1 ');
   return flattened.split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).some((clause) => (
     DEFINITIVE_PREDICATE.test(clause) && SUMMARY_CAUSE_RE.test(clause)
   ));
