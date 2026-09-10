@@ -65,7 +65,7 @@ describe('source contracts', () => {
   const path = require('path');
   test('the issued invoice is re-checked LOCKED inside the record transaction and a miss 409s without committing', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,1600}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,3200}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
     expect(source).toMatch(/if \(err && err\.code === 'issued_invoice_not_reusable'\) \{\s*\n\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
   });
   test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
@@ -108,7 +108,10 @@ describe('source contracts', () => {
   test('GitHub r7 P2 set: ownership re-read after the gate, revertMerge takes the gate, batch receipts retry the closeout, post-commit failures are released for resume', () => {
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // The gate, then the ownership re-read, then the mint lock and the invoice row.
-    expect(completion).toMatch(/\['invoice-issued-closeout', String\(svc\.customer_id\)\],\s*\);[\s\S]{0,900}?const gatedOwner = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.first\('customer_id'\);[\s\S]{0,400}?svc\.customer_id = gatedOwner\.customer_id;[\s\S]{0,200}?acquireScheduledInvoiceMintLock\(trx, svc\.id\);/);
+    // Gate per observed owner, re-read until stable, then the mint lock and the invoice row.
+    expect(completion).toMatch(/let gateOwner = String\(svc\.customer_id\);\s*for \(let hop = 0; ; hop \+= 1\) \{\s*await trx\.raw\(\s*'SELECT pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)',\s*\['invoice-issued-closeout', gateOwner\],\s*\);\s*const gatedOwner = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.first\('customer_id'\);[\s\S]{0,700}?svc\.customer_id = gatedOwner\.customer_id;\s*gateOwner = observedOwner;\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const ScheduledInvoiceMint = require\('\.\.\/services\/scheduled-invoice-mint'\);\s*await ScheduledInvoiceMint\.acquireScheduledInvoiceMintLock\(trx, svc\.id\);/);
+    // The companion photo gate skips the closeout like the legacy form gate.
+    expect(completion).toMatch(/const treeShrubPhotoGateRequired = treeShrubCloseoutRequired\s*\|\| \(\(typedFindingsType === 'tree_shrub' \|\| hasTreeShrubCompanion\) && !isIncompleteVisit && !issuedInvoiceCloseout\);/);
     // Committed-then-failed: released to side_effects_pending before the rethrow.
     expect(completion).toMatch(/if \(!markedSucceeded && completionAttempt\) \{\s*await CompletionAttempts\.releaseCompletionAttemptForResume\(completionAttempt, err\);\s*\}\s*logger\.error\(\s*`\[dispatch\] Post-commit error/);
     const dedupe = fs.readFileSync(path.join(__dirname, '../services/customer-dedupe.js'), 'utf8');
@@ -235,6 +238,13 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     await fixture({ serviceType: 'Fixture Rodent Trapping Service', category: 'rodent',
       profile: { completion_mode: 'service_report', project_type: 'rodent_trapping', creates_service_record: true,
         companion_types: JSON.stringify([{ type: 'rodent_exclusion' }]) } });
+    await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
+  });
+
+  test('a lawn profile with a tree_shrub COMPANION closes on its invoice — the companion photo gate does not apply to the closeout (GitHub r7 P1)', async () => {
+    await fixture({ serviceType: 'Fixture Monthly Lawn Care Service', category: 'lawn',
+      profile: { completion_mode: 'service_report', creates_service_record: true,
+        companion_types: JSON.stringify([{ type: 'tree_shrub' }]) } });
     await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
   });
 

@@ -3300,8 +3300,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // same — the gate applies to combined completions too (pre-push P1).
     const hasTreeShrubCompanion = (completionProfile?.companions || [])
       .some((companion) => companion.type === 'tree_shrub');
+    // The invoice-issued closeout submits no photos and skips companion
+    // validation; the companion photo gate must skip it too, or a combined
+    // lawn + tree/shrub visit could never close on its invoice (GitHub r7
+    // P1 #4127) — the legacy Tree/Shrub form gate above already does.
     const treeShrubPhotoGateRequired = treeShrubCloseoutRequired
-      || ((typedFindingsType === 'tree_shrub' || hasTreeShrubCompanion) && !isIncompleteVisit);
+      || ((typedFindingsType === 'tree_shrub' || hasTreeShrubCompanion) && !isIncompleteVisit && !issuedInvoiceCloseout);
     const reportProtocolActions = normalizeCompletionTextArray([
       ...(Array.isArray(protocolActionsCompleted) ? protocolActionsCompleted : []),
       ...taggedCompletionNoteLines(technicianNotes, ['protocol', 'protocol optional', 'action']),
@@ -4833,22 +4837,33 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // lock, so whichever transaction arrives first runs to completion
           // before the other takes any row lock — no cycle is reachable.
           if (issuedInvoiceCloseout) {
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-              ['invoice-issued-closeout', String(svc.customer_id)],
-            );
-            // Ownership re-read AFTER the gate (GitHub r7 P2 #4127): a merge
-            // that held the gate first repointed this visit and its invoice
-            // to the winner and retired the loser, and the svc row loaded
-            // before the wait still names the loser — the customer snapshot,
-            // the record insert and every later customer_id write would
-            // attach to a deleted customer. Adopt the current owner; the
-            // invoice recheck below still requires the invoice to name THIS
-            // visit.
-            const gatedOwner = await trx('scheduled_services').where({ id: svc.id }).first('customer_id');
-            if (gatedOwner && String(gatedOwner.customer_id) !== String(svc.customer_id)) {
-              logger.info(`[completion] issued-invoice closeout: visit ${svc.id} re-homed ${svc.customer_id} → ${gatedOwner.customer_id} by a merge — adopting the current owner`);
+            // Gate, then ownership re-read, REPEATED until the owner is
+            // stable (GitHub r7 P2 #4127 ×2): a merge that held the gate
+            // first repointed this visit and its invoice to its winner and
+            // retired the loser, so the svc row loaded before the wait still
+            // names the loser — the customer snapshot, the record insert and
+            // every later customer_id write would attach to a deleted
+            // customer. Adopting the winner is not enough on its own: only
+            // the LOSER's gate is held then, and a further merge of the
+            // winner could run concurrently and re-open the ABBA. So the
+            // gate is taken for each newly observed owner (all held to
+            // commit) and the row re-read until two reads agree; the invoice
+            // recheck below still requires the invoice to name THIS visit.
+            let gateOwner = String(svc.customer_id);
+            for (let hop = 0; ; hop += 1) {
+              await trx.raw(
+                'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                ['invoice-issued-closeout', gateOwner],
+              );
+              const gatedOwner = await trx('scheduled_services').where({ id: svc.id }).first('customer_id');
+              const observedOwner = gatedOwner ? String(gatedOwner.customer_id) : gateOwner;
+              if (observedOwner === gateOwner) break;
+              if (hop >= 4) {
+                throw Object.assign(new Error('visit ownership kept changing under the closeout'), { code: 'visit_ownership_unstable' });
+              }
+              logger.info(`[completion] issued-invoice closeout: visit ${svc.id} re-homed ${gateOwner} → ${observedOwner} by a merge — adopting the current owner and taking its gate`);
               svc.customer_id = gatedOwner.customer_id;
+              gateOwner = observedOwner;
             }
             const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
             await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
