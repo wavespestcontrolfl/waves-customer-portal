@@ -4939,3 +4939,50 @@ test('failed approval persistence removes a newly created unsent request so a fr
     expect(mock.__state.rows.review_requests[0].status).not.toBe('suppressed');
   } finally { gate.mockRestore(); }
 });
+
+
+test('failed spacing-retry persistence removes only the newly created unsent request', async () => {
+  let failRetryWrite = true;
+  const mock = makeMock({
+    customers: [{ id: 'fresh-spacing', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'bradenton' }],
+    sms_log: [{ id: 'manual-ask', customer_id: 'fresh-spacing', direction: 'outbound', status: 'sent',
+      message_body: 'Please leave a Google review.', created_at: new Date() }],
+  }, { onUpdate: (table, patch) => {
+    if (table === 'review_requests' && patch.scheduled_for && failRetryWrite) throw new Error('retry write unavailable');
+  } });
+  db.mockImplementation(mock);
+  const gate = jest.spyOn(ReviewService, 'checkUnscheduledAskGates').mockResolvedValue({ allowed: true });
+  const args = { customerId: 'fresh-spacing', triggeredBy: 'admin' };
+  try {
+    await expect(ReviewService.create(args)).rejects.toMatchObject({ code: 'review_retry_persistence_failed' });
+    expect(mock.__state.rows.review_requests).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+    failRetryWrite = false;
+    const retried = await ReviewService.create(args);
+    expect(retried.sendOutcome).toMatchObject({ sent: false, deferred: 'spacing' });
+    expect(mock.__state.rows.review_requests).toHaveLength(1);
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeInstanceOf(Date);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  } finally { gate.mockRestore(); }
+});
+
+
+test('failed spacing-retry persistence never deletes an existing queued request', async () => {
+  const queued = { id: 'existing-spacing', customer_id: 'existing-spacing-customer', service_record_id: 'existing-service',
+    status: 'pending', scheduled_for: new Date(Date.now() - 60000), token: 'existing-token', created_at: new Date() };
+  const mock = makeMock({
+    customers: [{ id: 'existing-spacing-customer', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'bradenton' }],
+    review_requests: [queued],
+    sms_log: [{ id: 'manual-ask', customer_id: 'existing-spacing-customer', direction: 'outbound', status: 'sent',
+      message_body: 'Please leave a Google review.', created_at: new Date() }],
+  }, { onUpdate: (table, patch) => {
+    if (table === 'review_requests' && patch.scheduled_for) throw new Error('retry write unavailable');
+  } });
+  db.mockImplementation(mock);
+
+  await expect(ReviewService.create({ customerId: 'existing-spacing-customer', serviceRecordId: 'existing-service', triggeredBy: 'admin' }))
+    .rejects.toMatchObject({ code: 'review_retry_persistence_failed' });
+  expect(mock.__state.rows.review_requests).toEqual([queued]);
+  expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+});
