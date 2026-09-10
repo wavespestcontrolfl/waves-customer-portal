@@ -37,6 +37,13 @@ async function employee(conn, id, { lock = false } = {}) {
 function ruleAt(conn, date) {
   return conn('field_program_rules').where('effective_date', '<=', date).orderBy('effective_date', 'desc').first().then(row => calendarRow(row, ['effective_date']));
 }
+// Evidence binds its rule permanently, so a write must not read the effective
+// rule while saveRule is publishing a newer one: share the advisory lock that
+// saveRule takes exclusively, for the rest of the writing transaction.
+async function lockedRuleAt(trx, date) {
+  await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?))', ['field-program-rules']);
+  return ruleAt(trx, date);
+}
 function levelAt(conn, id, date) {
   return conn('field_program_levels').where({ technician_id: id }).where('effective_date', '<=', date).orderBy('effective_date', 'desc').first();
 }
@@ -274,7 +281,7 @@ async function saveServiceEvidence(input, actor) {
     const previousCalculations = await trx('field_production_simulations').where({ evidence_id: last.id });
     for (const participant of data.participants) {
       const previous = previousCalculations.find(item => item.technician_id === participant.technician_id) || {};
-      const rule = (previous.rule_id ? await trx('field_program_rules').where({ id: previous.rule_id }).first() : await ruleAt(trx, dateOnly(row.service_date))) || { id: null, definition: null };
+      const rule = (previous.rule_id ? await trx('field_program_rules').where({ id: previous.rule_id }).first() : await lockedRuleAt(trx, dateOnly(row.service_date))) || { id: null, definition: null };
       const level = (previous.level_id ? await trx('field_program_levels').where({ id: previous.level_id }).first() : await levelAt(trx, participant.technician_id, dateOnly(row.service_date))) || { id: null, role_key: null };
       await trx('field_production_simulations').insert({
         id: randomUUID(), evidence_id: row.id, technician_id: participant.technician_id,
@@ -309,7 +316,7 @@ async function saveBusinessEvidence(input, actor) {
       const due = data.activation_date && etDateString(addETDays(parseETDateTime(`${data.activation_date}T12:00`), 90));
       if (!due || due > today || !data.retention_reference) reject('Record a 90-day review after the milestone with supporting evidence.');
     }
-    const rule = last.rule_id ? { id: last.rule_id } : await ruleAt(trx, accepted);
+    const rule = last.rule_id ? { id: last.rule_id } : await lockedRuleAt(trx, accepted);
     const [row] = await trx('field_business_evidence').insert({ ...baseRow(data, actor), estimate_id: data.estimate_id, technician_id: data.technician_id, base_id: data.base_id, revision: last.revision + 1, accepted_date: accepted, rule_id: rule?.id || null, facts: data }).returning('*');
     await audit(trx, 'field_business_evidence', row, actor);
     return calendarRow(row, ['accepted_date']);
