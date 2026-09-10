@@ -2283,6 +2283,16 @@ Following owner acceptance of the Customer 360 render, the real Pipeline estimat
 
 A separate regression fix clears customer-specific notes and custom discounts when starting the next estimate while keeping service selections. Saved draft identity, revision preflight, failed-save retention, customer/property boundaries, and server pricing retain their existing mechanisms. See `estimate-foundation-acceptance-2026-09-08.md` for local tests, synthetic actual-route browser evidence, and physical-device limits. This entry does not record a deployment or customer send.
 
+## 2026-09-09 — Termite station cost follows the inventory catalog (plan §A1)
+
+**Decision:** The Trelona ATBS station cost the engine prices installs from is no longer a literal. `db-bridge` reads it from the `products_catalog` row "Trelona ATBS Bait Station" on every pricing sync (approved, active vendor best price ÷ the count in `container_size`; sanity band [0.5×, 2×] of the config value; fail-open to config), stamps `stationCostSource`, and the termite line carries `materialCostSource` so a stale catalog is never silent. Fallback constant and `pricing_config.termite_install.trelona_bait` move 22.05 → 24.00 ($384 / 16, owner 2026-09-02); install at 15 stations $610 → $653, and the rental uplift that amortizes it moves with it. Kill switch: `termite_install.link_station_costs_to_catalog = false`.
+
+**Replay:** the termite line stamps the station cost it priced under (`pricingKnobs`, the T&S shape) and the knob-replay module gains a termite reader injected on both authoritative replay paths; unstamped rows replay at the pre-change $22.05, kept in the module as the no-stamp default. A1 moves new quotes only.
+
+**Cost model:** the termite line now emits a report-only `costs` block — service labor (5 min/station + drive), cartridge replacement (2 per station × 33% × the 25-pack cartridge cost, catalog-linkable through the existing "Trelona Compressed Termite Bait Cartridges" row once the owner corrects it to the 25-pack), and an assumed 0.25 follow-up visit reserve. `scripts/audit-estimator-pricing.js --termite-plan` prints setup × annual × replacement × minutes → margins for the plan's P1/P2 shapes. Nothing in the cost model changes a price; the annual-plan product is PR A2, gated `GATE_TERMITE_ANNUAL_PLAN`.
+
+**Why:** owner 2026-09-03 — "termite bait stations should be linked to inventory for price changes — this is an easy one". The catalog already carried $24 while quotes priced off the stale $22.05 literal.
+
 ## 2026-09-07 — Lawn actuals ledger for every lawn visit
 
 Behind `GATE_LAWN_ACTUALS_LEDGER` the existing lawn completion writer records every lawn closeout — member, one-time, commercial, and an incomplete visit that applied product — instead of only completed WaveGuard visits with a structured plan. The row freezes `property_id` (additive nullable column, migration 20260907000110) and each actual row carries the product's own treated area, unit, zone string and method, so spot work across three zones never reads as a whole-lawn broadcast. Removed plan defaults from Complete Service arrive as `skipped` rows with no reason required.
