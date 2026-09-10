@@ -5460,7 +5460,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             {(propertyPrefs.length > 1 || perPropertyTexts) ? (
               <>
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
-                <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
+                <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment notifications</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Sent to the app when it is installed, or by text.</div>
                 <div style={{ marginTop: 12 }}>
                   {/* Under the saved-property scope the server lists one entry
                       per SAVED property (id = the entry key, so this picker
@@ -5481,13 +5482,13 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 {savedScope && (
                   <div style={{ fontSize: 14, color: muted, marginTop: 8 }}>
                     {perPropertyTexts
-                      ? 'Each property keeps its own appointment texts. On-location contacts are shared across this profile.'
+                      ? 'Each property keeps its own appointment notifications. On-location contacts are shared across this profile.'
                       : 'These settings apply to every property on this profile.'}
                   </div>
                 )}
                 <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
                   {perPropertyTexts && !shownTextsEntry
-                    ? 'Select a property above to manage its appointment texts.'
+                    ? 'Select a property above to manage its appointment notifications.'
                     : perPropertyTexts
                     ? (shownTextsEntry?.isPrimaryProperty
                       ? 'Your primary residence gets every alert unless you turn one off.'
@@ -5530,7 +5531,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 { key: 'serviceReminder24h', label: '24-hour reminder', desc: 'The day before a visit', icon: 'bell' },
                 { key: 'techEnRoute', label: 'Tech en route', desc: 'Live GPS, about an hour out', icon: 'truck' },
                 { key: 'techArrived', label: 'Tech arrived', desc: 'The moment we reach the property', icon: 'door' },
-                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s texts to your phone as well as the on-location contacts', icon: 'smartphone' },
+                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s notifications to your phone as well as the on-location contacts', icon: 'smartphone' },
               ];
               const onCount = options.filter((o) => o.key !== 'appointmentNotifyPrimary' && property.preferences?.[o.key] !== false).length;
               const alertCount = options.length - 1;
