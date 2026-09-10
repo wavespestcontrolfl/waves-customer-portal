@@ -564,6 +564,25 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
   return Number(resumed || 0);
 }
 
+// A review ask's provider request runs while the packet row of the visit
+// that recorded its service record is shared, so a summary bounce (which
+// takes that row FOR UPDATE before parking outreach) serializes with the
+// send: the ask goes out before the bounce lands, or is parked before it
+// could go out. Records outside a combined visit dispatch unfenced.
+async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db) {
+  return database.transaction(async (trx) => {
+    const item = serviceRecordId
+      ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
+    if (item) {
+      const packet = await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
+      const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
+        .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+      if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+    }
+    return dispatch(trx);
+  });
+}
+
 // The retry rail's provider request runs while the customer and preference
 // rows are held, so the recipient the fence approved is the recipient the
 // provider receives. `dispatch()` performs the request.
@@ -679,4 +698,4 @@ module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPub
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
-  PARKED_REVIEW_REASON };
+  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON };

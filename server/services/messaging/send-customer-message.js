@@ -205,7 +205,11 @@ async function sendCustomerMessage(input) {
       && input.entryPoint === 'lead_response_auto_reply')
     || (input.audience === 'customer' && input.purpose === 'service_completion'
       && input.metadata?.original_message_type === 'visit_summary'
-      && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint));
+      && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint))
+    // A review ask that follows a combined-visit summary shares that
+    // summary's packet row through the request.
+    || (input.audience === 'customer' && input.purpose === 'review_request'
+      && ['review_request_send', 'review_outreach_touch'].includes(input.entryPoint));
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
   }
