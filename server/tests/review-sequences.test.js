@@ -4783,7 +4783,7 @@ describe('legacy follow-up delivery spacing', () => {
       customer_id: customer.id, direction: 'outbound', status: 'sent', message_body: 'Please leave a review.', created_at: manualAt,
     }] : [] }, { onUpdate, throwSelectWhen });
     db.mockImplementation(mock);
-    mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-legacy' });
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-legacy' });
     mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
     return { mock, request };
   }
@@ -4832,7 +4832,7 @@ describe('legacy follow-up delivery spacing', () => {
     const { request } = setup({ onUpdate: (table, patch) => {
       if (table === 'review_requests' && patch.followup_delivered_at) stampedUnderLock = global.__reviewLockHeld.has('review-send:legacy-lock');
     } });
-    if (throws) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true, providerMessageId: 'SM-legacy' } }));
+    if (throws) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-legacy' } }));
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
     expect(stampedUnderLock).toBe(true);
     expect(request.followup_delivered_at).toBeInstanceOf(Date);
@@ -4860,7 +4860,7 @@ describe('legacy follow-up delivery spacing', () => {
 
   test.each([false, true])('a definite retryable refusal reopens the reserved follow-up, including audit throws (%s)', async auditThrows => {
     const { request } = setup();
-    const outcome = { sent: false, retryable: true, code: 'PROVIDER_RETRY' };
+    const outcome = { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_RETRY' };
     if (auditThrows) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
     else mockSendCustomerMessage.mockResolvedValueOnce(outcome);
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
@@ -4869,12 +4869,27 @@ describe('legacy follow-up delivery spacing', () => {
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
   });
 
+  test.each([false, true])('an uncertain follow-up result keeps its reservation and cannot resend (%s)', async auditThrows => {
+    const { request } = setup();
+    const outcome = { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_RETRY' };
+    if (auditThrows) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
+    else mockSendCustomerMessage.mockResolvedValueOnce(outcome);
+
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 0 });
+    expect(request.followup_sent).toBe(true);
+    expect(request.followup_sent_at).toBeInstanceOf(Date);
+    expect(request.followup_reserved_at).toBeInstanceOf(Date);
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('another worker cannot send the follow-up during provider dispatch', async () => {
     setup();
     let entered, finish;
     const started = new Promise(resolve => { entered = resolve; });
     const wait = new Promise(resolve => { finish = resolve; });
-    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true, providerMessageId: 'SM-legacy' }; });
+    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-legacy' }; });
     const first = ReviewService.processFollowups();
     try {
       await started;
@@ -4886,7 +4901,7 @@ describe('legacy follow-up delivery spacing', () => {
 
   test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed follow-up releases spacing without delivery: %s', async providerMessageId => {
     const { request } = setup();
-    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'not_sent', providerMessageId });
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 1 });
     expect(request.followup_reserved_at).toBeNull();
     expect(request.followup_delivered_at).toBeUndefined();
@@ -4895,7 +4910,7 @@ describe('legacy follow-up delivery spacing', () => {
 
   test('suppression is not a delivered ask timestamp', async () => {
     const { request } = setup();
-    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'PURPOSE_OPTED_OUT' });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', blocked: true, code: 'PURPOSE_OPTED_OUT' });
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 1 });
     expect(request.followup_sent_at).toBeInstanceOf(Date);
     expect(request.followup_delivered_at).toBeUndefined();

@@ -141,7 +141,7 @@ describe('review request follow-up flow', () => {
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     renderSmsTemplate.mockResolvedValue('Please review us');
-    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-followup', auditLogId: 'audit-1' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-followup', auditLogId: 'audit-1' });
 
     const result = await ReviewService.processFollowups();
 
@@ -208,6 +208,7 @@ describe('review request follow-up flow', () => {
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({
       sent: false,
+      deliveryOutcome: 'not_sent',
       blocked: true,
       code: 'PURPOSE_OPTED_OUT',
       retryable: false,
@@ -266,6 +267,7 @@ describe('review request follow-up flow', () => {
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({
       sent: false,
+      deliveryOutcome: 'not_sent',
       blocked: true,
       code: 'CONSENT_LOOKUP_FAILED',
       retryable: false,

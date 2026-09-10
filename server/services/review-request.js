@@ -3229,10 +3229,15 @@ const ReviewService = {
               },
             });
           } catch (err) {
-            if (typeof err?.providerOutcome?.sent !== 'boolean') throw err;
+            if (!err?.providerOutcome) throw err;
             result = err.providerOutcome;
           }
-          if (!require('./sms-auto-send').isRealProviderSend(result)) {
+          const deliveryOutcome = result?.deliveryOutcome;
+          if (deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent") {
+            logger.warn(`[review] Follow-up SMS delivery uncertain; reservation held (customerId=${customer.id} requestId=${request.id})`);
+            return;
+          }
+          if (deliveryOutcome !== "accepted") {
             logger.warn(
               `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
             );
