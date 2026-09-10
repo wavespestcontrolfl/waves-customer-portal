@@ -24,7 +24,24 @@ function customerObservations(text, findings = []) {
   const scrubbed = scrubCustomerText(text || '');
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return NO_OBSERVATIONS;
   if (namesUnpublishedCause(scrubbed, findings)) return NO_OBSERVATIONS;
-  return scrubbed.slice(0, 600).trim();
+  return publishableSlice(scrubbed, 600, findings) ?? NO_OBSERVATIONS;
+}
+
+// Display limits are applied AFTER the screens, so the cut must never manufacture
+// prohibited copy: a re-entry idiom that is legal whole ("safe once dry; your
+// technician confirms the timing") becomes an unconditional claim if the tail is
+// cut. Cut at a sentence boundary (else a word boundary), then re-screen the
+// returned value; a slice that fails falls back whole (Codex #4328 r2).
+function publishableSlice(text, limit, findings) {
+  const whole = String(text || '').trim();
+  if (whole.length <= limit) return whole;
+  let cut = whole.slice(0, limit);
+  const sentence = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+  if (sentence > 0) cut = cut.slice(0, sentence + 1);
+  else if (cut.lastIndexOf(' ') > 0) cut = cut.slice(0, cut.lastIndexOf(' '));
+  cut = cut.trim();
+  if (!cut || unpublishableCustomerCopy(cut) || namesUnpublishedCause(cut, findings)) return null;
+  return cut;
 }
 
 // True when the text names a governed cause (the report lane's
@@ -128,7 +145,8 @@ function safeConfirmationStep(text, finding = null) {
   if (unpublishableCustomerCopy(text)) return '';
   const scrubbed = scrubCustomerText(text || '');
   if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return '';
-  return namesUnpublishedCause(scrubbed, [finding]) ? '' : scrubbed.slice(0, 200).trim();
+  if (namesUnpublishedCause(scrubbed, [finding])) return '';
+  return publishableSlice(scrubbed, 200, [finding]) ?? '';
 }
 
 // lastPublished is the persisted value this module last wrote, including

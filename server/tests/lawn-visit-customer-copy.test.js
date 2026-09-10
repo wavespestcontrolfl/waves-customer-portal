@@ -106,22 +106,62 @@ describe('customer publication', () => {
       const text = `Chinch bugs ${claim} along the edge.`;
       const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
       expect(copy.customerObservations(text, [evidence])).not.toMatch(/\b(?:is|are|was|were)\b[^.]*\bactive\b/i);
-      expect(copy.customerObservations(text, [evidence])).toMatch(/chinch bugs may be active/i);
+      expect(copy.customerObservations(text, [evidence])).toMatch(/chinch bugs may (?:be|have been) active/i);
       expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/\b(?:is|are|was|were)\b[^.]*\bactive\b/i);
     },
   );
 
-  test.each(['have remained active', 'has stayed active', 'had kept active', 'have just remained active', 'had stayed very active'])(
-    'qualifies the aspectual activity claim %s on both customer surfaces', (claim) => {
+  test.each([
+    ['have remained active', 'may be active'], ['has stayed active', 'may be active'], ['have just remained active', 'may be active'],
+    ['remain active', 'may be active'], ['stays active', 'may be active'], ['continue to be active', 'may be active'],
+    // A past-tense linker keeps past possibility.
+    ['had kept active', 'may have been active'], ['had stayed very active', 'may have been active'], ['were active', 'may have been active'],
+  ])(
+    'qualifies the aspectual activity claim %s on both customer surfaces', (claim, downgraded) => {
       const text = `Chinch bugs ${claim} along the edge.`;
       const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
-      const expected = 'Chinch bugs may be active along the edge.';
+      const expected = `Chinch bugs ${downgraded} along the edge.`;
       expect(copy.customerObservations(text, [evidence])).toBe(expected);
       expect(copy.safeConfirmationStep(text, evidence)).toBe(expected);
       expect(copy.customerObservations(text, [{ ...evidence, confidence: 'low' }])).toBe(copy.NO_OBSERVATIONS);
       expect(copy.safeConfirmationStep(text, { ...evidence, confidence: 'low' })).toBe('');
     },
   );
+
+  describe('display limits never manufacture prohibited copy', () => {
+    const filler = 'The turf along the front walk is thin in two spots and should be watched. '.repeat(8); // 592 chars
+    const idiom = 'The treated area is safe once dry; your technician confirms the timing.';
+
+    test('the whole idiom passes the screens but its cut tail would not', () => {
+      expect(copy.unpublishableCustomerCopy(idiom)).toBe(false);
+      expect(copy.unpublishableCustomerCopy(idiom.slice(0, 40))).toBe(true);
+    });
+
+    test('customerObservations cuts at a sentence boundary and re-screens the slice', () => {
+      const out = copy.customerObservations(`${filler}${idiom}`, []);
+      expect(out.length).toBeLessThanOrEqual(600);
+      expect(out.endsWith('.')).toBe(true);
+      expect(copy.unpublishableCustomerCopy(out)).toBe(false);
+      expect(out).not.toMatch(/safe once dry/);
+    });
+
+    test('customerObservations falls back whole when no publishable slice exists', () => {
+      // A single 700-char sentence whose only safe form is the whole sentence.
+      const long = `${'Watch the shaded strip near the fence for slow recovery and keep to the normal schedule, '.repeat(6)}and the treated area is safe once dry; your technician confirms the timing.`;
+      expect(long.length).toBeGreaterThan(600);
+      expect(copy.unpublishableCustomerCopy(long)).toBe(false);
+      expect(copy.customerObservations(long, [])).toBe(copy.NO_OBSERVATIONS);
+    });
+
+    test('safeConfirmationStep applies the same rule at 200 characters', () => {
+      const step = `${'Re-check the margin after the next mowing and note any spread. '.repeat(3)}${idiom}`;
+      expect(step.length).toBeGreaterThan(200);
+      const out = copy.safeConfirmationStep(step, { label: 'chinch bug activity', confidence: 'moderate' });
+      expect(out.length).toBeLessThanOrEqual(200);
+      expect(out === '' || (out.endsWith('.') && !copy.unpublishableCustomerCopy(out))).toBe(true);
+      expect(out).not.toMatch(/safe once dry/);
+    });
+  });
 
   test.each(['were previously active', 'had formerly been active', 'were historically active'])(
     'preserves the historical qualifier and tense of %s on both customer surfaces', (claim) => {

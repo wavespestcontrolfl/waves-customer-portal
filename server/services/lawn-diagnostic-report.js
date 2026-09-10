@@ -552,7 +552,11 @@ const GENERIC_STRESS_LABEL = 'general lawn stress';
 // A finding is "clean" only when it LEADS with a negation / health phrase. This catches
 // "No visible disease" / "Healthy, dense turf" without misreading a positive finding
 // that carries a negated differential ("Possible fungal disease; no weed pressure").
-const LEADING_NEGATION = /^\s*(no|none|not|clear|healthy|looks good|looks healthy|nothing)\b/;
+// Clause-level lead words that mark a clause as clean. Health phrases ("healthy",
+// "looks good") are NOT here: they stay positive clauses and map through the
+// CONDITION_LABELS health row, so "Healthy, dense turf" still resolves clean while
+// "Healthy overall, some yellowing" maps its positive clause.
+const CLEAN_CLAUSE_LEAD = /^\s*(?:no|none|not|clear|nothing)\b/;
 
 // A negation marker anywhere in a clause withdraws that clause from label mapping,
 // so a negated alias ("Rhizoctonia ruled out", "Take-all was not observed",
@@ -568,7 +572,7 @@ function positiveClauses(lower) {
   for (const clause of lower.split(CLAUSE_SPLIT)) {
     const text = clause.trim();
     if (!text) continue;
-    if (LEADING_NEGATION.test(text) || NEGATION_MARKER.test(text)) negated = true;
+    if (CLEAN_CLAUSE_LEAD.test(text) || NEGATION_MARKER.test(text)) negated = true;
     else positive.push(text);
   }
   return { positive, negated };
@@ -584,11 +588,13 @@ function safeConditionLabel(rawName, confidence) {
   if (!lower) return null;
   let label = 'a lawn condition we are monitoring';
   const { positive, negated } = positiveClauses(lower);
-  if (LEADING_NEGATION.test(lower) || (negated && !positive.length)) {
+  // The clean label applies only when NO positive clause remains: "No weeds;
+  // large patch is visible" maps its positive clause (Codex #4328 r2).
+  if (negated && !positive.length) {
     label = 'no major visible stress';
   } else {
     // Only the non-negated clauses may map to a label.
-    const mappable = positive.join('; ');
+    const mappable = positive.length ? positive.join('; ') : lower;
     for (const [pattern, mapped] of CONDITION_LABELS) {
       if (pattern.test(mappable)) { label = mapped; break; }
     }
@@ -635,7 +641,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // is governed only as the hyphenated shorthand or the full "take all root rot" — the
 // ordinary phrase "may take all season" is not a disease — and the full phrase is
 // consumed whole so a predicate after it ("… is confirmed") is still scrubbed.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -711,32 +717,40 @@ function classifyReleaseMode(contract = {}) {
 // A historical qualifier in the adverb run ("were previously active", "had
 // historically been confirmed") keeps its tense through the downgrade, so a
 // resolved past claim never becomes a present possibility that contradicts the
-// rest of the sentence ("…, but none are present now").
+// rest of the sentence ("…, but none are present now"). The same holds when the
+// matched linker itself is past tense ("were active yesterday"). Simple aspectual
+// linkers ("remain active", "stays active", "continue to be active") are
+// downgraded like the copulas.
 const HISTORICAL_QUALIFIER = /\b(previously|formerly|historically|initially|originally)\b/i;
+const PREDICATE_LINKER = '(?<linker>is|are|was|were|has|have|had|remains?|remained|stays?|stayed|continues?\\s+to\\s+be|continued\\s+to\\s+be)';
+const PAST_LINKER = /^(?:was|were|had|remained|stayed|continued\b)/i;
+const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+${PREDICATE_LINKER}`;
+const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3})\\s+confirmed\\b`, 'gi');
+const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3})\\s+active\\b`, 'gi');
+// Named groups survive SUMMARY_CAUSE_RE's own groups; the cause is always $1.
+function predicateParts(args) {
+  const groups = args[args.length - 1];
+  const historical = HISTORICAL_QUALIFIER.exec(groups.adverbs || '');
+  const qualifier = historical ? `${historical[1].toLowerCase()} ` : '';
+  const past = PAST_LINKER.test(groups.linker || '') || !!historical;
+  return { cause: args[1], qualifier, past };
+}
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text).replace(/\s+/g, ' ')
     .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3}\\s+confirmed\\b`, 'gi'),
-      (match, cause) => {
-        // SUMMARY_CAUSE_RE carries its own groups, so read the run from the match.
-        const historical = HISTORICAL_QUALIFIER.exec(match);
-        return historical
-          ? `${cause} ${historical[1].toLowerCase()} appeared most consistent with the visible pattern`
-          : `${cause} most consistent with the visible pattern`;
-      })
+    .replace(CONFIRMED_PREDICATE, (...args) => {
+      const { cause, qualifier, past } = predicateParts(args);
+      return past ? `${cause} ${qualifier}appeared most consistent with the visible pattern` : `${cause} most consistent with the visible pattern`;
+    })
     // Cause-first active predicate ("Chinch bugs are active along the edge"). Both
     // predicate passes accept a short parenthetical after the cause
     // ("Large patch (Rhizoctonia) is confirmed").
-    .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
-      (match, cause) => {
-        // SUMMARY_CAUSE_RE carries its own groups, so read the run from the match.
-        const historical = HISTORICAL_QUALIFIER.exec(match);
-        return historical
-          ? `${cause} may have been ${historical[1].toLowerCase()} active`
-          : `${cause} may be active`;
-      })
+    .replace(ACTIVE_PREDICATE, (...args) => {
+      const { cause, qualifier, past } = predicateParts(args);
+      return past ? `${cause} may have been ${qualifier}active` : `${cause} may be active`;
+    })
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 

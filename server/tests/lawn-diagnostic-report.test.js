@@ -512,6 +512,17 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(scrubCustomerText(text)).toBe(expected);
   });
 
+  test.each([
+    ['Chinch bugs remain active here.', 'Chinch bugs may be active here.'],
+    ['Large patch stays active.', 'Large patch may be active.'],
+    ['Grubs continue to be active.', 'Grubs may be active.'],
+    ['Chinch bugs remained active last visit.', 'Chinch bugs may have been active last visit.'],
+    ['Chinch bugs were active yesterday, but none are present now.', 'Chinch bugs may have been active yesterday, but none are present now.'],
+    ['Drought was confirmed last month.', 'Drought appeared most consistent with the visible pattern last month.'],
+  ])('scrubCustomerText downgrades aspectual and past-tense claims in %s without changing tense', (text, expected) => {
+    expect(scrubCustomerText(text)).toBe(expected);
+  });
+
   test('scrubCustomerText keeps a historical qualifier when downgrading a confirmed claim', () => {
     const out = scrubCustomerText('Chinch bugs were previously confirmed, but none are present now.');
     expect(out).not.toMatch(/\bconfirmed\b/i);
@@ -574,8 +585,20 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Chinch bugs not present, but drought stress visible', 'drought stress'],
     ['Rhizoctonia ruled out; dollar spot lesions', 'dollar spot'],
     ['Sod-webworm not present. Grub damage at the edge', 'grub activity'],
+    ['No weeds; large patch is visible', 'large patch (fungal) activity'],
+    ['Not drought, chinch bug damage along the edge', 'chinch bug activity'],
+    ['Healthy overall, some yellowing', 'color and nutrient stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
+  });
+
+  test('safeConditionLabel keeps a health-led name clean when no positive clause follows', () => {
+    expect(safeConditionLabel('Healthy, dense turf', 'high')).toBe('no major visible stress');
+    expect(safeConditionLabel('Looks good overall', 'high')).toBe('no major visible stress');
+  });
+
+  test.each(['Sod--webworm damage', 'Sod - webworm damage', 'Chinch  bug damage', 'Army--worm feeding'])('safeCustomerSummary replaces a low-confidence summary naming %s with the generic line', (cause) => {
+    expect(safeCustomerSummary(`Most consistent with ${cause}.`, 'low')).not.toMatch(/webworm|chinch|worm/i);
   });
 
   test.each([

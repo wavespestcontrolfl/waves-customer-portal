@@ -277,7 +277,7 @@ describe('buildPublicLawnReport whitelisting', () => {
   // customer copy for a low/unknown finding (the v0.4 naming gate). Deliberately omits
   // "disease" (the generic "no specific pest or disease" fallback uses it) and "weed"
   // (specific weeds are genericized to "weed pressure" at any confidence, by design).
-  const GOVERNED_CAUSE = /\b(chinch(?:[\s‐‑‒–—-]?bugs?)?|caterpillars?|army[\s‐‑‒–—-]?worms?|sod[\s‐‑‒–—-]?webworms?|grubs?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|fungus|fungi|fungal|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|insects?|infestations?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
+  const GOVERNED_CAUSE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|caterpillars?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|grubs?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|fungus|fungi|fungal|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|insects?|infestations?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?)\b/i;
 
   // The diagnosis-driven, customer-facing fields — everything a cause name could leak
   // into. Excludes seasonal_context (server-generated SWFL education that legitimately
