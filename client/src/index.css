@@ -279,7 +279,8 @@ html.admin-app [style*="overflow-x: auto"]:has(> table) {
    the browser's content-box default. Inside the admin that can make a
    width:100% field overflow once its padding and border are added. Keep the
    existing page-local dimensions and styling, but make those dimensions
-   include the field chrome. */
+   include the field chrome. html.admin-app also covers forms portaled to body. */
+html.admin-app :where(input, select, textarea),
 .admin-shell-v2 :where(input, select, textarea) {
   box-sizing: border-box;
 }
