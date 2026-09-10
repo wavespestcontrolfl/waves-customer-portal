@@ -101,7 +101,12 @@ export default function ServiceRecapModal({
   onCompleted,
 }) {
   const isMobile = useIsMobile();
-  const dialogRef = useModalFocus(true, onClose);
+  // Escape must take the same guarded path as the Close button: no close
+  // while a submission is pending, and a confirm before losing edits that
+  // device storage could not save. The guarded close is defined below,
+  // after the draft hook, so the key handler reaches it through a ref.
+  const closeRef = useRef(null);
+  const dialogRef = useModalFocus(true, () => closeRef.current?.());
   const P = PALETTES[theme] || PALETTES.dark;
   const serviceId = service?.id;
   const base = `/admin/dispatch/${serviceId}/pest-recap`;
@@ -288,6 +293,7 @@ export default function ServiceRecapModal({
   const close = () => {
     if (!submitInFlight.current && draft.canClose()) onClose?.();
   };
+  closeRef.current = close;
 
   const toggleProduct = useCallback((id) => {
     setSelected((prev) => {

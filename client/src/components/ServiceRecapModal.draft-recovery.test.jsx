@@ -246,6 +246,39 @@ describe('recap interruption recovery', () => {
     expect(clean.defaultPrevented).toBe(false);
   });
 
+  it('routes Escape through the guarded close while a completion is pending', async () => {
+    let reject;
+    const pending = new Promise((_, rejectRequest) => { reject = rejectRequest; });
+    const close = vi.fn();
+    const request = vi.fn((path) => path.endsWith('/context') ? Promise.resolve(structuredClone(context)) : pending);
+    render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={close} />);
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Keep this while pending.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
+    fireEvent.keyDown(document.activeElement || document.body, { key: 'Escape' });
+    expect(close).not.toHaveBeenCalled();
+    reject(new Error('Example completion failed.'));
+    await screen.findByText('Example completion failed.');
+    fireEvent.keyDown(document.activeElement || document.body, { key: 'Escape' });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes Escape through the unsaved-draft confirmation when device storage failed', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Storage unavailable'); });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const close = vi.fn();
+    render(<ServiceRecapModal service={{ id: 'visit-a' }} request={requestFor()} onClose={close} />);
+    await screen.findByRole('button', { name: 'Example gel', exact: true });
+    fireEvent.change(noteInput(), { target: { value: 'Unsaved treatment' } });
+    await screen.findByText(/Draft could not be saved on this device/);
+    fireEvent.keyDown(document.activeElement || document.body, { key: 'Escape' });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    fireEvent.keyDown(document.activeElement || document.body, { key: 'Escape' });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it('restores the selected visit draft after close and reopen, including actual rates', async () => {
     const request = requestFor();
     const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
