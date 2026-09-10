@@ -709,7 +709,8 @@ async function listForCall(conn, callLogId) {
 
 function effectiveDueAt(row, cardsEnabled) {
   const isCard = row.kind === 'callback' && row.party === 'waves' && cardsEnabled;
-  const base = row.due_at || (isCard ? row.callback_due_at : null) || null;
+  // An undated card projects the legacy implicit deadline it is judged by.
+  const base = row.due_at || (isCard ? (row.callback_due_at || implicitDueAt(row)) : null) || null;
   if (!base || !isCard || !row.snoozed_until) return base;
   return new Date(row.snoozed_until).getTime() > new Date(base).getTime() ? row.snoozed_until : base;
 }
@@ -1499,8 +1500,12 @@ function implicitDueAt(row) {
   const from = basis ? new Date(basis) : null;
   if (!from || Number.isNaN(from.getTime())) return null;
   if (row.kind === 'send_estimate') return new Date(from.getTime() + OVERDUE_IMPLICIT_ESTIMATE_HOURS * 60 * 60 * 1000);
+  // A callback card's staffed deadline; a card left undated (calendar or
+  // configuration failure at preparation) keeps the legacy implicit
+  // deadline — the end of the call's ET day — so it stays in the reminder
+  // lane instead of waiting for someone to open the queue.
   if (row.kind === 'callback') return require('./callback-cards').enabled()
-    ? (row.callback_due_at ? new Date(row.callback_due_at) : null) : endOfETDay(from);
+    ? (row.callback_due_at ? new Date(row.callback_due_at) : endOfETDay(from)) : endOfETDay(from);
   return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
 }
 
@@ -1527,8 +1532,9 @@ function effectiveDueSql(cc = 'cc', cl = 'cl') {
   const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
   const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
   const cardsEnabled = require('./callback-cards').enabled();
-  const callbackDue = cardsEnabled ? `${cc}.callback_due_at`
-    : `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
+  const legacyCallbackDue = `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
+  // An undated card keeps the legacy implicit deadline (implicitDueAt).
+  const callbackDue = cardsEnabled ? `COALESCE(${cc}.callback_due_at, ${legacyCallbackDue})` : legacyCallbackDue;
   const deadline = `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
     + ` WHEN ${cc}.party <> 'waves' THEN NULL`
     + ` WHEN ${cc}.kind = 'send_estimate' THEN (${basis}) + interval '${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours'`
@@ -1538,8 +1544,8 @@ function effectiveDueSql(cc = 'cc', cl = 'cl') {
   if (!cardsEnabled) return deadline;
   // A snoozed callback card is owed when the snooze ends, not before: the
   // same rule isOverdue applies, so the queue order, the overdue flag and
-  // the watchdog agree. Only callback cards carry snoozed_until; an undated
-  // row stays undated (GREATEST of a NULL deadline and NULL is NULL).
+  // the watchdog agree. Only callback cards carry snoozed_until; a NULL
+  // deadline stays NULL (GREATEST of a NULL deadline and NULL is NULL).
   return `GREATEST((${deadline}), CASE WHEN (${deadline}) IS NULL THEN NULL ELSE ${cc}.snoozed_until END)`;
 }
 

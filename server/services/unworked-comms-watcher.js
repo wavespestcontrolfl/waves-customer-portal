@@ -132,8 +132,9 @@ async function loadCallbackCalls(cutoff = new Date()) {
       .whereRaw(`NOT ${staleAiRowSql('cc')}`)
       .where((b) => b.whereNull('cl.customer_id').orWhereNotIn('cl.customer_id', INTERNAL_TEST_CUSTOMER_IDS))
       .whereRaw(taskLaneCarriesCallbackSql('cl'))
-      .whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= NOW()')
-      .whereRaw('(cc.snoozed_until IS NULL OR cc.snoozed_until <= NOW())')
+      // The same judged deadline as the queue and the watchdog: staffed,
+      // else the legacy implicit one for an undated card, snooze-aware.
+      .whereRaw(`${require('./call-commitments').effectiveDueSql('cc', 'cl')} <= NOW()`)
       .select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
   }
   const { rows } = await db.raw(
@@ -168,24 +169,15 @@ async function loadCallbackCalls(cutoff = new Date()) {
       -- (call-extraction-v1 prompt) and drives visit creation — a booked
       -- call carrying it is scheduled work, not an unworked callback.
       AND c.disposition = 'callback_task_created'
-      -- While cards are on, retain disposition-only work if recording its
-      -- commitment failed, and while ANY live open callback of the call is
-      -- still undated (a calendar/configuration failure left it without a
-      -- deadline, so neither the card summary nor the watchdog carries it).
-      -- A call whose every live callback is closed or dated is represented
-      -- and must not reappear in the fallback digest.
-      AND (:cards_enabled = FALSE OR NOT (
-        EXISTS (
-          SELECT 1 FROM call_commitments cc
-          WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
-            AND NOT ${staleAiRowSql('cc')}
-        )
-        AND NOT EXISTS (
-          SELECT 1 FROM call_commitments cc
-          WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
-            AND NOT ${staleAiRowSql('cc')}
-            AND cc.status = 'open' AND COALESCE(cc.due_at, cc.callback_due_at) IS NULL
-        )
+      -- While cards are on, retain disposition-only work only if recording
+      -- its commitment failed: every live callback card is represented —
+      -- an undated one keeps the legacy implicit deadline (effectiveDueSql),
+      -- so the card summary and the watchdog carry it — and a represented
+      -- promise (including staff-closed work) must not reappear here.
+      AND (:cards_enabled = FALSE OR NOT EXISTS (
+        SELECT 1 FROM call_commitments cc
+        WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
+          AND NOT ${staleAiRowSql('cc')}
       ))
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an

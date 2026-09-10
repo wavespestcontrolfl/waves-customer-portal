@@ -229,21 +229,26 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect(active).toHaveLength(1); expect(active[0].metadata.commitment_id).toBe(other.id);
   });
 
-  test('undated open cards keep the legacy digest fallback, while staff-closed cards stay closed', async () => {
+  test('an undated open card is judged by the legacy implicit deadline: counted as a card, rung by the watchdog, not duplicated in the fallback', async () => {
+    const ledger = require('../services/call-commitments');
     const row = await seed({ callback_due_at: null });
     await trx('call_log').where({ id: row.call_log_id }).update({ disposition: 'callback_task_created',
       created_at: new Date(now.getTime() - 60000), updated_at: ago });
     const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;
+    const digest = await load();
+    expect(digest.some((r) => r.id === row.call_log_id)).toBe(false);
+    const counted = await trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id').where('cc.id', row.id)
+      .whereRaw(`${ledger.effectiveDueSql('cc', 'cl')} <= NOW()`).first('cc.id');
+    expect(counted).toBeTruthy();
+    const queued = (await ledger.listOpenCommitments(trx, { kind: 'callback', now })).find((r) => r.id === row.id);
+    expect(queued.effective_due_at).not.toBeNull();
+    expect(queued.overdue).toBe(true);
+    await runSweep();
+    expect((await unread()).some((n) => n.metadata.commitment_id === row.id || (n.metadata.overdue_commitment_ids || []).includes(row.id))).toBe(true);
+    // A call with no recorded commitment at all keeps its legacy fallback row.
+    await trx('call_commitments').where({ id: row.id }).del();
     expect((await load()).some((r) => r.id === row.call_log_id)).toBe(true);
-    // A dated sibling on the same call does not hide the undated one.
-    const [sibling] = await trx('call_commitments').insert({ id: randomUUID(), call_log_id: row.call_log_id, commitment_key: `fixture:sibling:${row.id}`,
-      party: 'waves', kind: 'callback', status: 'open', source: 'human', description: 'Sibling callback', callback_due_at: ago, created_at: ago, updated_at: ago }).returning('*');
-    expect((await load()).some((r) => r.id === row.call_log_id)).toBe(true);
-    await trx('call_commitments').where({ id: row.id }).update({ status: 'fulfilled' });
-    expect((await load()).some((r) => r.id === row.call_log_id)).toBe(false);
-    await trx('call_commitments').where({ id: sibling.id }).del();
   });
-
   test('a callback card the coach’s call_back task already carries is not counted again by the digest', async () => {
     const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;
     const carried = await seed();
@@ -258,6 +263,7 @@ run('callback reminder transitions on PostgreSQL', () => {
       await trx('ai_follow_up_tasks').where({ id: task.id }).del();
     }
   });
+
 
   test('the digest card count leaves out internal-test customers', async () => {
     const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
