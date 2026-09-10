@@ -531,8 +531,8 @@ const CONDITION_LABELS = [
   [/(nutsedge|sedge|crabgrass|dollarweed|clover|spurge|\bweed)/, 'weed pressure'],
   [/(overwater|too much water|excess(ive)?\s+(water|moisture)|soggy|saturat)/, 'overwatering signal'],
   [/(drought|\bdry\b|water[\s‐‑‒–—-]*stress|wilt|under[\s‐‑‒–—-]*water)/, 'drought stress'],
-  [/(thin|bare|sparse|patchy)/, 'thinning turf'],
-  [/(chlorosis|iron|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
+  [/\b(thin(?:ning|ned)?|bare|sparse|patchy)\b/, 'thinning turf'],
+  [/(chlorosis|\biron\b|nitrogen|nutrient|yellow)/, 'color and nutrient stress'],
   [/(\bhealthy\b|looks good|looks healthy)/, 'no major visible stress'],
   [/(color|discolor|stress|decline)/, 'color stress'],
 ];
@@ -581,11 +581,24 @@ const FORWARD_NEGATION = /\b(no|not|never|without|non|neither)\b/;
 // only its own compound; the rest of the clause is judged on its own, so
 // "Large patch in otherwise weed-free turf" keeps large patch while
 // "Disease-free turf" stays clean.
-const FREE_DIFFERENTIAL = /\b\w+[\s‐‑‒–—-]*free\b|\bfree\s+(?:of|from)\s+\w+(?:\s+\w+)?/g;
+// Built lazily: SUMMARY_CAUSE_RE is declared below. The whole governed cause
+// (plus an optional spot/activity/… suffix word) is consumed with "free", so
+// "Chinch bug-free turf", "Gray leaf spot-free turf" and "Iron deficiency-free
+// turf" leave no positive fragment behind.
+let freeDifferential = null;
+function freeDifferentialRe() {
+  if (!freeDifferential) {
+    const cause = SUMMARY_CAUSE_RE.source.slice(2, -2);
+    freeDifferential = new RegExp(`\\bfree\\s+(?:of|from)\\s+\\w+(?:\\s+\\w+){0,2}|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
+  }
+  freeDifferential.lastIndex = 0;
+  return freeDifferential;
+}
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
   const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
+  const FREE_DIFFERENTIAL = freeDifferentialRe();
   for (const clause of lower.split(CLAUSE_SPLIT)) {
     let text = clause.trim();
     if (!text) continue;
@@ -681,12 +694,23 @@ const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an
 // any summary that still NAMES a cause (stale stored contract, or a narrative pass that
 // inferred a pest) with a generic symptom-only line. Applies the v0.4 naming gate to
 // the FIRST customer-facing text, not just the findings/labels.
+// Sentence-level backstop behind the scrubber's predicate grammar: a sentence
+// that still asserts a governed cause as confirmed / definite / certain after
+// the downgrade passes (an auxiliary chain or subject noun the grammar did not
+// anticipate) is never published as-is. Shared with the copy module.
+function residualDefinitiveClaim(text) {
+  return String(text || '').split(/(?<=[.!?])\s+/).some((sentence) => (
+    /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b/i.test(sentence) && SUMMARY_CAUSE_RE.test(sentence)
+  ));
+}
+
 function safeCustomerSummary(summary, confidence) {
   const scrubbed = scrubCustomerText(summary);
   if (!scrubbed) return null;
   if (confidenceRank(confidence) < CONFIDENCE_ORDER.moderate && SUMMARY_CAUSE_RE.test(scrubbed)) {
     return GENERIC_LOW_CONFIDENCE_SUMMARY;
   }
+  if (residualDefinitiveClaim(scrubbed)) return GENERIC_LOW_CONFIDENCE_SUMMARY;
   return scrubbed;
 }
 
@@ -763,8 +787,8 @@ const PLURAL_LINKER = /^(?:are|have|remain|stay|continue|keep)\b/i;
 // "Fungal activity is confirmed in the shade" → "Fungal activity appears most
 // consistent with the visible pattern in the shade".
 const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?<phrase>(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|presence|signs?|evidence|symptoms?|feeding|population|outbreak|disease|infestation|stress|spots?))*)\\s+${PREDICATE_LINKER}`;
-const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3})\\s+confirmed\\b`, 'gi');
-const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3})\\s+active\\b`, 'gi');
+const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|only|\\w+ly)){0,6})\\s+confirmed\\b`, 'gi');
+const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|only|\\w+ly)){0,6})\\s+active\\b`, 'gi');
 // Named groups survive SUMMARY_CAUSE_RE's own groups; the cause is always $1.
 function predicateParts(args) {
   const groups = args[args.length - 1];
@@ -935,6 +959,7 @@ module.exports = {
   runQaSafetyCheck,
   scrubCustomerText,
   safeConditionLabel,
+  residualDefinitiveClaim,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
   lowerConfidence,

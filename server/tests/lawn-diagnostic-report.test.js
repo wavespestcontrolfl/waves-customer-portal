@@ -8,6 +8,7 @@ const {
   scrubCustomerText,
   safeConditionLabel,
   safeCustomerSummary,
+  residualDefinitiveClaim,
   lowerConfidence,
   MINIMAL_SAFE_SUMMARY,
 } = require('../services/lawn-diagnostic-report');
@@ -535,8 +536,22 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Chinch bug presence is confirmed.', 'Chinch bug presence appears most consistent with the visible pattern.'],
     ['Chinch bug signs are confirmed along the edge.', 'Chinch bug signs appear most consistent with the visible pattern along the edge.'],
     ['Grub feeding is confirmed.', 'Grub feeding appears most consistent with the visible pattern.'],
+    ['Chinch bugs have only just recently been confirmed.', 'Chinch bugs appear most consistent with the visible pattern.'],
+    ['Large patch has now also already just again been confirmed.', 'Large patch appears most consistent with the visible pattern.'],
   ])('scrubCustomerText keeps the subject noun phrase and a copula when downgrading %s', (text, expected) => {
     expect(scrubCustomerText(text)).toBe(expected);
+  });
+
+  test('safeCustomerSummary never publishes a residual definitive cause claim at any confidence', () => {
+    for (const confidence of ['moderate', 'high']) {
+      const out = safeCustomerSummary('Chinch bug colonies are confirmed along the edge.', confidence);
+      expect(out).not.toMatch(/\bconfirmed\b/i);
+      expect(out).not.toMatch(/chinch/i);
+    }
+    expect(residualDefinitiveClaim('Chinch bug colonies are confirmed along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('Chinch bugs appear most consistent with the visible pattern.')).toBe(false);
+    // No governed term in the sentence: not a cause claim.
+    expect(residualDefinitiveClaim('The watering schedule is confirmed for Tuesday.')).toBe(false);
   });
 
   test('scrubCustomerText keeps a historical qualifier when downgrading a confirmed claim', () => {
@@ -599,6 +614,10 @@ describe('lawn diagnostic auto-release ladder', () => {
     // A subject-describing negation negates the whole clause.
     'Chinch bugs not a factor', 'Chinch bugs were never seen', 'Large patch with no weed pressure ruled out',
     'Weed-free, disease-free turf', 'Free of chinch bugs',
+    // The whole governed cause is consumed with "free".
+    'Chinch bug-free turf', 'Gray leaf spot-free turf', 'Iron deficiency-free turf', 'Free of gray leaf spot',
+    // "nothing" must not match the thinning alias inside it.
+    'Healthy overall, nothing concerning', 'Nothing concerning',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -621,6 +640,13 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Healthy overall, some yellowing', 'color and nutrient stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
+  });
+
+  test('safeConditionLabel aliases are word-bounded so ordinary words never map to a condition', () => {
+    expect(safeConditionLabel('Thin turf', 'high')).toBe('thinning turf');
+    expect(safeConditionLabel('Thinning along the edge', 'high')).toBe('thinning turf');
+    expect(safeConditionLabel('Environmental stress', 'high')).not.toBe('color and nutrient stress');
+    expect(safeConditionLabel('Iron deficiency', 'high')).toBe('color and nutrient stress');
   });
 
   test('safeConditionLabel keeps a health-led name clean when no positive clause follows', () => {

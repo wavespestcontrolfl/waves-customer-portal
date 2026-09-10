@@ -1,5 +1,5 @@
 /** Customer publication rules for lawn visit results and repeated reviews. */
-const { scrubCustomerText, SUMMARY_CAUSE_RE } = require('./lawn-diagnostic-report');
+const { scrubCustomerText, SUMMARY_CAUSE_RE, residualDefinitiveClaim } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
@@ -44,16 +44,6 @@ function publishableSlice(text, limit, findings) {
   return cut;
 }
 
-// Structural backstop behind the scrubber's predicate grammar: a sentence that
-// still asserts a governed cause as confirmed / definite / certain after the
-// downgrade passes ("Chinch bug colonies are confirmed") is rejected whole
-// rather than published, whatever subject noun the grammar did not anticipate
-// (Codex #4328 r6). Deterministic copy never says these words.
-function residualDefinitiveClaim(text) {
-  return String(text || '').split(/(?<=[.!?])\s+/).some((sentence) => (
-    /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b/i.test(sentence) && governedTerms(sentence).size > 0
-  ));
-}
 
 // True when the text names a governed cause (the report lane's
 // SUMMARY_CAUSE_RE, kept in lockstep with the cause-mapped labels) that no
@@ -97,7 +87,7 @@ function distinctCauseCount(name) {
 }
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/deficiencies\b/, 'deficiency').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bmoldy\b/, 'mold').replace(/\bmildew(?:ed|y)\b/, 'mildew').replace(/\bdiseased\b/, 'disease').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/patches\b/g, 'patch').replace(/deficiencies\b/g, 'deficiency').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bmoldy\b/, 'mold').replace(/\bmildew(?:ed|y)\b/, 'mildew').replace(/\bdiseased\b/, 'disease').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   // Singularize before the synonym lookup so "molds" folds like "mold".
   const singular = /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
   return CAUSE_TERM_SYNONYMS[singular] || CAUSE_TERM_SYNONYMS[base] || singular;

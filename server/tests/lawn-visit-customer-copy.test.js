@@ -147,6 +147,17 @@ describe('customer publication', () => {
     },
   );
 
+  test.each([
+    ['Largepatches are spreading in the shade.', 'Large patch', 'large patch (fungal) activity'],
+    ['Large-patches are spreading in the shade.', 'Largepatch', 'large patch (fungal) activity'],
+    ['Irondeficiencies are visible near the walk.', 'Iron deficiency', 'color and nutrient stress'],
+    ['Iron deficiency is visible near the walk.', 'Irondeficiencies', 'color and nutrient stress'],
+  ])('joined and plural spellings compare equal to the reviewed evidence: %s vs %s', (text, name, label) => {
+    const evidence = { name, label, confidence: 'moderate' };
+    expect(copy.customerObservations(text, [evidence])).toBe(text);
+    expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
+  });
+
   test('a finding marked keep: false is never evidence on any publication path', () => {
     const removed = { name: 'Nutsedge', label: 'weed pressure', confidence: 'moderate', keep: false };
     expect(copy.customerObservations('Nutsedge is spreading along the walk.', [removed])).toBe(copy.NO_OBSERVATIONS);
