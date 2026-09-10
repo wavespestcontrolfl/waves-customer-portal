@@ -1330,7 +1330,10 @@ async function obligationRenewedAt(conn, commitment) {
   // edit left, captured before the save advanced it.
   const edits = events.filter((e) => e.action === 'callback_edit');
   const restatements = events.filter((e) => !(e.action === 'callback_edit' && meta(e).restated === false));
-  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => e.created_at),
+  // The boundary is the event's renewed_at, stamped after the action took
+  // its row lock: the row's created_at defaults to the transaction start,
+  // and a call returned while the action waited for the lock preceded it.
+  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => meta(e).renewed_at || e.created_at),
     ...edits.map((e) => meta(e).legacy_boundary)];
   // A card edited before callback cards existed went through the generic
   // path, which wrote no callback_edit event: while none exists at all its
@@ -1858,9 +1861,11 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (!updated) throw Object.assign(new Error('Commitment not found'), { status: 404 });
   if (before && before.kind === 'callback' && before.party === 'waves') {
     const renewal = action === 'edit' ? await callbackEditEventMetadata(conn, before, { description, due_at }) : {};
+    // renewed_at is taken here, after the locked pre-read and the update —
+    // not the audit row's created_at, which is the transaction start.
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
-      metadata: { via: 'ledger', ...renewal }, critical: true, trx: conn });
+      metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
 }

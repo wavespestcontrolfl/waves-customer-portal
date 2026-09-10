@@ -179,7 +179,12 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     await prepareCallbackCards(trx, { callId: row.call_log_id });
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
       resource_type: 'call_commitment', resource_id: id,
-      metadata: { snoozed_until: until?.toISOString() || null, ...editEvent }, critical: true, trx });
+      // renewed_at: the boundary fulfillment refresh honours for a reopen or
+      // edit, stamped here after the row lock and the writes — the audit
+      // row's own created_at is the transaction start, which a call returned
+      // during a lock wait would post-date.
+      metadata: { snoozed_until: until?.toISOString() || null, ...editEvent,
+        ...(['edit', 'reopen'].includes(action) ? { renewed_at: new Date().toISOString() } : {}) }, critical: true, trx });
     // Every action retires the reminder for the version staff just acted on
     // AND releases its per-day dedupe identity: a snoozed, released or
     // edited callback that is still open rings again the next time the
