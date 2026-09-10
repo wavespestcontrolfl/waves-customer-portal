@@ -624,7 +624,14 @@ async function openVisitPickerRow(visit, customerId) {
     payerBilled = !!payer?.payerId;
     if (visit.source_estimate_id && !payerBilled) credit = await pendingDepositCredit(visit.source_estimate_id);
   } catch { credit = null; }
-  if (await prepaidRefusesOfficeInvoice(visit, { payerBilled })) return null;
+  // Unverifiable annual coverage (strict mode threw) is NOT offered either —
+  // fail closed toward "no new collectible invoice" (pre-push P0 r3).
+  try {
+    if (await prepaidRefusesOfficeInvoice(visit, { payerBilled })) return null;
+  } catch (err) {
+    logger.warn(`[admin-invoices] picker: prepaid coverage unverifiable for visit ${visit.id} — not offered: ${err.message}`);
+    return null;
+  }
   // Internal columns (the coverage inputs, the estimate link) stay off the wire.
   const { source_estimate_id: _estimate, prepaid_amount: _amount, prepaid_method: _method, estimated_price: _price,
     annual_prepay_term_id: _term, customer_id: _customer, ...row } = visit;
@@ -1051,7 +1058,14 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
   if (!isOpenVisitStatus(visit.status)) {
     return refusal(409, { error: `That visit is ${visit.status} — link a completed visit through its service record instead`, code: 'visit_not_open' });
   }
-  if (await linkedVisitPrepaid(db, visit, { customerId })) {
+  let prepaid;
+  try {
+    prepaid = await linkedVisitPrepaid(db, visit, { customerId });
+  } catch (err) {
+    logger.warn(`[admin-invoices] linked create: prepaid coverage unverifiable for visit ${visit.id} — refused: ${err.message}`);
+    return refusal(409, { error: 'That visit carries an annual-prepay stamp whose coverage could not be verified — nothing was created', code: 'visit_prepaid_unverifiable' });
+  }
+  if (prepaid) {
     return refusal(409, { error: 'That visit is already prepaid — it needs no new invoice (use Charge now from the schedule to credit the prepayment)', code: 'visit_prepaid' });
   }
   return { visit };
@@ -1066,14 +1080,20 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
     if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
       throw conflict('visit_not_open', `That visit is no longer open for this customer${still ? ` (${still.status})` : ''} — nothing was created`);
     }
-    if (await linkedVisitPrepaid(trx, still, { customerId })) {
+    let prepaid;
+    try {
+      prepaid = await linkedVisitPrepaid(trx, still, { customerId });
+    } catch (err) {
+      throw conflict('visit_prepaid_unverifiable', `That visit's annual-prepay coverage could not be verified under the lock — nothing was created (${err.message})`);
+    }
+    if (prepaid) {
       throw conflict('visit_prepaid', 'That visit was prepaid while this invoice was being created — nothing was created');
     }
   };
 }
 
 // Step 4 — a mint refusal as the HTTP response, or null for a real error.
-// visit_not_open | visit_prepaid | SCHEDULED_PRICE_MOVED |
+// visit_not_open | visit_prepaid | visit_prepaid_unverifiable | SCHEDULED_PRICE_MOVED |
 // DEPOSIT_CREDIT_CHANGED | BALANCE_CHANGED. The drift figures ride along so
 // the form can show the balance the server would actually bill.
 const DRIFT_FIELDS = ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit'];

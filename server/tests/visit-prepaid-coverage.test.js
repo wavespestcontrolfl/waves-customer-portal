@@ -35,13 +35,20 @@ describe('prepaidRefusesOfficeInvoice', () => {
     annualPrepayCoversVisit.mockResolvedValueOnce(true);
     const visit = { prepaid_amount: 1, prepaid_method: 'annual_prepay_invoice' };
     expect(await prepaidRefusesOfficeInvoice(visit)).toBe(true);
-    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(visit, expect.anything());
+    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(visit, expect.anything(), { throwOnError: true });
   });
 
   test('a stale annual-prepay stamp (voided/refunded term) covers nothing, whatever the amount says', async () => {
     annualPrepayCoversVisit.mockResolvedValueOnce(false);
     const visit = { prepaid_amount: 999999, prepaid_method: 'annual_prepay_invoice' };
     expect(await prepaidRefusesOfficeInvoice(visit)).toBe(false);
+  });
+
+  test('an annual-prepay stamp is verified STRICTLY — throwOnError — and an unverifiable stamp propagates as an error, never as "not covered" (pre-push P0 r3)', async () => {
+    const visit = { prepaid_amount: 117, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: null };
+    annualPrepayCoversVisit.mockRejectedValueOnce(new Error('stamped visit carries no annual_prepay_term_id — coverage unverifiable'));
+    await expect(prepaidRefusesOfficeInvoice(visit)).rejects.toThrow(/unverifiable/);
+    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(visit, expect.anything(), { throwOnError: true });
   });
 
   test('no recorded prepayment does not cover', async () => {

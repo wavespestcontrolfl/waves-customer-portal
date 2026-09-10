@@ -229,6 +229,37 @@ describe('POST /admin/invoices with an open visit link', () => {
 
   // Codex P2 #4131 r3 — a homeowner's prepayment never hides a PAYER's
   // invoice: the third party's AP invoice must still be cut.
+  // Pre-push P0 r3 — the annual-prepay check runs STRICT here: an
+  // unverifiable stamp (no term id, table missing, a failed read) refuses
+  // the create, before and under the lock, rather than billing a visit that
+  // may already be paid for.
+  test('an annual-prepay stamp whose coverage cannot be verified is refused (409 visit_prepaid_unverifiable) — nothing created', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 117, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: null };
+    annualPrepayCoversVisit.mockRejectedValueOnce(new Error('stamped visit carries no annual_prepay_term_id — coverage unverifiable'));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_prepaid_unverifiable' });
+      expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: VISIT }), expect.anything(), { throwOnError: true });
+      expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
+    });
+  });
+
+  test('an annual-prepay stamp that becomes unverifiable under the lock is refused inside the chain', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 117, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: 'term-1' };
+    annualPrepayCoversVisit.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('annual_prepay_terms read failed'));
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
+      const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => ({ ...visitRow })) })) });
+      await assertEligibleInTrx(trx);
+      throw new Error('hook should have refused');
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_prepaid_unverifiable' });
+    });
+  });
+
   test('a payer-billed visit is never covered by the homeowner prepayment, however large', async () => {
     visitRow = { id: PAYER_VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 999 };
     await withServer(async (baseUrl) => {
@@ -427,6 +458,7 @@ describe('POST /admin/invoices/:id/schedule-send on a linked visit (GitHub P1 #4
 describe('GET /admin/invoices/service-records/:customerId', () => {
   // The visits query is found by call index below — start from a clean call log.
   beforeEach(() => jest.clearAllMocks());
+  afterEach(() => annualPrepayCoversVisit.mockImplementation(async () => false));
   test('returns the completed records AND the open visits for the picker', async () => {
     const records = [{ id: 'r1', service_date: '2040-02-01', service_type: 'Quarterly Pest Control Service', status: 'completed', tech_name: 'Adam' }];
     const open = [
@@ -463,13 +495,19 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
     });
   });
 
-  test('a partially prepaid visit and an annual-prepaid visit under a live term are not offered; internal columns never reach the wire', async () => {
+  test('a partially prepaid visit, an annual-prepaid visit under a live term, and an unverifiable annual stamp are not offered; internal columns never reach the wire', async () => {
     const open = [
       { id: VISIT, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: 50, prepaid_method: 'zelle', customer_id: CUSTOMER },
       { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: 117, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: 'term-1', customer_id: CUSTOMER },
       { id: '66666666-6666-4666-8666-666666666666', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, customer_id: CUSTOMER, estimated_price: 117 },
     ];
-    annualPrepayCoversVisit.mockImplementationOnce(async (visit) => visit.annual_prepay_term_id === 'term-1');
+    open.push({ id: '77777777-7777-4777-8777-777777777777', scheduled_date: '2040-03-25', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: 117, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: null, customer_id: CUSTOMER });
+    // Strict verification: a live term refuses; an UNVERIFIABLE stamp (no term id) throws and is not offered either.
+    annualPrepayCoversVisit.mockImplementation(async (visit, _conn, opts) => {
+      expect(opts).toEqual({ throwOnError: true });
+      if (!visit.annual_prepay_term_id) throw new Error('stamped visit carries no annual_prepay_term_id — coverage unverifiable');
+      return visit.annual_prepay_term_id === 'term-1';
+    });
     db.mockImplementation((table) => {
       if (table === 'service_records') return qb({ limit: jest.fn(async () => []) });
       if (table === 'scheduled_services') return qb({ limit: jest.fn(async () => open.map((v) => ({ ...v }))) });
@@ -479,7 +517,7 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
       const res = await fetch(`${baseUrl}/admin/invoices/service-records/${CUSTOMER}`);
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: OTHER, annual_prepay_term_id: 'term-1' }), expect.anything());
+      expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: OTHER, annual_prepay_term_id: 'term-1' }), expect.anything(), { throwOnError: true });
       expect(body.openVisits).toEqual([
         { id: '66666666-6666-4666-8666-666666666666', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 0 },
       ]);

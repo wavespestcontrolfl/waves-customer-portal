@@ -8,7 +8,8 @@
 //   - an annual-prepay stamp is governed ONLY by annualPrepayCoversVisit
 //     (explicit stamp AND a still-live, non-refunded term) — a stale stamp
 //     left by a best-effort void/refund clear refuses nothing, whatever its
-//     amount says;
+//     amount says — and an UNVERIFIABLE stamp throws (strict mode), which
+//     every office caller turns into a refusal (pre-push P0 r3);
 //   - ANY positive out-of-band prepayment (cash, Zelle, phone card) refuses,
 //     partial or not. The completion and Charge Now apply a recorded
 //     prepayment as an idempotent credit when they mint; the office create
@@ -22,7 +23,11 @@ async function prepaidRefusesOfficeInvoice(visit, { payerBilled = false, conn = 
   if (!visit || payerBilled) return false;
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
   if (visit.prepaid_method === AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD) {
-    return AnnualPrepayRenewals.annualPrepayCoversVisit(visit, conn);
+    // STRICT (pre-push P0 r3): this is the charging side of the boundary —
+    // an unverifiable stamp (no amount, no term id, terms table missing, a
+    // failed coverage read) must REFUSE the office invoice, not read as
+    // "stale stamp, bill away". The error propagates; callers refuse on it.
+    return AnnualPrepayRenewals.annualPrepayCoversVisit(visit, conn, { throwOnError: true });
   }
   return Number(visit.prepaid_amount) > 0;
 }
