@@ -3039,6 +3039,7 @@ const InvoiceService = {
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
       issuedCloseout = await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
     }
+    const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
 
     // The review decision waits for the closeout (GitHub r4 P1 #4127): a
     // linked pre-completion invoice has no service_record_id until the
@@ -3070,6 +3071,13 @@ const InvoiceService = {
             && !["paid", "prepaid"].includes(String(inv.status || ""));
           if (deferToPayment) {
             logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
+          } else if (inv && await issuedCloseoutOwnsRecord(inv.service_record_id)) {
+            // A closeout that committed its record (frozen requestReview:
+            // false) but reported closed: false — post-commit failure, or a
+            // later send on an already-closed visit — still owns the ask
+            // (pre-push P1 r7): the durable provenance decides, not this
+            // invocation's return value.
+            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${inv.service_record_id} was committed by the invoice-issued closeout`);
           } else if (inv) {
             await ReviewService.enrollPostService({
               customerId: inv.customer_id,
@@ -3211,8 +3219,15 @@ const InvoiceService = {
           // invoices (no service_record_id) keep the legacy at-delivery ask.
           const deferToPayment = linkage.service_record_id
             && !["paid", "prepaid"].includes(String(linkage.status || ""));
+          const { issuedCloseoutOwnsRecord } = require("./invoice-issued-closeout");
           if (deferToPayment) {
             logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
+          } else if (await issuedCloseoutOwnsRecord(linkage.service_record_id)) {
+            // Durable provenance over this invocation's verdict (pre-push
+            // P1 r7): a closeout that committed the record but failed after
+            // — or a resend on a visit it already closed — reports closed:
+            // false, yet the record froze requestReview: false.
+            logger.info(`[invoice] Review ask suppressed for invoice ${invoiceId}: record ${linkage.service_record_id} was committed by the invoice-issued closeout (source=${source})`);
           } else {
             const ReviewService = require("./review-request");
             await ReviewService.enrollPostService({

@@ -105,6 +105,24 @@ async function resumableIssuedCloseoutAttempt(conn, { serviceId, idempotencyKey 
   return state.state === 'resumable';
 }
 
+// Durable provenance of a quiet closeout: the record it committed carries
+// structured_notes.issuedInvoiceCloseout (frozen requestReview: false). The
+// delivery / payment paths consult it before enrolling a review ask
+// (pre-push P1 r7): a closeout that committed its record but failed in its
+// post-commit work reports closed: false, and if the invoice is already
+// paid by the time of the fresh linkage read, the at-delivery ask would
+// otherwise enroll against the very record that promised never to send it.
+async function issuedCloseoutOwnsRecord(serviceRecordId, conn = db) {
+  if (!serviceRecordId) return false;
+  const record = await conn('service_records').where({ id: serviceRecordId }).first('structured_notes');
+  if (!record) return false;
+  let notes = record.structured_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { return false; }
+  }
+  return Boolean(notes && typeof notes === 'object' && notes.issuedInvoiceCloseout);
+}
+
 // Entry point for the send and record-payment paths. Best-effort by
 // contract: the invoice was already delivered / the payment already
 // recorded, so a refused or failed closeout is logged and reported, never
@@ -236,6 +254,7 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
 }
 
 module.exports = {
+  issuedCloseoutOwnsRecord,
   OPEN_VISIT_STATUSES,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,

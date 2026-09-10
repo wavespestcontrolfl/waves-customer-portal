@@ -30,12 +30,15 @@ jest.mock('../services/invoice-followups', () => ({
 // the review decision; gate-off by default here, one test flips its verdict.
 jest.mock('../services/invoice-issued-closeout', () => ({
   closeOutVisitForIssuedInvoice: jest.fn(async () => ({ closed: false, reason: 'gate_off' })),
+  // Durable provenance of a committed quiet closeout on the linked record
+  // (pre-push P1 r7) — false by default: no closeout owns these records.
+  issuedCloseoutOwnsRecord: jest.fn(async () => false),
 }));
 
 const db = require('../models/db');
 const ReviewService = require('../services/review-request');
 const InvoiceService = require('../services/invoice');
-const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+const { closeOutVisitForIssuedInvoice, issuedCloseoutOwnsRecord } = require('../services/invoice-issued-closeout');
 
 function chain({ first, returning } = {}) {
   const q = {};
@@ -185,6 +188,18 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
 
     expect(result.ok).toBe(true);
     expect(closeOutVisitForIssuedInvoice).toHaveBeenCalledWith({ invoiceId: 'inv-1', trigger: 'sent', actorTechnicianId: null });
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+  });
+
+  test('a PAID completion invoice whose record was committed by the quiet closeout never enrolls — provenance beats a closed: false verdict (pre-push P1 r7)', async () => {
+    mockSendSequence(scheduledInvoice(), { status: 'paid' });
+    closeOutVisitForIssuedInvoice.mockResolvedValueOnce({ closed: false, reason: 'visit_completed', visitId: 'svc-1' });
+    issuedCloseoutOwnsRecord.mockResolvedValueOnce(true);
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+    expect(result.ok).toBe(true);
+    expect(issuedCloseoutOwnsRecord).toHaveBeenCalledWith('sr-1');
     expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 

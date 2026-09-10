@@ -98,6 +98,13 @@ describe('source contracts', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(source).toMatch(/if \(completionInput\.issuedInvoiceCloseout\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCommittedCompletionAttempt\(svc\.id, k\), false\)\)\) \{/);
   });
+  test('both delivery-side review decisions consult the record provenance (issuedCloseoutOwnsRecord) before enrolling (pre-push P1 r7)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    // sendViaSMSAndEmail: provenance check sits between the payment deferral and the enrollment.
+    expect(source).toMatch(/\} else if \(inv && await issuedCloseoutOwnsRecord\(inv\.service_record_id\)\) \{[\s\S]*?\} else if \(inv\) \{\s*\n\s*await ReviewService\.enrollPostService\(\{\s*\n\s*customerId: inv\.customer_id,/);
+    // markDeliverySent: same order on the durable linkage.
+    expect(source).toMatch(/\} else if \(await issuedCloseoutOwnsRecord\(linkage\.service_record_id\)\) \{[\s\S]*?\} else \{\s*\n\s*const ReviewService = require\("\.\/review-request"\);\s*\n\s*await ReviewService\.enrollPostService\(\{\s*\n\s*customerId: invoice\.customer_id,\s*\n\s*serviceRecordId: linkage\.service_record_id/);
+  });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const persistAt = source.indexOf('const persistRecord = async (trx) => {');
@@ -240,6 +247,29 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(transition.transitioned_by).toBeNull();
     expect(records[0].technician_id).toBe(f.techId);
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completed_on_invoice_issued' }).first()).toMatchObject({ actor_type: 'system', actor_id: null });
+  });
+
+  test('a closeout that already committed its record owns the review decision even when a later invocation reports closed: false and the invoice is paid (pre-push P1 r7)', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const { issuedCloseoutOwnsRecord } = require('../services/invoice-issued-closeout');
+    await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
+    const record = await mockPg('service_records').where({ scheduled_service_id: f.serviceId }).first();
+    // Durable provenance on the committed record…
+    expect(await issuedCloseoutOwnsRecord(record.id, mockPg)).toBe(true);
+    expect(await issuedCloseoutOwnsRecord(randomUUID(), mockPg)).toBe(false);
+    expect(await issuedCloseoutOwnsRecord(null, mockPg)).toBe(false);
+    // …decides the ask: the invoice is PAID by the time of the delivery's
+    // fresh linkage read and the closeout now reports closed: false (the
+    // visit is already completed), which used to fall through to the
+    // at-delivery enrollment against the record that froze requestReview: false.
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date(), scheduled_request_review: true, scheduled_review_delay_minutes: 120 });
+    const again = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
+    expect(again).toMatchObject({ closed: false, reason: 'visit_completed' });
+    const InvoiceService = require('../services/invoice');
+    await InvoiceService.markDeliverySent(f.invoiceId, { sms: true, source: 'scheduled_send' });
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+    expect(await mockPg('review_requests').where({ customer_id: f.customerId })).toHaveLength(0);
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(1);
   });
 
   test('an annual-prepay-covered visit keeps its SENT invoice intact — add-ons and all; the closeout never settles or voids it', async () => {
