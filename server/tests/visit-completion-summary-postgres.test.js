@@ -64,7 +64,7 @@ function handoffSender(provider = async () => ({ sent: true })) {
     let verdict;
     try {
       verdict = await withSmsHandoff(async (_trx, onProviderStart) => {
-        if (typeof onProviderStart === 'function') onProviderStart();
+        if (typeof onProviderStart === 'function') await onProviderStart();
         dispatched = true; outcome = await provider(); return { ok: true };
       });
     } catch (err) {
@@ -284,6 +284,106 @@ postgres('visit summary recipient recovery', () => {
     expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
     expect(await deliver()).toEqual({ state: 'delivery_review' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a queued summary carries its recorded member so the replay applies the same per-property toggles', async () => {
+    const queued = await heldSummary();
+    expect(fixture.serviceIds).toContain(queued.metadata.scheduled_service_id);
+  });
+
+  test('a per-property toggle write attempted during the summary handoff waits for it to commit', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    let blockedCode = null;
+    sendCustomerMessage.mockImplementation(handoffSender(async () => {
+      // savePropertyToggles commits under the customer-comms lock.
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await require('../utils/customer-comms-lock').lockCustomerComms(trx, fixture.customerId);
+      }).catch((err) => { blockedCode = err.code; });
+      return { sent: true };
+    }));
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(blockedCode).toBe('55P03');
+  });
+
+  test('a worker that dies between the SMS dispatch mark and its provider request leaves a reclaimable summary', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const member = await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first();
+    const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
+    expect(claim.state).toBe('owner');
+    expect(await VisitGroups.beginVisitNotificationDispatch(fixture.visitId, 'completion_sms', claim.token)).toBe(true);
+    // The process is lost here: the mark is durable and no provider request was made.
+    const effect = () => mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
+    expect(await effect()).toMatchObject({ status: 'unknown_delivery', last_error: 'handoff_pending' });
+    // Within the lease the mark is a live handoff: nothing resends and the packet stays pending.
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' })
+      .update({ claimed_at: new Date(Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS - 1000) });
+    // Past the lease the marker proves the request never went out: reclaimed and sent once.
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(await effect()).toMatchObject({ status: 'sent', last_error: null });
+  });
+
+  test('a mark whose pre-provider marker was cleared is never reclaimed, even past the lease', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const member = await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first();
+    const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
+    expect(await VisitGroups.beginVisitNotificationDispatch(fixture.visitId, 'completion_sms', claim.token)).toBe(true);
+    expect(await VisitGroups.markVisitNotificationProviderStart(fixture.visitId, 'completion_sms', claim.token)).toBe(true);
+    // The clear is one-shot: a mark without its marker is a request that may have gone out.
+    expect(await VisitGroups.markVisitNotificationProviderStart(fixture.visitId, 'completion_sms', claim.token)).toBe(false);
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' })
+      .update({ claimed_at: new Date(Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS - 1000) });
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a worker that dies between the email dispatch mark and its provider request leaves the queued row recoverable', async () => {
+    // Emulated through the real library: the durable mark commits, then every
+    // write the graceful paths would make (the pre-provider clear, the unmark,
+    // the library's abort, the finalize, a further recipient's ledger row) is lost.
+    const execute = mockPg.client.constructor.prototype._query;
+    let marked = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function crash(connection, query) {
+      const bindings = (query.bindings || []).map((value) => String(value));
+      const lost = () => Promise.reject(new Error('Synthetic process loss before the provider request'));
+      if (query.sql.startsWith('update "visit_effects"') && bindings.includes('unknown_delivery') && bindings.some((value) => value.startsWith('handoff_pending:'))) {
+        if (marked) return lost();
+        marked = true;
+      } else if (marked && (
+        (query.sql.startsWith('update "visit_effects"') && bindings.includes('handoff_pending%'))
+        || (query.sql.startsWith('update "email_messages"') && bindings.includes(ABORTED_BEFORE_DISPATCH))
+        || (query.sql.startsWith('insert into "visit_effects"') && bindings.includes('completion_email'))
+        || query.sql.startsWith('insert into "email_messages"'))) {
+        return lost();
+      }
+      return execute.call(this, connection, query);
+    });
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    jest.restoreAllMocks();
+    expect(marked).toBe(true);
+    expect(sendOne).not.toHaveBeenCalled();
+    const effect = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first();
+    expect(effect).toMatchObject({ status: 'unknown_delivery' });
+    expect(effect.last_error).toMatch(/^handoff_pending:/);
+    const abandoned = await mockPg('email_messages').where({ id: effect.last_error.split(':')[1] }).first();
+    expect(abandoned).toMatchObject({ status: 'queued', provider_message_id: null, sent_at: null });
+    // Within the lease nothing resends; past it the queued row is settled as a
+    // pre-dispatch abort and the replay finishes every recipient.
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(sendOne).not.toHaveBeenCalled();
+    await mockPg('visit_effects').where({ id: effect.id }).update({ claimed_at: new Date(Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS - 1000) });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    // The settled row (a pre-dispatch abort) is the one the library retries under its idempotency key: sent once.
+    expect(await mockPg('email_messages').where({ id: abandoned.id }).first()).toMatchObject({ status: 'sent' });
+    const sent = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}`, status: 'sent' });
+    expect(sent.filter((row) => row.recipient_email_snapshot === abandoned.recipient_email_snapshot)).toHaveLength(1);
+    expect(await mockPg('visit_effects').where({ id: effect.id }).first()).toMatchObject({ status: 'sent', last_error: null });
   });
 
   test('a proven provider-boundary quiet-hours hold can retry its pending scheduled handoff', async () => {
@@ -575,7 +675,7 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
     sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
-      await withSmsHandoff(async (_trx, onProviderStart) => { onProviderStart(); throw new Error('provider response unavailable'); });
+      await withSmsHandoff(async (_trx, onProviderStart) => { await onProviderStart(); throw new Error('provider response unavailable'); });
     });
     expect(await deliver()).toEqual({ state: 'delivery_review' });
     expect(sendCustomerMessage.mock.calls[0][0].to).toBe('+12025550123');
@@ -775,7 +875,7 @@ postgres('visit summary recipient recovery', () => {
       await withSmsHandoff(async (_trx, onProviderStart) => {
         // Read on another connection while the handoff transaction is open.
         markDuringRequest = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first('status');
-        onProviderStart();
+        await onProviderStart();
         throw Object.assign(new Error('process lost mid-request'), { providerHttpStatus: undefined });
       });
     });
@@ -1007,7 +1107,7 @@ postgres('visit summary recipient recovery', () => {
     if (rail === 'scheduled') {
       await expect(deferredHandoff(queued.metadata, failingRecheck)).rejects.toThrow('consent recheck outage');
       expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'pending' });
-      expect(await deferredHandoff(queued.metadata, async (_trx, onProviderStart) => { onProviderStart(); providerCalls += 1; return { ok: true }; })).toMatchObject({ ok: true });
+      expect(await deferredHandoff(queued.metadata, async (_trx, onProviderStart) => { await onProviderStart(); providerCalls += 1; return { ok: true }; })).toMatchObject({ ok: true });
     } else {
       sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
         try { await withSmsHandoff(failingRecheck); } catch (err) { return { sent: false, blocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true, reason: err.message }; }
@@ -1036,7 +1136,7 @@ postgres('visit summary recipient recovery', () => {
       return { ok: true };
     };
     if (rail === 'scheduled') {
-      expect(await deferredHandoff(queued.metadata, async (_trx, onProviderStart) => { onProviderStart(); return stopDuringRequest(); })).toMatchObject({ ok: true });
+      expect(await deferredHandoff(queued.metadata, async (_trx, onProviderStart) => { await onProviderStart(); return stopDuringRequest(); })).toMatchObject({ ok: true });
     } else {
       sendCustomerMessage.mockImplementation(handoffSender(async () => { await stopDuringRequest(); return { sent: true }; }));
       expect(await deliver()).toEqual({ state: 'delivered' });
