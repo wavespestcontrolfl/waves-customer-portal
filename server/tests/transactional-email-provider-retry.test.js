@@ -82,6 +82,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'sent' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
@@ -117,7 +118,8 @@ describe('transactional email provider retry classification', () => {
   test('a visit summary retry is refused before the handoff when its recipient is no longer current', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
-    chain.update = jest.fn(async () => 1);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
     emailTemplates.activeSuppressionFor.mockResolvedValue(null);
@@ -140,6 +142,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed', template_key: 'service.visit_summary', recipient_email_snapshot: 'a@example.com' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
@@ -158,6 +161,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'failed' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
@@ -174,6 +178,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn().mockRejectedValueOnce(new Error('connection reset')).mockResolvedValue([{ id: 'message-1', status: 'failed' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
@@ -191,6 +196,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked', template_key: 'service.visit_summary' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
@@ -217,6 +223,7 @@ describe('transactional email provider retry classification', () => {
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
     emailTemplates.activeSuppressionFor.mockResolvedValue(null);
     sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-8' });
+    // The retry's handoff mock receives no transaction; the marker is written before it on the root handle.
     const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-8' });
     expect((await retry.retryOne(stored)).sent).toBe(true);
     const marker = chain.update.mock.calls.findIndex(([data]) => data.error_message === retry.HANDOFF_STARTED);
@@ -234,6 +241,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'sent' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
@@ -247,6 +255,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
@@ -263,7 +272,8 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
-    chain.update = jest.fn(async () => 1);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     db.mockReturnValue(chain);
     const now = new Date('2026-07-16T12:30:00Z');
 
