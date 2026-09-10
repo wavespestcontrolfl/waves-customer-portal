@@ -575,6 +575,35 @@ describe('review sequences — cadence engine', () => {
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('opted_out');
   });
+
+  test('a step parked by a summary bounce after the provider accepted it is still advanced, so recovery resumes the next step', async () => {
+    const Summary = require('../services/visit-completion-summary');
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'cust-pk', first_name: 'Pia', last_name: 'K', nearest_location_id: 'venice' }],
+      review_sequences: [{
+        id: 'seq-pk', customer_id: 'cust-pk', service_record_id: 'sr-pk', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(async () => {
+      // The bounce reconciliation parks the sequence between the provider's
+      // return and this step's bookkeeping (the packet handoff ends at return).
+      Object.assign(mock.__state.rows.review_sequences[0], { status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, completed_at: new Date() });
+      return { sent: true, auditLogId: 'audit-pk' };
+    });
+
+    await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    const seq = mock.__state.rows.review_sequences[0];
+    // Parked stays parked (never re-activated here), but the delivered step is
+    // recorded so a resume schedules step 1 instead of replaying step 0.
+    expect(seq).toMatchObject({ status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, current_step: 1, touches_sent: 1 });
+    expect(seq.next_run_at).toBeInstanceOf(Date);
+  });
 });
 
 describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () => {

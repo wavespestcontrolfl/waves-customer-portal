@@ -106,7 +106,7 @@ async function getVisitCompletionSummary(token, database = db) {
 
 // Queue ownership and the visit marker commit together. Packet recovery then
 // waits on this row; only the existing scheduled-SMS worker dispatches it.
-async function deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt }) {
+async function deferSummarySms({ visit, member, customer, recipient, body, claim, nextAllowedAt }) {
   await db.transaction(async (trx) => {
     const owned = await trx('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
       claim_token: claim.token }).whereIn('status', ['claimed', 'unknown_delivery'])
@@ -115,9 +115,13 @@ async function deferSummarySms({ visit, customer, recipient, body, claim, nextAl
     await trx('sms_log').insert({ customer_id: customer.id, direction: 'outbound',
       from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: recipient.phone,
       message_body: body, message_type: 'visit_summary', status: 'scheduled', scheduled_for: new Date(nextAllowedAt),
+      // The recorded member rides along: the scheduled worker passes it as
+      // the replay's appointmentId, so the consent validator applies the
+      // same per-property toggles the immediate attempt judged.
       metadata: JSON.stringify({ entry_point: 'visit_summary_deferred', visit_id: visit.id,
         visit_summary_claim_token: claim.token, summary_token_hash: visit.summary_token_hash,
-        customer_id: customer.id, to_phone: recipient.phone, resolve_from_by_customer: true }),
+        customer_id: customer.id, to_phone: recipient.phone, resolve_from_by_customer: true,
+        scheduled_service_id: member?.id || null }),
     });
   });
 }
@@ -155,9 +159,13 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
   // the same rule the tech line and the admin composer apply.
   const provenUnsentAt = meta.quiet_hours_hold_at
     && new Date(meta.quiet_hours_hold_at) >= new Date(effect?.claimed_at || 0) ? meta.quiet_hours_hold_at : null;
-  if (effect?.status === 'unknown_delivery' && provenUnsentAt) {
+  // A dispatch mark still carrying its pre-provider marker past the lease is
+  // the other proof: the worker died before its provider request.
+  const abandonedHandoff = effect?.status === 'unknown_delivery' && VisitGroups.isHandoffPending(effect.last_error)
+    && new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS;
+  if (effect?.status === 'unknown_delivery' && (provenUnsentAt || abandonedHandoff)) {
     await database('visit_effects').where({ id: effect.id, status: 'unknown_delivery', claimed_at: effect.claimed_at,
-      claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', updated_at: database.fn.now() });
+      claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', last_error: null, updated_at: database.fn.now() });
     effect.status = 'pending';
   }
   return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
@@ -181,14 +189,18 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
 // before its provider request: a throw before that signal (a failed recheck
 // on the held connection) is provably unsent and restores the claim, while a
 // throw after it is the provider outcome and propagates with the mark in place.
-async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, email = null, authorized, dispatch }) {
+async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, email = null, pendingRef = null, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
   const holdAndAuthorize = async (trx, phase) => {
-    // A leg takes its canonical per-address lock first (the SMS phone lock
-    // the STOP / suppression writers take, or the email-address lock the
-    // suppression and address writers take), so an opt-out or an address
-    // claim that commits during the request serializes behind the handoff.
+    // Lock order (customer-comms-lock.js): the per-customer comms lock
+    // first — the per-property toggle writer commits under it, so a
+    // property opt-out that lands during the request serializes behind the
+    // handoff instead of slipping past the consent recheck — then the
+    // leg's canonical per-address lock (the SMS phone lock the STOP /
+    // suppression writers take, or the email-address lock the suppression
+    // and address writers take), then the rows.
     const locks = require('../utils/customer-comms-lock');
+    await locks.lockCustomerComms(trx, customerId);
     if (phone) await locks.lockSmsPhone(trx, phone);
     if (email) await locks.lockCustomerEmail(trx, email);
     await trx('customers').where({ id: customerId }).forShare().first('id');
@@ -211,20 +223,31 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     return authorized(customer, prefs, trx, phase);
   };
   const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
-    ? VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: trx }) : false));
+    ? VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: trx, pendingRef }) : false));
   if (!marked) return lost;
   // Nothing reached the provider: the mark returns to its pre-dispatch state
-  // so the same claim can retry. If this write fails the effect stays
-  // uncertain and reaches office review, which is the safe side.
+  // so the same claim can retry. Only a mark still carrying its pre-provider
+  // marker is returned; if this write fails the effect stays uncertain until
+  // the lease proves it unsent (or reaches office review), the safe side.
   const unmark = () => db('visit_effects').where({ visit_id: visitId, effect_type: kind, claim_token: token, status: 'unknown_delivery' })
-    .update({ status: scheduled ? 'pending' : 'claimed', claimed_at: new Date(), updated_at: db.fn.now() })
+    .where('last_error', 'like', `${VisitGroups.HANDOFF_PENDING}%`)
+    .update({ status: scheduled ? 'pending' : 'claimed', last_error: null, claimed_at: new Date(), updated_at: db.fn.now() })
     .catch(() => {});
   let dispatching = false;
   let verdict;
   try {
     verdict = await db.transaction(async (trx) => {
       if (!(await holdAndAuthorize(trx, 'dispatch'))) return lost;
-      return dispatch(trx, () => { dispatching = true; });
+      // The sender awaits this immediately before its provider request:
+      // the pre-provider marker is cleared durably first (a crash after it
+      // is uncertain, a crash before it reclaimable); a mark recovery has
+      // already reclaimed throws here, before anything reaches the provider.
+      return dispatch(trx, async () => {
+        if (!(await VisitGroups.markVisitNotificationProviderStart(visitId, kind, token))) {
+          throw Object.assign(new Error('Visit summary dispatch mark was reclaimed before the provider request'), { code: 'VISIT_SUMMARY_CLAIM_LOST' });
+        }
+        dispatching = true;
+      });
     });
   } catch (err) {
     // A failed read before the provider request is not a provider outcome.
@@ -293,11 +316,11 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
         authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
           && currentPrefs.service_completed !== false
           && getServiceContactSmsRecipient(current).phone === recipient.phone,
-        dispatch: (trx, onProviderStart) => handoff(trx, () => { dispatched = true; onProviderStart(); }) }),
+        dispatch: (trx, onProviderStart) => handoff(trx, async () => { await onProviderStart(); dispatched = true; }) }),
     });
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
       dispatched = false; // The provider boundary can also prove it held before sending.
-      await deferSummarySms({ visit, customer, recipient, body, claim, nextAllowedAt: result.nextAllowedAt });
+      await deferSummarySms({ visit, member, customer, recipient, body, claim, nextAllowedAt: result.nextAllowedAt });
       return;
     }
     // Once handed to a non-idempotent provider, every failure is ambiguous
@@ -351,8 +374,13 @@ function summaryEmailRecipients(customer, prefs) {
 // happened) | 'pending' (nothing reached the provider; retry later).
 async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, recipient, idempotencyKey }) {
   let dispatched = false;
+  let queued = null;
   try {
     const result = await require('./email-template-library').sendTemplate({
+      // The queued ledger row's id rides on the dispatch mark's pre-provider
+      // marker: a crash before the request leaves a queued row that packet
+      // replay would otherwise skip as uncertain (see sendSummaryEmail).
+      onQueued: (message) => { queued = message; },
       templateKey: 'service.visit_summary', to: recipient.email,
       payload: { first_name: recipient.name || 'there', summary_url: summaryUrl },
       recipientType: 'customer', recipientId: customer.id, idempotencyKey,
@@ -364,11 +392,11 @@ async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, r
       // through the provider request. A claim that cannot be read throws
       // before dispatch, which the library records as a pre-provider abort.
       withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
-        kind: 'completion_email', token: claim.token, email: recipient.email,
+        kind: 'completion_email', token: claim.token, email: recipient.email, pendingRef: queued?.id || null,
         authorized: async (current, currentPrefs, trx) => summaryEmailRecipients(current, currentPrefs)
           .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
           && !(await summaryEmailSuppressed(recipient.email, trx)),
-        dispatch: async (_trx, onProviderStart) => { onProviderStart(); dispatched = true; await handoff(); return { ok: true }; } }),
+        dispatch: async (_trx, onProviderStart) => { await onProviderStart(); dispatched = true; await handoff(); return { ok: true }; } }),
     });
     if (result.sent) return 'sent';
     if (result.blocked) return 'blocked';
@@ -381,9 +409,30 @@ async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, r
   }
 }
 
+// A handoff that died between its durable dispatch mark and its provider
+// request left the recipient's ledger row queued; the mark's marker names
+// that row and, past the lease, proves no request was made, so the row is
+// settled as a pre-dispatch abort and the replay finishes that recipient
+// instead of skipping it as uncertain. Read before the claim (which
+// reclaims such a mark), settled once the claim is owned.
+async function settleAbandonedSummaryEmailRow(visitId, database) {
+  const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' }).first('last_error', 'claimed_at');
+  if (!effect || !VisitGroups.isHandoffPending(effect.last_error)) return null;
+  if (new Date(effect.claimed_at).getTime() > Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS) return null;
+  const messageId = effect.last_error.split(':')[1] || null;
+  return async () => {
+    if (!messageId) return 0;
+    return database('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
+      .whereNull('provider_message_id').whereNull('sent_at')
+      .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: database.fn.now() });
+  };
+}
+
 async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
+  const abandoned = await settleAbandonedSummaryEmailRow(visit.id, database);
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
+  if (abandoned) await abandoned();
   const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
@@ -685,12 +734,14 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
     .whereIn('effect_type', ['completion_sms', 'completion_email']);
   // Keep the packet on recovery while either channel has proven-unsent work
   // or a live provider handoff, even if the other channel needs office review.
+  // A stale mark that still carries its pre-provider marker is provably
+  // unsent (the next replay reclaims it), so it stays pending, not review.
+  const stale = (effect) => new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS;
   const unknown = effects.some((effect) => effect.status === 'unknown_delivery'
-    && (effect.last_error === 'provider_outcome_unknown'
-      || new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS));
+    && (effect.last_error === 'provider_outcome_unknown' || (stale(effect) && !VisitGroups.isHandoffPending(effect.last_error))));
   const pending = effects.length !== 2 || effects.some((effect) => !['sent', 'suppressed', 'unknown_delivery'].includes(effect.status)
     || (effect.status === 'unknown_delivery' && effect.last_error !== 'provider_outcome_unknown'
-      && new Date(effect.claimed_at).getTime() > Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS));
+      && (!stale(effect) || VisitGroups.isHandoffPending(effect.last_error))));
   return { state: pending ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
