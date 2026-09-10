@@ -83,3 +83,21 @@ The source hashes recorded by `.tmp/admin-equipment-foundation/report.json` are:
 Current local artifacts are `.tmp/admin-equipment-foundation/report.json`, `.tmp/admin-equipment-foundation/review.html` and the 60 report-listed PNG captures in that directory.
 
 Three real-iPhone installed-PWA captures attached to [#4280](https://github.com/wavespestcontrolfl/waves-customer-portal/pull/4280) show the notch/safe area clear and Save/Cancel visible while scrolling. On September 10 the owner also confirmed in this session that the full physical iPhone software-keyboard check passed in the installed `Equipment QA` PWA. That owner confirmation closes the keyboard prerequisite; the automated browser run does not emulate a full native keyboard, and the verification agent did not capture that full-keyboard evidence.
+
+### Assets toast pointer-behavior review fix — September 10, 2026
+
+Final-head review found that the migrated success toast could participate in pointer hit testing even though the previous notification did not. Assets commit `549e597c0c3295d002265d73f6b22d22b4308a05` adds only `pointer-events-none` to the toast Card, restoring click-through behavior without changing its visual position, status semantics or message lifecycle. The integration owner separately verified desktop Chromium and touch WebKit hit testing by tapping through the visible toast into the Notes field.
+
+That fix was merged into the local verification branch at clean commit `3f5c12cfa0963757ee8a5ef962d0c18b20272a83`. Node 20.20.2 worktree setup and the frontend doctor passed again with credentials excluded, background jobs disabled and migrations not checked. The clean-commit browser run started at `2026-09-10T22:51:18.590Z` and passed all 214 geometry cases (107 Chromium and 107 touch WebKit), all 66 behavior checks and all 60 screenshot captures. Both browser states recorded no page errors, unmatched synthetic API routes or unexpected console errors. The deliberate 503 failure/retry fixtures remained the only console errors. Refreshed desktop and phone Assets and equipment-edit captures were visually inspected and remained correct.
+
+The refreshed report records these SHA-256 hashes:
+
+| Source | SHA-256 |
+| --- | --- |
+| `client/src/components/admin/AdminCommandHeader.jsx` | `6f8c2f349196321cacfeb1617355b2a092dbf97354c6c3df8ddeed014e12fe8f` |
+| `client/src/pages/admin/EquipmentPage.jsx` | `bb9047a8192810d06e5c31e6f15b2c4d284f4f623b9513fdf35f02620278a811` |
+| `client/src/pages/admin/EquipmentMaintenancePage.jsx` | `5beb79a59f2a412c9ef39b0c32c0e6c6afcb826d649c61b41ac16f4fb1c385be` |
+| `client/src/pages/admin/EquipmentCalibrationPanel.jsx` | `20690e4863751ba7d71986f95db1c251fd31bfae49c1b40998b0b992d8300129` |
+| `scripts/qa/admin-equipment-foundation.js` | `29b546f8f83bf3ce5aef7837ee961f6e5bcb0791138bd2446107ad8fadee0664` |
+
+The refreshed local artifacts remain `.tmp/admin-equipment-foundation/report.json`, `.tmp/admin-equipment-foundation/review.html` and the 60 report-listed PNG captures. The earlier focused suites, production build and physical iPhone acceptance above remain historical evidence; they were not repeated for this one-class pointer-behavior correction.
