@@ -1009,10 +1009,11 @@ const ReviewService = {
    * bound total volume, and an sms_log blip must not silently kill every
    * post-service enrollment.
    */
-  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null, failClosed = false, returnAt = false } = {}) {
+  async manualReviewAskSentRecently(customerId, { windowDays = 30, since = null, failClosed = false, returnAt = false, includeReservations = true } = {}) {
     try {
       const manualAt = await ASK_HISTORY.lastManualAskAt(customerId, {
         since: since || new Date(Date.now() - windowDays * 86400000),
+        includeReservations,
       });
       return returnAt ? manualAt : manualAt != null;
     } catch (err) {
@@ -1522,7 +1523,7 @@ const ReviewService = {
         tName = tName || sr?.tech_name || null;
       }
       // Owner already asked this customer by hand → the cadence stands down.
-      if (await this.manualReviewAskSentRecently(customerId)) {
+      if (await this.manualReviewAskSentRecently(customerId, { includeReservations: false })) {
         logger.info(`[review] Post-service cadence skipped (customerId=${customerId} reason=manual_ask_recent)`);
         return { started: false, reason: "manual_ask_recent" };
       }
@@ -1954,10 +1955,13 @@ const ReviewService = {
 
       deliveryOutcome = result?.deliveryOutcome;
       if (deliveryOutcome === "accepted") {
-        await db("review_requests").where({ id: requestId }).update({
-          sms_sent_at: new Date(),
-          status: "sent",
-        });
+        const stamped = await stampWithRetry(
+          () => db("review_requests").where({ id: requestId }).update({
+            sms_sent_at: new Date(), status: "sent",
+          }),
+          `SMS sent stamp (requestId=${requestId})`,
+        );
+        if (!stamped) return { sent: true, unrecorded: true };
         await releaseReviewSmsReservation(reservation);
         reservation = null;
         // PII: ID-only per AGENTS.md.
@@ -4898,7 +4902,11 @@ const ReviewService = {
     let manualAskRecent = false;
     if (seq.started_at) {
       try {
-        manualAskRecent = await this.manualReviewAskSentRecently(seq.customer_id, { since: seq.started_at, failClosed: true });
+        // An ambiguous attempt enforces spacing below; it does not prove a
+        // staff send that should permanently retire this cadence.
+        manualAskRecent = await this.manualReviewAskSentRecently(seq.customer_id, {
+          since: seq.started_at, failClosed: true, includeReservations: false,
+        });
       } catch (err) {
         askLookupFailed = true; // (codex #4141 r4 P1)
         logger.warn(`[review] staff-ask lookup failed (sequenceId=${seq.id}): ${err.message}`);
