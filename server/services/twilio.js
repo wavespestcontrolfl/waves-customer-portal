@@ -1016,6 +1016,28 @@ const TwilioService = {
    * Send 24-hour service reminder
    * Called by cron job the day before scheduled service
    */
+  // The customer's notification_prefs row as it applies to ONE visit (app
+  // property scope, PR 3): a NON-primary saved property's toggles when
+  // enforced, shadow-logged otherwise. An unreadable property under
+  // enforcement THROWS — the callers map that to a retry — but not silently:
+  // en-route / arrived have no scheduler retry lane for an ungrouped visit,
+  // so the office is belled first (in-session review on f9945dc89).
+  async _visitPrefsFor(customerId, scheduledServiceId, source) {
+    const row = await db("notification_prefs").where({ customer_id: customerId }).first();
+    try {
+      return await require('./property-notification-prefs').prefsForVisit(row, customerId, scheduledServiceId, source);
+    } catch (err) {
+      try {
+        await require('./notification-service').notifyAdmin('appointment', 'Appointment text not sent',
+          `The ${source.replace(/_/g, ' ')} text for visit ${scheduledServiceId} could not be sent: the property's notification settings were unreadable. Please contact the customer.`,
+          { dedupeKey: `property-prefs-unreadable:${scheduledServiceId}:${source}`, metadata: { scheduledServiceId, customerId, source } });
+      } catch (bellErr) {
+        logger.error(`[twilio] unreadable-property bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+      }
+      throw err;
+    }
+  },
+
   async sendServiceReminder(customerId, scheduledServiceId) {
     const customer = await db("customers").where({ id: customerId }).first();
     const service = await db("scheduled_services")
@@ -1030,10 +1052,10 @@ const TwilioService = {
 
     if (!customer || !service) return;
 
-    // Check if customer has this notification enabled
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // Check if customer has this notification enabled — for a NON-primary
+    // saved property, that property's own toggle (app property scope, PR 3;
+    // enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise).
+    const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'reminder_24h_legacy');
     if (!prefs?.service_reminder_24h || !prefs?.sms_enabled) return;
 
     const time = service.window_start
@@ -1095,9 +1117,11 @@ const TwilioService = {
    */
   async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null, scheduledServiceId = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // The visit's NON-primary saved property owns the en-route toggle (app
+    // property scope, PR 3; enforced under GATE_APP_PROPERTY_TEXTS, shadow-
+    // logged otherwise). A failed property read under enforcement throws —
+    // the caller retries rather than texting on the customer row's answer.
+    const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'en_route');
     if (!customer || !prefs?.tech_en_route) return;
 
     // Honor the customer's delivery-channel choice (portal Settings dropdown,
@@ -1231,13 +1255,24 @@ const TwilioService = {
     const sendEnRouteEmail = async () => {
       try {
         const AppointmentEmail = require("./appointment-email");
-        return await AppointmentEmail.sendTechEnRouteEmail({
+        const res = await AppointmentEmail.sendTechEnRouteEmail({
           customerId,
+          scheduledServiceId,
           techName: customerTechName,
           etaMinutes,
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
+        // A HELD email (preferences unreadable at the provider handoff) has
+        // no retry lane on this path — bell the office so an email-only
+        // service contact is not silently skipped (GitHub codex #4299 r4 P1).
+        if (res?.held) {
+          await require('./notification-service').notifyAdmin('appointment', 'En-route email not sent',
+            `The en-route email for visit ${scheduledServiceId || customerId} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `en-route-email-held:${scheduledServiceId || customerId}`, metadata: { scheduledServiceId, customerId } })
+            .catch((bellErr) => logger.error(`[twilio] en-route email hold bell failed for ${customerId}: ${bellErr.message}`));
+        }
+        return res;
       } catch (e) {
         logger.warn(`[twilio] en-route email send failed for customer ${customerId}: ${e.message}`);
         return { ok: false, error: e.message };
@@ -1245,7 +1280,9 @@ const TwilioService = {
     };
     const alertUnreachable = async () => {
       try {
-        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route" });
+        // Visit-aware (app property scope, PR 3): reachability is judged on
+        // the recipients THIS visit's saved property notifies (GitHub codex r5 P1).
+        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route", scheduledServiceId });
       } catch (e) {
         logger.warn(`[twilio] en-route no-channel alert failed for customer ${customerId}: ${e.message}`);
       }
@@ -1305,9 +1342,8 @@ const TwilioService = {
    */
   async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // Same per-property toggle as en-route (app property scope, PR 3).
+    const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'arrived');
     // Deterministic local suppression (opt-out / SMS disabled / missing customer):
     // the arrival is "handled", not a retryable failure. The caller (markOnProperty)
     // keeps its idempotency guard stamped on this signal so no later same-job

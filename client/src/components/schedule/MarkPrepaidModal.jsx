@@ -6,7 +6,7 @@
 // Mobile-first layout — stays inside the admin V2 system (Tailwind zinc ramp).
 
 import { useState } from 'react';
-import { createPortal } from 'react-dom';
+import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from '../ui';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -199,28 +199,13 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
     }
   }
 
-  return createPortal(
-    <div
-      onClick={dismiss}
-      className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
-      style={{ background: 'rgba(15,23,42,0.55)', padding: 16, paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))' }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full bg-white rounded-2xl max-h-full overflow-y-auto box-border"
-        style={{ maxWidth: 480, padding: 20 }}
-      >
-        <div
-          className="flex items-start justify-between"
-          style={{ marginBottom: 16 }}
-        >
+  return (
+    <Dialog open onClose={dismiss} layer={1200}>
+        <DialogHeader className="flex items-start justify-between gap-3">
           <div>
-            <div
-              className="font-medium text-zinc-900"
-              style={{ fontSize: 18 }}
-            >
+            <DialogTitle>
               {isExistingPrepayment ? 'Edit prepayment' : 'Mark prepaid'}
-            </div>
+            </DialogTitle>
             <div
               className="text-ink-secondary"
               style={{ fontSize: 13, marginTop: 2 }}
@@ -233,12 +218,12 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
             onClick={dismiss}
             aria-label="Close"
             className="flex items-center justify-center rounded-full bg-white border border-hairline border-zinc-200 u-focus-ring"
-            style={{ width: 32, height: 32, fontSize: 18, lineHeight: 1 }}
+            style={{ width: 44, height: 44, flexShrink: 0, fontSize: 18, lineHeight: 1 }}
           >
             ×
           </button>
-        </div>
-
+        </DialogHeader>
+        <DialogBody className="flex-1">
         {isSeries && (
           <label
             className="flex items-start gap-3 border border-hairline border-zinc-200 rounded-lg bg-zinc-50 cursor-pointer"
@@ -363,6 +348,8 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           </label>
         )}
 
+        </DialogBody>
+        <DialogFooter className="flex-col items-stretch">
         {receiptNote && (
           <div
             className="border border-hairline border-zinc-200 rounded-lg bg-zinc-50 text-ink-secondary"
@@ -374,12 +361,14 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
 
         {error && (
           <div
+            role="alert"
             className="text-alert-fg"
             style={{ fontSize: 13, marginBottom: 12 }}
           >
             {error}
           </div>
         )}
+
 
         <button
           type="button"
@@ -390,8 +379,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
         >
           {saving ? 'Saving…' : savedWithNote ? 'Done' : isExistingPrepayment ? 'Save changes' : 'Save prepayment'}
         </button>
-      </div>
-    </div>,
-    document.body,
+        </DialogFooter>
+    </Dialog>
   );
 }
