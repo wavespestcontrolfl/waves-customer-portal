@@ -57,20 +57,21 @@ function loadWorker(cache) {
   vm.createContext(sandbox);
   vm.runInContext(`${source}\n;this.__exports = { cacheCompleteShellResponse, pruneStaleAssets, buildIdOf, shellAssetUrls };`, sandbox);
   // Simulate the page requesting a URL: returns the handler's response after
-  // its extend-lifetime work (the tagged cache write) has settled.
-  async function dispatchFetch(pathname) {
+  // its extend-lifetime work has settled (unless the caller wants to hold it).
+  async function dispatchFetch(pathname, { mode = 'no-cors', settle = true } = {}) {
     const pending = [];
     let responded;
     listeners.fetch({
-      request: { url: `https://portal.test${pathname}`, mode: 'no-cors', destination: 'script' },
+      request: { url: `https://portal.test${pathname}`, mode, destination: mode === 'navigate' ? 'document' : 'script' },
       respondWith(promise) { responded = promise; },
       waitUntil(promise) { pending.push(promise); },
     });
     const response = await responded;
-    await Promise.all(pending);
-    return response;
+    if (settle) await Promise.all(pending);
+    return { response, settled: () => Promise.all(pending) };
   }
-  return { ...sandbox.__exports, dispatchFetch };
+  const setFetch = (fn) => { sandbox.fetch = fn; };
+  return { ...sandbox.__exports, dispatchFetch, setFetch };
 }
 
 const shellHtml = (assets) => `<html><head>${assets.map(a => `<script src="${a}"></script>`).join('')}</head></html>`;
@@ -209,11 +210,43 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
     await dispatchFetch('/assets/Shared-XYZ.js');
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])));
-    const hit = await dispatchFetch('/assets/Shared-XYZ.js');
+    const { response: hit } = await dispatchFetch('/assets/Shared-XYZ.js');
     expect(await hit.text()).toBe('asset:https://portal.test/assets/Shared-XYZ.js');
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
 
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
+  });
+
+  it('tags chunks loaded before the new shell lands with the build the page received', async () => {
+    // Codex pre-push P1: a navigation returns build B's HTML at once, but B's
+    // shell refresh (asset preload + prune) runs in the background. A page
+    // chunk B loads in that window belongs to B — tagging it with the still
+    // cached A would let C's prune delete it while B is the retained build.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+
+    let releaseAssets;
+    const assetsGate = new Promise(resolve => { releaseAssets = resolve; });
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) await assetsGate; // B's preload is still in flight
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const nav = await dispatchFetch('/admin/', { mode: 'navigate', settle: false });
+    expect(await nav.response.text()).toBe(shellHtml(['/assets/index-BBB.js']));
+    // Page B lazy-loads a route while its shell refresh is parked.
+    await dispatchFetch('/assets/DashboardPageV2-BBB.js');
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build'))
+      .toBe(buildIdOf(['/assets/index-BBB.js']));
+
+    releaseAssets();
+    await nav.settled();
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
   });
 
   it('does not touch cached page chunks when the same shell is refreshed', async () => {
@@ -235,13 +268,13 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     const { cacheCompleteShellResponse, dispatchFetch, buildIdOf } = loadWorker(cache);
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
 
-    const first = await dispatchFetch('/assets/Chunk-AAA.js');
+    const { response: first } = await dispatchFetch('/assets/Chunk-AAA.js');
     expect(first.headers.get('x-waves-build')).toBeNull(); // the page gets the network response untouched
     const cached = await cache.match('/assets/Chunk-AAA.js');
     expect(cached.headers.get('x-waves-build')).toBe(buildIdOf(['/assets/index-AAA.js']));
     expect(await cached.text()).toBe('asset:https://portal.test/assets/Chunk-AAA.js');
 
-    const second = await dispatchFetch('/assets/Chunk-AAA.js');
+    const { response: second } = await dispatchFetch('/assets/Chunk-AAA.js');
     expect(await second.text()).toBe('asset:https://portal.test/assets/Chunk-AAA.js');
     expect(second).toBe(cached); // same build → the hit is served as-is, no re-stamp
   });

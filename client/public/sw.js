@@ -66,12 +66,22 @@ function tagWithBuild(response, buildId) {
 // chunk fetched right now belongs to. Worker globals do not survive
 // termination, so read it from the cache each time (one small parse, and
 // only on an /assets/ cache miss).
-let liveBuildId = null; // memo for this worker lifetime; refreshes update it
-async function currentBuildId(cache) {
-  if (liveBuildId) return liveBuildId;
+async function cachedBuildId(cache) {
   const shell = await cache.match(OFFLINE_URL);
   if (!shell) return null;
-  liveBuildId = buildIdOf(shellAssetUrls(await shell.text()));
+  return buildIdOf(shellAssetUrls(await shell.text()));
+}
+
+// The build pages are running right now. A navigation hands the page build
+// B's HTML before B's background shell refresh finishes, so chunks B loads
+// in that window must not be stamped with the still-cached build A; the
+// navigation handler advances this memo from the fresh HTML immediately.
+// Memoized per worker lifetime, seeded from the cached shell after a cold
+// start. Never used to decide what the previous build was — that comes
+// from the cached shell itself (cachedBuildId), or pruning would never fire.
+let liveBuildId = null;
+async function currentBuildId(cache) {
+  if (!liveBuildId) liveBuildId = await cachedBuildId(cache);
   return liveBuildId;
 }
 
@@ -108,7 +118,7 @@ async function replaceCompleteShell(shellResponse) {
   }));
   // Read the previous build BEFORE overwriting its shell: a different id
   // means a deploy shipped, and everything older than that build is dead weight.
-  const previousBuildId = await currentBuildId(cache);
+  const previousBuildId = await cachedBuildId(cache);
   await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, tagWithBuild(response, buildId))));
   await cache.put(OFFLINE_URL, shellResponse);
   liveBuildId = buildId;
@@ -172,6 +182,13 @@ self.addEventListener('fetch', event => {
         // are available. Keep serving the current page immediately; if this
         // background refresh fails, the last complete shell remains intact.
         if (response && response.ok) {
+          // Advance the live build before the (serialized, possibly slow)
+          // refresh lands, so chunks this page loads meanwhile are tagged
+          // with its own build. A shell without assets is not a build.
+          event.waitUntil(response.clone().text().then(html => {
+            const assets = shellAssetUrls(html);
+            if (assets.length) liveBuildId = buildIdOf(assets);
+          }).catch(() => {}));
           event.waitUntil(cacheCompleteShellResponse(response.clone()).catch(() => {}));
         }
         return response;
