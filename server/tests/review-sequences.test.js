@@ -5149,3 +5149,14 @@ test('failed approval persistence removes a newly created unsent request so a fr
     expect(mock.__state.rows.review_requests[0].status).not.toBe('suppressed');
   } finally { gate.mockRestore(); }
 });
+
+
+test.each(['scheduled', 'failed', 'blocked', 'canceled', 'cancelled', 'undelivered'])('recovered %s reservations hold spacing without becoming confirmed staff asks', async status => {
+  const at = new Date();
+  const query = { where: jest.fn(() => query), whereNotNull: jest.fn(() => query), orderBy: jest.fn(() => query),
+    select: jest.fn(async () => [{ status, created_at: at, message_body: 'Please leave a Google review.', metadata: { review_ask_reservation: true } }]) };
+  db.mockImplementation(() => query);
+  const history = require('../services/review-ask-history');
+  expect(await history.lastManualAskAt('recovered-reservation', { since: at })).toEqual(at);
+  expect(await history.lastManualAskAt('recovered-reservation', { since: at, includeReservations: false })).toBeNull();
+});

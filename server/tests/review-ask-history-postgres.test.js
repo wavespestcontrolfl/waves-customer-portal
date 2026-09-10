@@ -79,6 +79,7 @@ postgres('review ask history against migrated PostgreSQL', () => {
       created_at: at, message_body: 'Please leave a Google review.',
       metadata: { review_ask_reservation: true } }).returning('id');
     expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(at);
+    expect(await history.lastManualAskAt(customerId, { since: at, includeReservations: false })).toBeNull();
     expect(await history.lastManualAskAt(customerId, { since: new Date(at.getTime() + 1) })).toBeNull();
     await trx('sms_log').where({ id: row.id }).update({ metadata: {} });
     expect(await history.lastManualAskAt(customerId, { since: at })).toBeNull();

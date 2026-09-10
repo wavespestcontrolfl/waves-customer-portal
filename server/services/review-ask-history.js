@@ -82,6 +82,7 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
     catch { return {}; }
   };
   const isReviewReservation = row => metadata(row).review_ask_reservation === true;
+  const isConfirmed = row => ['sent', 'delivered'].includes(row.status) || metadata(row).finalize_only === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window only when the caller includes reservations. A confirmed marker
   // belongs in candidates below: it is durable delivery evidence even when
@@ -89,7 +90,7 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
   // and the normal request/log correlation must still distinguish an
   // automated pipeline send from a staff ask.
   const reservations = includeReservations
-    ? outbound.filter(row => row.status === 'sending' && isReviewReservation(row))
+    ? outbound.filter(row => isReviewReservation(row) && !isConfirmed(row))
     : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
@@ -97,7 +98,7 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
   }, null);
   const candidates = outbound.filter(row => {
     const meta = metadata(row);
-    if (row.status === 'sending' && !meta.finalize_only) return false;
+    if ((isReviewReservation(row) && !isConfirmed(row)) || (row.status === 'sending' && !meta.finalize_only)) return false;
     return isReviewReservation(row) || looksLikeReviewAsk(row.message_body)
       || !!(meta.bundled_review_request_id || meta.review_ask_delivered_at);
   });
