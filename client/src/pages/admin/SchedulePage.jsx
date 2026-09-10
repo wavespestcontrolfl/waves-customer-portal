@@ -14024,8 +14024,11 @@ export function CompletionPanel({
       row = planned || { ...row, rate: "", totalAmount: "", applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
         lawnAreaDefault: row.areaUnit === "sqft",
         lawnAmountReason: "Enter the actual amount for this application." };
-      setLawnRemovedDefaultIds(ids => ids.filter(id => String(id) !== String(product.id)));
     }
+    // A re-added product is no longer a removed default whatever the plan
+    // state — a draft restored under an outage carries removed ids too, and
+    // the skip payload must never list an applied product (pre-push audit P1).
+    setLawnRemovedDefaultIds(ids => ids.filter(id => String(id) !== String(product.id)));
     setSelectedProducts((prev) => [...prev, row]);
     setProductSearch("");
   }
@@ -15045,7 +15048,7 @@ export function CompletionPanel({
       // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
       // server's unlisted-skip audit (Codex #4113 P2).
       const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
-        ? lawnRemovedDefaultIds.flatMap((id) => {
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
             const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
             const productName = item?.product?.name || catalogProduct?.name;

@@ -446,6 +446,19 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
     expect(submitted[0]).toMatchObject({ carrier_gal_per_1000: 2, total_carrier_gal: 8 });
   });
 
+  test('a product the visit applied is never also a skipped default, whatever the client submitted', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const actuals = []; const completions = [];
+    const applied = { id: 'sp-2', product_id: 'prod-2', product_name: 'Fixture bifenthrin', application_rate: 3, rate_unit: 'fl oz', total_amount: 7.5, amount_unit: 'fl oz', application_method: 'broadcast_spray', area_value: '4000', area_unit: 'sqft' };
+    await recordLawnProtocolCompletion(fakeTrx(completions, actuals), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: insectPlan, serviceProducts: [applied],
+      completionInput: { treatedSqft: 4000, skippedProducts: [{ productId: 'prod-2', productName: 'Fixture bifenthrin' }] },
+    });
+    expect(actuals).toHaveLength(1);
+    expect(actuals[0].status).not.toBe('skipped');
+    expect(JSON.parse(completions[0].metadata).unlistedSkippedProducts).toEqual([]);
+  });
+
   test('withheld attribution also withholds the plan\'s substitution labels: the applied substitute is a plain application', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const actuals = []; const completions = [];

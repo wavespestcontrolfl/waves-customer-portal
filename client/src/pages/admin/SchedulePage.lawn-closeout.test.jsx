@@ -583,6 +583,35 @@ it('a governed draft restored under an initial plan outage still submits its rem
   expect(submit.mock.calls[0][1].lawnProtocolCompletion.skippedProducts).toEqual([{ productId: products[0].id, productName: products[0].name }]);
 });
 
+it('a removed default re-added under a plan outage is applied, not skipped (pre-push audit P1)', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnRemovedDefaultIds).toEqual([products[0].id]));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: products[0].name } });
+  fireEvent.click(screen.getByText(products[0].name));
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  totals().forEach((input) => {
+    const card = within(input.parentElement);
+    fireEvent.change(card.getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } });
+    fireEvent.change(card.getAllByRole('combobox')[1], { target: { value: 'fl_oz' } });
+    fireEvent.change(card.getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
+    fireEvent.change(input, { target: { value: '2' } });
+  });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const payload = submit.mock.calls[0][1];
+  expect(payload.products.map((row) => row.productId).sort()).toEqual([products[0].id, secondProduct.id].sort());
+  expect(payload.lawnProtocolCompletion?.skippedProducts ?? []).toEqual([]);
+});
+
 it('changing only the rate unit withdraws a plan-suggested rate and total instead of relabeling them, and returning to the plan unit restores them', async () => {
   enableDefaults();
   mount();

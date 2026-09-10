@@ -487,7 +487,15 @@ async function recordLawnProtocolCompletion(trx, {
   // calendar plan's substitute is a plain application on a visit with no
   // applicable protocol, never an approved protocol substitution (Codex #4113).
   const { substitutions, bySubstituteProductId } = resolveSubstitutions(attribution.attributed ? plan : null);
-  const skips = await revalidateSkippedProducts(trx, partitionSkippedProducts(completionInput, plan, attribution.structured, allLawn));
+  // A product the visit applied is not a skipped default, whatever the client
+  // submitted: an applied and a skipped row for one product would inflate
+  // Command Center's skip counts (pre-push audit P1).
+  const appliedIds = new Set(serviceProducts.map((row) => String(row.product_id || '')));
+  const partitioned = partitionSkippedProducts(completionInput, plan, attribution.structured, allLawn);
+  const skips = await revalidateSkippedProducts(trx, {
+    skipped: partitioned.skipped.filter((row) => !appliedIds.has(String(row.productId))),
+    unlisted: partitioned.unlisted.filter((row) => !appliedIds.has(String(row.productId))),
+  });
 
   const [completion] = await trx('lawn_protocol_service_completions')
     .insert(buildCompletionRow({
