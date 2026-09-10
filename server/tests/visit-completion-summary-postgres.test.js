@@ -1914,15 +1914,24 @@ postgres('visit summary recipient recovery', () => {
     const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
     await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
     try {
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
       expect(await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId, { requireDue: true })).toMatchObject({ payerBilled: true, payerId: payer.id });
       expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}` });
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      // The late withdrawal is office review, like the coordinator's own payer finding: packet error + one alert.
+      const closed = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first();
+      expect(JSON.parse(closed.error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned' });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+      expect(await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId)).toMatchObject({ payerBilled: true });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
       // The deactivation that was waiting on the claim's payer lock lands next: ownership is self-pay again.
       expect(await Payer.updatePayer(payer.id, { active: false })).toMatchObject({ payer: { active: false } });
       const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
       expect(invoice).toMatchObject({ status: 'scheduled', scheduled_send_error: null, scheduled_send_attempts: 0 });
       expect(invoice.scheduled_send_at).not.toBeNull();
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+      expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'done', error: null });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
     } finally {
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('invoices').where({ id: invoiceId }).del();
