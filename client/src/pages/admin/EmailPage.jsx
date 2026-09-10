@@ -24,6 +24,7 @@ export default function EmailPage({ navigation, active }) {
     key: "compose",
     label: hasComposeDraft ? "Resume draft" : "New email",
     icon: Plus,
+    variant: mailbox.selectedEmail ? "secondary" : "primary",
     onClick: (event) => {
       event.currentTarget.focus({ preventScroll: true });
       setShowCompose(true);
@@ -48,7 +49,10 @@ export default function EmailPage({ navigation, active }) {
         <Button onClick={handleConnectGmail} loading={connecting}>Connect Gmail account</Button>
       </div> : <>
         {(hasDrafts || storageError) && <ActionFeedback error={storageError} className="mb-4">{recoveryNotice}</ActionFeedback>}
-        <EmailSummary stats={stats} digest={digest} />
+        <details open className="group mb-5 rounded-md border-hairline border-zinc-200 bg-white">
+          <summary className="u-focus-ring min-h-11 cursor-pointer px-4 py-3 font-medium">Email activity</summary>
+          <div className="px-4 pb-1"><EmailSummary stats={stats} digest={digest} /></div>
+        </details>
         {tab === "blocked" && <BlockedSenders mailbox={mailbox} />}
         {tab === "inbox" && <EmailInbox active={active} mailbox={mailbox} editor={editor} />}
         <EmailComposer active={active} editor={editor} onSent={mailbox.loadStats} />
