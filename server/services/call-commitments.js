@@ -1774,6 +1774,14 @@ const HUMAN_ACTIONS = new Set(['confirm', 'dismiss', 'fulfill', 'reopen', 'edit'
 // conversation that fulfilled it before.
 async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy, renewalAudit = true } = {}) {
   if (!HUMAN_ACTIONS.has(action)) throw Object.assign(new Error(`Unknown commitment action: ${action}`), { status: 400 });
+  // The row update and its renewal boundary commit together: a refresh
+  // running between them would close a reopened callback on the old
+  // conversation, and a failed audit insert would leave the boundary
+  // missing for good. Callers that pass the plain connection get one
+  // transaction here; a caller's own transaction is reused as is.
+  if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
     ? await conn('call_commitments').where({ id }).first('kind', 'party', 'description', 'due_at') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
