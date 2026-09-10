@@ -1736,6 +1736,15 @@ const ReviewService = {
           logger.info(
             `[review] SMS DEFERRED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${deferredRetryAt.toISOString()})`,
           );
+        } else if (result.blocked && result.code === "VISIT_SUMMARY_UNCERTAIN") {
+          // Parked with its summary: the pending ask is removed, exactly as
+          // the parking operation does, and re-created when the summary settles.
+          await db("review_requests").where({ id: requestId, status: "pending" }).del().catch(() => {});
+          logger.info(`[review] Parked request at the provider (requestId=${requestId} reason=visit_summary_bounced)`);
+        } else if (result.blocked && result.code === "VISIT_SUMMARY_STATE_UNAVAILABLE") {
+          const retryAt = new Date(Date.now() + 30 * 60 * 1000);
+          await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt });
+          logger.info(`[review] SMS deferred: summary state unavailable (requestId=${requestId}) (queued for retry at ${retryAt.toISOString()})`);
         } else if (result.blocked && result.code === "CONSENT_LOOKUP_FAILED") {
           // Transient lookup failure inside the wrapper (DB error during
           // consent validation). Distinct code from NO_CONSENT_RECORD;
@@ -3462,6 +3471,17 @@ const ReviewService = {
       return { ok: false, retryable: true, channel: "sms", requestId: request.id };
     }
 
+    const summaryVerdict = this._visitSummaryVerdictOutcome(result, request);
+    if (summaryVerdict) {
+      // Parked: the parking operation removed or will remove the durable
+      // row; unreadable: keep the ask pending for a later pass.
+      if (summaryVerdict.reason === "summary_state_unavailable") {
+        await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
+      } else {
+        await db("review_requests").where({ id: request.id, status: "pending" }).del().catch(() => {});
+      }
+      return summaryVerdict;
+    }
     try {
       return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
     } catch (bookErr) {
@@ -3565,6 +3585,7 @@ const ReviewService = {
     // onQueued fires immediately before the provider call — a throw after it
     // MAY have reached SendGrid (GH Codex #3856 r9 P2).
     let dispatched = false;
+    let summaryBlock = null;
     try {
       const EmailLib = require("./email-template-library");
       result = await EmailLib.sendTemplate({
@@ -3573,7 +3594,7 @@ const ReviewService = {
         // Re-judged immediately before the SendGrid request.
         withProviderHandoff: async (dispatch) => {
           const verdict = await this._visitSummaryPreDispatch(request?.service_record_id);
-          if (verdict.ok !== true) return verdict;
+          if (verdict.ok !== true) { summaryBlock = { blocked: true, code: verdict.code }; return verdict; }
           await dispatch();
           return { ok: true };
         },
@@ -3624,6 +3645,15 @@ const ReviewService = {
       // operator is told it went and not to resend (GH Codex #3856 r12 P2).
       // A sequence step keeps its step-stable idempotency key, so it stays ok.
       return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_sent_unrecorded" };
+    }
+    const summaryVerdict = summaryBlock && this._visitSummaryVerdictOutcome(summaryBlock, request);
+    if (summaryVerdict) {
+      if (summaryVerdict.reason === "summary_state_unavailable") {
+        await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
+      } else {
+        await db("review_requests").where({ id: request.id, status: "pending" }).del().catch(() => {});
+      }
+      return { ...summaryVerdict, channel: "email" };
     }
     try {
       await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
@@ -4443,7 +4473,9 @@ const ReviewService = {
     // under the reason the closeout coordinator resumes.
     if (seq.service_record_id) {
       const Summary = require("./visit-completion-summary");
-      if (await Summary.visitSummaryUncertainForRecord(seq.service_record_id)) return stop(Summary.PARKED_REVIEW_REASON);
+      const parked = await Summary.visitSummaryUncertainForRecord(seq.service_record_id);
+      if (parked === null) return { ran: false, deferred: true, retryAt: new Date(Date.now() + 30 * 60 * 1000), reason: "summary_state_unavailable" };
+      if (parked) return stop(Summary.PARKED_REVIEW_REASON);
     }
 
     // Gate-toggle hygiene (Codex P2, r4): while GATE_REVIEW_SEQUENCES is off
@@ -4566,6 +4598,7 @@ const ReviewService = {
       return { ran: true, sent: true, step: seq.current_step };
     }
 
+    if (outcome.reason === "visit_summary_parked") return stop(require("./visit-completion-summary").PARKED_REVIEW_REASON);
     if (outcome.terminal || outcome.blocked) {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
@@ -4716,7 +4749,18 @@ const ReviewService = {
   async _visitSummaryPreDispatch(serviceRecordId) {
     if (!serviceRecordId) return { ok: true };
     const uncertain = await require("./visit-completion-summary").visitSummaryUncertainForRecord(serviceRecordId);
+    if (uncertain === null) return { ok: false, code: "VISIT_SUMMARY_STATE_UNAVAILABLE", reason: "The visit summary state could not be read", retryable: true };
     return uncertain ? { ok: false, code: "VISIT_SUMMARY_UNCERTAIN", reason: "The visit summary this review follows is awaiting recovery" } : { ok: true };
+  },
+
+  // A blocked summary verdict at the provider is never a policy block: a
+  // parked summary parks the ask (resumable), an unreadable state defers it.
+  _visitSummaryVerdictOutcome(result, request) {
+    if (!result?.blocked || !["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE"].includes(result.code)) return null;
+    const parked = result.code === "VISIT_SUMMARY_UNCERTAIN";
+    return { ok: false, retryable: true, deferred: true, channel: "sms", requestId: request?.id,
+      reason: parked ? "visit_summary_parked" : "summary_state_unavailable",
+      nextAllowedAt: new Date(Date.now() + 30 * 60 * 1000).toISOString() };
   },
 
   async stopReviewSequence(sequenceId, reason = "manual") {

@@ -505,20 +505,21 @@ const PARKED_REVIEW_REASON = 'visit_summary_bounced';
 
 // True while the visit that recorded this service record has a summary leg
 // parked as uncertain: review outreach for it must not reach a provider.
+// true = parked, false = clear, null = the state could not be read (callers
+// defer rather than send on a guess).
 async function visitSummaryUncertainForRecord(serviceRecordId, database = db) {
   if (!serviceRecordId) return false;
   try {
-    const item = await database('visit_completion_packet_items as i').join('visit_completion_packets as p', 'p.id', 'i.packet_id')
-      .where('i.service_record_id', serviceRecordId).first('p.visit_id');
+    const item = await database('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id');
     if (!item) return false;
-    const uncertain = await database('visit_effects').where({ visit_id: item.visit_id, status: 'unknown_delivery' })
+    const packet = await database('visit_completion_packets').where({ id: item.packet_id }).first('visit_id');
+    if (!packet) return false;
+    const uncertain = await database('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
       .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
     return Boolean(uncertain);
   } catch (err) {
-    // A read failure here must not park a sequence for good; the parking
-    // operation itself is durable and the coordinator resumes it.
     require('./logger').warn(`[visit-closeout] summary uncertainty check failed for record ${serviceRecordId}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
