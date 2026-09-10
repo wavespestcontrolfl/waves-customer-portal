@@ -195,6 +195,23 @@ async function updatePayer(id, body) {
           conflict: true, code: 'invoice_send_in_flight' };
       }
       const [row] = await trx('payers').where({ id: pid }).update(dbUpdates).returning('*');
+      // A deactivation that waited on a send claim's payer lock arrives after
+      // that claim withdrew the homeowner invoice to this payer: with the
+      // payer inactive, live ownership is self-pay again, so the withdrawn
+      // invoice returns to its queue (the worker re-judges ownership on its
+      // claim) and the hold the withdrawal set is lifted.
+      if (dbUpdates.active === false && current.active !== false) {
+        const withdrawn = await trx('invoices').where({ status: 'draft', scheduled_send_error: `payer_billed:${pid}` })
+          .whereNull('payer_id').whereNotNull('visit_completion_packet_id').select('id', 'visit_completion_packet_id');
+        if (withdrawn.length) {
+          await trx('invoices').whereIn('id', withdrawn.map((invoice) => invoice.id)).update({
+            status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now(),
+          });
+          await trx('service_visits').whereIn('id', trx('visit_completion_packets')
+            .whereIn('id', withdrawn.map((invoice) => invoice.visit_completion_packet_id)).select('visit_id'))
+            .update({ billing_hold: false, updated_at: trx.fn.now() });
+        }
+      }
       return { payer: row };
     });
   }

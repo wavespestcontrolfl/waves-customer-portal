@@ -567,6 +567,8 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
 }
 
 const PARKED_REVIEW_REASON = 'visit_summary_bounced';
+// stop_reason is varchar(24).
+const PARKED_SUPERSEDED_REASON = 'summary_park_superseded';
 
 // True while the visit that recorded this service record has a summary leg
 // parked as uncertain: review outreach for it must not reach a provider.
@@ -614,8 +616,19 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
   if (!packet || !records.length) return 0;
   const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
   if (await database('review_sequences').where({ customer_id: visit.customer_id, status: 'active' }).first('id')) return 0;
-  const resumed = await database('review_sequences').whereIn('service_record_id', records)
-    .where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
+  // A customer holds at most one active sequence (uq_review_sequences_active_customer):
+  // when several were parked for this packet (a later member's enrollment
+  // parked on arrival), the most recently parked one resumes and the others
+  // retire under a reason of their own, so nothing re-parks them again.
+  const parked = await database('review_sequences').whereIn('service_record_id', records)
+    .where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON }).orderBy('updated_at', 'desc').orderBy('id').select('id');
+  if (!parked.length) return 0;
+  const [chosen, ...others] = parked.map((row) => row.id);
+  if (others.length) {
+    await database('review_sequences').whereIn('id', others).where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
+      .update({ stop_reason: PARKED_SUPERSEDED_REASON, updated_at: database.fn.now() });
+  }
+  const resumed = await database('review_sequences').where({ id: chosen, status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
     .update({ status: 'active', stop_reason: null, completed_at: null, updated_at: database.fn.now(),
       next_run_at: database.raw('GREATEST(COALESCE(next_run_at, NOW()), NOW())') });
   return Number(resumed || 0);
@@ -643,7 +656,14 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
       if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
     }
     if (requestId) await trx('review_requests').where({ id: requestId, status: 'pending' }).update({ status: 'sending' });
-    return dispatch(trx);
+    const verdict = await dispatch(trx);
+    // A refusal before the request (consent, suppression, send window) is
+    // provably unsent: the row returns to pending in this same transaction,
+    // so a worker lost before the sender's own bookkeeping strands nothing.
+    if (requestId && verdict && verdict.ok === false) {
+      await trx('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending' });
+    }
+    return verdict;
   });
 }
 
