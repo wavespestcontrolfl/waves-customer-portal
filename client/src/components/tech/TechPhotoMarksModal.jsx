@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { DVH } from '../../lib/viewportUnits';
 // The SHARED palette (codex P1). A local copy made the comment below a lie:
 // a correction to markColor would have updated the live card and the PDF and
 // left the capture UI showing the technician different colours from the ones
@@ -178,7 +179,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
     >
       <div style={{
         background: DARK.bg, border: `1px solid ${DARK.border}`, borderRadius: 14,
-        width: '100%', maxWidth: 420, maxHeight: 'calc(100dvh - 28px)', boxSizing: 'border-box',
+        width: '100%', maxWidth: 420, maxHeight: `calc(100${DVH} - 28px)`, boxSizing: 'border-box',
         ...(isMobile ? { borderRadius: 0, maxWidth: 'none', height: '100%', maxHeight: '100%' } : {}),
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
         paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))',

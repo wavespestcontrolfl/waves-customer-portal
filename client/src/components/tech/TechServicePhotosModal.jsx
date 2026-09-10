@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../../hooks/useIsMobile';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { DVH } from '../../lib/viewportUnits';
 import TechPhotoMarksModal from './TechPhotoMarksModal';
 
 const DARK = {
@@ -154,7 +155,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         style={{
           background: DARK.bg, width: '100%', maxWidth: isMobile ? 'none' : 480,
           borderTopLeftRadius: isMobile ? 0 : 16, borderTopRightRadius: isMobile ? 0 : 16,
-          boxSizing: 'border-box', height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : '90dvh',
+          boxSizing: 'border-box', height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : `90${DVH}`,
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
           paddingTop: 'calc(16px + env(safe-area-inset-top, 0px))',
           paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
