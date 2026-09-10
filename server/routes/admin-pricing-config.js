@@ -344,9 +344,13 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       }
       return null;
     };
-    const failed = check(['trelona_bait', 'trelona_station_cost', 'advance_bait', 'advance_station_cost', 'hexpro_bait'], isPositive, 'a positive $/station cost')
-      || check(['multiplier', 'install_multiplier'], isPositive, 'a positive multiplier')
-      || check(['labor_per_station', 'labor_material_per_station', 'misc_per_station'], isNonNegative, 'a non-negative $/station amount')
+    // Price-driving knobs carry plausible UPPER bounds too (codex #4313 P1):
+    // a mistyped `multiplier: 145` or `trelona_bait: 2400` would otherwise
+    // be persisted and applied by the bridge on the next sync.
+    const within = (lo, hi) => (v) => Number.isFinite(num(v)) && num(v) >= lo && num(v) <= hi;
+    const failed = check(['trelona_bait', 'trelona_station_cost', 'advance_bait', 'advance_station_cost', 'hexpro_bait'], (v) => isPositive(v) && num(v) <= 200, 'a positive $/station cost no greater than 200')
+      || check(['multiplier', 'install_multiplier'], (v) => isPositive(v) && num(v) <= 5, 'a positive multiplier no greater than 5')
+      || check(['labor_per_station', 'labor_material_per_station', 'misc_per_station'], within(0, 50), 'a $/station amount between 0 and 50')
       // Positive: a zero cartridge cost removes cartridge COGS from every
       // margin report AND disables the catalog link (the sanity band anchors
       // on it). The reserve is a fraction of a visit's labor per year — a
@@ -1266,6 +1270,10 @@ async function effectiveTermiteInstallBasis() {
       labor_material_per_station: Number(trelona.laborMaterial),
       misc_per_station: Number(trelona.misc),
       install_multiplier: Number(TERMITE.installMultiplier),
+      // The station floor is a price-driving knob too — served with the
+      // rest so the client never pairs a stale row floor with fresh
+      // effective costs (codex #4313 P2).
+      min_stations: Number(TERMITE.minStations),
       cartridge_cost: Number(cartridges.cartridgeCost),
       cartridge_cost_source: cartridges.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
       link_station_costs_to_catalog: TERMITE.linkStationCostsToCatalog === true,

@@ -327,6 +327,9 @@ describe('termite catalog link — self-heal and refusals', () => {
 describe('termite_install admin validation — aliases', () => {
   test.each([
     [{ install_multiplier: 0 }, 'install_multiplier'],
+    [{ multiplier: 145 }, 'multiplier'],
+    [{ trelona_bait: 2400 }, 'trelona_bait'],
+    [{ labor_per_station: 500 }, 'labor_per_station'],
     [{ trelona_bait: 0 }, 'trelona_bait'],
     [{ trelona_station_cost: -1 }, 'trelona_station_cost'],
     [{ cartridgeCost: -9 }, 'cartridgeCost'],
@@ -445,6 +448,23 @@ describe('termite install knobs — every price-driving knob replays (codex r5)'
     expect(signal).toEqual({ system: 'trelona', stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.4, minStations: 8 });
     const input = { homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family', services: { termite: { system: 'trelona' } }, termitePricingKnobs: signal };
     expect(generateEstimate(input).lineItems.find((l) => l.service === 'termite_bait').installation.price).toBe(Math.round(15 * 28.05 * 1.4));
+  });
+});
+
+describe('unstamped Advance quotes recover their era (codex r7)', () => {
+  afterEach(restoreTermite);
+  test('a pre-April-2026 Advance row ($14 × 1.75) replays at its own basis, not today\'s constants', () => {
+    // 23 stations at $14 + $6 buildup × 1.75 = 805.
+    const signal = replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'advance', sta: 23, ai: 805 } } } });
+    expect(signal).toMatchObject({ system: 'advance', stationCost: 14, installMultiplier: 1.75 });
+    const replayed = priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'advance', knobs: signal });
+    expect(replayed.stations).toBe(23);
+    expect(replayed.installation.price).toBe(805);
+    // A post-April Advance row (13.16 × 1.45 → 639) still resolves to that era.
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'advance', sta: 23, ai: 639 } } } })).toMatchObject({ stationCost: 13.16, installMultiplier: 1.45 });
+    // A tuned Advance row with neutral stored modifiers inverts under the era multipliers (1.45 first).
+    const tuned = replay.termiteKnobSignalForReplay({ engineRequest: { profile: { homeSqFt: 2000 } }, result: { results: { tmBait: { selectedSystem: 'advance', sta: 23, ai: 700 } } } });
+    expect(priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'advance', knobs: tuned }).installation.price).toBe(700);
   });
 });
 
