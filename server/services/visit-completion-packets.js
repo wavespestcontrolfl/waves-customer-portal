@@ -358,7 +358,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
         });
     }
   }
-  const delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
+  let delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
   // Canonical completion gives these two effects different eligibility: a
   // card mints for every performed, non-internal-only completion (a backfill
   // mints silently), while a referral credit excludes backfills but not an
@@ -404,18 +404,22 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     await trx('service_visits').where({ id: visit.id }).forUpdate().first('id');
     const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
     if (locked.status !== 'done') {
-      // A recovery that settled the uncertain summary between the delivery
-      // read and this lock must not be closed over with the stale result:
-      // the packet stays on the recovery queue so the next pass re-observes
-      // the settled summary and enrolls the review it still owes.
-      if (delivery.state === 'delivery_review' && !(await trx('visit_effects').where({ visit_id: packet.visit_id })
-        .whereIn('effect_type', ['completion_sms', 'completion_email']).where({ status: 'unknown_delivery' }).first('id'))) {
+      // The delivery effects are re-read under this lock. A recovery that
+      // settled the uncertain summary since the delivery read must not be
+      // closed over with the stale result (the packet stays on the recovery
+      // queue), and a bounce that arrived since must close for office review
+      // with its parked outreach rather than as a clean completion.
+      const uncertainNow = await trx('visit_effects').where({ visit_id: packet.visit_id })
+        .whereIn('effect_type', ['completion_sms', 'completion_email']).where({ status: 'unknown_delivery' }).first('id');
+      if (delivery.state === 'delivery_review' && !uncertainNow) {
         recovered = true;
         await trx('visit_completion_packets').where({ id: packet.id })
           .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
         return;
       }
-      if (review) {
+      if (uncertainNow && delivery.state === 'delivered') delivery = { ...delivery, state: 'delivery_review' };
+      const closeReview = payment.state === 'office_required' || delivery.state === 'delivery_review';
+      if (closeReview) {
         const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
         await require('./dispatch-alerts').createAlert({
           type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
@@ -423,19 +427,21 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
         });
       }
       await trx('visit_completion_packets').where({ id: packet.id }).update({
-        status: 'done', error: review ? JSON.stringify({ payment: payment.state, delivery: delivery.state }) : null,
+        status: 'done', error: closeReview ? JSON.stringify({ payment: payment.state, delivery: delivery.state }) : null,
         updated_at: trx.fn.now(),
       });
       // A recovery reopens only the packet: a visit that already closed keeps
       // its original closure time and reason.
       await trx('service_visits').where({ id: packet.visit_id }).update({
         status: 'closed', closed_at: trx.raw('COALESCE(closed_at, NOW())'),
-        close_reason: trx.raw('COALESCE(close_reason, ?)', [review ? 'office_review' : 'completed']), updated_at: trx.fn.now(),
+        close_reason: trx.raw('COALESCE(close_reason, ?)', [closeReview ? 'office_review' : 'completed']), updated_at: trx.fn.now(),
       });
     }
   });
+  const finalState = recovered ? 'effects_pending' : pending ? 'effects_pending'
+    : (payment.state === 'office_required' || delivery.state === 'delivery_review') ? 'office_required' : 'done';
   return { status: pending || recovered ? 202 : 200, body: {
-    visitId: packet.visit_id, packetId: packet.id, state: recovered ? 'effects_pending' : state, payment, delivery,
+    visitId: packet.visit_id, packetId: packet.id, state: finalState, payment, delivery,
     summaryUrl: token ? `/visit/${token}` : null,
   } };
 }
@@ -545,6 +551,10 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
   // be retried on every recovery sweep.
   const customer = await database('customers').where({ id: visit.customer_id }).first('deleted_at');
   if (!customer || customer.deleted_at) return { enrolled: false, reason: 'customer_archived' };
+  // Outreach parked while the summary was uncertain resumes at its kept
+  // schedule instead of a fresh enrollment the cadence cooldown might refuse.
+  const resumed = await require('./visit-completion-summary').resumeVisitReviewOutreach(packet.id, database);
+  if (resumed) return { enrolled: true, resumed };
   const first = members[0];
   const result = await require('./review-request').enrollPostService({
     customerId: visit.customer_id, serviceRecordId: first.record_id, scheduledServiceId: first.id,

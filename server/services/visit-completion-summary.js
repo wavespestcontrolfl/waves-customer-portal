@@ -436,12 +436,15 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   const flipped = await database('visit_effects').where({ id: effect.id, status: 'sent' })
     .update({ status: 'unknown_delivery', last_error: 'provider_bounce', updated_at: database.fn.now() }).returning('id');
   if (!flipped.length) return { reconciled: false };
-  const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
-  const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
   // The review ask follows the summary. Outreach enrolled while the summary
-  // looked delivered is parked now that a required recipient failed; the
-  // coordinator re-enrolls it when the recovery settles the summary.
-  if (packet) await parkVisitReviewOutreach(packet.id, database);
+  // looked delivered is parked now that a required recipient failed, whether
+  // the packet already closed or is still closing (the coordinator's close
+  // re-reads the effects under its lock); the coordinator resumes it when
+  // the recovery settles the summary.
+  const anyPacket = await database('visit_completion_packets').where({ visit_id: visitId }).first('id', 'status');
+  if (anyPacket) await parkVisitReviewOutreach(anyPacket.id, database);
+  const packet = anyPacket?.status === 'done' ? anyPacket : null;
+  const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
   if (packet && member) {
     // Same transaction as the effect flip: a webhook that fails after this
     // point rolls both back, and SendGrid's redelivery cannot leave an alert
@@ -486,17 +489,37 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
   return { ok: true };
 }
 
-// Stops the cadence sequences and removes the pending legacy asks that were
-// enrolled for this packet's recorded service records.
+const PARKED_REVIEW_REASON = 'visit_summary_bounced';
+
+// Parks the cadence sequences enrolled for this packet's recorded service
+// records (stopped with a reason of their own and their schedule kept, so
+// the recovery can resume them without a fresh enrollment that the cadence
+// cooldown might refuse) and removes the pending legacy asks.
 async function parkVisitReviewOutreach(packetId, database = db) {
   const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
     .whereNotNull('service_record_id').pluck('service_record_id');
   if (!records.length) return { parked: 0 };
-  const sequences = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' }).select('id');
-  const Reviews = require('./review-request');
-  for (const sequence of sequences) await Reviews.stopReviewSequence(sequence.id, 'visit_summary_bounced');
+  const parked = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' })
+    .update({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON, completed_at: database.fn.now(), updated_at: database.fn.now() });
   const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' }).del();
-  return { parked: sequences.length + Number(removed || 0) };
+  return { parked: Number(parked || 0) + Number(removed || 0) };
+}
+
+// Resumes the sequences parkVisitReviewOutreach stopped, at their kept
+// schedule or now, whichever is later, unless the customer has since gained
+// another active sequence. Returns how many resumed.
+async function resumeVisitReviewOutreach(packetId, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id');
+  const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
+    .whereNotNull('service_record_id').pluck('service_record_id');
+  if (!packet || !records.length) return 0;
+  const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
+  if (await database('review_sequences').where({ customer_id: visit.customer_id, status: 'active' }).first('id')) return 0;
+  const resumed = await database('review_sequences').whereIn('service_record_id', records)
+    .where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
+    .update({ status: 'active', stop_reason: null, completed_at: null, updated_at: database.fn.now(),
+      next_run_at: database.raw('GREATEST(COALESCE(next_run_at, NOW()), NOW())') });
+  return Number(resumed || 0);
 }
 
 // The retry rail's provider request runs while the customer and preference
@@ -609,4 +632,4 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
-  retrySummaryThroughHandoff };
+  retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach };

@@ -1538,8 +1538,49 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId, status: 'active' })).toHaveLength(0);
     expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId }).first()).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
     expect(await mockPg('review_requests').where({ customer_id: fixture.customerId, status: 'pending' })).toHaveLength(0);
+    // The recovery settles the summary: the parked sequence resumes instead of a fresh enrollment.
+    await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'sent', sent_at: new Date(), provider_message_id: 'recovered' });
+    expect(await Summary.reconcileSummaryEmailRecovery({ ...delivered, status: 'sent' })).toEqual({ reconciled: true });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(reviews).toHaveBeenCalledTimes(1);
+    expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId }).first()).toMatchObject({ status: 'active', stop_reason: null });
     await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
     await mockPg('review_requests').where({ customer_id: fixture.customerId }).del();
+  });
+
+  test('a bounce that races the packet close parks the outreach and closes for office review', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    jest.spyOn(require('../services/review-request'), 'enrollPostService').mockImplementation(async ({ serviceRecordId }) => {
+      await mockPg('review_sequences').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: serviceRecordId,
+        status: 'active', plan: JSON.stringify({ touches: [] }) });
+      return { started: true };
+    });
+    const execute = mockPg.client.constructor.prototype._query;
+    let raced = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function bounceBeforeClose(connection, query) {
+      if (!raced && query.sql.startsWith('select * from "visit_completion_packets"') && query.sql.includes('for update')) {
+        raced = true;
+        const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+        await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'bounced' });
+        await mockPg.transaction(async (trx) => {
+          expect(await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx)).toEqual({ reconciled: true });
+        });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required', delivery: { state: 'delivery_review' } } });
+      expect(raced).toBe(true);
+      expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'done', error: expect.stringContaining('delivery_review') });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+      expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId }).first()).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
+    } finally {
+      await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
+    }
   });
 
   test('a recovery that settles the summary before the packet closes keeps the packet on recovery', async () => {
