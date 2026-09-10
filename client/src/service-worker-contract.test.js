@@ -11,10 +11,11 @@ function fakeCache() {
   const asRequest = (key) => (typeof key === 'string' ? { url: `https://portal.test${key}` } : key);
   return {
     store,
+    gate: null, // a test may park keys() (the prune's first step) on a promise
     async match(key) { return store.get(asRequest(key).url); },
     async put(key, response) { store.set(asRequest(key).url, response); },
     async delete(key) { return store.delete(asRequest(key).url); },
-    async keys() { return [...store.keys()].map(url => ({ url })); },
+    async keys() { if (this.gate) await this.gate; return [...store.keys()].map(url => ({ url })); },
   };
 }
 
@@ -115,6 +116,36 @@ describe('service-worker shell refresh keeps the asset cache bounded to the curr
 
     const kept = [...cache.store.keys()].map(u => new URL(u).pathname).sort();
     expect(kept).toEqual(['/', '/assets/index-AAA.css', '/assets/index-BBB.js', '/waves-logo.png']);
+  });
+
+  it('serializes overlapping refreshes so the stored shell always has its assets', async () => {
+    // Codex pre-push P1: refresh A (old build) and refresh B (new build) in
+    // flight together. Unserialized, both store their shell, then A's prune
+    // deletes B's assets and B's prune deletes A's — leaving '/' pointing
+    // at an entry script that is gone. The gate parks both prunes so they
+    // would run back-to-back after both shells were written.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+    const shellA = shellHtml(['/assets/index-AAA.js', '/assets/index-AAA.css']);
+    const shellB = shellHtml(['/assets/index-BBB.js', '/assets/index-BBB.css']);
+
+    let release;
+    cache.gate = new Promise(resolve => { release = resolve; });
+    const refreshes = Promise.all([
+      cacheCompleteShellResponse(fakeResponse(shellA)),
+      cacheCompleteShellResponse(fakeResponse(shellB)),
+    ]);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    release();
+    await refreshes;
+
+    const stored = await cache.match('/');
+    const referenced = [...(await stored.text()).matchAll(/src="(\/assets\/[^"]+)"/g)].map(m => m[1]);
+    expect(referenced.length).toBeGreaterThan(0);
+    for (const asset of referenced) expect(await cache.match(asset), asset).toBeTruthy();
+    expect((await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/')).sort())
+      .toEqual(referenced.slice().sort());
   });
 
   it('does not touch lazily cached chunks when the same shell is refreshed', async () => {

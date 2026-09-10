@@ -47,7 +47,21 @@ function shellAssetUrls(html) {
   return [...urls];
 }
 
+// Every navigation kicks off a background shell refresh, so two can overlap
+// across a deploy (old shell A and new shell B in flight together). Each
+// refresh reads the previous shell, writes, then prunes — interleaved, A's
+// prune deletes B's assets after B stored its shell, leaving '/' pointing
+// at a missing entry script. Serialize the whole read-write-prune unit on
+// a promise chain; overlap only exists within one worker lifetime, so a
+// module-level chain is the right scope (Web Locks would outlive it).
+let shellRefreshChain = Promise.resolve();
 async function cacheCompleteShellResponse(shellResponse) {
+  const run = shellRefreshChain.then(() => replaceCompleteShell(shellResponse));
+  shellRefreshChain = run.catch(() => {});
+  return run;
+}
+
+async function replaceCompleteShell(shellResponse) {
   const cache = await caches.open(CACHE_NAME);
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
 
