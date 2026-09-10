@@ -21,6 +21,7 @@ import {
   openVisitSendTimingBlocked,
   previewLinkedBalance,
   reconcileSelectedOpenVisit,
+  visitPickerResponseIsCurrent,
   reloadsVisitPickerAfterCreateError,
   resolveLinkedBalance,
   noticeCandidateLabel,
@@ -125,6 +126,16 @@ describe("AdminInvoicesPage open-visit link: picker refresh after a create confl
     expect(reconcileSelectedOpenVisit(stale, [])).toBe(stale);
     expect(reconcileSelectedOpenVisit(stale, [{ id: "v1", deposit_credit: 20 }])).toEqual({ id: "v1", deposit_credit: 20 });
     expect(reconcileSelectedOpenVisit(null, [{ id: "v1" }])).toBeNull();
+  });
+});
+
+describe("AdminInvoicesPage open-visit link: stale picker responses (pre-push P1 r3)", () => {
+  it("applies a picker response only for the customer still selected — never after a switch or a clear", () => {
+    expect(visitPickerResponseIsCurrent("c1", "c1")).toBe(true);
+    expect(visitPickerResponseIsCurrent(7, "7")).toBe(true);
+    expect(visitPickerResponseIsCurrent("c2", "c1")).toBe(false);
+    expect(visitPickerResponseIsCurrent(null, "c1")).toBe(false);
+    expect(visitPickerResponseIsCurrent(undefined, "c1")).toBe(false);
   });
 });
 

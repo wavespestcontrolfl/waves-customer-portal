@@ -188,15 +188,17 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
-  // Codex P2 #4131 r3 — payer/method-aware coverage: a prepayment that does
-  // not reach the amount being billed is only a partial credit, not full
-  // coverage, and the completion would still bill the rest — so the office
-  // create must still be allowed (Charge Now / completion own crediting it).
-  test('a prepayment that only partially covers the invoice amount still gets a new invoice', async () => {
-    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 50 };
+  // Pre-push P0 r3 — the office create has no prepayment-crediting step (the
+  // completion / Charge Now apply the recorded prepayment when THEY mint),
+  // so a partial prepayment must refuse too: otherwise a $117 visit with $50
+  // on file becomes a collectible $117 invoice the operator can send at once.
+  test('a prepayment that only partially covers the invoice amount is refused as well — nothing created', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 50, prepaid_method: 'zelle' };
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT });
-      expect(res.status).toBe(201);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_prepaid' });
+      expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
     });
   });
 
@@ -449,11 +451,37 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
       visitsQuery.where.mock.calls.filter(([arg]) => typeof arg === 'function').forEach(([fn]) => fn(predicate));
       expect(predicate.whereNull).toHaveBeenCalledWith('scheduled_services.status');
       expect(predicate.orWhereIn).toHaveBeenCalledWith('scheduled_services.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+      // The coverage inputs ride in the SELECT (pre-push P1 r3): annualPrepayCoversVisit
+      // needs annual_prepay_term_id; the payer resolution needs customer_id.
+      expect(visitsQuery.select.mock.calls[0]).toEqual(expect.arrayContaining(['scheduled_services.annual_prepay_term_id', 'scheduled_services.customer_id', 'scheduled_services.prepaid_method']));
       // The pending estimate deposit rides along for the form's balance preview; the estimate id itself does not.
       expect(body.openVisits).toEqual([
         { id: VISIT, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 50 },
         { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, deposit_credit: 0 },
         { id: '55555555-5555-4555-8555-555555555555', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 0 },
+      ]);
+    });
+  });
+
+  test('a partially prepaid visit and an annual-prepaid visit under a live term are not offered; internal columns never reach the wire', async () => {
+    const open = [
+      { id: VISIT, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: 50, prepaid_method: 'zelle', customer_id: CUSTOMER },
+      { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: 117, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: 'term-1', customer_id: CUSTOMER },
+      { id: '66666666-6666-4666-8666-666666666666', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, customer_id: CUSTOMER, estimated_price: 117 },
+    ];
+    annualPrepayCoversVisit.mockImplementationOnce(async (visit) => visit.annual_prepay_term_id === 'term-1');
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return qb({ limit: jest.fn(async () => []) });
+      if (table === 'scheduled_services') return qb({ limit: jest.fn(async () => open.map((v) => ({ ...v }))) });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/service-records/${CUSTOMER}`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: OTHER, annual_prepay_term_id: 'term-1' }), expect.anything());
+      expect(body.openVisits).toEqual([
+        { id: '66666666-6666-4666-8666-666666666666', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 0 },
       ]);
     });
   });

@@ -616,7 +616,7 @@ const isOpenVisitStatus = (status) => status == null || OPEN_VISIT_STATUSES.incl
 async function openVisitPickerRow(visit, customerId) {
   const { pendingDepositCredit } = require('../services/estimate-deposits');
   const { resolveForInvoice } = require('../services/payer');
-  const { prepaidCoversVisit } = require('../services/visit-prepaid-coverage');
+  const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
   let payerBilled = false;
   let credit = null;
   try {
@@ -624,9 +624,10 @@ async function openVisitPickerRow(visit, customerId) {
     payerBilled = !!payer?.payerId;
     if (visit.source_estimate_id && !payerBilled) credit = await pendingDepositCredit(visit.source_estimate_id);
   } catch { credit = null; }
-  const invoiceAmount = Number(visit.estimated_price) > 0 ? Number(visit.estimated_price) : null;
-  if (await prepaidCoversVisit(visit, { payerBilled, invoiceAmount })) return null;
-  const { source_estimate_id: _estimate, prepaid_amount: _amount, prepaid_method: _method, estimated_price: _price, ...row } = visit;
+  if (await prepaidRefusesOfficeInvoice(visit, { payerBilled })) return null;
+  // Internal columns (the coverage inputs, the estimate link) stay off the wire.
+  const { source_estimate_id: _estimate, prepaid_amount: _amount, prepaid_method: _method, estimated_price: _price,
+    annual_prepay_term_id: _term, customer_id: _customer, ...row } = visit;
   return { ...row, deposit_credit: credit ? Number(credit.amount) : 0 };
 }
 
@@ -662,6 +663,11 @@ router.get('/service-records/:customerId', async (req, res, next) => {
       .select('scheduled_services.id', db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as scheduled_date"),
         'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.source_estimate_id',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.estimated_price',
+        // annualPrepayCoversVisit needs the term linkage (and the customer for
+        // the payer resolution) — without them every annual-prepaid candidate
+        // read as uncovered and ate the limit (pre-push P1 r3). Stripped from
+        // the response in openVisitPickerRow.
+        'scheduled_services.annual_prepay_term_id', 'scheduled_services.customer_id',
         'technicians.name as tech_name')
       .orderBy('scheduled_services.scheduled_date', 'asc')
       .limit(40);
@@ -1018,23 +1024,17 @@ function validateCreateInvoiceBody(body) {
   return null;
 }
 
-// The would-be invoice amount for the prepaid-coverage rule: what the
-// operator is billing (positive lines), as the completion compares its own
-// would-be amount.
-const billedLineTotal = (lineItems) => (lineItems || []).reduce((sum, li) => {
-  const amount = Number(li?.amount) || (Number(li?.quantity) || 0) * (Number(li?.unit_price) || 0);
-  return sum + Math.max(0, amount);
-}, 0);
-
-// The completion's payer-aware, method-specific coverage rule (Codex P2
-// r3): a payer-billed visit is never covered by the homeowner's prepay, an
-// annual stamp only by a live term, other methods only when the amount
-// reaches the bill. `conn` is the row lock's transaction inside the chain.
-async function linkedVisitPrepaid(conn, visit, { customerId, invoiceAmount }) {
+// The office prepaid rule (Codex P2 r3, pre-push P0 r3): a payer-billed
+// visit is never refused on the homeowner's prepay, an annual stamp refuses
+// only under a live term, and ANY positive out-of-band prepayment refuses —
+// this path has no crediting step, so a partial prepayment would otherwise
+// produce a fully collectible invoice. `conn` is the row lock's transaction
+// inside the chain.
+async function linkedVisitPrepaid(conn, visit, { customerId }) {
   const { resolveForInvoice } = require('../services/payer');
-  const { prepaidCoversVisit } = require('../services/visit-prepaid-coverage');
+  const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
   const payer = await resolveForInvoice({ database: conn, customerId, scheduledServiceId: visit.id });
-  return prepaidCoversVisit(visit, { payerBilled: !!payer?.payerId, invoiceAmount, conn });
+  return prepaidRefusesOfficeInvoice(visit, { payerBilled: !!payer?.payerId, conn });
 }
 
 // Step 2 — the OPEN visit picked from the Invoices page (owner ruling
@@ -1043,7 +1043,7 @@ async function linkedVisitPrepaid(conn, visit, { customerId, invoiceAmount }) {
 // or not at all), and not already covered by a prepayment (the customer
 // would pay twice before completion — Charge Now owns prepaid crediting).
 // Fail closed.
-async function loadLinkedOpenVisit({ scheduledServiceId, customerId, invoiceAmount }) {
+async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
   const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first();
   if (!visit || String(visit.customer_id) !== String(customerId)) {
     return refusal(400, { error: 'That visit does not belong to this customer' });
@@ -1051,7 +1051,7 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId, invoiceAmou
   if (!isOpenVisitStatus(visit.status)) {
     return refusal(409, { error: `That visit is ${visit.status} — link a completed visit through its service record instead`, code: 'visit_not_open' });
   }
-  if (await linkedVisitPrepaid(db, visit, { customerId, invoiceAmount })) {
+  if (await linkedVisitPrepaid(db, visit, { customerId })) {
     return refusal(409, { error: 'That visit is already prepaid — it needs no new invoice (use Charge now from the schedule to credit the prepayment)', code: 'visit_prepaid' });
   }
   return { visit };
@@ -1060,13 +1060,13 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId, invoiceAmou
 // Step 3 — the same checks ROW-LOCKED inside the mint chain (pre-push P1):
 // a cancellation or prepayment finishing between the pre-check and the
 // lock must refuse, not get a fresh invoice on a dead or covered visit.
-function openVisitEligibilityInTrx({ visit, customerId, invoiceAmount }) {
+function openVisitEligibilityInTrx({ visit, customerId }) {
   return async (trx) => {
     const still = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
     if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
       throw conflict('visit_not_open', `That visit is no longer open for this customer${still ? ` (${still.status})` : ''} — nothing was created`);
     }
-    if (await linkedVisitPrepaid(trx, still, { customerId, invoiceAmount })) {
+    if (await linkedVisitPrepaid(trx, still, { customerId })) {
       throw conflict('visit_prepaid', 'That visit was prepaid while this invoice was being created — nothing was created');
     }
   };
@@ -1093,7 +1093,7 @@ function mintRefusalResponse(err) {
 // (allowPriceMovement: the stale-price refusal guards derived prices). The
 // previewed deposit and balance are checked inside the transaction (GitHub
 // P1 ×2) so the customer is never sent a balance the operator did not see.
-async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue, invoiceAmount }) {
+async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue }) {
   const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
   let minted;
   try {
@@ -1102,7 +1102,7 @@ async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, e
       allowPriceMovement: true,
       expectedDepositCredit: numberOrNull(expectedDepositCredit),
       expectedBalanceDue: numberOrNull(expectedBalanceDue),
-      assertEligibleInTrx: openVisitEligibilityInTrx({ visit, customerId, invoiceAmount }),
+      assertEligibleInTrx: openVisitEligibilityInTrx({ visit, customerId }),
       buildCreateParams: () => ({ ...createArgs, scheduledServiceId: visit.id }),
     });
   } catch (err) {
@@ -1159,13 +1159,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // The exact linkage the setup-fee alert instructs — retired right after creation.
     const stampedEstimateId = (String(notes || '').match(/accepted estimate #([0-9a-fA-F-]{8,})/) || [])[1] || null;
     const createArgs = { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate };
-    const invoiceAmount = billedLineTotal(lineItems);
 
     let outcome;
     if (scheduledServiceId) {
-      outcome = await loadLinkedOpenVisit({ scheduledServiceId, customerId, invoiceAmount });
+      outcome = await loadLinkedOpenVisit({ scheduledServiceId, customerId });
       if (!outcome.refusal) {
-        outcome = await createInvoiceLinkedToOpenVisit({ visit: outcome.visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue, invoiceAmount });
+        outcome = await createInvoiceLinkedToOpenVisit({ visit: outcome.visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue });
       }
     } else {
       outcome = { invoice: await createInvoiceUnlinked({ createArgs, serviceRecordId, stampedEstimateId }) };

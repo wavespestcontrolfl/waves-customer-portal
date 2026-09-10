@@ -367,6 +367,15 @@ export function reloadsVisitPickerAfterCreateError(code) {
 // open (its deposit credit may have moved), otherwise the stale selection is
 // RETAINED so linkedVisitGone can render — never silently deselected, which
 // would let the next Create go out unlinked.
+// A picker response is applied only while the customer it was requested
+// for is still the selected one (pre-push P1 r3): switching customers with
+// a request in flight must not let the old customer's records and visits
+// overwrite the new customer's — a cross-customer link the create would
+// then refuse (or worse, honor).
+export function visitPickerResponseIsCurrent(currentCustomerId, requestedCustomerId) {
+  return currentCustomerId != null && String(currentCustomerId) === String(requestedCustomerId);
+}
+
 export function reconcileSelectedOpenVisit(selected, visits = []) {
   if (!selected) return null;
   const refreshed = (Array.isArray(visits) ? visits : []).find((v) => v && v.id === selected.id);
@@ -5719,8 +5728,14 @@ function CreateInvoice({
   // The picker feed: completed records + open visits (each with the deposit
   // credit the linked mint will apply). Re-read after a deposit-drift
   // refusal below, so the summary shows the credit that will actually apply.
+  // Stale-response guard (pre-push P1 r3): the customer the picker is
+  // currently for. A response for any other customer — or one that lands
+  // after the customer was cleared — is dropped, never applied. Returns
+  // null in that case so conflict-triggered reloads skip their follow-up.
+  const visitPickerCustomerRef = useRef(null);
   const loadVisitPicker = async (customerId) => {
     const d = await adminFetch(`/admin/invoices/service-records/${customerId}`);
+    if (!visitPickerResponseIsCurrent(visitPickerCustomerRef.current, customerId)) return null;
     setServiceRecords(d.records || []);
     const visits = d.openVisits || [];
     setOpenVisits(visits);
@@ -5728,6 +5743,7 @@ function CreateInvoice({
   };
   useEffect(() => {
     let alive = true;
+    visitPickerCustomerRef.current = !editMode && selectedCustomer ? selectedCustomer.id : null;
     setServiceRecords([]);
     setOpenVisits([]);
     setServiceRecordsError("");
@@ -6172,6 +6188,7 @@ function CreateInvoice({
     if (!reloadsVisitPickerAfterCreateError(e.code) || !selectedOpenVisit) return;
     try {
       const visits = await loadVisitPicker(selectedCustomer.id);
+      if (!visits) return; // the customer changed underneath — the new customer's own load owns the state
       setSelectedOpenVisit((current) => reconcileSelectedOpenVisit(current, visits));
     } catch {
       /* the toast already asks for a reload */
