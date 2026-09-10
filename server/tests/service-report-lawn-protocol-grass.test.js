@@ -20,7 +20,7 @@ function makeKnex(rowsByTable = {}) {
       where: () => q, andWhere: () => q, whereIn: () => q, whereNull: () => q, whereNot: () => q,
       orderBy: () => q, leftJoin: () => q, join: () => q, select: () => q, limit: () => q,
       columnInfo: () => Promise.resolve({}),
-      first: () => Promise.resolve(rows[0] || null),
+      first: () => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows[0] || null)),
       catch: () => Promise.resolve(rows),
       then: (resolve) => Promise.resolve(rows).then(resolve),
     };
@@ -78,6 +78,16 @@ describe('lawn protocol report context — actuals rows recorded without a plan'
     });
     knex.schema = { hasTable: () => Promise.resolve(true) };
     expect(await buildLawnProtocolReportContext(RECORD, knex, AT)).toBeNull();
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+  });
+
+  test('a failed completion lookup fails closed instead of reading as "no completion" and inventing the calendar card', async () => {
+    const knex = makeKnex({
+      customer_turf_profiles: [{ track_key: 'zoysia', active: true }],
+      'lawn_protocol_service_completions as lpsc': new Error('connection reset'),
+    });
+    knex.schema = { hasTable: () => Promise.resolve(true) };
+    await expect(buildLawnProtocolReportContext(RECORD, knex, AT)).rejects.toThrow('connection reset');
     expect(getProtocolWindowContext).not.toHaveBeenCalled();
   });
 

@@ -203,14 +203,17 @@ it('updates untouched products and areas while keeping a manually entered amount
     .toEqual([{ completionDefaults: true, lawnSqft: 4000 }]);
 });
 
-it('keeps removed defaults out of the plan after refresh and submits them as skipped products', async () => {
+it('keeps removed defaults out of the plan after refresh and submits them as skipped products, named from the catalog when the refreshed plan no longer lists them', async () => {
   enableDefaults();
   mount();
   await waitFor(() => expect(totals()).toHaveLength(2));
   fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  // The refreshed plan drops the removed product entirely (Codex #4113 P2):
+  // its id must still reach the server's unlisted-skip audit with a name.
+  catalog = [secondProduct];
   fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
   await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());
-  expect(totals().map(input => input.value)).toEqual(['10']);
+  expect(totals()).toHaveLength(1);
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({

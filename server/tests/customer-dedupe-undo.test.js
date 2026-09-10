@@ -3331,6 +3331,28 @@ describe('revertMerge', () => {
     expect(result.repointedBack['customer_properties.linked_property_removed']).toBe(1);
   });
 
+  it('transfers (never deletes) the link-as-property row when a lawn actuals ledger row froze that property (#4113)', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] },
+        // A completion ledger row still points at the property: the SET NULL
+        // FK would silently erase the frozen reference on delete.
+        lawn_protocol_service_completions: { probeRows: [{ id: 'completion-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.propertyDeleted).toBe(null);
+    expect(state.propertyTransferred).toMatchObject({ where: { id: 'prop-9', customer_id: WINNER } });
+    expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
+  });
+
   it('refuses (409) a link-as-property merge whose created property was never journaled', async () => {
     const journal = baseJournal();
     journal.evidence = { via: 'admin_link_as_property' };

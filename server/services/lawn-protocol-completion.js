@@ -67,7 +67,7 @@ function summarizeExpectedResponse(window = {}, completionInput = {}) {
   if (completionInput.expectedResponse && typeof completionInput.expectedResponse === 'object') {
     return completionInput.expectedResponse;
   }
-  const key = String(window.window_key || '');
+  const key = String(window.window_key || window.key || '');
   if (key.includes('pre_m')) {
     return { window: 'Preventive barrier; water-in required within label window.', metric: 'weed_breakthrough' };
   }
@@ -85,7 +85,9 @@ function summarizeExpectedResponse(window = {}, completionInput = {}) {
 
 function defaultRecheckDueDate(window = {}, completionInput = {}, serviceDate = new Date()) {
   if (completionInput.recheckDueDate) return String(completionInput.recheckDueDate).slice(0, 10);
-  const key = String(window.window_key || '');
+  // The structured plan window carries `key`; a stored row carries
+  // `window_key` (Codex #4113 P2: the plan shape stored generic follow-up).
+  const key = String(window.window_key || window.key || '');
   const needsFastRecheck = key.includes('chinch') || key.includes('insect') || key.includes('blackout');
   return needsFastRecheck ? etDateString(addETDays(serviceDate, 7)) : null;
 }
@@ -132,8 +134,23 @@ function resolveProtocolProduct(protocolProducts, substitution, product) {
 // its camel or snake name.
 function firstPositiveNumber(...values) {
   for (const value of values) {
-    const n = Number(value || 0);
-    if (n) return n;
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// The completion payload is spread from the client: a carrier alias is only
+// forwarded when it is a finite positive number the column can hold —
+// carrier_gal_per_1000 is numeric(6,3), total_carrier_gal numeric(10,3). An
+// out-of-range value is omitted rather than rolling the closeout back as a
+// 500 or persisting a negative measurement (Codex #4113 P2).
+const CARRIER_GAL_PER_1000_MAX = 999.999;
+const TOTAL_CARRIER_GAL_MAX = 9999999.999;
+function boundedPositive(max, ...values) {
+  for (const value of values) {
+    const n = firstPositiveNumber(value);
+    if (n != null && n <= max) return n;
   }
   return null;
 }
@@ -194,13 +211,14 @@ function resolveTreatedArea(completionInput, plan, allLawn) {
   const enteredSqft = firstPositiveNumber(completionInput.treatedSqft);
   const treatedSqft = enteredSqft || (allLawn ? null : firstPositiveNumber(plan?.mixCalculator?.lawnSqft));
   const source = enteredSqft ? 'visit' : (treatedSqft ? 'plan' : 'missing');
-  const carrier = firstPositiveNumber(
+  const carrier = boundedPositive(
+    CARRIER_GAL_PER_1000_MAX,
     completionInput.carrierGalPer1000,
     completionInput.carrier_gal_per_1000,
     plan?.mixCalculator?.carrierGalPer1000,
   );
-  const totalCarrier = firstPositiveNumber(completionInput.totalCarrierGal, completionInput.total_carrier_gal)
-    || (treatedSqft && carrier ? Number(((treatedSqft / 1000) * carrier).toFixed(3)) : null);
+  const totalCarrier = boundedPositive(TOTAL_CARRIER_GAL_MAX, completionInput.totalCarrierGal, completionInput.total_carrier_gal)
+    || (treatedSqft && carrier ? boundedPositive(TOTAL_CARRIER_GAL_MAX, Number(((treatedSqft / 1000) * carrier).toFixed(3))) : null);
   return { treatedSqft, source, carrier, totalCarrier };
 }
 
@@ -257,6 +275,22 @@ function partitionSkippedProducts(completionInput, plan, structured, allLawn) {
     unlisted: submitted
       .filter((row) => !visitDefaultIds.has(String(row.productId)))
       .map(({ productId, productName }) => ({ productId, productName })),
+  };
+}
+
+// A skipped default lands in the foreign-keyed product_id column. The plan
+// was built before this transaction: a catalog row deleted in between still
+// sits in the plan's defaults, and inserting its id would roll the whole
+// closeout back as a 500. Ids the catalog no longer resolves stay on the
+// completion's metadata as unlisted (Codex #4113 P2).
+async function revalidateSkippedProducts(trx, skips) {
+  if (!skips.skipped.length) return skips;
+  const ids = skips.skipped.map((row) => String(row.productId));
+  const known = new Set((await trx('products_catalog').whereIn('id', ids).select('id')).map((row) => String(row.id)));
+  const retired = skips.skipped.filter((row) => !known.has(String(row.productId)));
+  return {
+    skipped: skips.skipped.filter((row) => known.has(String(row.productId))),
+    unlisted: [...skips.unlisted, ...retired.map(({ productId, productName }) => ({ productId, productName }))],
   };
 }
 
@@ -431,7 +465,7 @@ async function recordLawnProtocolCompletion(trx, {
   const rows = await loadProtocolRows(trx, attribution);
   const equipment = resolveEquipment({ plan, equipmentSystemId, calibrationId, calibrationCleared });
   const { substitutions, bySubstituteProductId } = resolveSubstitutions(plan);
-  const skips = partitionSkippedProducts(completionInput, plan, attribution.structured, allLawn);
+  const skips = await revalidateSkippedProducts(trx, partitionSkippedProducts(completionInput, plan, attribution.structured, allLawn));
 
   const [completion] = await trx('lawn_protocol_service_completions')
     .insert(buildCompletionRow({

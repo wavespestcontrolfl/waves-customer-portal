@@ -91,8 +91,11 @@ async function loadLawnProtocolCompletion(record, knex) {
       'ec.verified_test_area_sqft',
       'ec.verified_captured_gallons',
     )
-    .first()
-    .catch(() => null);
+    .first();
+  // No catch: a transient lookup failure must not read as "no completion" —
+  // an unattributed one-time visit would then fall through to the calendar
+  // protocol card this row exists to suppress. The error reaches safeBuild,
+  // which omits the module (Codex #4113 P2).
 }
 
 async function loadAssignedLawnProtocol(record, knex) {

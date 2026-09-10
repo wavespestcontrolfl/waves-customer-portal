@@ -15037,10 +15037,15 @@ export function CompletionPanel({
           ? [typedRecommendations.trim()]
           : []),
       ];
+      // A removed default keeps its name from the catalog when the refreshed
+      // plan (or a draft restored under an outage) no longer lists it, so the
+      // server still receives it for its unlisted-skip audit (Codex #4113 P2).
       const lawnSkippedDefaults = lawnDefaultsEnabled
         ? lawnRemovedDefaultIds.flatMap((id) => {
             const item = lawnCompletionDefaults.items.find((row) => String(row.product.id) === String(id));
-            return item ? [{ productId: item.product.id, productName: item.product.name }] : [];
+            const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
+            const productName = item?.product?.name || catalogProduct?.name;
+            return productName ? [{ productId: item?.product?.id || id, productName }] : [];
           })
         : [];
       const body = {

@@ -4171,12 +4171,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const waveguardCloseout = !isIncompleteVisit && isWaveGuardLawnCompletion(svc);
     if (claim.action === 'proceed' && (waveguardCloseout || lawnLedgerVisit)) {
       try {
-        waveguardPlan = await buildPlanForService(svc.id, {
-          db,
+        // Under a packet closeout `db` is the packet's outer transaction: a
+        // planner statement that fails would leave it aborted, and catching
+        // the error below could not restore it — the later unattributed
+        // ledger writes would fail with "current transaction is aborted" and
+        // roll back the whole grouped closeout. The savepoint makes the
+        // fail-soft path real (Codex #4113 P1).
+        waveguardPlan = await savepointRead(db, (database) => buildPlanForService(svc.id, {
+          db: database,
           equipmentSystemId: waveguardEquipmentSystemId || null,
           calibrationId: waveguardCalibrationId || null,
           lawnSqft: lawnCompletionArea,
-        });
+        }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
         logger.warn('lawn actuals ledger: appointment plan unavailable, recording actuals without attribution', { serviceId: svc.id, error: planErr?.message });
@@ -6210,7 +6216,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // A track-resolved protocol on a visit with no program, or a plan
             // that did not resolve the visit's explicit assignment, is not the
             // visit's protocol — record the actuals without attribution.
-            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanAttributesVisit(waveguardPlan) ? null : waveguardPlan,
+            // Only the protocol portion is withheld: the plan's calibrated rig
+            // carrier is still the visit's measured carrier (Codex #4113 P2).
+            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanAttributesVisit(waveguardPlan) ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),

@@ -33,7 +33,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
   // asserted. Table name keeps its "as" alias, hence startsWith.
   function fakeTrx(insertedCompletions, insertedActuals = [], deletes = []) {
     return (table) => ({
-      whereIn: () => ({ select: () => Promise.resolve([]) }),
+      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: (criteria) => ({
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
@@ -87,7 +87,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     const completions = [];
     const actuals = [];
     const trx = (table) => ({
-      whereIn: () => ({ select: () => Promise.resolve([]) }),
+      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
       insert: (row) => {
@@ -193,7 +193,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
 
   function fakeTrx(completions, actuals, deletes) {
     return (table) => ({
-      whereIn: () => ({ select: () => Promise.resolve([]) }),
+      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: (criteria) => ({
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
@@ -266,7 +266,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const protocolRow = { id: 'pp-1', product_id: 'orig-1', catalog_product_name: 'Original iron', role: 'micronutrient', rate_per_1000: 3, rate_unit: 'fl oz' };
     const trx = (table) => ({
-      whereIn: () => ({ select: () => Promise.resolve([]) }),
+      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog') ? ids.map((id) => ({ id })) : []) }),
       where: () => ({ first: () => Promise.resolve({ id: 'row-1' }), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
       insert: (row) => {
@@ -334,5 +334,80 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(actuals).toEqual([]);
     expect(completions[0]).toMatchObject({ treated_sqft: 5000, total_carrier_gal: 5 });
     expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'plan' });
+  });
+});
+
+describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
+  afterEach(() => { delete process.env.GATE_LAWN_ACTUALS_LEDGER; });
+  function fakeTrx(completions, actuals, catalogIds = null) {
+    return (table) => ({
+      whereIn: (_column, ids) => ({ select: () => Promise.resolve(String(table).startsWith('products_catalog')
+        ? ids.filter((id) => (catalogIds || ids).includes(id)).map((id) => ({ id })) : []) }),
+      where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
+      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      insert: (row) => {
+        if (String(table).startsWith('lawn_protocol_service_completions')) {
+          completions.push(row);
+          return { onConflict: () => ({ merge: () => ({ returning: () => Promise.resolve([{ id: 'completion-x', ...row }]) }) }) };
+        }
+        actuals.push(row);
+        return Promise.resolve([row]);
+      },
+    });
+  }
+  const visit = { id: 'svc-3', customer_id: 'cust-3', property_id: 'prop-3' };
+  const insectPlan = {
+    protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer insect pressure', requiredTasks: [] },
+      products: [{ productId: 'prod-2', defaultInPlan: true }] } },
+    mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [{ selected: true, product: { id: 'prod-2', name: 'Fixture bifenthrin' } }] },
+  };
+
+  test('the structured window key drives the follow-up: an insect window records its scouting response and a seven-day recheck', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, []), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: insectPlan, completionInput: { treatedSqft: 2500 }, serviceDate: new Date('2026-06-15T16:00:00Z'),
+    });
+    expect(JSON.parse(completions[0].expected_response)).toMatchObject({ metric: 'active_insects_and_spreading_damage' });
+    expect(completions[0].recheck_due_date).toBe('2026-06-22');
+  });
+
+  test('a skipped default whose catalog row was deleted after the plan build stays unlisted instead of a foreign-keyed insert', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = []; const actuals = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, actuals, []), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: insectPlan,
+      completionInput: { treatedSqft: 2500, skippedProducts: [{ productId: 'prod-2', productName: 'Fixture bifenthrin' }] },
+    });
+    expect(actuals.filter((row) => row.status === 'skipped')).toEqual([]);
+    expect(JSON.parse(completions[0].metadata).unlistedSkippedProducts).toEqual([{ productId: 'prod-2', productName: 'Fixture bifenthrin' }]);
+    const kept = []; const keptActuals = [];
+    await recordLawnProtocolCompletion(fakeTrx(kept, keptActuals, ['prod-2']), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: insectPlan,
+      completionInput: { treatedSqft: 2500, skippedProducts: [{ productId: 'prod-2', productName: 'Fixture bifenthrin' }] },
+    });
+    expect(keptActuals.filter((row) => row.status === 'skipped')).toHaveLength(1);
+  });
+
+  test.each([
+    [1000, null, null], [-1, null, null], ['abc', null, null], [1.5, 1.5, 3.75],
+  ])('a submitted carrier of %p is stored as %p per 1,000 (total %p): only finite positives the column can hold are forwarded', async (carrierGalPer1000, carrier, total) => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, []), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: null, completionInput: { treatedSqft: 2500, carrierGalPer1000 },
+    });
+    expect(completions[0]).toMatchObject({ carrier_gal_per_1000: carrier, total_carrier_gal: total });
+  });
+
+  test('a plan whose protocol attribution is withheld still supplies the calibrated rig carrier', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, []), {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: { ...insectPlan, protocol: null, mixCalculator: { ...insectPlan.mixCalculator, carrierGalPer1000: 1.5 } },
+      completionInput: { treatedSqft: 4000 },
+    });
+    expect(completions[0]).toMatchObject({ protocol_key: null, carrier_gal_per_1000: 1.5, total_carrier_gal: 6 });
+    expect(JSON.parse(completions[0].metadata).attribution).toBe('none');
   });
 });
