@@ -10897,7 +10897,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // SMS body only; the mobile in-person payment sheet
         // (invoicePaymentActionRequired) is intentionally left untouched so an
         // unpaid invoice always keeps a collection path.
+        // A REUSED pre-minted invoice: its delivery state is re-read NOW, at
+        // the link decision (Codex P1 #4131 r4) — an admin "send now" from the
+        // Invoices page may have claimed ('sending', sendViaSMSAndEmail's own
+        // claim) or delivered it after the pre-completion snapshot was read.
+        // That claim is honored here, so the completion text goes report-only
+        // instead of carrying the same pay link a second time. Unreadable =
+        // fail closed (no link).
+        let reusedInvoiceClaimedElsewhere = false;
+        if (preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
+          try {
+            const live = await db('invoices').where({ id: invoice.id }).first('status', 'sent_at');
+            reusedInvoiceClaimedElsewhere = !!live && (String(live.status) === 'sending'
+              || require('../services/invoice-helpers').completionInvoiceAlreadyDelivered(live));
+          } catch (liveErr) {
+            logger.warn(`[dispatch] invoice ${invoice.id} delivery re-read failed — completion text goes report-only: ${liveErr.message}`);
+            reusedInvoiceClaimedElsewhere = true;
+          }
+        }
         const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink
+          && !reusedInvoiceClaimedElsewhere
           && includePayLink !== false
           && !prepaidCovered
           && !alreadyPaid

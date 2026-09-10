@@ -357,8 +357,9 @@ export const VISIT_STATE_CONFLICT_CODES = [
   "BALANCE_CHANGED",
   "visit_not_open",
   "visit_link_moved",
+  "visit_invoice_refunded",
   "visit_prepaid",
-  "visit_prepaid_unverifiable",
+  "visit_billing_unverifiable",
   "visit_already_invoiced",
   "SCHEDULED_PRICE_MOVED",
 ];
@@ -389,6 +390,13 @@ export function reconcileSelectedOpenVisit(selected, visits = []) {
 // send, so the chosen time would not be honored anyway.
 export function openVisitSendTimingBlocked(sendTiming, selectedOpenVisit) {
   return !!selectedOpenVisit && sendTiming !== "now" && sendTiming !== "draft";
+}
+// A pre-completion invoice linked to an open visit never carries a review
+// ask (Codex P1 #4131 r4): the visit may be days away and the send route
+// would enroll the ask after its delay regardless — the server drops it,
+// and the form disables the toggle so nothing is silently ignored.
+export function openVisitReviewRequestBlocked(selectedOpenVisit) {
+  return !!selectedOpenVisit;
 }
 // The identity of a previewed balance: the visit, the deposit it carries,
 // and the billable lines. A server-confirmed balance is honored only while
@@ -6262,7 +6270,7 @@ function CreateInvoice({
           sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
             method: "POST",
             body: JSON.stringify({
-              requestReview,
+              requestReview: openVisitReviewRequestBlocked(selectedOpenVisit) ? false : requestReview,
               reviewDelayMinutes: reviewDelay,
               reviewTiming,
               reviewScheduledFor:
@@ -7819,11 +7827,11 @@ function CreateInvoice({
               >
                 {" "}
                 <Checkbox
-                  checked={requestReview}
+                  checked={requestReview && !openVisitReviewRequestBlocked(selectedOpenVisit)}
                   onChange={(e) => setRequestReview(e.target.checked)}
                   id="review-toggle"
-                  label="Send review request"
-                  disabled={builderBusy || sendTiming === "draft"}
+                  label={openVisitReviewRequestBlocked(selectedOpenVisit) ? "Send review request (after the visit completes)" : "Send review request"}
+                  disabled={builderBusy || sendTiming === "draft" || openVisitReviewRequestBlocked(selectedOpenVisit)}
                 />{" "}
               </div>
               {requestReview && (

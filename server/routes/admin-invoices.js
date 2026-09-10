@@ -624,7 +624,10 @@ async function openVisitPickerRow(visit, customerId) {
   // credit of 0, and after the mint's own retries a full-balance invoice
   // could go out over a paid deposit. Fail closed — the visit is omitted.
   try {
-    const payer = await resolveForInvoice({ customerId, scheduledServiceId: visit.id });
+    // STRICT payer resolution (Codex P1 r4): the resolver's default converts a
+    // failed lookup into self-pay, which would offer a Bill-To visit as the
+    // homeowner's — throwOnError makes the outage reach this catch.
+    const payer = await resolveForInvoice({ customerId, scheduledServiceId: visit.id, throwOnError: true });
     payerBilled = !!payer?.payerId;
     if (visit.source_estimate_id && !payerBilled) credit = await pendingDepositCredit(visit.source_estimate_id);
   } catch (err) {
@@ -649,6 +652,14 @@ async function openVisitPickerRow(visit, customerId) {
 // completed visits (service records) AND the customer's open visits.
 const PICKER_OPEN_VISIT_LIMIT = 20;
 const PICKER_CANDIDATE_BATCH = 40;
+const { COMPLETION_TERMINAL_INVOICE_STATUSES, completionTerminalInvoiceLookup } = require('../services/completion-invoice-candidate');
+
+// The completion's terminal-invoice rule for the office paths (Codex P1 r4):
+// a refunded invoice on the visit blocks any new mint until the refund is
+// final — the visit is parked for a human, exactly as at completion.
+async function linkedVisitRefundedInvoice(conn, visitId) {
+  return completionTerminalInvoiceLookup(conn, { scheduledServiceId: visitId });
+}
 router.get('/service-records/:customerId', async (req, res, next) => {
   try {
     const records = await db('service_records')
@@ -679,6 +690,14 @@ router.get('/service-records/:customerId', async (req, res, next) => {
       .where((qb) => qb.whereNull('scheduled_services.status').orWhereIn('scheduled_services.status', OPEN_VISIT_STATUSES))
       .whereNotExists(function adoptableInvoice() {
         scopeAdoptableScheduledInvoices(this.select(db.raw('1')).from('invoices').whereRaw('invoices.scheduled_service_id = scheduled_services.id'));
+      })
+      // A REFUNDED invoice on the visit is a terminal blocker, not a
+      // re-bill (Codex P1 r4, same rule as the completion's
+      // completionTerminalInvoiceLookup): refund.failed can restore it, and
+      // a replacement minted meanwhile could never be reconciled. Not offered.
+      .whereNotExists(function refundedInvoice() {
+        this.select(db.raw('1')).from('invoices').whereRaw('invoices.scheduled_service_id = scheduled_services.id')
+          .whereIn('invoices.status', COMPLETION_TERMINAL_INVOICE_STATUSES);
       })
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select('scheduled_services.id', db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as scheduled_date"),
@@ -1060,7 +1079,9 @@ function validateCreateInvoiceBody(body) {
 async function linkedVisitPrepaid(conn, visit, { customerId }) {
   const { resolveForInvoice } = require('../services/payer');
   const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
-  const payer = await resolveForInvoice({ database: conn, customerId, scheduledServiceId: visit.id });
+  // STRICT (Codex P1 r4): a failed payer lookup must refuse, never read as
+  // self-pay — the callers turn the throw into visit_billing_unverifiable.
+  const payer = await resolveForInvoice({ database: conn, customerId, scheduledServiceId: visit.id, throwOnError: true });
   return prepaidRefusesOfficeInvoice(visit, { payerBilled: !!payer?.payerId, conn });
 }
 
@@ -1078,12 +1099,16 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
   if (!isOpenVisitStatus(visit.status)) {
     return refusal(409, { error: `That visit is ${visit.status} — link a completed visit through its service record instead`, code: 'visit_not_open' });
   }
+  const refunded = await linkedVisitRefundedInvoice(db, visit.id);
+  if (refunded) {
+    return refusal(409, { error: `That visit's invoice ${refunded.invoice_number || refunded.id} was refunded — the refund must be final before it can be billed again (bill it from the schedule once it is)`, code: 'visit_invoice_refunded' });
+  }
   let prepaid;
   try {
     prepaid = await linkedVisitPrepaid(db, visit, { customerId });
   } catch (err) {
     logger.warn(`[admin-invoices] linked create: prepaid coverage unverifiable for visit ${visit.id} — refused: ${err.message}`);
-    return refusal(409, { error: 'That visit carries an annual-prepay stamp whose coverage could not be verified — nothing was created', code: 'visit_prepaid_unverifiable' });
+    return refusal(409, { error: 'That visit\'s billing (payer or prepaid coverage) could not be verified — nothing was created; try again', code: 'visit_billing_unverifiable' });
   }
   if (prepaid) {
     return refusal(409, { error: 'That visit is already prepaid — it needs no new invoice (use Charge now from the schedule to credit the prepayment)', code: 'visit_prepaid' });
@@ -1108,11 +1133,14 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
     if (String(still.source_estimate_id || '') !== String(visit.source_estimate_id || '')) {
       throw conflict('visit_link_moved', 'That visit\'s estimate link changed while this invoice was being created — nothing was created; reload and try again');
     }
+    if (await linkedVisitRefundedInvoice(trx, still.id)) {
+      throw conflict('visit_invoice_refunded', 'That visit\'s previous invoice was refunded while this invoice was being created — nothing was created');
+    }
     let prepaid;
     try {
       prepaid = await linkedVisitPrepaid(trx, still, { customerId });
     } catch (err) {
-      throw conflict('visit_prepaid_unverifiable', `That visit's annual-prepay coverage could not be verified under the lock — nothing was created (${err.message})`);
+      throw conflict('visit_billing_unverifiable', `That visit's billing (payer or prepaid coverage) could not be verified under the lock — nothing was created (${err.message})`);
     }
     if (prepaid) {
       throw conflict('visit_prepaid', 'That visit was prepaid while this invoice was being created — nothing was created');
@@ -1121,7 +1149,7 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
 }
 
 // Step 4 — a mint refusal as the HTTP response, or null for a real error.
-// visit_not_open | visit_link_moved | visit_prepaid | visit_prepaid_unverifiable | SCHEDULED_PRICE_MOVED |
+// visit_not_open | visit_link_moved | visit_invoice_refunded | visit_prepaid | visit_billing_unverifiable | SCHEDULED_PRICE_MOVED |
 // DEPOSIT_CREDIT_CHANGED | BALANCE_CHANGED. The drift figures ride along so
 // the form can show the balance the server would actually bill.
 const DRIFT_FIELDS = ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit'];
@@ -1730,8 +1758,19 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // A pre-completion invoice linked to an OPEN visit (scheduled_service_id,
+    // no service_record_id yet) never enrolls a review ask at delivery
+    // (Codex P1 r4): the service may be days away, and sendViaSMSAndEmail
+    // defers only on an existing service record. The ask is dropped here
+    // (the quiet closeout never sends one either); the form disables the
+    // toggle for linked open visits.
+    const linkage = await db('invoices').where({ id }).first('scheduled_service_id', 'service_record_id');
+    const preCompletionLinked = !!(linkage?.scheduled_service_id && !linkage?.service_record_id);
+    if (preCompletionLinked && requestReview) {
+      logger.info(`[admin-invoices] review ask dropped for invoice ${id}: linked to open visit ${linkage.scheduled_service_id}, sent before completion`);
+    }
     const result = await InvoiceService.sendViaSMSAndEmail(id, {
-      requestReview,
+      requestReview: preCompletionLinked ? false : requestReview,
       reviewDelayMinutes,
       emailRecipientOverride,
       operatorInitiated: true,

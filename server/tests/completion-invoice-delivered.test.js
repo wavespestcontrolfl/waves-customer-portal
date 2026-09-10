@@ -31,5 +31,8 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(dispatch).toContain(".first('id', 'status', 'total', 'token', 'sent_at')");
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(completion).toMatch(/const suppressCompletionInvoiceLink = !!invoiceAlreadySent\s*\|\| !!\(preMintedInvoice && require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(preMintedInvoice\)\);/);
+    // …and re-reads the reused invoice's LIVE state at the link decision, honoring the send's own 'sending' claim (Codex P1 r4).
+    expect(completion).toMatch(/const live = await db\('invoices'\)\.where\(\{ id: invoice\.id \}\)\.first\('status', 'sent_at'\);\s*reusedInvoiceClaimedElsewhere = !!live && \(String\(live\.status\) === 'sending'\s*\|\| require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(live\)\);/);
+    expect(completion).toMatch(/const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink\s*&& !reusedInvoiceClaimedElsewhere/);
   });
 });

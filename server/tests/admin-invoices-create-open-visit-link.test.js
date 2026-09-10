@@ -33,6 +33,10 @@ jest.mock('../services/scheduled-invoice-mint', () => ({
     return { invoice: { id: 'inv-new', token: 'tok', customer_id: params.customerId, invoice_number: 'WPC-TEST-1', scheduled_service_id: svc.id }, reused: false };
   }),
 }));
+jest.mock('../services/completion-invoice-candidate', () => ({
+  ...jest.requireActual('../services/completion-invoice-candidate'),
+  completionTerminalInvoiceLookup: jest.fn(async () => null),
+}));
 jest.mock('../services/setup-fee-alert-reconcile', () => ({
   reconcileSetupFeeAlert: jest.fn(async () => undefined),
   reconcileSetupFeeAlertForInvoice: jest.fn(async () => undefined),
@@ -64,6 +68,8 @@ const InvoiceService = require('../services/invoice');
 const { acquireScheduledInvoiceMintLock, mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
 const { reconcileSetupFeeAlert } = require('../services/setup-fee-alert-reconcile');
 const { annualPrepayCoversVisit, ANNUAL_PREPAY_PREPAID_METHOD } = require('../services/annual-prepay-renewals');
+const { completionTerminalInvoiceLookup } = require('../services/completion-invoice-candidate');
+const { resolveForInvoice } = require('../services/payer');
 const { completionStatusForService } = require('../services/completion-attempts');
 const router = require('../routes/admin-invoices');
 
@@ -233,13 +239,13 @@ describe('POST /admin/invoices with an open visit link', () => {
   // unverifiable stamp (no term id, table missing, a failed read) refuses
   // the create, before and under the lock, rather than billing a visit that
   // may already be paid for.
-  test('an annual-prepay stamp whose coverage cannot be verified is refused (409 visit_prepaid_unverifiable) — nothing created', async () => {
+  test('an annual-prepay stamp whose coverage cannot be verified is refused (409 visit_billing_unverifiable) — nothing created', async () => {
     visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 117, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: null };
     annualPrepayCoversVisit.mockRejectedValueOnce(new Error('stamped visit carries no annual_prepay_term_id — coverage unverifiable'));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT });
       expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ code: 'visit_prepaid_unverifiable' });
+      expect(await res.json()).toMatchObject({ code: 'visit_billing_unverifiable' });
       expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: VISIT }), expect.anything(), { throwOnError: true });
       expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
     });
@@ -256,7 +262,46 @@ describe('POST /admin/invoices with an open visit link', () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT });
       expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ code: 'visit_prepaid_unverifiable' });
+      expect(await res.json()).toMatchObject({ code: 'visit_billing_unverifiable' });
+    });
+  });
+
+  // Codex P1 r4 — the payer lookup runs STRICT on the office paths: a failed
+  // read must refuse, never fall back to self-pay and bill the homeowner.
+  test('a failed payer lookup refuses the create (409 visit_billing_unverifiable) — nothing created', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed' };
+    resolveForInvoice.mockRejectedValueOnce(new Error('payer schema probe failed'));
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_billing_unverifiable' });
+      expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: VISIT, throwOnError: true }));
+      expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
+    });
+  });
+
+  // Codex P1 r4 — a refunded invoice on the visit is a terminal blocker (the
+  // completion's rule): refund.failed can restore it, so no replacement is
+  // minted, before or under the lock.
+  test('a visit whose previous invoice was refunded is refused (409 visit_invoice_refunded) — before the lock and under it', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed' };
+    completionTerminalInvoiceLookup.mockResolvedValueOnce({ id: 'inv-r', invoice_number: 'WPC-REF-1', status: 'refunded' });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_invoice_refunded' });
+      expect(mintScheduledServiceInvoiceWithDeposit).not.toHaveBeenCalled();
+    });
+    completionTerminalInvoiceLookup.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'inv-r', invoice_number: 'WPC-REF-1', status: 'refunded' });
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
+      const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => ({ ...visitRow })) })) });
+      await assertEligibleInTrx(trx);
+      throw new Error('hook should have refused');
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_invoice_refunded' });
     });
   });
 
@@ -544,6 +589,24 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
     });
   });
 
+  test('a visit whose payer lookup fails is not offered (strict resolution, never read as self-pay)', async () => {
+    resolveForInvoice.mockRejectedValueOnce(new Error('payer schema probe failed'));
+    const open = [
+      { id: VISIT, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, customer_id: CUSTOMER },
+      { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, source_estimate_id: null, customer_id: CUSTOMER },
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return qb({ limit: jest.fn(async () => []) });
+      if (table === 'scheduled_services') return qb({ limit: jest.fn(async () => open.map((v) => ({ ...v }))) });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/service-records/${CUSTOMER}`);
+      expect((await res.json()).openVisits.map((v) => v.id)).toEqual([OTHER]);
+      expect(resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+    });
+  });
+
   test('a visit whose deposit lookup fails is not offered at all (never deposit_credit 0)', async () => {
     const { pendingDepositCredit } = require('../services/estimate-deposits');
     pendingDepositCredit.mockRejectedValueOnce(new Error('deposit ledger unavailable'));
@@ -591,6 +654,46 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
       expect(body.openVisits).toEqual([
         { id: '66666666-6666-4666-8666-666666666666', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 0 },
       ]);
+    });
+  });
+});
+
+describe('POST /admin/invoices/:id/send on a pre-completion linked invoice (Codex P1 #4131 r4)', () => {
+  const INVOICE = '44444444-4444-4444-8444-444444444444';
+  const send = (baseUrl, body) => fetch(`${baseUrl}/admin/invoices/${INVOICE}/send`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  let linkage;
+  let sendSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    sendSpy = jest.spyOn(InvoiceService, 'sendViaSMSAndEmail').mockResolvedValue({ ok: true, sms: { ok: true }, email: { ok: false, skipped: true }, payUrl: 'https://pay.example.test/x' });
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return qb({ first: jest.fn(async () => linkage) });
+      throw new Error(`unexpected table ${table}`);
+    });
+  });
+  afterEach(() => sendSpy.mockRestore());
+
+  test('drops the review ask when the invoice is linked to an open visit with no service record yet', async () => {
+    linkage = { scheduled_service_id: VISIT, service_record_id: null };
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { requestReview: true, reviewDelayMinutes: 120 });
+      expect(res.status).toBe(200);
+      expect(sendSpy).toHaveBeenCalledWith(INVOICE, expect.objectContaining({ requestReview: false }));
+    });
+  });
+
+  test('keeps the operator\'s review ask for a standalone or completion-linked invoice', async () => {
+    linkage = { scheduled_service_id: null, service_record_id: null };
+    await withServer(async (baseUrl) => {
+      await send(baseUrl, { requestReview: true, reviewDelayMinutes: 120 });
+      expect(sendSpy).toHaveBeenCalledWith(INVOICE, expect.objectContaining({ requestReview: true }));
+    });
+    linkage = { scheduled_service_id: VISIT, service_record_id: 'sr-1' };
+    await withServer(async (baseUrl) => {
+      await send(baseUrl, { requestReview: true, reviewDelayMinutes: 120 });
+      expect(sendSpy).toHaveBeenLastCalledWith(INVOICE, expect.objectContaining({ requestReview: true }));
     });
   });
 });

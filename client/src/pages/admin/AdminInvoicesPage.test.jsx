@@ -19,6 +19,7 @@ import {
   openVisitBalanceKey,
   openVisitCreateExpectations,
   openVisitSendTimingBlocked,
+  openVisitReviewRequestBlocked,
   previewLinkedBalance,
   reconcileSelectedOpenVisit,
   visitPickerResponseIsCurrent,
@@ -110,9 +111,17 @@ describe("AdminInvoicesPage open-visit link: send timing (Codex P1 r2)", () => {
   });
 });
 
+describe("AdminInvoicesPage open-visit link: no review ask before completion (Codex P1 r4)", () => {
+  it("blocks the review toggle for a linked open visit and leaves standalone invoices alone", () => {
+    expect(openVisitReviewRequestBlocked({ id: "v1" })).toBe(true);
+    expect(openVisitReviewRequestBlocked(null)).toBe(false);
+    expect(openVisitReviewRequestBlocked(undefined)).toBe(false);
+  });
+});
+
 describe("AdminInvoicesPage open-visit link: picker refresh after a create conflict (Codex P2 r2)", () => {
   it("reloads the picker for every visit-state conflict code, not only deposit drift", () => {
-    for (const code of ["DEPOSIT_CREDIT_CHANGED", "BALANCE_CHANGED", "visit_not_open", "visit_link_moved", "visit_prepaid", "visit_prepaid_unverifiable", "visit_already_invoiced", "SCHEDULED_PRICE_MOVED"]) {
+    for (const code of ["DEPOSIT_CREDIT_CHANGED", "BALANCE_CHANGED", "visit_not_open", "visit_link_moved", "visit_invoice_refunded", "visit_prepaid", "visit_billing_unverifiable", "visit_already_invoiced", "SCHEDULED_PRICE_MOVED"]) {
       expect(VISIT_STATE_CONFLICT_CODES).toContain(code);
       expect(reloadsVisitPickerAfterCreateError(code)).toBe(true);
     }
