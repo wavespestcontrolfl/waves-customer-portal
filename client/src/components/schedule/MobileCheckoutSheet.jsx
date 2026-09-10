@@ -24,6 +24,7 @@
 //   ESC behavior should restore the parent's scroll position and not
 //   leak focus.
 
+import { createPortal } from 'react-dom';
 import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
@@ -286,10 +287,10 @@ export default function MobileCheckoutSheet({
     }
   }
 
-  return (
-    <div className={`fixed inset-0 z-[105] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
+  return createPortal(
+    <div className={`fixed inset-0 z-[105] bg-white flex flex-col overflow-hidden ${desktopVisible ? '' : 'md:hidden'}`}>
       <div
-        className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
+        className="box-border sticky top-0 z-[1] shrink-0 bg-white border-b border-hairline border-zinc-200 flex items-center px-3"
         style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
@@ -306,7 +307,7 @@ export default function MobileCheckoutSheet({
         <div className="w-11" />
       </div>
 
-      <div className="px-4 pt-5 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+      <div className="box-border shrink-0 w-full px-4 py-3 mx-auto" style={{ maxWidth: 560 }}>
         <button
           type="button"
           onClick={handleCharge}
@@ -322,16 +323,19 @@ export default function MobileCheckoutSheet({
                 ? 'No charge — complete from job'
                 : `Charge $${total.toFixed(2)}`}
         </button>
+        {mintError && (
+          <div role="alert" className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
+            {mintError}
+          </div>
+        )}
+      </div>
+      <div className="box-border min-h-0 flex-1 overflow-y-auto overscroll-contain w-full px-4 pb-10 mx-auto" style={{ maxWidth: 560, paddingBottom: "calc(40px + env(safe-area-inset-bottom, 0px))" }}>
         {cardOnFileNote && (
           <div className="text-center text-ink-tertiary" style={{ fontSize: 13, marginTop: 8 }}>
             {cardOnFileNote}
           </div>
         )}
-        {mintError && (
-          <div className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
-            {mintError}
-          </div>
-        )}
+
         {/* Service line items */}
         <div className="mt-6">
           {invoicePreview ? (
@@ -534,6 +538,7 @@ export default function MobileCheckoutSheet({
           onSelect={handleAddItem}
         />
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }

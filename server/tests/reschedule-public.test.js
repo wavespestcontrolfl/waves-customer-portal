@@ -512,6 +512,88 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
     }));
     await expect(buildRescheduleLink('svc-1')).resolves.toEqual({ url: null, line: '' });
   });
+
+  test('buildRescheduleLink reuseExisting: the oldest existing code wins over a mint, but only after the eligibility checks', async () => {
+    // The builder destructures its short-url imports at load, so the
+    // shortener is mocked for a fresh, isolated copy of the module.
+    const shortenOrPassthrough = jest.fn().mockResolvedValue('https://portal.test/l/fresh12345');
+    const existingShortUrlFor = jest.fn().mockResolvedValue('https://portal.test/l/abcde');
+    let buildRescheduleLink;
+    jest.isolateModules(() => {
+      jest.doMock('../services/short-url', () => ({ shortenOrPassthrough, existingShortUrlFor, shortLinkBaseUrl: () => 'https://portal.test' }));
+      ({ buildRescheduleLink } = require('../services/reschedule-link'));
+    });
+
+    // Eligible visit: the existing code is returned, nothing is minted.
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
+        source_action: null, status: 'confirmed', customer_confirmed: true, visit_id: null,
+      }),
+    }));
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({
+      url: 'https://portal.test/l/abcde', line: 'Reschedule here: https://portal.test/l/abcde\n\n',
+    });
+    expect(existingShortUrlFor).toHaveBeenCalledWith({ kind: 'reschedule', entityType: 'scheduled_services', entityId: 'svc-1' });
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+
+    // Without the option the default path is untouched: a fresh mint.
+    existingShortUrlFor.mockClear();
+    await expect(buildRescheduleLink('svc-1')).resolves.toMatchObject({ url: 'https://portal.test/l/fresh12345' });
+    expect(existingShortUrlFor).not.toHaveBeenCalled();
+
+    // previewOnly: the existing code when there is one, else a placeholder
+    // the length of a fresh mint — and never a mint (the sheet's advisory
+    // counter is read-only).
+    shortenOrPassthrough.mockClear();
+    await expect(buildRescheduleLink('svc-1', { previewOnly: true })).resolves.toMatchObject({ url: 'https://portal.test/l/abcde' });
+    existingShortUrlFor.mockResolvedValueOnce(null);
+    const { url: placeholder } = await buildRescheduleLink('svc-1', { previewOnly: true });
+    expect(placeholder).toMatch(/\/l\/x{10}$/);
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+
+    // Ineligible (unconfirmed dispatch-owned pending): the refusal still
+    // wins — an existing code is never handed out for a dead-end page.
+    existingShortUrlFor.mockClear();
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
+        source_action: 'ai_call_pipeline_followup', status: 'pending', customer_confirmed: false,
+      }),
+    }));
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({ url: null, line: '' });
+    expect(existingShortUrlFor).not.toHaveBeenCalled();
+
+    // pinnedUrl: after the checks, hand back the measured url untouched —
+    // no lookup, no mint — or null once the visit is no longer eligible.
+    existingShortUrlFor.mockClear(); shortenOrPassthrough.mockClear();
+    await expect(buildRescheduleLink('svc-1', { pinnedUrl: 'https://portal.test/l/measured', assumeConfirmed: true }))
+      .resolves.toEqual({ url: 'https://portal.test/l/measured', line: 'Reschedule here: https://portal.test/l/measured\n\n' });
+    expect(existingShortUrlFor).not.toHaveBeenCalled();
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+    await expect(buildRescheduleLink('svc-1', { pinnedUrl: 'https://portal.test/l/measured' })).resolves.toEqual({ url: null, line: '' });
+
+    // A thrown read is reported as failed (Quick Move fails closed on it);
+    // the url/line contract is unchanged for every other caller.
+    mockDb.mockImplementation(() => ({ where: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(new Error('connection reset')) }));
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({ url: null, line: '', failed: true });
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
+        source_action: 'ai_call_pipeline_followup', status: 'pending', customer_confirmed: false,
+      }),
+    }));
+
+    // assumeConfirmed: the SAME pending row judged on its landed state —
+    // the Quick Move pre-check is about to confirm it through the
+    // rebooker, so the link the post-move send would build is what gets
+    // measured and pinned (codex #4122 P2).
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true, assumeConfirmed: true }))
+      .resolves.toMatchObject({ url: 'https://portal.test/l/abcde' });
+  });
 });
 
 describe('grouped visits are refused before slot selection (codex #3609 r4)', () => {
