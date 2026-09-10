@@ -252,7 +252,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await nav.response.text()).toBe(shellHtml(['/assets/index-BBB.js']));
     // Page B lazy-loads a route while its shell refresh is parked.
     await dispatchFetch('/assets/DashboardPageV2-BBB.js');
-    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build'))
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build').split(',')[0])
       .toBe(buildIdOf(['/assets/index-BBB.js']));
 
     releaseAssets();
@@ -291,7 +291,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     gates.A();
     await navA.settled(); // A's refresh landed after B's navigation
     await dispatchFetch('/assets/DashboardPageV2-BBB.js');
-    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build'))
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build').split(',')[0])
       .toBe(buildIdOf(['/assets/index-BBB.js']));
 
     gates.B();
@@ -391,9 +391,9 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await nav.settled();
 
     const bbb = buildIdOf(['/assets/index-BBB.js']);
-    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build')).toBe(bbb);
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build').split(',')[0]).toBe(bbb);
     await dispatchFetch('/assets/Later-BBB.js');
-    expect((await cache.match('/assets/Later-BBB.js')).headers.get('x-waves-build')).toBe(bbb);
+    expect((await cache.match('/assets/Later-BBB.js')).headers.get('x-waves-build').split(',')[0]).toBe(bbb);
   });
 
   it('keeps a chunk that a retained build re-tagged while the prune was deleting it', async () => {
@@ -447,7 +447,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await navB.settled();
 
     await dispatchFetch('/assets/DashboardPageV2-BBB.js');
-    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build'))
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build').split(',')[0])
       .toBe(buildIdOf(['/assets/index-BBB.js']));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
@@ -537,5 +537,28 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     setFetch(async (request) => fakeResponse(`asset:${request.url}`));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-EEE.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-EEE.js']);
+  });
+
+  it('lets the cached build claim a chunk first loaded while a never-cached build is live', async () => {
+    // Pre-push Codex P1: the worker cannot tell which tab requested a miss.
+    // Shell A cached; a navigation to B fails its refresh (B live, never
+    // cached); an A tab then loads a route for the first time. Tagged only
+    // B, C's prune (retaining C and A) would delete it under the A tab.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' });
+    await dispatchFetch('/assets/DashboardPageV2-AAA.js'); // first load, from the A tab
+    expect((await cache.match('/assets/DashboardPageV2-AAA.js')).headers.get('x-waves-build'))
+      .toBe(`${buildIdOf(['/assets/index-BBB.js'])},${buildIdOf(['/assets/index-AAA.js'])}`);
+
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
   });
 });

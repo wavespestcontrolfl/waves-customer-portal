@@ -80,12 +80,11 @@ function buildTagsOf(response) {
   return raw ? raw.split(',').map(t => t.trim()).filter(Boolean) : [];
 }
 
-function tagWithBuild(response, buildId, pinnedBuildId = null) {
+function tagWithBuild(response, buildIds, pinnedBuildId = null) {
   const headers = new Headers(response.headers);
   const existing = buildTagsOf(response);
-  const pinned = pinnedBuildId && pinnedBuildId !== buildId && existing.includes(pinnedBuildId) ? [pinnedBuildId] : [];
-  const rest = existing.filter(t => t !== buildId && !pinned.includes(t));
-  const tags = [buildId, ...pinned, ...rest].slice(0, BUILD_TAGS_KEPT);
+  const pinned = pinnedBuildId && existing.includes(pinnedBuildId) ? [pinnedBuildId] : [];
+  const tags = [...new Set([].concat(buildIds).filter(Boolean).concat(pinned, existing))].slice(0, BUILD_TAGS_KEPT);
   headers.set(BUILD_HEADER, tags.join(','));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -303,8 +302,12 @@ self.addEventListener('fetch', event => {
             const clone = response.clone();
             // Tag the chunk with the build it was loaded for, so the prune
             // keeps it with that build's shell instead of guessing from HTML.
-            const store = currentBuildId(cache)
-              .then(buildId => withAssetWrites(() => cache.put(event.request, tagWithBuild(clone, buildId || 'untagged'))))
+            // The worker cannot tell which tab asked: the live build is the
+            // newest navigation's, but a tab on the cached shell's build may
+            // be the requester (a newer navigation whose refresh failed is
+            // live yet never cached), so the cached build claims it too.
+            const store = Promise.all([currentBuildId(cache), cachedBuildId(cache)])
+              .then(([buildId, cachedId]) => withAssetWrites(() => cache.put(event.request, tagWithBuild(clone, [buildId || 'untagged', cachedId]))))
               .catch(() => {});
             // The respondWith promise is still pending here, so the event
             // can still be extended; if a browser disagrees, fall back to
