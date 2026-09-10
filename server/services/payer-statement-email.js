@@ -286,16 +286,16 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
 // SMS-delivered statement enters the viewed/dunning lifecycle exactly like
 // an emailed one (GH Codex #3844 r2 P1).
 async function markStatementSent(statementId, database = db) {
-  const updated = await database('payer_statements')
+  await database('payer_statements')
     .where({ id: statementId, status: 'finalized' })
     .update({ status: 'sent', sent_at: database.fn.now(), updated_at: database.fn.now() });
-  // First delivery only (the update matched): every linked child invoice is
-  // now delivered, so its open visit closes out like an individually sent
-  // invoice (GitHub r9 P1 #4127). Best-effort by contract.
-  if (Number(updated) > 0) {
-    const { closeOutVisitsForStatement } = require('./invoice-issued-closeout');
-    await closeOutVisitsForStatement(statementId, { trigger: 'sent', conn: database });
-  }
+  // Every successful delivery — the first AND every resend: each linked child
+  // invoice is delivered, so its open visit closes out like an individually
+  // sent invoice (GitHub r9 P1 #4127); a resend is the reachable retry for a
+  // child closeout that committed but still owes post-commit work. Idempotent
+  // (a closed visit refuses quietly), best-effort by contract.
+  const { closeOutVisitsForStatement } = require('./invoice-issued-closeout');
+  await closeOutVisitsForStatement(statementId, { trigger: 'sent', conn: database });
 }
 
 module.exports = { sendStatementEmail, resolveApRecipient, forcedRetryKey, markStatementSent };

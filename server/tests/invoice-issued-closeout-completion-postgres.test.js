@@ -128,7 +128,7 @@ describe('source contracts', () => {
   });
   test('GitHub r9: statement delivery + settlement run the closeout for linked children AFTER commit; the locked recheck re-resolves project ownership', () => {
     const email = fs.readFileSync(path.join(__dirname, '../services/payer-statement-email.js'), 'utf8');
-    expect(email).toMatch(/const updated = await database\('payer_statements'\)[\s\S]{0,300}?if \(Number\(updated\) > 0\) \{[\s\S]{0,200}?closeOutVisitsForStatement\(statementId, \{ trigger: 'sent', conn: database \}\)/);
+    expect(email).toMatch(/await database\('payer_statements'\)[\s\S]{0,1200}?closeOutVisitsForStatement\(statementId, \{ trigger: 'sent', conn: database \}\);\s*\}/);
     const payers = fs.readFileSync(path.join(__dirname, '../routes/admin-payers.js'), 'utf8');
     const settleAt = payers.indexOf("{ database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });");
     const closeAt = payers.indexOf("closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null })");
@@ -137,8 +137,10 @@ describe('source contracts', () => {
     const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     expect(webhook).toMatch(/if \(settledNow\) \{[\s\S]{0,400}?closeOutVisitsForStatement\(statementId, \{ trigger: 'paid' \}\)/);
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,900}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,2000}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'project_required_completion' && issuedInvoiceCloseout\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
+    // The office-only status set is re-checked on the locked row, ahead of the profile re-resolve.
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,700}?if \(!\['pending', 'confirmed'\]\.includes\(String\(lockedSvcRow\?\.status\)\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,1200}?const lockedProfile = await resolveLockedProfile/);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -393,6 +395,20 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).del();
     await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'confirmed' });
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg })).toMatchObject({ closed: false, reason: 'invoice_void', visitId: f.serviceId });
+  });
+
+  test('a technician who starts the visit between the unlocked read and the record transaction wins — the locked status refuses the closeout (pre-push P1 r9)', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    // The wrapper resolved the visit as 'confirmed'; by the time the record
+    // transaction locks the row the technician is on site.
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+    const result = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey: randomUUID() },
+      actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
+    expect(result).toMatchObject({ status: 409, body: { code: 'issued_visit_in_progress' } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
   });
 
   test('a reschedule that lands between the unlocked read and the record transaction refuses the closeout — the locked day decides (GitHub r6 P2)', async () => {

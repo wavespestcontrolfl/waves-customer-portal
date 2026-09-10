@@ -4918,6 +4918,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (!lockedDay || lockedDay !== serviceDateOnly(svc.scheduled_date) || lockedDay > etDateString()) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
+            // The office-only status set, re-checked on the LOCKED row (pre-push
+            // P1 r9): the wrapper admits pending/confirmed on an unlocked read;
+            // a technician who started the visit in between (en_route /
+            // on_site) owns it — a running timer and a completion of their own
+            // — so the closeout refuses instead of completing over them.
+            if (!['pending', 'confirmed'].includes(String(lockedSvcRow?.status))) {
+              throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
+            }
             // Project ownership re-resolved from the LOCKED row (GitHub r9 P2
             // #4127): the wrapper's strict profile check and the unlocked
             // project_required_completion guard above read the identity
@@ -6648,6 +6656,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was rescheduled while its invoice was being issued — the visit stays open on its new day.',
             code: 'issued_visit_rescheduled',
+          } });
+        }
+        if (err && err.code === 'issued_visit_in_progress') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit was started by its technician while its invoice was being issued — the technician completes it.',
+            code: 'issued_visit_in_progress',
           } });
         }
         if (err && err.code === 'project_required_completion' && issuedInvoiceCloseout) {

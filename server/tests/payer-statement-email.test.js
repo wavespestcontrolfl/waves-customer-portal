@@ -92,7 +92,7 @@ test('sends via SendGrid + stamps finalized→sent', async () => {
   }));
   expect(updates).toHaveLength(1);
   expect(updates[0]).toMatchObject({ status: 'sent' });
-  // First delivery → the linked child invoices' open visits are closed out.
+  // Delivery → the linked child invoices' open visits are closed out (every delivery, resends included).
   expect(mockCloseOutVisitsForStatement).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ trigger: 'sent' }));
 });
 
