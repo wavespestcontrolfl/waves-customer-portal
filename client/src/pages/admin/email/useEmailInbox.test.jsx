@@ -87,6 +87,20 @@ describe("useEmailInbox reclassify and attachment feedback", () => {
     expect(result.current.visibleEmails.find((email) => email.id === "m1").classification).toBe("quote_request");
   });
 
+  it("does not re-read an unread row, since that GET marks it read server-side", async () => {
+    adminFetch.mockImplementation((path) => {
+      if (path.startsWith("/api/admin/email/oauth/status")) return json({ connected: true });
+      if (path.startsWith("/api/admin/email/inbox")) return json({ emails: [{ ...row, is_read: false }], total: 1 });
+      if (path.endsWith("/reclassify")) return Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({ error: "Reclassified, but the follow-up action failed" }) });
+      return json({});
+    });
+    const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
+    await flush();
+    await act(async () => { await result.current.handleReclassify("m1"); });
+    expect(result.current.actionFeedback).toEqual({ error: true, message: "Reclassified, but the follow-up action failed" });
+    expect(adminFetch.mock.calls.some(([path]) => path === "/api/admin/email/message/m1")).toBe(false);
+  });
+
   it("falls back to the generic reclassify message when the failure carries no payload", async () => {
     handlers["/api/admin/email/message/m1/reclassify"] = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.reject(new Error("no body")) });
     const { result } = renderHook(() => useEmailInbox(true, () => {}), { wrapper });
