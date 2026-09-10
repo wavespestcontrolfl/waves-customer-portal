@@ -1770,7 +1770,14 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
     case 'confirm':
-      patch.human_state = 'confirmed';
+      // Confirming an EDITED callback card reaffirms the edit rather than
+      // un-editing it: the edited state and its review time stay, because
+      // for a card edited before callback cards existed that reviewed_at
+      // is the only evidence boundary on record (obligationRenewedAt).
+      // Other commitments keep the plain confirm.
+      patch.human_state = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN 'edited' ELSE 'confirmed' END");
+      patch.reviewed_at = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN reviewed_at ELSE ? END", [patch.reviewed_at]);
+      patch.reviewed_by = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN reviewed_by ELSE ? END", [patch.reviewed_by]);
       break;
     case 'dismiss':
       patch.human_state = 'dismissed';

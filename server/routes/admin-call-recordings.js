@@ -292,6 +292,11 @@ router.get('/commitments/open', async (req, res, next) => {
     const { isEnabled } = require('../config/feature-gates');
     const enabled = isEnabled('callCommitments');
     let rows = await listOpenCommitments(db, opts);
+    // Undated callbacks are prepared by the first read only: a second
+    // preparation within the request could staff deadlines that reorder
+    // rows ahead of the page already selected, and a later offset would
+    // then skip or repeat callbacks.
+    const reread = { ...opts, prepare: false };
     // Refresh at most REFRESH_CALLS_PER_READ distinct calls per read — cheap
     // indexed lookups, rotating window across reads (see above) —
     // then re-list whenever ANY fulfillment field moved (a row kept, a
@@ -308,14 +313,14 @@ router.get('/commitments/open', async (req, res, next) => {
       // the unfiltered page at the same offset is a different logical page,
       // so a call the operator is looking at could otherwise never be
       // refreshed (Codex #3725 r18 P2).
-      const candidates = opts.includeHints ? rows : [...rows, ...await listOpenCommitments(db, { ...opts, includeHints: true })];
+      const candidates = opts.includeHints ? rows : [...rows, ...await listOpenCommitments(db, { ...reread, includeHints: true })];
       const callIds = rotatingRefreshWindow([...new Set(candidates.map((r) => r.call_log_id))]);
       let changed = 0;
       for (const id of callIds) {
         const r = await refreshFulfillment(db, id).catch(() => ({}));
         changed += (r.fulfilled || 0) + (r.hinted || 0) + (r.cleared || 0);
       }
-      if (changed > 0) rows = await listOpenCommitments(db, opts);
+      if (changed > 0) rows = await listOpenCommitments(db, reread);
     }
     const hasMore = rows.length > pageLimit;
     const cards = require('../services/callback-cards');

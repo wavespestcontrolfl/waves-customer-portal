@@ -225,7 +225,11 @@ describe('GET /commitments/open — the Owed queue', () => {
     // hints=0: the refresh candidates come from the UNFILTERED page, so a
     // hint the facts no longer support gets cleared instead of hiding the
     // row for good.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true, prepare: true });
+    // Undated callbacks are prepared by the FIRST read only; the unfiltered
+    // candidate read and any re-list after a refresh must not staff new
+    // deadlines that reorder rows ahead of the page already selected.
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true, prepare: false });
+    expect(commitments.listOpenCommitments.mock.calls.filter(([, o]) => o.prepare)).toHaveLength(1);
     expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
     expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(3);
   });

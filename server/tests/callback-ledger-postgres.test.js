@@ -270,6 +270,13 @@ run('callback ledger on PostgreSQL', () => {
     // A later claim under callback cards leaves that boundary in place.
     await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: edited.updated_at, now: new Date() });
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+    // Confirming the edited card reaffirms the edit: state and review time stay.
+    const claimed = await trx('call_commitments').where({ id: row.id }).first();
+    await cards.actOnCallback(trx, row.id, { action: 'confirm', actorId: staff.id, expectedAt: claimed.updated_at, now: new Date() });
+    const confirmed = await trx('call_commitments').where({ id: row.id }).first();
+    expect(confirmed.human_state).toBe('edited');
+    expect(confirmed.reviewed_at).toEqual(edited.reviewed_at);
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
     await returnedCall(await afterReview(row.id));
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
   });
