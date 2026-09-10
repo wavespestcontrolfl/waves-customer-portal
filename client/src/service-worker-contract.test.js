@@ -119,7 +119,7 @@ const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.ur
 
 describe('customer service-worker update contract', () => {
   it('preloads hashed shell assets before storing the replacement HTML', () => {
-    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq)');
+    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true } = {})');
     expect(source).toContain('async function precacheCompleteShell()');
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
     expect(source).toContain('await Promise.allSettled(assetResponses.map');
@@ -366,7 +366,9 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await navA.settled();
     expect(await cache.match('/assets/DashboardPageV2-BBB.js')).toBeTruthy();
     await navB.settled();
-    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-AAA.js', '/assets/index-BBB.js']);
+    // A's refresh was superseded by B's navigation and never committed
+    // (see 'skips a superseded refresh'), so 000 remains the previous build.
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-000.js', '/assets/index-BBB.js']);
   });
 
   it('does not touch cached page chunks when the same shell is refreshed', async () => {
@@ -733,6 +735,61 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js', '/assets/index-DDD.js']);
+  });
+
+  it('removes the entries a failed refresh batch created and keeps prior claims on the rest', async () => {
+    // Codex #4335 P1: a refresh to C stores C's new entry script, then fails
+    // storing another asset (quota). Tagging the new script with the cached
+    // build would make the failed generation unprunable while B stays
+    // cached — and hold the quota every later refresh needs.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js', '/assets/Shared-XYZ.js'])));
+
+    cache.failPut = (url) => url.endsWith('/assets/vendor-CCC.js');
+    await expect(cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js', '/assets/vendor-CCC.js', '/assets/Shared-XYZ.js']))))
+      .rejects.toThrow(/Quota/);
+    cache.failPut = null;
+
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js']); // index-CCC.js rolled back
+    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+      .toContain(buildIdOf(['/assets/index-BBB.js', '/assets/Shared-XYZ.js']));
+  });
+
+  it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
+    // Codex #4335 P1: navigation A begins before a deploy but its response is
+    // slow; navigation B begins later, is answered by the new build and its
+    // refresh commits shell B. When A's (older) response finally lands it
+    // must neither replace shell B nor become the live build.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    let navs = 0;
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') {
+        navs += 1;
+        if (navs === 1) { await gateA; return fakeResponse(shellHtml(['/assets/index-AAA.js'])); }
+        return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      }
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    const navAPromise = dispatchFetch('/admin/', { mode: 'navigate' }); // begins first, response parked
+    await tick();
+    await dispatchFetch('/admin/', { mode: 'navigate' }); // begins later, lands first, commits B
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+    releaseA();
+    await navAPromise;
+
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+    await dispatchFetch('/assets/DashboardPageV2-BBB.js');
+    expect((await cache.match('/assets/DashboardPageV2-BBB.js')).headers.get('x-waves-build').split(',')[0])
+      .toBe(buildIdOf(['/assets/index-BBB.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-BBB.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
   });
 
   it('merges a queued re-tag into the entry a refresh re-wrote meanwhile', async () => {

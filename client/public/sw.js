@@ -178,12 +178,18 @@ function claimBuilds(cache, request, fallback, claims) {
 // origin-wide for the same reason as the asset writes: an installing
 // worker's precache and the active worker's navigation refresh overlap.
 const shellRefreshChain = { promise: Promise.resolve() };
-async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq) {
-  return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, () => replaceCompleteShell(shellResponse, enqueuedSeq));
+async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true } = {}) {
+  return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, () => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable));
 }
 
-async function replaceCompleteShell(shellResponse, enqueuedSeq) {
+async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
   const cache = await caches.open(CACHE_NAME);
+  // A navigation that began before a newer one can still finish after it
+  // (its network response was slower); its shell is the older deploy's and
+  // must not replace the newer shell already cached — nor its build be
+  // retained over the newer one at the next prune. The install precache
+  // is never superseded: the worker needs a shell.
+  if (supersedable && enqueuedSeq < liveBuildSeq) throw new Error('Shell refresh superseded by a newer navigation');
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
 
   const html = await shellResponse.clone().text();
@@ -199,21 +205,34 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
     return [assetUrl, response];
   }));
+  // The asset fetches above take time; a newer navigation may have landed
+  // meanwhile. Check again before committing anything.
+  if (supersedable && enqueuedSeq < liveBuildSeq) throw new Error('Shell refresh superseded by a newer navigation');
   // Read the previous build BEFORE overwriting its shell: a different id
   // means a deploy shipped, and everything older than that build is dead weight.
   const previousBuildId = await cachedBuildId(cache);
   // Under the write lock, keeping the claims an existing entry already
-  // holds. The previous build claims these too: if a write fails (quota)
-  // the shell is not replaced, and a run of such failures must not push
-  // the still-cached build off the tag cap of an asset it shares. Every
-  // started write settles before the lock is released.
+  // holds. An entry that already existed is claimed by the previous build
+  // too: if a write fails (quota) the shell is not replaced, and a run of
+  // such failures must not push the still-cached build off the tag cap
+  // of an asset it shares. Entries this batch CREATED belong only to the
+  // new build, and are removed again if the batch fails — otherwise a
+  // failed generation would sit in the bucket, unprunable, holding the
+  // very quota the next refresh needs. Every started write settles before
+  // the lock is released.
   await withAssetWrites(async () => {
+    const created = [];
     const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
       const existing = await cache.match(assetUrl);
-      await cache.put(assetUrl, tagWithBuild(response, [buildId, previousBuildId, ...buildTagsOf(existing)]));
+      const claims = existing ? [buildId, previousBuildId, ...buildTagsOf(existing)] : [buildId];
+      if (!existing) created.push(assetUrl);
+      await cache.put(assetUrl, tagWithBuild(response, claims));
     }));
     const failed = results.find(r => r.status === 'rejected');
-    if (failed) throw failed.reason;
+    if (failed) {
+      await Promise.allSettled(created.map(assetUrl => cache.delete(assetUrl)));
+      throw failed.reason;
+    }
   });
   await cache.put(OFFLINE_URL, shellResponse);
   cachedShellSeq += 1;
@@ -252,7 +271,7 @@ function pruneStaleAssets(cache, retainedBuildIds) {
 async function precacheOnce() {
   const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
   const shellResponse = await fetch(shellRequest);
-  await cacheCompleteShellResponse(shellResponse);
+  await cacheCompleteShellResponse(shellResponse, navigationSeq, { supersedable: false });
 }
 
 function isQuotaError(err) {
@@ -302,6 +321,10 @@ self.addEventListener('fetch', event => {
   // ALWAYS return a Response (never undefined) so iOS standalone PWAs
   // never render a blank screen on flaky cellular.
   if (event.request.mode === 'navigate' || event.request.destination === 'document') {
+    // Order navigations by when they BEGIN, not when their response lands:
+    // an earlier request can be answered by the older deploy yet resolve
+    // after a later request answered by the newer one.
+    const navSeq = ++navigationSeq;
     event.respondWith((async () => {
       try {
         const response = await fetch(event.request);
@@ -312,9 +335,6 @@ self.addEventListener('fetch', event => {
           // Advance the live build before the (serialized, possibly slow)
           // refresh lands, so chunks this page loads meanwhile are tagged
           // with its own build. A shell without assets is not a build.
-          // The order token is taken now, not when the body finishes:
-          // an older response's body can resolve after a newer one's.
-          const navSeq = ++navigationSeq;
           event.waitUntil(response.clone().text().then(html => {
             const assets = shellAssetUrls(html);
             if (!assets.length) return;
