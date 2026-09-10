@@ -47,6 +47,7 @@ const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
 const { ASK_SPACING_MS, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt } = ASK_HISTORY;
+const REVIEW_RETRY_PERSISTENCE_FAILED = "review_retry_persistence_failed";
 const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 // Trapping-family catalog keys (owner ruling 2026-08-06: "rodent/wildlife
 // should be deemed multiple visits") — multi-treatment REVIEW-CADENCE
@@ -967,7 +968,7 @@ const ReviewService = {
       try {
         outcome = await this.sendSMS(request.id, { expectedPhone });
       } catch (err) {
-        if (err?.code === "approved_phone_persistence_failed") {
+        if (["approved_phone_persistence_failed", REVIEW_RETRY_PERSISTENCE_FAILED].includes(err?.code)) {
           // This call created the row and the provider was never entered.
           // Remove it so creation-time cooldown readers do not block a retry.
           await this._parkRequestVerified(request.id, { preferDelete: true });
@@ -1739,8 +1740,15 @@ const ReviewService = {
       return { deferred: "spacing", nextAllowedAt: holdUntil };
     } catch (err) {
       const retryAt = new Date(Date.now() + 30 * 60 * 1000);
-      const stored = await db("review_requests").where({ id: requestId, status: "pending" }).update({ scheduled_for: retryAt });
-      if (!stored) throw new Error(`3-day rule lookup failed and the retry could not be stored (requestId=${requestId})`);
+      try {
+        const stored = await db("review_requests").where({ id: requestId, status: "pending" }).update({ scheduled_for: retryAt });
+        if (!stored) throw new Error("pending request was lost");
+      } catch (retryErr) {
+        throw Object.assign(
+          new Error(`3-day rule lookup failed and the retry could not be stored (requestId=${requestId})`),
+          { cause: retryErr, code: REVIEW_RETRY_PERSISTENCE_FAILED },
+        );
+      }
       logger.warn(`[review] 3-day rule lookup failed, holding request (requestId=${requestId}): ${err.message}`);
       return { deferred: "spacing_lookup_unavailable", nextAllowedAt: retryAt };
     }
