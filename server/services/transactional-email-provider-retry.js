@@ -227,10 +227,14 @@ async function retryOne(message) {
   const asmGroupId = group === 'transactional_required' ? 0 : sendgrid.serviceGroupId();
   try {
     let result;
+    // Set immediately before the Mail Send request: a failure clearing the
+    // provider block is provably pre-send and keeps the ordinary retry schedule.
+    let dispatchStarted = false;
     const dispatchToProvider = async () => {
       // Blocks are a provider-specific suppression distinct from hard bounces.
       // If it remains, SendGrid will drop the retry before attempting delivery.
       await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
+      dispatchStarted = true;
       result = await sendgrid.sendOne({
         to: message.recipient_email_snapshot,
         fromEmail: message.from_email_snapshot,
@@ -249,10 +253,9 @@ async function retryOne(message) {
       });
     };
     if (withProviderHandoff) {
-      let dispatchStarted = false;
       let fence;
       try {
-        fence = await withProviderHandoff(async () => { dispatchStarted = true; await dispatchToProvider(); });
+        fence = await withProviderHandoff(dispatchToProvider);
       } catch (err) {
         if (dispatchStarted && !result) {
           await markRetryUncertain(message, err);

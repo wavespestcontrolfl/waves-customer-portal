@@ -129,7 +129,8 @@ async function deferSummarySms({ visit, customer, recipient, body, claim, nextAl
 async function deferredSummaryRecipient(meta, database = db, { customer: heldCustomer = null } = {}) {
   const visit = await database('service_visits').where({ id: meta.visit_id, customer_id: meta.customer_id,
     summary_token_hash: meta.summary_token_hash }).whereNull('summary_token_revoked_at')
-    .whereIn('status', ['closing', 'closed']).first('id');
+    .whereIn('status', ['closing', 'closed'])
+    .modify((query) => { if (database.isTransaction) query.forShare(); }).first('id');
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
   const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
     { db: database });
@@ -190,6 +191,12 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // claim read, not a silently different recipient.
     const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
       { db: trx, forShare: true, rethrow: true });
+    // The visit row is held too: a revocation or status change after the
+    // mark committed serializes behind the provider request instead of
+    // racing it.
+    const live = await trx('service_visits').where({ id: visitId }).whereNull('summary_token_revoked_at')
+      .whereIn('status', ['closing', 'closed']).forShare().first('id');
+    if (!live) return false;
     return authorized(customer, prefs, trx, phase);
   };
   const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
@@ -438,10 +445,12 @@ async function reconcileSummaryEmailBounce(message, database = db) {
 async function summaryRetryAuthorized(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: true };
-  const visit = await database('service_visits').where({ id: match[1] }).whereNull('summary_token_revoked_at')
-    .whereIn('status', ['closing', 'closed']).first('id', 'customer_id');
-  if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
   const held = Boolean(database.isTransaction);
+  // On a held transaction the visit row is locked with the recipient rows so
+  // a revocation serializes behind the provider request.
+  const visit = await database('service_visits').where({ id: match[1] }).whereNull('summary_token_revoked_at')
+    .whereIn('status', ['closing', 'closed']).modify((query) => { if (held) query.forShare(); }).first('id', 'customer_id');
+  if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
   const customer = await withAccountPrimaryContact(
     await database('customers').where({ id: visit.customer_id }).first(), { db: database, forShare: held, rethrow: held },
   );
@@ -459,7 +468,7 @@ async function retrySummaryThroughHandoff(message, dispatch, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
   return database.transaction(async (trx) => {
-    const visit = await trx('service_visits').where({ id: match[1] }).first('customer_id');
+    const visit = await trx('service_visits').where({ id: match[1] }).forShare().first('customer_id');
     if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
     await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
     await createDefaultCustomerRows(trx, visit.customer_id);
@@ -521,8 +530,10 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
 async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
+  // An unreadable account primary is a failed read the coordinator retries,
+  // never a secondary profile with no recipient.
   const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database },
+    await database('customers').where({ id: visit.customer_id }).first(), { db: database, rethrow: true },
   );
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   // A recorded member owns the effects; retained history never qualifies.

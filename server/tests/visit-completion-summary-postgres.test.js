@@ -247,20 +247,30 @@ postgres('visit summary recipient recovery', () => {
       .toMatchObject({ status: 'suppressed' });
   });
 
-  test('revocation between replay validation and the atomic dispatch claim still blocks sending', async () => {
+  test('a revocation cannot slip between the replay validation and the dispatch claim: it waits on the held visit row', async () => {
     const queued = await heldSummary();
     // The claim runs on a transaction client, which inherits the prototype.
     const execute = mockPg.client.constructor.prototype._query;
-    let revoked = false;
+    let attempted = false;
+    let blockedCode = null;
     jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function revokeBeforeClaim(connection, query) {
-      if (!revoked && query.sql.startsWith('update "visit_effects"') && query.bindings.includes('unknown_delivery')) {
-        revoked = true;
-        await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+      if (!attempted && query.sql.startsWith('update "visit_effects"') && query.bindings.includes('unknown_delivery')) {
+        attempted = true;
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+        }).catch((err) => { blockedCode = err.code; });
       }
       return execute.call(this, connection, query);
     });
-    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
-    expect(revoked).toBe(true);
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
+    expect(attempted).toBe(true);
+    expect(blockedCode).toBe('55P03');
+    // Once the claim commits, the revocation lands and the next replay is refused.
+    jest.restoreAllMocks();
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+    expect(await require('../services/messaging/deferred-replay-registry').recheckDeferredReplay('visit_summary_deferred', queued.metadata))
+      .toMatchObject({ eligible: false, reason: 'visit_summary_unavailable' });
   });
 
   test('an ambiguous scheduled provider handoff cannot resend and reaches office review', async () => {
@@ -807,6 +817,85 @@ postgres('visit summary recipient recovery', () => {
     expect(providerCalls).toBe(1);
   });
 
+  test('a link revoked between the durable mark and the provider request is refused at the held re-authorization', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const execute = mockPg.client.constructor.prototype._query;
+    let locks = 0;
+    let revoked = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function revokeAfterMark(connection, query) {
+      if (!revoked && query.sql.includes('from "customers"') && query.sql.includes('for share') && query.sql.includes('"id"')) {
+        locks += 1;
+        if (locks === 2) {
+          revoked = true;
+          await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+        }
+      }
+      return execute.call(this, connection, query);
+    });
+    let providerCalls = 0;
+    sendCustomerMessage.mockImplementation(handoffSender(async () => { providerCalls += 1; return { sent: true }; }));
+    await deliver();
+    expect(revoked).toBe(true);
+    expect(providerCalls).toBe(0);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  test('an unreadable account primary fails delivery for retry instead of settling as no recipient', async () => {
+    const primaryId = randomUUID();
+    const accountId = randomUUID();
+    await mockPg('customer_accounts').insert({ id: accountId, first_name: 'Primary' });
+    await mockPg('customers').insert({ id: primaryId, first_name: 'Primary', phone: '+12025550199',
+      email: `${primaryId}@example.invalid`, account_id: accountId, is_primary_profile: true });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: accountId, is_primary_profile: false });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failPrimaryRead(connection, query) {
+      if (!interrupted && query.sql.includes('"is_primary_profile" = ')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic account primary outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      await expect(deliver()).rejects.toThrow('Synthetic account primary outage');
+      expect(interrupted).toBe(true);
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      jest.restoreAllMocks();
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: null });
+      await mockPg('customers').where({ id: primaryId }).del();
+      await mockPg('customer_accounts').where({ id: accountId }).del();
+    }
+  });
+
+  test.each(['sms', 'email', 'retry'])('a revocation during the %s provider request waits for the handoff to commit', async (rail) => {
+    fixture.payload.items[0].body.sendCompletionSms = rail === 'sms';
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    let blockedCode = null;
+    const revokeDuringRequest = async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+      }).catch((err) => { blockedCode = err.code; });
+    };
+    if (rail === 'sms') {
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { await revokeDuringRequest(); return { sent: true }; }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } else if (rail === 'email') {
+      sendOne.mockImplementation(async () => { await revokeDuringRequest(); return { messageId: randomUUID() }; });
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } else {
+      const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+        recipient_email_snapshot: fixture.serviceEmail };
+      expect(await Summary.retrySummaryThroughHandoff(stored, revokeDuringRequest)).toEqual({ ok: true });
+    }
+    expect(blockedCode).toBe('55P03');
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ summary_token_revoked_at: null });
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };
@@ -1245,6 +1334,66 @@ postgres('visit summary recipient recovery', () => {
       } });
       expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', total: '120.00' });
     } finally { await mockPg('invoices').where({ id: invoiceId }).del(); }
+  });
+
+  test.each(['customer', 'member'])('a third-party payer assigned to the %s after the self-pay invoice was minted holds the visit instead of scheduling a homeowner pay link', async (target) => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    if (target === 'customer') await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    else await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ payer_id: payer.id });
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: {
+        state: 'office_required', payment: { state: 'office_required', reason: 'payer_assigned', payerId: payer.id },
+      } });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true, close_reason: 'office_review' });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ payer_id: null });
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a recovery that settles the summary before the packet closes keeps the packet on recovery', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    sendOne.mockImplementationOnce(async () => { throw new Error('provider response unavailable'); });
+    // The recovery lands after the delivery read and before the closing lock.
+    const execute = mockPg.client.constructor.prototype._query;
+    let raced = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function recoverBeforeClose(connection, query) {
+      if (!raced && query.sql.startsWith('select * from "visit_completion_packets"') && query.sql.includes('for update')) {
+        raced = true;
+        const uncertain = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}`, status: 'failed' }).first();
+        await mockPg('email_messages').where({ id: uncertain.id }).update({ status: 'sent', sent_at: new Date(), provider_message_id: 'recovered', error_message: null });
+        expect(await Summary.reconcileSummaryEmailRecovery({ ...uncertain, status: 'sent' })).toEqual({ reconciled: true });
+      }
+      return execute.call(this, connection, query);
+    });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 202, body: { state: 'effects_pending', delivery: { state: 'delivery_review' } } });
+    expect(raced).toBe(true);
+    expect(reviews).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+    jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', delivery: { state: 'delivered' } } });
+    expect(require('../services/review-request').enrollPostService).toHaveBeenCalledTimes(1);
+  });
+
+  test('a recovery pass over an already closed visit preserves its original closure', async () => {
+    const closedAt = new Date('2026-09-01T15:00:00Z');
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ status: 'closed', closed_at: closedAt, close_reason: 'completed' });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: 'review_enrollment_pending' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ status: 'closed', closed_at: closedAt, close_reason: 'completed' });
   });
 
   test('a failed packet lookup for a paid invoice reopens the packet through the invoice link', async () => {
