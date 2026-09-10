@@ -1,5 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
-jest.mock('../services/appointment-reminders', () => ({ safeSendAppointment: jest.fn() }));
+// visitPrefsRow: the series notice reads the anchor visit's prefs row through
+// the saved property (app property scope, PR 3); a plain row = the profile.
+jest.mock('../services/appointment-reminders', () => ({ safeSendAppointment: jest.fn(), visitPrefsRow: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 

@@ -36,7 +36,7 @@ describe('payer surfaces on a failed load', () => {
     render(<MemoryRouter><PayersPage /></MemoryRouter>);
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
     expect(screen.queryByText(/No payers yet/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(calls).toBe(2));
     expect(await screen.findByText(/No payers yet/)).toBeInTheDocument();
   });
@@ -67,12 +67,12 @@ describe('payer surfaces on a failed load', () => {
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async () => {
       calls += 1;
-      return calls === 1 ? failing() : { ok: true, json: async () => ({ statement_count: 0 }) };
+      return calls === 1 ? failing() : { ok: true, json: async () => ({ statement_count: 0, payers: [] }) };
     }));
     render(<PayerArAgingDialog onClose={() => {}} onSelectPayer={() => {}} />);
     expect(await screen.findByRole('alert')).toHaveTextContent('boom');
     expect(screen.queryByText(/No outstanding payer statements/)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/No outstanding payer statements/)).toBeInTheDocument();
   });
 });
