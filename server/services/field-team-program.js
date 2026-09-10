@@ -104,13 +104,27 @@ async function saveAllocation(input, actor) {
     // Allocation identity is customer, property, service and period; the credit
     // type never separates two pools for the same service, so an overlap of any
     // type is a duplicate of the same retained value.
-    const overlap = await trx('field_credit_allocations').whereIn('customer_id', owners).where({ property_id: data.property_id, service_key: data.service_key })
+    const properties = await equivalentProperties(trx, owners, data.property_id);
+    const overlap = await trx('field_credit_allocations').whereIn('customer_id', owners).where({ service_key: data.service_key })
+      .where(q => properties.length ? q.whereIn('property_id', properties) : q.whereNull('property_id'))
       .where('coverage_start', '<=', data.coverage_end).where('coverage_end', '>=', data.coverage_start).first();
     if (overlap) reject('An allocation already covers this service and period. Use its original scheduled count.', 409);
     const [row] = await trx('field_credit_allocations').insert({ ...data, ...baseRow(data, actor) }).returning('*');
     await audit(trx, 'field_credit_allocations', row, actor);
     return calendarRow(row, ['coverage_start', 'coverage_end']);
   });
+}
+
+// A customer merge keeps the loser's copy of an address the winner already
+// holds as an inactive property row with its own id, and any allocation on it
+// keeps that id. Overlap therefore compares against every property in the
+// account family that shares the requested property's address key.
+async function equivalentProperties(conn, owners, propertyId) {
+  if (!propertyId) return [];
+  const property = await conn('customer_properties').where({ id: propertyId }).first('address_key');
+  if (!property?.address_key) return [propertyId];
+  const rows = await conn('customer_properties').whereIn('customer_id', owners).where({ address_key: property.address_key }).select('id');
+  return [...new Set([propertyId, ...rows.map(row => row.id)])];
 }
 
 // The merge journal retains original account identities. Follow only active
