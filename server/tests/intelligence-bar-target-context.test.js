@@ -913,6 +913,9 @@ test('address-keyed readers take only a task customer\'s own active saved addres
   expect((await read('99 Beach Rd Apt 4, Venice, ZZ 34285', context())).code).toBe('target_clarification_required');
   expect((await read('99 Beach Rd Apt 4, Venice, Ontario', context())).code).toBe('target_clarification_required');
   expect(await read('99 Beach Rd Apt 4, Venice, Florida 34285', context())).toEqual({ input: { address: beach } });
+  expect(await read('99 Beach Rd Apt 4, Venice, FL 34285, USA', context())).toEqual({ input: { address: beach } });
+  expect(await read('99 Beach Rd Apt 4, Venice, FL 34285, United States', context())).toEqual({ input: { address: beach } });
+  expect((await read('99 Beach Rd Apt 4, Venice, ZZ 34285, USA', context())).code).toBe('target_clarification_required');
   // A supplied component the saved row cannot verify (a ZIP against a city-only row) is refused; the row still binds
   // for the components it has, and a comma-free post-directional is not read as a city.
   rows.customer_properties.push({ id: '30000000-0000-4000-8000-000000000007', customer_id: A, address_line1: '8 Cove Way', city: 'Venice', state: 'FL', active: true },
