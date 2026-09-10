@@ -211,6 +211,10 @@ const SCOPE_SNAPSHOT = {
     // typed into any of these): technician notes and call snippets, restock
     // reasons, the pricing changelog, estimate service_interest, lost reasons.
     'get_estimate_funnel', 'get_lost_analysis', 'get_restock_queue', 'recent_pricing_changes', 'search_field_intelligence', 'search_knowledge_base',
+    // customers.lead_source is operator free text ("Referral — <name>"); commit
+    // messages and PR titles are developer free text where customer details
+    // have appeared (AGENTS.md).
+    'get_ad_attribution', 'get_customer_acquisition', 'get_commit_info', 'get_recent_merged_prs',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],

@@ -132,6 +132,12 @@ old list).
   key, and `lost_reason` — and a name or address can be typed into any of
   them. `compare_technicians` stays `none`: its `cities` value is a
   de-duplicated aggregate of service-area cities, not a customer location.
+- `get_ad_attribution` and `get_customer_acquisition` are `broad`: they group
+  by `customers.lead_source`, an operator free-text label ("Referral —
+  <name>") returned verbatim; `get_source_performance` stays `none` because
+  it reads the `lead_sources` catalog. `get_commit_info` and
+  `get_recent_merged_prs` are `broad`: commit messages and PR titles are
+  developer free text where customer details have appeared (AGENTS.md).
 - `get_truck_status` is `broad`: the live last position of a truck during
   service hours is a customer's property, so it is refused inside a
   customer-scoped task like `get_truck_trips`.

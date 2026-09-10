@@ -309,7 +309,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_advisor_alerts": {
     "module": "tax-tools.js",
@@ -429,7 +429,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_content_decay_alerts": {
     "module": "seo-tools.js",
@@ -477,7 +477,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_customer_detail": {
     "module": "tools.js",
@@ -869,7 +869,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_report_engagement": {
     "module": "dashboard-tools.js",
