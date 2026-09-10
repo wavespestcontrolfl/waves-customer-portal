@@ -22,12 +22,16 @@ function failure(status, code, error) {
   return { status, body: { code, error } };
 }
 
+// A visit records a handful of members; the cap rejects an implausible
+// array before the save acquires a per-item invoice-mint lock for each id.
+const MAX_PACKET_ITEMS = 50;
+
 function packetRequest({ visitId, idempotencyKey, items }) {
   if (!isUuid(visitId) || typeof idempotencyKey !== 'string'
       || !idempotencyKey.trim() || idempotencyKey.length > 120) {
     return { error: failure(400, 'visit_closeout_invalid', 'A visit and an idempotency key are required.') };
   }
-  if (!Array.isArray(items) || items.length < 1 || items.some((item) => (
+  if (!Array.isArray(items) || items.length < 1 || items.length > MAX_PACKET_ITEMS || items.some((item) => (
     !isUuid(item?.serviceId) || !item.body || typeof item.body !== 'object' || Array.isArray(item.body)
   )) || new Set(items.map((item) => item.serviceId.toLowerCase())).size !== items.length) {
     return { error: failure(400, 'visit_closeout_members_invalid', 'Submit each visit service once with its completion form.') };
