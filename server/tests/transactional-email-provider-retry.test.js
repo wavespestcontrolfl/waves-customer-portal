@@ -203,6 +203,33 @@ describe('transactional email provider retry classification', () => {
     expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }));
   });
 
+  test('a visit summary retry marks the handoff as started before contacting SendGrid, and stale-claim recovery settles such a row as uncertain', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.whereNull = jest.fn(() => chain);
+    chain.whereNot = jest.fn(() => chain);
+    chain.orWhereNot = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'sent' }]);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    db.mockReturnValue(chain);
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-8' });
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-8' });
+    expect((await retry.retryOne(stored)).sent).toBe(true);
+    const marker = chain.update.mock.calls.findIndex(([data]) => data.error_message === retry.HANDOFF_STARTED);
+    expect(marker).toBeGreaterThanOrEqual(0);
+    expect(chain.update.mock.invocationCallOrder[marker]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
+    // Recovery: a started handoff settles as uncertain; other stale claims requeue.
+    chain.update.mockClear();
+    await retry.recoverStaleClaims();
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
+      error_message: expect.stringMatching(/^Provider outcome unknown/) }));
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ error_message: 'Interrupted provider retry claim recovered' }));
+  });
+
   test('other templates never consult the visit summary fence', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
@@ -240,7 +267,9 @@ describe('transactional email provider retry classification', () => {
     db.mockReturnValue(chain);
     const now = new Date('2026-07-16T12:30:00Z');
 
-    await expect(retry.recoverStaleClaims(now)).resolves.toBe(1);
+    // Two recovery updates run (started handoffs settle as uncertain, the
+    // rest requeue); the fake resolves 1 for each.
+    await expect(retry.recoverStaleClaims(now)).resolves.toBe(2);
 
     expect(chain.where).toHaveBeenCalledWith({ status: 'queued' });
     expect(chain.where).toHaveBeenCalledWith('provider_retry_count', '>', 0);

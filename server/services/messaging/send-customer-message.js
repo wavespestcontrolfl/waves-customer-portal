@@ -440,6 +440,11 @@ async function sendCustomerMessage(input) {
       if (!suppression.ok) return suppression;
       const consent = await checkConsentForPurpose(sendInput, policy, currentState);
       if (!consent.ok) return consent;
+      // Acquiring the handoff's locks can straddle the send-window cutoff:
+      // re-judge the window on the fresh state immediately before the
+      // provider request so a wait across it returns the ordinary hold.
+      const windowVerdict = checkSendWindow(sendInput, policy, currentState);
+      if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
       if (typeof onProviderStart === 'function') onProviderStart();
       await dispatch();
       return { ok: true };

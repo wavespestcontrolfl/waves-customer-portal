@@ -1014,6 +1014,29 @@ postgres('visit summary recipient recovery', () => {
     expect(providerCalls).toBe(1);
   });
 
+  test.each(['immediate', 'scheduled'])('a STOP suppression write during the %s SMS provider request waits on the per-phone consent lock', async (rail) => {
+    const queued = rail === 'scheduled' ? await heldSummary() : null;
+    if (rail === 'immediate') {
+      fixture.payload.items[0].body.sendCompletionSms = true;
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    }
+    let blockedCode = null;
+    const stopDuringRequest = async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await require('../utils/customer-comms-lock').lockSmsPhone(trx, '+12025550124');
+      }).catch((err) => { blockedCode = err.code; });
+      return { ok: true };
+    };
+    if (rail === 'scheduled') {
+      expect(await deferredHandoff(queued.metadata, async (_trx, onProviderStart) => { onProviderStart(); return stopDuringRequest(); })).toMatchObject({ ok: true });
+    } else {
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { await stopDuringRequest(); return { sent: true }; }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    }
+    expect(blockedCode).toBe('55P03');
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };

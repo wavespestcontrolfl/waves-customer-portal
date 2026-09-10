@@ -181,9 +181,13 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
 // before its provider request: a throw before that signal (a failed recheck
 // on the held connection) is provably unsent and restores the claim, while a
 // throw after it is the provider outcome and propagates with the mark in place.
-async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, authorized, dispatch }) {
+async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
   const holdAndAuthorize = async (trx, phase) => {
+    // An SMS leg takes the canonical per-phone consent lock first, in the
+    // order the STOP / suppression writers take it, so an opt-out that
+    // commits during the request serializes behind the handoff.
+    if (phone) await require('../utils/customer-comms-lock').lockSmsPhone(trx, phone);
     await trx('customers').where({ id: customerId }).forShare().first('id');
     // FOR SHARE cannot lock an absent row. The canonical seed serializes
     // missing-row creation without inventing marketing consent or replacing
@@ -233,7 +237,7 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
 // claim and the provider request share the same held rows.
 async function beginDeferredSummarySms(meta, dispatch) {
   return claimDispatchThroughHandoff({ visitId: meta.visit_id, customerId: meta.customer_id, kind: 'completion_sms',
-    token: meta.visit_summary_claim_token, scheduled: true, dispatch,
+    token: meta.visit_summary_claim_token, scheduled: true, phone: meta.to_phone, dispatch,
     authorized: async (customer, prefs, trx, phase) => {
       if (prefs.sms_enabled === false || prefs.service_completed === false) return false;
       // The claim phase may return a proven-unsent effect to pending; that
@@ -282,7 +286,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       // before any provider request, which the provider wrapper reports as
       // a retryable block, so the requested SMS stays retryable.
       withSmsHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
-        kind: 'completion_sms', token: claim.token,
+        kind: 'completion_sms', token: claim.token, phone: recipient.phone,
         authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
           && currentPrefs.service_completed !== false
           && getServiceContactSmsRecipient(current).phone === recipient.phone,
