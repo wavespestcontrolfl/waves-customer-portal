@@ -511,4 +511,31 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
   });
+
+  it('keeps the cached build\'s claim through a run of navigations whose refreshes all fail', async () => {
+    // Pre-push Codex P1: with shell A cached, navigations to B, C and D each
+    // fail their shell preload, and A's tab hits its route chunk after each.
+    // A bounded most-recent-first tag list would shed A after three; the
+    // cached shell's build is pinned because the next prune retains it.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/DashboardPageV2-AAA.js');
+
+    for (const build of ['BBB', 'CCC', 'DDD']) {
+      setFetch(async (request) => {
+        if (request.mode === 'navigate') return fakeResponse(shellHtml([`/assets/index-${build}.js`]));
+        if (request.url.includes(`index-${build}.js`)) return fakeResponse('boom', false);
+        return fakeResponse(`asset:${request.url}`);
+      });
+      await dispatchFetch('/admin/', { mode: 'navigate' });
+      await dispatchFetch('/assets/DashboardPageV2-AAA.js');
+    }
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-AAA.js']));
+    expect((await cache.match('/assets/DashboardPageV2-AAA.js')).headers.get('x-waves-build').split(',').length).toBe(3);
+
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-EEE.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-EEE.js']);
+  });
 });

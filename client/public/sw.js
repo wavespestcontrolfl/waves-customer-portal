@@ -69,18 +69,23 @@ function buildIdOf(assets) {
 // A chunk unchanged across builds is used by several of them at once, and a
 // retained build must not lose its claim because a newer page also used the
 // chunk (a navigation whose shell refresh failed is live but never cached, so
-// its build is never retained). The header lists the last builds that used
-// the entry, newest first; retention only needs the current, previous and
-// live builds, so three is enough.
+// its build is never retained). The header lists the builds that used the
+// entry, newest first, capped so repeated never-cached builds cannot grow
+// it without bound. The cap must never drop the cached shell's build: it is
+// the "previous" generation the next prune retains, however many failed
+// refreshes came between (`pinnedBuildId`, read by the caller).
 const BUILD_TAGS_KEPT = 3;
 function buildTagsOf(response) {
   const raw = response && response.headers.get(BUILD_HEADER);
   return raw ? raw.split(',').map(t => t.trim()).filter(Boolean) : [];
 }
 
-function tagWithBuild(response, buildId) {
+function tagWithBuild(response, buildId, pinnedBuildId = null) {
   const headers = new Headers(response.headers);
-  const tags = [buildId, ...buildTagsOf(response).filter(t => t !== buildId)].slice(0, BUILD_TAGS_KEPT);
+  const existing = buildTagsOf(response);
+  const pinned = pinnedBuildId && pinnedBuildId !== buildId && existing.includes(pinnedBuildId) ? [pinnedBuildId] : [];
+  const rest = existing.filter(t => t !== buildId && !pinned.includes(t));
+  const tags = [buildId, ...pinned, ...rest].slice(0, BUILD_TAGS_KEPT);
   headers.set(BUILD_HEADER, tags.join(','));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -283,11 +288,12 @@ self.addEventListener('fetch', event => {
           // build lookup awaits the cached shell, and the page can lock the
           // body in that window, making a later clone() throw.
           const copy = cached.clone();
-          const touch = currentBuildId(cache).then(buildId => {
-            if (buildId && !tags.includes(buildId)) {
-              return withAssetWrites(() => cache.put(event.request, tagWithBuild(copy, buildId)));
-            }
-            return undefined;
+          const touch = currentBuildId(cache).then(async buildId => {
+            if (!buildId || tags.includes(buildId)) return undefined;
+            // The cached shell's build is retained by the next prune; pin it
+            // so the tag cap cannot shed it behind a run of live-only builds.
+            const pinned = await cachedBuildId(cache);
+            return withAssetWrites(() => cache.put(event.request, tagWithBuild(copy, buildId, pinned)));
           }).catch(() => {});
           try { event.waitUntil(touch); } catch { /* fire and forget */ }
           return cached;
