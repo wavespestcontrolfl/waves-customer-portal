@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { hasPendingPhotoSummary } = require('./photo-summary-recovery');
 
 /**
  * Report-photo-set key component for cached service-report PDFs.
@@ -19,9 +20,18 @@ const crypto = require('crypto');
  * the render and re-reads it after, serving without storing on a mismatch —
  * the same posture as the callback-set fence (reservice-report.js).
  *
- * Records with no photo rows return '' so their existing keys are untouched;
- * a failed lookup returns a unique token so uncertainty re-renders (and trips
- * the fence) instead of serving or storing a possibly stale document.
+ * The parked photo summary is part of the same identity: recovery attaches
+ * the rows FIRST and /photos/reconcile restores the summary AFTER, so a render
+ * that starts between the two sees the full photo set but a summary-less
+ * snapshot. Its photo-row signature would match before and after; the '-ps'
+ * marker (present while photoSummaryPendingRecovery is parked, gone once
+ * restored) moves the key and trips the fence across that window (pre-push
+ * Codex P1 on e3e8302e3).
+ *
+ * Records with no photo rows and nothing parked return '' so their existing
+ * keys are untouched; a failed lookup returns a unique token so uncertainty
+ * re-renders (and trips the fence) instead of serving or storing a possibly
+ * stale document.
  */
 async function reportPhotoSetPdfSignature(serviceRecordId, knex = null) {
   if (!knex || !serviceRecordId) return '';
@@ -30,9 +40,17 @@ async function reportPhotoSetPdfSignature(serviceRecordId, knex = null) {
       .where({ service_record_id: serviceRecordId })
       .orderBy('id', 'asc')
       .select('id');
-    if (!rows.length) return '';
+    const record = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .first('service_data');
+    let serviceData = record ? record.service_data : null;
+    if (typeof serviceData === 'string') {
+      try { serviceData = JSON.parse(serviceData); } catch { serviceData = null; }
+    }
+    const parked = hasPendingPhotoSummary(serviceData) ? '-ps' : '';
+    if (!rows.length) return parked;
     const digest = crypto.createHash('sha1').update(rows.map((row) => String(row.id)).join(',')).digest('hex').slice(0, 8);
-    return `-ph${rows.length}-${digest}`;
+    return `-ph${rows.length}-${digest}${parked}`;
   } catch {
     return `-phu-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
   }
