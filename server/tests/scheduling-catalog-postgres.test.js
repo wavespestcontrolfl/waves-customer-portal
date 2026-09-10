@@ -187,4 +187,37 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
     }
   });
 
+  test.each(['strict resolution', 'late validation'])('ambiguous engine claims reject %s instead of using fallback capacity', async phase => {
+    const [, , estimate, profileOptions] = strictBranches[2];
+    const policy = { version: 1, default_duration_minutes: 90, min_duration_minutes: 30, max_duration_minutes: 120 };
+    await mockPg('services').where({ id: ids.containment }).update({
+      engine_keys: JSON.stringify([]), scheduling_duration_policy: policy,
+    });
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const scheduling = await mockPg.transaction();
+    try {
+      const profile = await resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling);
+      expect(profile.durationMinutes).toBe(60);
+      // Neither row matched the allowance read. Both mappings then become
+      // visible, each requiring more work than the original fallback covered.
+      const original = await mockPg('services').where({ id: ids.containment }).first();
+      await mockPg.transaction(async editor => {
+        await editor('services').where({ id: ids.containment }).update({ engine_keys: JSON.stringify(['fixture_specialty']) });
+        await editor('services').insert({ ...original, id: randomUUID(), service_key: 'fixture_specialty_duplicate',
+          engine_keys: JSON.stringify(['fixture_specialty']) });
+      });
+      const protectedRead = phase === 'strict resolution'
+        ? resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling)
+        : catalogLinkForProfile(scheduling, profile, { preserveCapacity: true, validateAllowance: true });
+      await expect(protectedRead).rejects.toMatchObject({
+        code: 'SLOT_UNAVAILABLE', reason: 'catalog_unavailable', status: 409, statusCode: 409, isOperational: true,
+      });
+      await expect(scheduling.raw('SELECT 1 AS healthy')).resolves.toMatchObject({ rows: [{ healthy: 1 }] });
+      // Identity-only legacy readers continue to return no identity.
+      expect(await catalogLinkForProfile(scheduling, profile, { preserveCapacity: true })).toBeNull();
+    } finally {
+      if (!scheduling.isCompleted()) await scheduling.rollback();
+    }
+  });
+
 });

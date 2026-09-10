@@ -405,7 +405,10 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
           .select(...catalogColumns)
           .modify(query => { if (lockCatalog) query.forShare(); });
         if (rows.length === 1) byKey = rows[0];
-        else if (rows.length > 1) logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
+        else if (rows.length > 1) {
+          logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
+          if (strictAllowanceRead || validateAllowance) throw capacityError('catalog_unavailable');
+        }
       });
     } catch (err) {
       logger.warn(`[slot-reservation] catalog lookup failed for catalog key "${catalogKey}": ${err.message}`);
@@ -454,6 +457,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
           .select(...catalogColumns)
           .modify(query => { if (lockCatalog) query.forShare(); });
         if (cadenceRows.length === 1) resolved = cadenceRows[0];
+        else if (cadenceRows.length > 1 && (strictAllowanceRead || validateAllowance)) throw capacityError('catalog_unavailable');
         return;
       }
       const rows = await sp('services')
@@ -466,6 +470,9 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         resolved = rows[0];
       } else if (rows.length > 1) {
         logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
+        // Ambiguity is not an absent catalog: a duration authority cannot
+        // certify fallback work while matching rows require unknown work.
+        if (strictAllowanceRead || validateAllowance) throw capacityError('catalog_unavailable');
       }
     });
   } catch (err) {
