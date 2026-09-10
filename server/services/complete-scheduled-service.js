@@ -10903,6 +10903,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // SMS body only; the mobile in-person payment sheet
         // (invoicePaymentActionRequired) is intentionally left untouched so an
         // unpaid invoice always keeps a collection path.
+        // Every OTHER pay-link gate first (pre-push P1 r4): the delivery claim
+        // below is taken only when the completion would actually text the link
+        // — a report-only completion (paid, prepaid, autopay, payer-billed,
+        // non-collectible, operator opt-out) must not claim a delivery it will
+        // never perform, nor turn a transient claim failure into a 503.
+        const linkOtherwiseEligible = !suppressCompletionInvoiceLink
+          && includePayLink !== false
+          && !prepaidCovered
+          && !alreadyPaid
+          && !autopayCoversVisit
+          // Collectible statuses only: a crash-resumed completion reloads the
+          // invoice through the existing-invoice path with invoiceCreated/
+          // payUrl set for any non-paid status — a 'processing' invoice (ACH
+          // autopay debit in flight, or the orphaned-charge park) must never
+          // get a pay link texted for money already moving (Codex round-6
+          // P1). Mirrors the invoicePaymentActionRequired guard.
+          && (!invoice || require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status))
+          // Third-party Bill-To: never text the homeowner the pay link for a
+          // payer-billed invoice — AR routes to the payer's AP inbox. The
+          // homeowner still gets the report-only completion SMS (no pay_url).
+          && !invoice?.payer_id;
         // A REUSED pre-minted invoice is delivered under the ONE send claim
         // (Codex P1 #4131 r4): the completion takes claimInvoiceForSend — the
         // same atomic draft/scheduled/… → 'sending' flip sendViaSMSAndEmail
@@ -10913,7 +10934,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // the end unless the link actually went out (markDeliverySent then
         // finalizes 'sending' → 'sent'). A failed claim read fails closed.
         let reusedInvoiceClaimedElsewhere = false;
-        if (!suppressCompletionInvoiceLink && preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
+        if (linkOtherwiseEligible && preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
           try {
             const InvoiceServiceForClaim = require('../services/invoice');
             const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);
@@ -10946,23 +10967,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reusedInvoiceClaimedElsewhere = true;
           }
         }
-        const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink
-          && !reusedInvoiceClaimedElsewhere
-          && includePayLink !== false
-          && !prepaidCovered
-          && !alreadyPaid
-          && !autopayCoversVisit
-          // Collectible statuses only: a crash-resumed completion reloads the
-          // invoice through the existing-invoice path with invoiceCreated/
-          // payUrl set for any non-paid status — a 'processing' invoice (ACH
-          // autopay debit in flight, or the orphaned-charge park) must never
-          // get a pay link texted for money already moving (Codex round-6
-          // P1). Mirrors the invoicePaymentActionRequired guard.
-          && (!invoice || require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status))
-          // Third-party Bill-To: never text the homeowner the pay link for a
-          // payer-billed invoice — AR routes to the payer's AP inbox. The
-          // homeowner still gets the report-only completion SMS (no pay_url).
-          && !invoice?.payer_id;
+        const allowCompletionInvoiceLinkBase = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;
         // The decline notice (sent before this block) carries the pay link
         // as its own text — the completion SMS goes report-only only once
         // that notice has ACTUALLY delivered.

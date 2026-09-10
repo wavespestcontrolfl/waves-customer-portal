@@ -78,7 +78,9 @@ describe('completionInvoiceAlreadyDelivered', () => {
     // …and takes the ONE send claim before texting a link for a reused invoice (Codex P1 r4):
     // claim at the decision, finalize via markDeliverySent when the link went out, release otherwise (normal end and thrown path).
     expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);[\s\S]{0,600}?if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\) \{\s*await InvoiceServiceForClaim\.restoreSendClaim\(invoice\.id, claim\.previousStatus, claim\.claimed\);[\s\S]{0,300}?reusedInvoiceClaimedElsewhere = true;\s*\} else \{\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
-    expect(completion).toMatch(/const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink\s*&& !reusedInvoiceClaimedElsewhere/);
+    // The claim is attempted only when every other pay-link gate already passes.
+    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,1600}?&& !invoice\?\.payer_id;[\s\S]{0,1200}?if \(linkOtherwiseEligible && preMintedInvoice && invoice\?\.id/);
+    expect(completion).toMatch(/const allowCompletionInvoiceLinkBase = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;/);
     // A refused claim is classified: settled/gone → report-only; in-flight send or transient failure → the resumable 503 (retryable delivery).
     expect(completion).toMatch(/const nothingLeftToDeliver = \/Cannot send a \(paid\|prepaid\|voided\) invoice\|Cannot send an invoice while payment is processing\|Invoice not found\|Invoice is not sendable\/i\.test\(claimMessage\);\s*if \(!nothingLeftToDeliver\) \{[\s\S]{0,300}?return exitForCompletionSmsResume\(new Error\(`Invoice \$\{invoice\.id\} delivery claim unavailable: \$\{claimMessage\}`\)\);/);
     expect(completion.match(/completionInvoiceLinkDelivered = true;/g)).toHaveLength(2);
