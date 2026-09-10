@@ -137,8 +137,10 @@ async function guardHintSlots(slots, { today, sameDayFloorMin, step, spanMin, ex
 // verdict may call it a fit (Codex #4120 r5 P2).
 function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows }) {
   const nowEt = etParts();
-  const dayEndMin = useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60;
+  const { capacityEnabled, SHIFT } = require('./policy');
+  const dayEndMin = capacityEnabled() ? SHIFT.endMinutes : (useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60);
   return pickedMin % 60 !== 0
+    || (capacityEnabled() && pickedMin + SHIFT.arrivalMinutes > SHIFT.endMinutes)
     || (from === today && pickedMin < nowEt.hour * 60 + nowEt.minute + 30)
     || (from === today && Number.isInteger(sameDayFloorMin) && pickedMin < sameDayFloorMin)
     || pickedMin < DAY_START_HOUR * 60

@@ -9,7 +9,7 @@
  * Tier 1 V2 surface — components/ui + Tailwind zinc.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Building2 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
@@ -19,9 +19,11 @@ import {
   Textarea,
   Badge,
   Card,
-  CardHeader,
-  CardTitle,
   CardBody,
+  ActionFeedback,
+  Checkbox,
+  Field,
+  UiSurface,
   Table,
   THead,
   TBody,
@@ -68,43 +70,50 @@ function termLabel(value) {
 export default function PayersPage() {
   const [payers, setPayers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [detailError, setDetailError] = useState("");
   const [search, setSearch] = useState("");
   const [includeInactive, setIncludeInactive] = useState(false);
   const [editing, setEditing] = useState(null); // payer object, {} for new, or null
   const [form, setForm] = useState(EMPTY);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const loadVersion = useRef(0);
   const [error, setError] = useState("");
-  const [loadError, setLoadError] = useState(""); // a failed list must not read as "no payers"
   const [detailPayer, setDetailPayer] = useState(null); // open the statements/AR sheet
   const [arOpen, setArOpen] = useState(false); // cross-payer AR aging dialog
+  const arTriggerRef = useRef(null);
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     setLoading(true);
+    setLoadError("");
     try {
       const params = new URLSearchParams();
       if (search.trim()) params.set("search", search.trim());
       if (includeInactive) params.set("includeInactive", "true");
-      setLoadError("");
       const r = await adminFetch(`/admin/payers?${params.toString()}`);
       const data = await r.json().catch(() => null);
       if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+      if (version !== loadVersion.current) return;
       setPayers(Array.isArray(data?.payers) ? data.payers : []);
-    } catch (e) {
-      // UI audit F0502: a 403/500/network failure used to collapse into
-      // "No payers yet" — the reassuring answer — with no retry.
-      setPayers([]);
-      setLoadError(e?.message || "Could not load payers.");
+    } catch (err) {
+      if (version === loadVersion.current) setLoadError(err.message || "Could not load payers.");
     } finally {
-      setLoading(false);
+      if (version === loadVersion.current) setLoading(false);
     }
   }, [search, includeInactive]);
 
   useEffect(() => {
     const t = setTimeout(load, 200);
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      loadVersion.current += 1;
+    };
   }, [load]);
 
-  function openNew() {
+  function openNew(event) {
+    event.currentTarget.focus({ preventScroll: true });
     setForm(EMPTY);
     setEditing({});
     setError("");
@@ -122,26 +131,34 @@ export default function PayersPage() {
   // id). Use the loaded row if present; otherwise fetch it (it may be filtered
   // out of the current list, e.g. inactive).
   async function openDetailById(id) {
+    setDetailError("");
     setArOpen(false);
     const found = payers.find((p) => p.id === id);
     if (found) {
+      // The selected worklist button is about to unmount. The sheet returns
+      // focus to the directory's persistent AR opener after this handoff.
+      arTriggerRef.current?.focus({ preventScroll: true });
       setDetailPayer(found);
       return;
     }
     try {
       const r = await adminFetch(`/admin/payers/${id}`);
-      const d = await r.json();
-      if (d?.payer) setDetailPayer(d.payer);
+      const d = await r.json().catch(() => null);
+      if (!r.ok || !d?.payer) throw new Error("Could not open payer details. Try selecting the payer again.");
+      arTriggerRef.current?.focus({ preventScroll: true });
+      setDetailPayer(d.payer);
     } catch {
-      /* ignore — sheet just won't open */
+      setDetailError("Could not open payer details. Try selecting the payer again.");
     }
   }
 
   async function save() {
+    if (savingRef.current) return;
     if (!form.display_name.trim()) {
       setError("Payer name is required.");
       return;
     }
+    savingRef.current = true;
     setSaving(true);
     setError("");
     try {
@@ -150,7 +167,7 @@ export default function PayersPage() {
         isNew ? "/admin/payers" : `/admin/payers/${editing.id}`,
         { method: isNew ? "POST" : "PUT", body: form },
       );
-      const data = await r.json();
+      const data = await r.json().catch(() => null);
       if (!r.ok) {
         setError(data?.error || "Could not save payer.");
         return;
@@ -160,46 +177,54 @@ export default function PayersPage() {
     } catch {
       setError("Could not save payer.");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
 
+  const closeEditor = () => { if (!savingRef.current) setEditing(null); };
+
   return (
-    <div className="max-w-[1300px] mx-auto">
+    <UiSurface density="comfortable" className="max-w-[1300px] mx-auto">
       <AdminCommandHeader
         title="Payers"
         icon={Building2}
+        variant="workspace"
         actions={[
-          { key: "ar", label: "AR aging", size: "sm", variant: "ghost", onClick: () => setArOpen(true) },
+          { key: "ar", label: "AR aging", size: "sm", variant: "ghost", onClick: (event) => {
+            arTriggerRef.current = event.currentTarget;
+            event.currentTarget.focus({ preventScroll: true });
+            setArOpen(true);
+          } },
           { key: "new", label: "New payer", size: "sm", onClick: openNew },
         ]}
       />
-      <p className="text-13 text-zinc-500 mb-4">
+      <p className="text-ui-body text-ink-secondary mb-5">
         Third-party Bill-To accounts — builders, property managers,
         realtors, HOAs. Assign one to a customer or a single job to route
         that invoice to them.
       </p>
 
-      <div className="flex items-center gap-3 mb-3 flex-wrap">
+      <div className="flex items-end gap-3 mb-5 flex-wrap">
+        <Field label="Search payers" className="w-full sm:max-w-sm">
         <Input
           placeholder="Search name, company, or AP email…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="max-w-xs"
         />
-        <label className="flex items-center gap-2 text-13 text-zinc-600 cursor-pointer">
-          <input
-            type="checkbox"
+        </Field>
+          <Checkbox
+            label="Show inactive"
             checked={includeInactive}
             onChange={(e) => setIncludeInactive(e.target.checked)}
           />
-          Show inactive
-        </label>
       </div>
+      {detailError && <ActionFeedback error className="mb-5">{detailError}</ActionFeedback>}
+      {loading && payers.length > 0 && <ActionFeedback className="mb-3">Refreshing payers…</ActionFeedback>}
 
       <Card>
         <CardBody className="p-0">
-          <Table>
+          <Table layout="records" aria-label="Payers">
             <THead>
               <TR>
                 <TH>Name</TH>
@@ -211,24 +236,17 @@ export default function PayersPage() {
               </TR>
             </THead>
             <TBody>
-              {loading ? (
+              {loading && payers.length === 0 ? (
                 <TR>
-                  <TD colSpan={6} className="text-center text-zinc-400 py-6">
-                    Loading…
+                  <TD colSpan={6} className="text-center text-ink-secondary py-6">
+                    <div role="status" className="min-h-[160px]">Loading…</div>
                   </TD>
                 </TR>
               ) : loadError ? (
-                <TR>
-                  <TD colSpan={6} className="text-center py-6 text-alert-fg" role="alert">
-                    {loadError}{" "}
-                    <Button size="sm" variant="ghost" onClick={load}>
-                      Retry
-                    </Button>
-                  </TD>
-                </TR>
+                <TR><TD colSpan={6}><ActionFeedback error onRetry={load}>{loadError}</ActionFeedback></TD></TR>
               ) : payers.length === 0 ? (
                 <TR>
-                  <TD colSpan={6} className="text-center text-zinc-400 py-6">
+                  <TD colSpan={6} className="text-center text-ink-secondary py-6">
                     No payers yet. Create one to bill a third party.
                   </TD>
                 </TR>
@@ -236,36 +254,46 @@ export default function PayersPage() {
                 payers.map((p) => (
                   <TR key={p.id}>
                     <TD>
-                      <button
-                        type="button"
-                        onClick={() => setDetailPayer(p)}
-                        className="font-medium text-zinc-900 hover:underline text-left"
+                      <Button
+                        variant="ghost"
+                        onClick={(event) => {
+                          event.currentTarget.focus({ preventScroll: true });
+                          setDetailError("");
+                          setDetailPayer(p);
+                        }}
+                        className="text-left justify-start max-w-full"
                       >
                         {p.display_name}
-                      </button>
+                      </Button>
                       {p.company_name && p.company_name !== p.display_name && (
-                        <div className="text-12 text-zinc-500">
+                        <div className="text-ui-caption text-ink-secondary">
                           {p.company_name}
                         </div>
                       )}
                     </TD>
-                    <TD className="text-zinc-600">{p.ap_email || "—"}</TD>
-                    <TD className="text-zinc-600">
+                    <TD data-label="AP email" className="text-zinc-600">{p.ap_email || "—"}</TD>
+                    <TD data-label="Terms" className="text-zinc-600">
                       {termLabel(p.payment_terms)}
                     </TD>
-                    <TD>{p.requires_po ? "Required" : "—"}</TD>
-                    <TD>
+                    <TD data-label="PO">{p.requires_po ? "Required" : "—"}</TD>
+                    <TD data-label="Status">
+                      <span>
                       {p.active ? (
                         <Badge tone="strong">Active</Badge>
                       ) : (
                         <Badge tone="neutral">Inactive</Badge>
                       )}
+                      </span>
                     </TD>
                     <TD className="text-right">
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => openEdit(p)}
+                        aria-label={`Edit ${p.display_name}`}
+                        onClick={(event) => {
+                          event.currentTarget.focus({ preventScroll: true });
+                          openEdit(p);
+                        }}
                       >
                         Edit
                       </Button>
@@ -279,12 +307,13 @@ export default function PayersPage() {
       </Card>
 
       {editing && (
-        <Dialog open onClose={() => setEditing(null)}>
+        <Dialog open onClose={closeEditor}>
           <DialogHeader>
             <DialogTitle>{editing.id ? "Edit payer" : "New payer"}</DialogTitle>
           </DialogHeader>
-          <DialogBody className="space-y-3">
-            <Field label="Payer name *">
+          <DialogBody>
+          <fieldset disabled={saving} className="min-w-0 m-0 p-0 border-0 space-y-3">
+            <Field label="Payer name" required>
               <Input
                 value={form.display_name}
                 onChange={(e) => set("display_name", e.target.value)}
@@ -297,7 +326,7 @@ export default function PayersPage() {
                 onChange={(e) => set("company_name", e.target.value)}
               />
             </Field>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="AP email (where invoices go)">
                 <Input
                   type="email"
@@ -341,7 +370,7 @@ export default function PayersPage() {
                 />
               </Field>
             </div>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <Field label="Payment terms">
                 <Select
                   value={form.payment_terms}
@@ -354,7 +383,7 @@ export default function PayersPage() {
                   ))}
                 </Select>
               </Field>
-              <Field label="Tax-exempt certificate #">
+              <Field label="Tax-exempt certificate #" help={!form.tax_exempt ? "Select Tax-exempt to enter a certificate." : undefined}>
                 <Input
                   value={form.tax_exempt_cert || ""}
                   onChange={(e) => set("tax_exempt_cert", e.target.value)}
@@ -363,37 +392,28 @@ export default function PayersPage() {
               </Field>
             </div>
             {form.payment_terms !== "due_on_receipt" && (
-              <p className="text-12 text-zinc-500">
+              <p className="text-ui-caption text-ink-secondary">
                 Net terms consolidate this payer&rsquo;s visits onto a monthly
                 statement billed to the AP inbox. Open the payer to close, send,
                 reconcile, and track AR on its statements.
               </p>
             )}
             <div className="flex flex-col gap-2 pt-1">
-              <label className="flex items-center gap-2 text-13 text-zinc-700 cursor-pointer">
-                <input
-                  type="checkbox"
+                <Checkbox
+                  label="Usually needs a PO (advisory — staff are reminded, not blocked)"
                   checked={!!form.requires_po}
                   onChange={(e) => set("requires_po", e.target.checked)}
                 />
-                Usually needs a PO (advisory — staff are reminded, not blocked)
-              </label>
-              <label className="flex items-center gap-2 text-13 text-zinc-700 cursor-pointer">
-                <input
-                  type="checkbox"
+                <Checkbox
+                  label="Tax-exempt (zeroes tax on this payer’s invoices)"
                   checked={!!form.tax_exempt}
                   onChange={(e) => set("tax_exempt", e.target.checked)}
                 />
-                Tax-exempt (zeroes tax on this payer&rsquo;s invoices)
-              </label>
-              <label className="flex items-center gap-2 text-13 text-zinc-700 cursor-pointer">
-                <input
-                  type="checkbox"
+                <Checkbox
+                  label="Active"
                   checked={!!form.active}
                   onChange={(e) => set("active", e.target.checked)}
                 />
-                Active
-              </label>
             </div>
             <Field label="Notes">
               <Textarea
@@ -402,14 +422,15 @@ export default function PayersPage() {
                 onChange={(e) => set("notes", e.target.value)}
               />
             </Field>
-            {error && <p className="text-13 text-alert-fg">{error}</p>}
+          </fieldset>
+            {error && <ActionFeedback error className="mt-3">{error}</ActionFeedback>}
           </DialogBody>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setEditing(null)}>
+            <Button variant="ghost" disabled={saving} onClick={closeEditor}>
               Cancel
             </Button>
-            <Button onClick={save} disabled={saving}>
-              {saving ? "Saving…" : "Save payer"}
+            <Button onClick={save} loading={saving}>
+              Save payer
             </Button>
           </DialogFooter>
         </Dialog>
@@ -417,6 +438,7 @@ export default function PayersPage() {
 
       {detailPayer && (
         <PayerDetailSheet
+          key={detailPayer.id}
           payer={detailPayer}
           onClose={() => setDetailPayer(null)}
           onChanged={load}
@@ -429,15 +451,6 @@ export default function PayersPage() {
           onSelectPayer={openDetailById}
         />
       )}
-    </div>
-  );
-}
-
-function Field({ label, children }) {
-  return (
-    <label className="block">
-      <span className="block text-12 text-zinc-500 mb-1">{label}</span>
-      {children}
-    </label>
+    </UiSurface>
   );
 }
