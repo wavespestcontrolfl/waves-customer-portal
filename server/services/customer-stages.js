@@ -33,15 +33,16 @@ const ALL_PIPELINE_STAGES = [
 
 // customers.created_via — PROVENANCE of a machine-minted row, stamped by the
 // creating path itself. Row SHAPE cannot carry this: several lead-creation
-// paths write an address-less, ZIP-less, active new_lead row (the Twilio
-// tracking webhook AND a form submitted without an address), so anything that
-// must tell them apart has to read a stamp, not infer one. Consumers treat a
-// NULL as "unknown provenance" and stay conservative.
+// paths write an address-less, ZIP-less, active new_lead row, so anything
+// that must tell them apart has to read a stamp, not infer one. Consumers
+// treat a NULL as "unknown provenance" and stay conservative.
+//
+// No writer currently stamps a value here (the Twilio tracking webhook's
+// 'twilio_tracking_shell' shell-row stamp was retired in #4206 — see
+// historical customers.created_via rows for the old value). Kept as an
+// extension point for the next machine-minted-row path that needs one;
+// historical rows keep whatever string an old writer stamped.
 const CREATED_VIA = {
-  // routes/twilio-webhook.js domain/van tracking branch: the placeholder row
-  // minted for an unknown number that just texted/called a tracking number,
-  // before anyone knows who they are.
-  TWILIO_TRACKING_SHELL: 'twilio_tracking_shell',
 };
 
 const { etDateString } = require('../utils/datetime-et');
