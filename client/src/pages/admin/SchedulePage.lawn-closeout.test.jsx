@@ -583,6 +583,30 @@ it('a governed draft restored under an initial plan outage still submits its rem
   expect(submit.mock.calls[0][1].lawnProtocolCompletion.skippedProducts).toEqual([{ productId: products[0].id, productName: products[0].name }]);
 });
 
+it('a removed default deleted from the catalog before the draft is restored is still submitted as a skipped product, named from the draft', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(`waves_completion_draft_${service.id}`)).lawnRemovedDefaultNames).toEqual({ [products[0].id]: products[0].name }));
+  view.unmount();
+  // Hard-deleted from the catalog and gone from the reloaded plan: no live lookup can name it.
+  failPlan = true;
+  catalog = [];
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  const card = within(totals()[0].parentElement);
+  fireEvent.change(card.getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } });
+  fireEvent.change(card.getAllByRole('combobox')[1], { target: { value: 'fl_oz' } });
+  fireEvent.change(card.getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
+  fireEvent.change(totals()[0], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.skippedProducts).toEqual([{ productId: products[0].id, productName: products[0].name }]);
+});
+
 it('a removed default re-added under a plan outage is applied, not skipped (pre-push audit P1)', async () => {
   enableDefaults();
   const view = mount();

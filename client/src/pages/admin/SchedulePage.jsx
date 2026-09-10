@@ -10604,6 +10604,11 @@ export function CompletionPanel({
   const [lawnPlanReady, setLawnPlanReady] = useState(false);
   const [lawnAreaOverride, setLawnAreaOverride] = useState(undefined);
   const [lawnRemovedDefaultIds, setLawnRemovedDefaultIds] = useState([]);
+  // Names of the removed defaults, keyed by catalog id, saved with the draft:
+  // a default removed, then hard-deleted from the catalog before the draft is
+  // restored, has no live lookup left to name it, and an unnamed skip never
+  // reaches the server's unlisted-skip audit (Codex #4113 P2).
+  const lawnRemovedDefaultNamesRef = useRef({});
   const [lawnDefaultsSeedSuppressed, setLawnDefaultsSeedSuppressed] = useState(false);
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
@@ -11864,6 +11869,7 @@ export function CompletionPanel({
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
     setLawnRemovedDefaultIds([]);
+    lawnRemovedDefaultNamesRef.current = {};
     setLawnDefaultsSeedSuppressed(false);
     setAreasServiced([...lawnDefaultAreas]);
     lawnAreasInitializedRef.current = true;
@@ -12764,6 +12770,7 @@ export function CompletionPanel({
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
         lawnAreaOverride,
         lawnRemovedDefaultIds: lawnDefaultsEnabled ? lawnRemovedDefaultIds : undefined,
+        lawnRemovedDefaultNames: lawnDefaultsEnabled ? lawnRemovedDefaultNamesRef.current : undefined,
         lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
@@ -12957,6 +12964,9 @@ export function CompletionPanel({
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
     setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
+    lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)
+      ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
+      : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
     // A draft restored while the plan request has already failed carries the
@@ -14184,7 +14194,11 @@ export function CompletionPanel({
     // A governed row restored while the plan request failed is still a plan
     // default: its removal must survive a successful retry (pre-push audit).
     const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
-    if (governed) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    if (governed) {
+      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -15051,7 +15065,7 @@ export function CompletionPanel({
         ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
             const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
             const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
-            const productName = item?.product?.name || catalogProduct?.name;
+            const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
             return productName ? [{ productId: item?.product?.id || id, productName }] : [];
           })
         : [];

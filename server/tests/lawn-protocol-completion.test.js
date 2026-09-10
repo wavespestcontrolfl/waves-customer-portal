@@ -446,6 +446,46 @@ describe('recordLawnProtocolCompletion — Codex #4113 round fixes', () => {
     expect(submitted[0]).toMatchObject({ carrier_gal_per_1000: 2, total_carrier_gal: 8 });
   });
 
+  test('a skipped default is named from the locked catalog row, never the request; the submitted name survives in the audit metadata', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const actuals = []; const completions = [];
+    const trx = fakeTrx(completions, actuals);
+    const named = (table) => {
+      const base = trx(table);
+      if (!String(table).startsWith('products_catalog')) return base;
+      return { ...base, whereIn: (_column, ids) => ({ forShare() { return this; }, select: () => Promise.resolve(ids.map((id) => ({ id, name: 'Fixture bifenthrin' }))) }) };
+    };
+    await recordLawnProtocolCompletion(named, {
+      service: visit, serviceRecord: { id: 'record-3' }, plan: insectPlan,
+      completionInput: { treatedSqft: 4000, skippedProducts: [{ productId: 'prod-2', productName: 'Unrelated herbicide' }] },
+    });
+    expect(actuals).toHaveLength(1);
+    expect(actuals[0]).toMatchObject({ status: 'skipped', product_id: 'prod-2', product_name: 'Fixture bifenthrin' });
+    expect(JSON.parse(actuals[0].metadata)).toMatchObject({ submittedProductName: 'Unrelated herbicide' });
+  });
+
+  test('an applied default is never also skipped through its approved substitute: the pair is one protocol product', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const plan = {
+      protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] },
+        products: [{ productId: 'orig-1', defaultInPlan: true }] } },
+      mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [
+        { selected: true, product: { id: 'sub-1' }, substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } },
+      ] },
+    };
+    const applied = { id: 'sp-1', product_id: 'orig-1', product_name: 'Original iron', application_rate: 3, rate_unit: 'fl oz', total_amount: 7.5, amount_unit: 'fl oz', application_method: 'broadcast_spray', area_value: '4000', area_unit: 'sqft' };
+    for (const [appliedRow, skippedId] of [[applied, 'sub-1'], [{ ...applied, product_id: 'sub-1', product_name: 'Substitute iron' }, 'orig-1']]) {
+      const actuals = []; const completions = [];
+      await recordLawnProtocolCompletion(fakeTrx(completions, actuals), {
+        service: visit, serviceRecord: { id: 'record-3' }, plan, serviceProducts: [appliedRow],
+        completionInput: { treatedSqft: 4000, skippedProducts: [{ productId: skippedId, productName: 'Iron' }] },
+      });
+      expect(actuals).toHaveLength(1);
+      expect(actuals[0].status).not.toBe('skipped');
+      expect(JSON.parse(completions[0].metadata).unlistedSkippedProducts).toEqual([]);
+    }
+  });
+
   test('a product the visit applied is never also a skipped default, whatever the client submitted', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const actuals = []; const completions = [];

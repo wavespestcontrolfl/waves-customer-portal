@@ -303,10 +303,18 @@ async function revalidateSkippedProducts(trx, skips) {
   // FOR SHARE: the accepted rows stay locked through the skipped-actual
   // inserts, so a catalog delete racing this transaction blocks instead of
   // winning the FK race after the check (Codex #4113 P2).
-  const known = new Set((await trx('products_catalog').whereIn('id', ids).forShare().select('id')).map((row) => String(row.id)));
+  // The locked row also supplies the name: a skipped actual's product_name
+  // is the catalog's, never the request's, so an older or crafted client
+  // cannot label a real product_id as an unrelated product (Codex #4113 P2).
+  // The submitted name is kept for the audit metadata when it differs.
+  const known = new Map((await trx('products_catalog').whereIn('id', ids).forShare().select('id', 'name')).map((row) => [String(row.id), String(row.name || '').trim()]));
   const retired = skips.skipped.filter((row) => !known.has(String(row.productId)));
   return {
-    skipped: skips.skipped.filter((row) => known.has(String(row.productId))),
+    skipped: skips.skipped.filter((row) => known.has(String(row.productId))).map((row) => {
+      const catalogName = known.get(String(row.productId));
+      if (!catalogName || catalogName === row.productName) return row;
+      return { ...row, productName: catalogName, submittedProductName: row.productName };
+    }),
     unlisted: [...skips.unlisted, ...retired.map(({ productId, productName }) => ({ productId, productName }))],
   };
 }
@@ -394,7 +402,10 @@ function buildSkippedActual({ completionId, skipped, substitution, protocolProdu
     planned_rate_per_1000: protocol.rate_per_1000,
     planned_rate_unit: protocol.rate_unit,
     skip_reason: skipped.reason,
-    metadata: JSON.stringify({ source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null }),
+    metadata: JSON.stringify({
+      source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null,
+      ...(skipped.submittedProductName ? { submittedProductName: skipped.submittedProductName } : {}),
+    }),
   });
 }
 
@@ -490,11 +501,16 @@ async function recordLawnProtocolCompletion(trx, {
   // A product the visit applied is not a skipped default, whatever the client
   // submitted: an applied and a skipped row for one product would inflate
   // Command Center's skip counts (pre-push audit P1).
-  const appliedIds = new Set(serviceProducts.map((row) => String(row.product_id || '')));
+  // Compared by protocol identity, not catalog id: default A applied while its
+  // approved substitute B is submitted as skipped (or the reverse) is one
+  // protocol product, and both rows would resolve to A's protocol row
+  // (Codex #4113 P2).
+  const protocolIdentity = (productId) => String(bySubstituteProductId.get(String(productId || ''))?.originalProductId || productId || '');
+  const appliedIdentities = new Set(serviceProducts.map((row) => protocolIdentity(row.product_id)));
   const partitioned = partitionSkippedProducts(completionInput, plan, attribution.structured, allLawn);
   const skips = await revalidateSkippedProducts(trx, {
-    skipped: partitioned.skipped.filter((row) => !appliedIds.has(String(row.productId))),
-    unlisted: partitioned.unlisted.filter((row) => !appliedIds.has(String(row.productId))),
+    skipped: partitioned.skipped.filter((row) => !appliedIdentities.has(protocolIdentity(row.productId))),
+    unlisted: partitioned.unlisted.filter((row) => !appliedIdentities.has(protocolIdentity(row.productId))),
   });
 
   const [completion] = await trx('lawn_protocol_service_completions')
