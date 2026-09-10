@@ -8,8 +8,8 @@ const { randomUUID } = require('crypto');
 // appointment_workflow, third_party_payers, annual_prepay_terms, and visit_billing_dispositions.
 async function createRepairDatabase() {
   const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
-  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.pathname !== '/invoice_repair_test') {
-    throw new Error('Repair tests require a local invoice_repair_test database');
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || !['/invoice_repair_test', '/waves_test'].includes(url.pathname)) {
+    throw new Error('Repair tests require a local invoice_repair_test or waves_test database');
   }
   const schema = `repair_${randomUUID().replace(/-/g, '')}`;
   const db = knex({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 8 } });
