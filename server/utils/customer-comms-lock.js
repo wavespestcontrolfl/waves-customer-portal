@@ -102,4 +102,14 @@ async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
   });
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock };
+// The shared per-address email lock (same key contact-correction, dedupe
+// merge-undo and the email-fanout claim guard take): suppression writers and
+// bearer-link email handoffs serialize on it so an opt-out or an address
+// claim commits either before a handoff's authorization or after its request.
+async function lockCustomerEmail(trx, email) {
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) throw new Error('Email authority requires an address');
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${normalized}`]);
+}
+
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail };

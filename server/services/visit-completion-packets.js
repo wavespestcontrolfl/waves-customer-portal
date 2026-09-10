@@ -395,7 +395,6 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
   const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
-  const state = pending ? 'effects_pending' : review ? 'office_required' : 'done';
   let recovered = false;
   if (!pending) await database.transaction(async (trx) => {
     const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
@@ -501,6 +500,9 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
     try {
       reopened = Number(await database('visit_completion_packets')
         .whereIn('id', database('invoices').where({ id: invoiceId }).whereNotNull('visit_completion_packet_id').select('visit_completion_packet_id'))
+        // Only a resumable packet reopens: a packet the office owns after a
+        // permanent member-effect rejection stays failed.
+        .whereIn('status', ['done', 'processing'])
         .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() }));
     } catch { reopened = null; }
     // A reopen that ran and touched no packet proves no packet owns this

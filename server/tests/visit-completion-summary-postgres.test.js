@@ -1044,6 +1044,25 @@ postgres('visit summary recipient recovery', () => {
     expect(blockedCode).toBe('55P03');
   });
 
+  test.each(['immediate', 'retry'])('an email suppression or address write during the %s provider request waits on the per-address lock', async (rail) => {
+    let blockedCode = null;
+    const writeDuringRequest = async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, fixture.serviceEmail);
+      }).catch((err) => { blockedCode = err.code; });
+    };
+    if (rail === 'immediate') {
+      sendOne.mockImplementation(async ({ to }) => { if (to === fixture.serviceEmail) await writeDuringRequest(); return { messageId: randomUUID() }; });
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    } else {
+      const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+        recipient_email_snapshot: fixture.serviceEmail };
+      expect(await Summary.retrySummaryThroughHandoff(stored, writeDuringRequest)).toEqual({ ok: true });
+    }
+    expect(blockedCode).toBe('55P03');
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };
@@ -1681,6 +1700,66 @@ postgres('visit summary recipient recovery', () => {
     } finally {
       await mockPg('invoices').where({ id: invoiceId }).del();
     }
+  });
+
+  test('a review SMS handoff shares the packet row so a bounce reconciliation waits for the send', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    let blockedCode = null;
+    expect(await Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => {
+      await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'bounced' });
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx);
+      }).catch((err) => { blockedCode = err.code; });
+      return { ok: true };
+    })).toEqual({ ok: true });
+    expect(blockedCode).toBe('55P03');
+    // Once the bounce lands, the next review handoff is refused.
+    await mockPg.transaction(async (trx) => { await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx); });
+    expect(await Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => ({ ok: true }))).toMatchObject({ ok: false, code: 'VISIT_SUMMARY_UNCERTAIN' });
+    expect(await Summary.reviewSendThroughSummaryHandoff(randomUUID(), async () => ({ ok: true }))).toEqual({ ok: true });
+  });
+
+  test('a manual stop recorded while a step was running is not overwritten by parking', async () => {
+    await mockPg('review_sequences').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'stopped', stop_reason: 'manual', plan: JSON.stringify({ touches: [] }) });
+    try {
+      await Summary.parkVisitReviewOutreach(fixture.packetId);
+      expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId }).first()).toMatchObject({ status: 'stopped', stop_reason: 'manual' });
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(0);
+    } finally {
+      await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
+    }
+  });
+
+  test('a failed packet is not reopened by a paid-invoice lookup failure', async () => {
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'failed', error: 'immutable_member_rejected' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'paid', visit_completion_packet_id: fixture.packetId });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failLookup(connection, query) {
+      if (!interrupted && query.sql.startsWith('select "visit_completion_packet_id" from "invoices"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic invoice read outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await require('../services/visit-completion-packets').enrollVisitCompletionReviewForInvoice(invoiceId)).toBeNull();
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+    expect(interrupted).toBe(true);
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'failed' });
   });
 
   test('a bounce reconciliation serializes behind the packet close and alerts on the closed packet', async () => {
