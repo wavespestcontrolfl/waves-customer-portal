@@ -10915,8 +10915,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         let reusedInvoiceClaimedElsewhere = false;
         if (!suppressCompletionInvoiceLink && preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
           try {
-            const claim = await require('../services/invoice').claimInvoiceForSend(invoice.id);
-            completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
+            const InvoiceServiceForClaim = require('../services/invoice');
+            const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);
+            // 'sent' is claimable (a resend), so a row DELIVERED since the
+            // pre-completion snapshot would still be claimed here — reject it
+            // (pre-push P1 r4): give the claim straight back and go report-only.
+            if (require('../services/invoice-helpers').completionInvoiceAlreadyDelivered(claim.invoice)) {
+              await InvoiceServiceForClaim.restoreSendClaim(invoice.id, claim.previousStatus, claim.claimed);
+              logger.info(`[dispatch] invoice ${invoice.id} was delivered since the pre-completion read — completion text goes report-only`);
+              reusedInvoiceClaimedElsewhere = true;
+            } else {
+              completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
+            }
           } catch (claimErr) {
             logger.info(`[dispatch] invoice ${invoice.id} delivery claimed elsewhere — completion text goes report-only: ${claimErr.message}`);
             reusedInvoiceClaimedElsewhere = true;
@@ -12035,13 +12045,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
-    // Release the completion's send claim when no pay link went out under it
-    // (report-only text, no phone, SMS failure) — the invoice returns to the
-    // status it had, sendable again by the office.
-    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
-      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
-      completionInvoiceSendClaim = null;
-    }
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
@@ -12095,12 +12098,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
     markedSucceeded = true;
     return ({ status: 200, body: responsePayload });
   } catch (err) {
-    // A thrown completion releases its send claim too — never a stranded
-    // 'sending' row the office can no longer send.
-    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
-      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
-      completionInvoiceSendClaim = null;
-    }
     // Only mark failed if we haven't already marked succeeded. After the
     // durable trx commits and the attempt is succeeded, an unhandled throw
     // in a recoverable side effect must NOT flip it back — that would
@@ -12117,6 +12114,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
       );
     }
     throw err;
+  } finally {
+    // Release the completion's send claim on EVERY exit when no pay link went
+    // out under it — report-only text, no phone, an SMS failure, the 503
+    // resume returns (exitForCompletionSmsResume), a throw — so the invoice
+    // returns to the status it had and stays sendable by the office (pre-push
+    // P1 r4). markDeliverySent already finalized 'sending' → 'sent' when the
+    // link did go out.
+    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
+      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
+      completionInvoiceSendClaim = null;
+    }
   }
 }
 

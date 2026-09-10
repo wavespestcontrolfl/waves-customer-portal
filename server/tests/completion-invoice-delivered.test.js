@@ -77,9 +77,11 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/const suppressCompletionInvoiceLink = !!invoiceAlreadySent\s*\|\| !!\(preMintedInvoice && require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(preMintedInvoice\)\);/);
     // …and takes the ONE send claim before texting a link for a reused invoice (Codex P1 r4):
     // claim at the decision, finalize via markDeliverySent when the link went out, release otherwise (normal end and thrown path).
-    expect(completion).toMatch(/const claim = await require\('\.\.\/services\/invoice'\)\.claimInvoiceForSend\(invoice\.id\);\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
+    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);[\s\S]{0,600}?if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\) \{\s*await InvoiceServiceForClaim\.restoreSendClaim\(invoice\.id, claim\.previousStatus, claim\.claimed\);[\s\S]{0,300}?reusedInvoiceClaimedElsewhere = true;\s*\} else \{\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
     expect(completion).toMatch(/const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink\s*&& !reusedInvoiceClaimedElsewhere/);
     expect(completion.match(/completionInvoiceLinkDelivered = true;/g)).toHaveLength(2);
-    expect(completion.match(/if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);/g)).toHaveLength(2);
+    // ONE release, in the outer finally — covers the normal end, the 503 resume returns and a throw.
+    expect(completion).toMatch(/throw err;\s*\} finally \{[\s\S]{0,900}?if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);[\s\S]{0,120}?\}\s*\}\s*\}\s*\n\s*module\.exports = \{/);
+    expect(completion.match(/restoreSendClaim\(completionInvoiceSendClaim\.invoiceId/g)).toHaveLength(1);
   });
 });
