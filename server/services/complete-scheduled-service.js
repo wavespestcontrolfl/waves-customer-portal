@@ -4799,6 +4799,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
         completionTimerEntriesSnapshot = null;
         const persistRecord = async (trx) => {
+          // Invoice-issued closeout: the pre-claim check above ran unlocked
+          // (pre-push P1). Re-check the issued invoice HERE, locked, in the
+          // transaction that commits the completion — a void or unlink that
+          // landed in between refuses the closeout instead of committing a
+          // completed visit with no invoice. Lock order (GitHub r6 P2 #4127):
+          // the invoice row is taken FIRST, ahead of every customer / visit
+          // lock below, because the invoice reversal paths (voidInvoice →
+          // restoreAccountCreditForVoidedInvoice, the packet payment
+          // finalizer) lock invoice → customer; taking the customer first
+          // here and the invoice last formed an ABBA cycle with a racing
+          // void. The scheduled-service mint advisory lock is taken ahead of
+          // it so the mint-chain writers (advisory → customer → visit →
+          // invoice) stay serialized against this transaction instead of
+          // meeting it in the opposite order.
+          if (issuedInvoiceCloseout) {
+            const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
+            await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
+            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');
+            const InvoiceServiceForIssued = require('../services/invoice');
+            if (!issuedNow || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issuedNow.status))
+              || String(issuedNow.scheduled_service_id) !== String(svc.id)) {
+              throw Object.assign(new Error('issued invoice no longer reusable'), { code: 'issued_invoice_not_reusable' });
+            }
+          }
           // Baseline -> customer -> visit matches confirmation. Take this before
           // the existing row locks because linking can change the installed row.
           if (propertyHistoryEnabled && canLinkLawnAssessmentRecord) {
@@ -4830,20 +4854,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
-          // Invoice-issued closeout: the pre-claim check above ran unlocked
-          // (pre-push P1). Re-check the issued invoice HERE, locked, in the
-          // transaction that commits the completion — a void or unlink that
-          // landed in between refuses the closeout instead of committing a
-          // completed visit with no invoice. Taken AFTER the customer and
-          // visit row locks (pre-push P1 r7): every invoice writer orders
-          // customer → visit → invoice, and an invoice lock ahead of them
-          // here would invert it.
+          // Invoice-issued closeout: the not-future decision (resolveVisit +
+          // backfillCompletionPlan) read the UNLOCKED scheduled_date. A
+          // reschedule that landed between that read and this lock would
+          // otherwise complete a visit that is now on another day — or in
+          // the future — against the date the closeout was resolved on
+          // (GitHub r6 P2 #4127). The locked row decides: a moved visit
+          // refuses here and stays open; the next send / payment of the
+          // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
-            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');
-            const InvoiceServiceForIssued = require('../services/invoice');
-            if (!issuedNow || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issuedNow.status))
-              || String(issuedNow.scheduled_service_id) !== String(svc.id)) {
-              throw Object.assign(new Error('issued invoice no longer reusable'), { code: 'issued_invoice_not_reusable' });
+            const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
+            if (!lockedDay || lockedDay !== serviceDateOnly(svc.scheduled_date) || lockedDay > etDateString()) {
+              throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
           }
           if (completionPricingPlan) {
@@ -6556,6 +6578,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'The invoice this closeout was issued for is no longer this visit\'s live invoice — the visit stays open.',
             code: 'issued_invoice_not_reusable',
+          } });
+        }
+        if (err && err.code === 'issued_visit_rescheduled') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit was rescheduled while its invoice was being issued — the visit stays open on its new day.',
+            code: 'issued_visit_rescheduled',
           } });
         }
         throw err;

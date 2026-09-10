@@ -54,11 +54,17 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
     const members = await openMembers(conn, svc.visit_id);
     if (members.length >= 2) return leaveOpen('grouped_visit');
   }
+  // Only the ownership verdict itself is a refusal; a failed read inside the
+  // check is an outage, rethrown so it lands in the caller's failure audit
+  // (code 'error') instead of being misfiled as packet ownership (GitHub r6
+  // P2 #4127). The visit is already in hand here, so the throw carries it
+  // (`linkedVisit`) — the failure is audited against this visit.
   try {
     const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');
     await assertScheduledInvoiceNotPacketOwned(conn, svc.id);
-  } catch {
-    return leaveOpen('packet_owned');
+  } catch (err) {
+    if (err?.code === 'VISIT_PACKET_OWNS_BILLING') return leaveOpen('packet_owned');
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
   // A project-backed visit (completion profile requiresProject /
   // projectBacked: special projects, rodent exclusion, …) completes ONLY
@@ -68,10 +74,17 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // send-with-invoice delivery is not the project's close. Excluded here
   // explicitly, with its own audited reason, rather than sending it into a
   // refusal it can never pass (GitHub r5 P2 #4127); the visit stays open
-  // for the project close. A profile lookup failure surfaces as an error
-  // outcome (audited by the caller), never as a closeout.
+  // for the project close. Resolved STRICT: a failed table / identity probe
+  // must surface as an error outcome (audited by the caller), never
+  // synthesize the generic profile and let a project-backed visit through
+  // the generic lane (GitHub r6 P2 #4127).
   const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-  const profile = await resolveCompletionProfileForScheduledService(svc, conn);
+  let profile;
+  try {
+    profile = await resolveCompletionProfileForScheduledService(svc, conn, { strict: true });
+  } catch (err) {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
+  }
   if (profile?.requiresProject || profile?.projectBacked) return leaveOpen('project_backed');
   return { svc, reason: null, visit: svc };
 }
@@ -178,6 +191,8 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
     await audit({ closed, visitId: svc.id, resumed: resuming, status: result?.status || null, code: result?.body?.code || null });
     return { closed, reason: closed ? null : (result?.body?.code || `status_${result?.status}`), visitId: svc.id, resumed: resuming };
   } catch (err) {
+    // A probe that threw after the linked visit row was in hand carries it.
+    linkedVisitId = linkedVisitId || err?.linkedVisit?.id || null;
     logger.error(`[invoice-issued-closeout] failed for invoice ${invoiceId}${linkedVisitId ? ` (visit ${linkedVisitId})` : ''}: ${err.message}`);
     // A linked visit had resolved: its outcome is a failure, recorded like
     // any other — the completion may have committed and back-linked before

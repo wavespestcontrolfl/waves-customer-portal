@@ -15,6 +15,23 @@ jest.mock('../models/db', () => {
 const mockCompleteScheduledService = jest.fn(async () => ({ status: 200, body: { success: true } }));
 jest.mock('../services/complete-scheduled-service', () => ({ completeScheduledService: (...a) => mockCompleteScheduledService(...a) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => ({})) }));
+// Outage injection for the two pre-completion probes: a test may replace
+// the packet-ownership assert or the profile resolver for one call.
+const mockProbe = { packetAssert: null, profile: null, profileCalls: [] };
+jest.mock('../services/scheduled-invoice-mint', () => {
+  const actual = jest.requireActual('../services/scheduled-invoice-mint');
+  return { ...actual, assertScheduledInvoiceNotPacketOwned: (...a) => (mockProbe.packetAssert ? mockProbe.packetAssert(...a) : actual.assertScheduledInvoiceNotPacketOwned(...a)) };
+});
+jest.mock('../services/service-completion-profiles', () => {
+  const actual = jest.requireActual('../services/service-completion-profiles');
+  return {
+    ...actual,
+    resolveCompletionProfileForScheduledService: (svc, knex, opts) => {
+      mockProbe.profileCalls.push(opts);
+      return mockProbe.profile ? mockProbe.profile(svc, knex, opts) : actual.resolveCompletionProfileForScheduledService(svc, knex, opts);
+    },
+  };
+});
 // The gate table is built at module load from process.env; the test flips
 // the gate through a mock instead of racing the require.
 const mockGate = { on: true };
@@ -56,6 +73,9 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   });
   beforeEach(async () => {
     mockGate.on = true;
+    mockProbe.packetAssert = null;
+    mockProbe.profile = null;
+    mockProbe.profileCalls = [];
     mockCompleteScheduledService.mockClear();
     recordAuditEvent.mockClear();
     trx = await database.transaction();
@@ -238,6 +258,32 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // An invoice with no visit link that throws has nothing to audit against.
     recordAuditEvent.mockClear();
     expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('only the ownership verdict is packet_owned — a failed read inside the packet check is an audited error, never a refusal (GitHub r6 P2)', async () => {
+    const open = await visit();
+    const inv = await invoice({ scheduled_service_id: open.id });
+    mockProbe.packetAssert = async () => { throw Object.assign(new Error('billed by its saved visit closeout'), { status: 409, code: 'VISIT_PACKET_OWNS_BILLING' }); };
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'packet_owned', visitId: open.id });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: open.id, metadata: expect.objectContaining({ code: 'packet_owned' }) }));
+    recordAuditEvent.mockClear();
+    mockProbe.packetAssert = async () => { throw new Error('connection reset'); };
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'error', error: 'connection reset', visitId: open.id });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: open.id, metadata: expect.objectContaining({ code: 'error', error: 'connection reset' }) }));
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('the project exclusion resolves the profile STRICT — an unverifiable profile is an audited error, never the synthesized generic lane (GitHub r6 P2)', async () => {
+    const open = await visit();
+    const inv = await invoice({ scheduled_service_id: open.id });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: open.id });
+    expect(mockProbe.profileCalls).toEqual([{ strict: true }]);
+    mockCompleteScheduledService.mockClear();
+    recordAuditEvent.mockClear();
+    mockProbe.profile = async () => { throw new Error('relation probe failed'); };
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'error', error: 'relation probe failed', visitId: open.id });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'visit.completion_on_invoice_issued_refused', resource_id: open.id, metadata: expect.objectContaining({ code: 'error' }) }));
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
   });
 
   test('a refused completion is reported, audited as refused, and never thrown', async () => {

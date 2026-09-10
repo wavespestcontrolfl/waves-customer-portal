@@ -24,6 +24,19 @@ jest.mock('../services/completion-recap', () => {
   const actual = jest.requireActual('../services/completion-recap');
   return { ...actual, generateRecap: jest.fn(actual.generateRecap) };
 });
+// Race injection: a test may run a hook right before the completion claim
+// (after the unlocked visit read, before the record transaction's locks).
+const mockRace = { beforeClaim: null };
+jest.mock('../services/completion-attempts', () => {
+  const actual = jest.requireActual('../services/completion-attempts');
+  return {
+    ...actual,
+    claimCompletionAttempt: async (...args) => {
+      if (mockRace.beforeClaim) { const hook = mockRace.beforeClaim; mockRace.beforeClaim = null; await hook(); }
+      return actual.claimCompletionAttempt(...args);
+    },
+  };
+});
 // Annual-prepay coverage is stamped rows + a live term; one test forces the
 // coverage verdict to exercise the settlement branch without that fixture.
 const mockAnnualPrepay = { covers: false };
@@ -52,7 +65,7 @@ describe('source contracts', () => {
   const path = require('path');
   test('the issued invoice is re-checked LOCKED inside the record transaction and a miss 409s without committing', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{\s*\n\s*const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,400}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
     expect(source).toMatch(/if \(err && err\.code === 'issued_invoice_not_reusable'\) \{\s*\n\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
   });
   test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
@@ -79,12 +92,20 @@ describe('source contracts', () => {
     // The route hands the operator through.
     expect(schedule).toMatch(/generatePrepaidReceiptForService\(req\.params\.id, \{ operatorInitiated: true, actorTechnicianId: req\.technicianId \|\| null \}\)/);
   });
-  test('the issued-invoice recheck locks the invoice AFTER the customer and visit rows (customer → visit → invoice)', () => {
+  test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    const visitLockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
-    const invoiceLockAt = source.indexOf("const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate()");
-    expect(visitLockAt).toBeGreaterThan(-1);
-    expect(invoiceLockAt).toBeGreaterThan(visitLockAt);
+    const persistAt = source.indexOf('const persistRecord = async (trx) => {');
+    const advisoryAt = source.indexOf('await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);', persistAt);
+    const invoiceLockAt = source.indexOf("const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate()", persistAt);
+    const customerLockAt = source.indexOf(".forShare()", persistAt);
+    const visitLockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();", persistAt);
+    expect(persistAt).toBeGreaterThan(-1);
+    expect(advisoryAt).toBeGreaterThan(persistAt);
+    expect(invoiceLockAt).toBeGreaterThan(advisoryAt);
+    expect(customerLockAt).toBeGreaterThan(invoiceLockAt);
+    expect(visitLockAt).toBeGreaterThan(customerLockAt);
+    // …and the locked visit row's day is re-validated after the visit lock.
+    expect(source.indexOf("{ code: 'issued_visit_rescheduled' }", visitLockAt)).toBeGreaterThan(visitLockAt);
   });
 });
 
@@ -272,6 +293,80 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(result).toMatchObject({ status: 409, body: { code: 'issued_invoice_not_reusable' } });
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
+  });
+
+  test('a reschedule that lands between the unlocked read and the record transaction refuses the closeout — the locked day decides (GitHub r6 P2)', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const tomorrow = new Date(Date.now() + 36 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    mockRace.beforeClaim = () => mockPg('scheduled_services').where({ id: f.serviceId }).update({ scheduled_date: tomorrow });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
+    expect(out).toMatchObject({ closed: false, reason: 'issued_visit_rescheduled', visitId: f.serviceId });
+    const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+    expect(visit.status).toBe('confirmed');
+    expect((await mockPg.raw("SELECT to_char(scheduled_date, 'YYYY-MM-DD') AS d FROM scheduled_services WHERE id = ?", [f.serviceId])).rows[0].d).toBe(tomorrow);
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+    expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBeNull();
+    expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'issued_visit_rescheduled' }) });
+  });
+
+  test('a void racing the closeout: the closeout queues behind the invoice-first void instead of deadlocking, then refuses (GitHub r6 P2)', async () => {
+    // Two real sessions, so the fixture graph is COMMITTED for this test
+    // and removed in finally (no catalog row is created — the visit's
+    // service_type resolves to the synthesized generic profile).
+    const outer = mockPg;
+    mockPg = database;
+    const ids = { customerId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID() };
+    const date = etDateString();
+    let voider = null;
+    try {
+      await database('customers').insert({ id: ids.customerId, first_name: 'Race', last_name: 'Fixture', phone: '+12025550199',
+        email: `${ids.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application' });
+      await database('scheduled_services').insert({ id: ids.serviceId, customer_id: ids.customerId, service_type: 'Quarterly Pest Control Service',
+        scheduled_date: date, window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 117 });
+      await database('invoices').insert({ id: ids.invoiceId, customer_id: ids.customerId, scheduled_service_id: ids.serviceId, invoice_number: `TST-${ids.invoiceId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''), status: 'sent', total: 117, subtotal: 117, credit_applied: 20, service_date: date, service_type: 'Quarterly Pest Control Service',
+        sent_at: new Date(), line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', amount: 117, quantity: 1, unit_price: 117 }]) });
+      // voidInvoice's lock order: the invoice row first…
+      voider = await database.transaction();
+      await voider('invoices').where({ id: ids.invoiceId }).forUpdate().first('id');
+      // …while the closeout runs concurrently and must queue behind it.
+      const closeout = closeOutVisitForIssuedInvoice({ invoiceId: ids.invoiceId, trigger: 'sent', actorTechnicianId: null, conn: database });
+      const deadline = Date.now() + 15000;
+      let waiting = 0;
+      while (Date.now() < deadline) {
+        const { rows } = await database.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()");
+        waiting = rows[0].n;
+        if (waiting > 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(waiting).toBeGreaterThan(0);
+      // …then restoreAccountCreditForVoidedInvoice locks the customer. With
+      // the closeout holding the customer share lock and waiting on the
+      // invoice this was the ABBA deadlock; now it acquires immediately.
+      await voider.raw("SET LOCAL lock_timeout = '4000ms'");
+      await voider('customers').where({ id: ids.customerId }).forUpdate().first('id');
+      await voider('invoices').where({ id: ids.invoiceId }).update({ status: 'void', credit_applied: 0, updated_at: new Date() });
+      await voider.commit();
+      voider = null;
+      const out = await closeout;
+      expect(out).toMatchObject({ closed: false, reason: 'issued_invoice_not_reusable', visitId: ids.serviceId });
+      expect((await database('scheduled_services').where({ id: ids.serviceId }).first()).status).toBe('confirmed');
+      expect(await database('service_records').where({ scheduled_service_id: ids.serviceId })).toHaveLength(0);
+    } finally {
+      if (voider) await voider.rollback().catch(() => {});
+      for (const [table, where] of [
+        ['service_completion_attempts', { service_id: ids.serviceId }],
+        ['audit_log', { resource_id: ids.serviceId }],
+        ['job_status_history', { job_id: ids.serviceId }],
+        ['activity_log', { customer_id: ids.customerId }],
+        ['invoices', { id: ids.invoiceId }],
+        ['scheduled_services', { id: ids.serviceId }],
+        ['customers', { id: ids.customerId }],
+      ]) {
+        await database(table).where(where).del().catch(() => {});
+      }
+      mockPg = outer;
+    }
   });
 
   test('a lawn visit with an unconfirmed assessment closes — the assessment form gate is a panel gate', async () => {
