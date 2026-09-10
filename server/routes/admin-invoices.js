@@ -619,11 +619,18 @@ async function openVisitPickerRow(visit, customerId) {
   const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
   let payerBilled = false;
   let credit = null;
+  // An unverifiable payer or deposit (a failed ledger read) is NOT offered
+  // as deposit_credit 0 (Codex P1 r3): the form would submit an expected
+  // credit of 0, and after the mint's own retries a full-balance invoice
+  // could go out over a paid deposit. Fail closed — the visit is omitted.
   try {
     const payer = await resolveForInvoice({ customerId, scheduledServiceId: visit.id });
     payerBilled = !!payer?.payerId;
     if (visit.source_estimate_id && !payerBilled) credit = await pendingDepositCredit(visit.source_estimate_id);
-  } catch { credit = null; }
+  } catch (err) {
+    logger.warn(`[admin-invoices] picker: payer/deposit lookup failed for visit ${visit.id} — not offered: ${err.message}`);
+    return null;
+  }
   // Unverifiable annual coverage (strict mode threw) is NOT offered either —
   // fail closed toward "no new collectible invoice" (pre-push P0 r3).
   try {
@@ -1080,6 +1087,14 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
     if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
       throw conflict('visit_not_open', `That visit is no longer open for this customer${still ? ` (${still.status})` : ''} — nothing was created`);
     }
+    // The mint derives its deposit ledger from the visit snapshot's
+    // source_estimate_id (Codex P1 r3): an estimate attached or relinked
+    // between the pre-check and this lock would be missed (or the old
+    // estimate's credit consumed) — refuse when the link moved; the form
+    // reloads the picker and previews the current credit.
+    if (String(still.source_estimate_id || '') !== String(visit.source_estimate_id || '')) {
+      throw conflict('visit_link_moved', 'That visit\'s estimate link changed while this invoice was being created — nothing was created; reload and try again');
+    }
     let prepaid;
     try {
       prepaid = await linkedVisitPrepaid(trx, still, { customerId });
@@ -1093,7 +1108,7 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
 }
 
 // Step 4 — a mint refusal as the HTTP response, or null for a real error.
-// visit_not_open | visit_prepaid | visit_prepaid_unverifiable | SCHEDULED_PRICE_MOVED |
+// visit_not_open | visit_link_moved | visit_prepaid | visit_prepaid_unverifiable | SCHEDULED_PRICE_MOVED |
 // DEPOSIT_CREDIT_CHANGED | BALANCE_CHANGED. The drift figures ride along so
 // the form can show the balance the server would actually bill.
 const DRIFT_FIELDS = ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit'];

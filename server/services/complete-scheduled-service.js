@@ -10259,7 +10259,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // collection path when no SMS actually goes out (no phone / already handled).
     // includePayLink is an SMS-only concern and is applied to
     // allowCompletionInvoiceLink below instead.
-    const suppressCompletionInvoiceLink = !!invoiceAlreadySent;
+    // Durable, server-side (Codex P1 #4131 r3): a reused pre-minted invoice
+    // that was ALREADY delivered (an Invoices-page linked create sent now,
+    // Charge Now, a scheduled send) suppresses the link whether or not the
+    // client carried invoiceAlreadySent — the customer must not get the
+    // same pay link twice.
+    const suppressCompletionInvoiceLink = !!invoiceAlreadySent
+      || !!(preMintedInvoice && require('../services/invoice-helpers').completionInvoiceAlreadyDelivered(preMintedInvoice));
     const recordStructuredNotes = parseJsonObject(record.structured_notes);
     const completionSmsAttemptedAt = recordStructuredNotes.completionSmsAttemptedAt
       ? new Date(recordStructuredNotes.completionSmsAttemptedAt).getTime()

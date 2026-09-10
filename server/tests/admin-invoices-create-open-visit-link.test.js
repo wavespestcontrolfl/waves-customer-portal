@@ -282,6 +282,24 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
+  // Codex P1 r3 — the mint derives its deposit ledger from the visit snapshot's
+  // source_estimate_id; an estimate attached or relinked between the
+  // pre-check and the lock is refused under the lock, never minted stale.
+  test('a source estimate attached or relinked between the pre-check and the lock is refused inside the chain (409 visit_link_moved)', async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', source_estimate_id: null };
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
+      const lockedRow = { ...visitRow, source_estimate_id: 'est-attached-later' };
+      const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+      await assertEligibleInTrx(trx);
+      throw new Error('hook should have refused');
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_link_moved' });
+    });
+  });
+
   test('the previewed deposit credit rides to the helper; a credit that moved since the preview is refused (409 DEPOSIT_CREDIT_CHANGED) — nothing created', async () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT, expectedDepositCredit: 50 });
@@ -491,6 +509,30 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
         { id: VISIT, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 50 },
         { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, deposit_credit: 0 },
         { id: '55555555-5555-4555-8555-555555555555', scheduled_date: '2040-03-18', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', deposit_credit: 0 },
+      ]);
+    });
+  });
+
+  // Codex P1 r3 — a failed deposit (or payer) lookup must not surface the
+  // visit with deposit_credit 0: the form would submit an expected credit of
+  // 0 and a full-balance invoice could go out over a paid deposit.
+  test('a visit whose deposit lookup fails is not offered at all (never deposit_credit 0)', async () => {
+    const { pendingDepositCredit } = require('../services/estimate-deposits');
+    pendingDepositCredit.mockRejectedValueOnce(new Error('deposit ledger unavailable'));
+    const open = [
+      { id: VISIT, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: 'est-with-deposit', customer_id: CUSTOMER },
+      { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, source_estimate_id: null, customer_id: CUSTOMER },
+    ];
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return qb({ limit: jest.fn(async () => []) });
+      if (table === 'scheduled_services') return qb({ limit: jest.fn(async () => open.map((v) => ({ ...v }))) });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/service-records/${CUSTOMER}`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).openVisits).toEqual([
+        { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, deposit_credit: 0 },
       ]);
     });
   });

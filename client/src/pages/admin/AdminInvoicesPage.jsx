@@ -356,6 +356,7 @@ export const VISIT_STATE_CONFLICT_CODES = [
   "DEPOSIT_CREDIT_CHANGED",
   "BALANCE_CHANGED",
   "visit_not_open",
+  "visit_link_moved",
   "visit_prepaid",
   "visit_prepaid_unverifiable",
   "visit_already_invoiced",

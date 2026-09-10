@@ -145,7 +145,20 @@ function formatCardLine(brand, last4) {
   return ` (${b.charAt(0).toUpperCase() + b.slice(1)} ending ${last4})`;
 }
 
+// Whether a visit's attached (checkout / pre-completion) invoice has ALREADY
+// been delivered to the customer, so the completion must reuse it silently —
+// no second pay-link text (Codex P1 #4131 r3). Durable: read from the
+// invoice row itself (sent_at, or a delivered/settled status), not from a
+// client-side flag that only the Charge Now flow used to set. Paid and
+// prepaid count as delivered — nothing is owed, nothing to link.
+function completionInvoiceAlreadyDelivered(invoice) {
+  if (!invoice) return false;
+  if (invoice.sent_at) return true;
+  return ['sent', 'paid', 'prepaid'].includes(String(invoice.status || ''));
+}
+
 module.exports = {
+  completionInvoiceAlreadyDelivered,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,

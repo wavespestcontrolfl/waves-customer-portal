@@ -8,6 +8,7 @@ const { acquireOccupancyLock, acquireOccupancyLocks, findConflictingVisits } = r
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
+const { completionInvoiceAlreadyDelivered } = require('../services/invoice-helpers');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -3681,7 +3682,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'sent_at');
       } catch { /* scheduled_service_id may be absent before migration */ }
       // Whether the visit's recorded prepayment has ALREADY been consumed by
       // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
@@ -3901,6 +3902,10 @@ router.get('/', async (req, res, next) => {
           : null,
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
+        // Durable "already sent" for the completion (Codex P1 #4131 r3): an
+        // attached invoice already delivered (an Invoices-page linked create
+        // sent now, Charge Now, a scheduled send) must not be re-texted.
+        completionInvoiceAlreadySent: completionInvoiceAlreadyDelivered(checkoutInvoice),
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
         checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],
@@ -4214,7 +4219,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'sent_at');
         } catch { /* scheduled_service_id may be absent before migration */ }
         // Mirrors the day-view enrichment: has the visit's prepayment already
         // been consumed by this invoice? Gated to the prepaid+invoice overlap.
@@ -4422,6 +4427,7 @@ router.get('/week', async (req, res, next) => {
             : null,
           checkoutInvoiceId: checkoutInvoice?.id || null,
           checkoutInvoiceStatus: checkoutInvoice?.status || null,
+          completionInvoiceAlreadySent: completionInvoiceAlreadyDelivered(checkoutInvoice),
           checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
           checkoutInvoiceNumber: checkoutInvoice?.invoice_number || null,
           checkoutInvoiceLines: checkoutInvoice ? compactCheckoutInvoiceLines(checkoutInvoice.line_items) : [],

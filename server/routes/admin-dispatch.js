@@ -756,7 +756,7 @@ router.get('/:date?', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNot('status', 'void')
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'token');
+          .first('id', 'status', 'total', 'token', 'sent_at');
       } catch { /* scheduled_service_id may be absent before migration */ }
       const autopayActive = await customerOnAutopay({
         id: s.customer_id,
@@ -881,6 +881,8 @@ router.get('/:date?', async (req, res, next) => {
         checkoutInvoiceId: checkoutInvoice?.id || null,
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
+        // Durable "already sent" for the completion (Codex P1 #4131 r3).
+        completionInvoiceAlreadySent: require('../services/invoice-helpers').completionInvoiceAlreadyDelivered(checkoutInvoice),
         completionProfile,
         // Whether the inspection-credit lane is actually live. The closeout
         // panel renders its promise checkbox only on true (Codex #3175 P1):
