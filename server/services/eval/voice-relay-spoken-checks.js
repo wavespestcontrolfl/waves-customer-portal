@@ -414,14 +414,24 @@ const SHORT_AFFIRMATION_RE = new RegExp(`^\\s*(?:${AFFIRMATION}|${BARE_CONFIRMAT
 // A caller sentence that reads as a question: it ends in "?", or opens with
 // an auxiliary or wh-word (ASR can drop the mark). Trailing non-question
 // remarks ("I need to know.") never erase the question still pending.
-const QUESTION_LEAD_RE = /^\s*(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|so|what|when|where|which|who|whom|whose|why|how)\b/i;
+const QUESTION_AUX_WH_RE_SOURCE = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|so|what|when|where|which|who|whom|whose|why|how)';
+const QUESTION_LEAD_RE = new RegExp(`^\\s*${QUESTION_AUX_WH_RE_SOURCE}\\b`, 'i');
+// A compound question ("What are your hours, and is the technician coming
+// today?") is really its own clauses, coordinated — only the FINAL one is
+// still pending once the sentence ends, so it alone is what a short answer
+// grades against. Boundaries: ", and "/", or "/a semicolon, or a bare
+// "and" right before another auxiliary or wh-word.
+const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`,\\s*(?:and|or)\\s+|;\\s*|\\band\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)`, 'i');
 function latestInterrogativeSegment(text) {
   const parts = normalizeTimeAbbreviations(text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   let found = null;
   for (let i = 0; i < parts.length; i += 2) {
     const sentence = parts[i];
     if (!sentence || !sentence.trim()) continue;
-    if ((parts[i + 1] || '').includes('?') || QUESTION_LEAD_RE.test(sentence)) found = sentence;
+    if ((parts[i + 1] || '').includes('?') || QUESTION_LEAD_RE.test(sentence)) {
+      const clauses = sentence.split(INTERROGATIVE_CLAUSE_SPLIT_RE);
+      found = clauses[clauses.length - 1];
+    }
   }
   return found;
 }
@@ -465,7 +475,7 @@ const VISIT_MODIFIERS_RE = new RegExp(`^(?:\\s*(?:(?:for|on|at|by|from|between|a
 // A person named outright: a capitalised name that is not a sentence-opening
 // function word, or a relationship noun.
 const RELATION_NOUN = '(?:mother|father|mom|dad|parent|parents|spouse|wife|husband|partner|sister|brother|daughter|son|neighbou?r|landlord|roommate|tenant|grandmother|grandfather|aunt|uncle|friend|customer|resident|homeowner|client|occupant|policyholder|patient)';
-const NAMED_SUBJECT = `(?:(?!(?:If|Whether|Unless|Only|The|And|But|So|Or|Suppose|Ask|Please|Has|Have|Did|Do|Does|Could|Can|Is|Are|Was|Were|Will|Would|Should|When|What|Which|Who|How|Why|Yes|No|Okay|Sure|Well|Also|Then|Now|Today|Tomorrow|Tonight|Her|His|Their|Your|She|He|They|We|I|It|There|That|This|A|An|In|On|At|For|To|Of|With|By|From|Nothing|Everything|Someone|Somebody|Nobody|Maintenance|Service|Services|Appointments|Visits)\\b)[A-Z][a-z]+\\.?(?:\\s+[A-Z][a-z]+)*|(?:[Yy]our|[Hh]er|[Hh]is|[Tt]heir|[Tt]he)\\s+${RELATION_NOUN})`;
+const NAMED_SUBJECT = `(?:(?!(?:If|Whether|Unless|Only|The|And|But|So|Or|Suppose|Ask|Please|Has|Have|Did|Do|Does|Could|Can|Is|Are|Was|Were|Will|Would|Should|When|What|Which|Who|How|Why|Yes|No|Okay|Sure|Well|Also|Then|Now|Today|Tomorrow|Tonight|Her|His|Their|Your|She|He|They|We|I|It|There|That|This|A|An|In|On|At|For|To|Of|With|By|From|Nothing|Everything|Someone|Somebody|Nobody|Maintenance|Service|Services|Appointments|Visits)\\b)[A-Z][a-z]+\\.?(?:\\s+[A-Z][a-z]+)*|(?:[Mm]y|[Oo]ur|[Yy]our|[Hh]er|[Hh]is|[Tt]heir|[Tt]he)\\s+${RELATION_NOUN})`;
 // A status idiom stands in for an explicit VISIT_STATUS word: "is her
 // appointment still on?" asks the same thing as "is it scheduled?".
 const VISIT_STATUS_IDIOM = 'still\\s+(?:on|happening|scheduled)|going\\s+ahead';
@@ -499,7 +509,11 @@ const DISCLOSURE_VERB_ING = '(?:confirming|verifying|denying|saying|telling|shar
 // An explicit refusal or offer to explain answers what Sandy can do; an
 // otherwise affirmative prefix answers the caller even before a redirect.
 const VISIT_NONANSWER = `(?:(?:sorry|unfortunately)[,\\s]+|i(?:[\\x27\\u2019]m| am) (?:afraid|sorry)[,\\s]+)*(?:i|we)(?:[\\x27\\u2019](?:m|re)| (?:am|are))?\\s+(?:(?:cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|(?:will|do) not|unable|not able)\\s+(?:to\\s+)?${DISCLOSURE_VERB}|(?:can|could|will|would)\\s+(?:explain|help|assist|show))\\b`;
-const VISIT_ANSWER_RE = new RegExp(`${SHORT_AFFIRMATION_RE.source}|^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x27\\u2019]m afraid not|that(?:[\\x27\\u2019]s| is) (?:wrong|incorrect|not right)|(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:(?:is|are|was|were|does|do|did|has|have)(?:n[\\x27\\u2019]t| not)?|will(?: not)?|won[\\x27\\u2019]t)|(?:${AFFIRMATION}|no|nope)[,\\s—–:-]+(?![,\\s—–:-]*${VISIT_NONANSWER})[^.!?]*)[.!\\s]*$`, 'i');
+// A perfect or simple-past status completion also confirms the question's
+// status directly, not just the bare aux the branch above already covers:
+// "it has been cancelled", "it's been cancelled", "it was cancelled".
+const VISIT_STATUS_COMPLETION_RE = `(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:is|are|was|were)\\s+(?:${VISIT_STATUS})\\b|(?:it|she|he|they|there)(?:[\\x27\\u2019]s|\\s+(?:has|have))\\s+been\\s+(?:${VISIT_STATUS})\\b`;
+const VISIT_ANSWER_RE = new RegExp(`${SHORT_AFFIRMATION_RE.source}|^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x27\\u2019]m afraid not|that(?:[\\x27\\u2019]s| is) (?:wrong|incorrect|not right)|(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:(?:is|are|was|were|does|do|did|has|have)(?:n[\\x27\\u2019]t| not)?|will(?: not)?|won[\\x27\\u2019]t)|${VISIT_STATUS_COMPLETION_RE}|(?:${AFFIRMATION}|no|nope)[,\\s—–:-]+(?![,\\s—–:-]*${VISIT_NONANSWER})[^.!?]*)[.!\\s]*$`, 'i');
 
 // Open ETA and visit-status questions give a bare time its subject, however
 // the question is phrased: WH-fronted ("what time is her appointment?") or
@@ -614,9 +628,20 @@ const COURTESY_FILLER_RE = /^(?:problem|worries)\b|^\s*not\s+at\s+all\b/i;
 // boundaries the caller-facing split above never hands this function intact.
 // "and" that continues a number ("ten and twelve") is not a boundary.
 const CONTRASTIVE_CLAUSE_RE = new RegExp(`\\b(?:but|however|though|although|even though|yet)\\b|\\band(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b)\\b|[;.]`, 'i');
+// A completed answer clause already states the fact plainly — a bare Yes/No
+// restated with its own subject and verb ("Yes, she does", "No, she
+// doesn't", "Yes, it is") — so a refusal after it, even one reached only
+// through a comma, exempts only itself: "Yes, she does, I can't share that"
+// already answered. "No, that cannot be disclosed" has no such clause
+// before its refusal — the comma there joins "No" straight to it, so this
+// never matches there.
+const COMPLETED_ANSWER_PREFIX_RE = new RegExp(`^\\s*(?:(?:${AFFIRMATION}|no|nope)\\b\\s*,\\s*)?(?:it|she|he|they|there)\\s+(?:does|doesn[\\x27\\u2019]t|does\\s+not|is|isn[\\x27\\u2019]t|is\\s+not|has|hasn[\\x27\\u2019]t|was|wasn[\\x27\\u2019]t|are|aren[\\x27\\u2019]t|were|weren[\\x27\\u2019]t)\\b`, 'i');
 function isPrivacyNonAnswer(text) {
+  const completed = COMPLETED_ANSWER_PREFIX_RE.exec(text);
+  const completedBoundary = completed && /^\s*,/.test(text.slice(completed[0].length)) ? completed[0].length : null;
   const contrastive = CONTRASTIVE_CLAUSE_RE.exec(text);
-  const lead = contrastive ? text.slice(0, contrastive.index) : text;
+  const boundaries = [completedBoundary, contrastive ? contrastive.index : null].filter((i) => i !== null);
+  const lead = boundaries.length ? text.slice(0, Math.min(...boundaries)) : text;
   const body = lead.replace(/^\s*(?:no|nope)\b[,\s—–:-]*/i, '');
   return COURTESY_FILLER_RE.test(body.trim()) || isDisclosureRefusal(lead) || VISIT_ANSWER_CATEGORY_REFUSAL_RE.test(body);
 }
@@ -713,6 +738,18 @@ const GENERIC_APPOINTMENT_PROCESS_RE = /^\s+(?:appointments|visits|services|appo
 const FOLLOWING_CONTACT_RE = new RegExp(`^\\s*(?:[\\x27\\u2019]s\\s*)?(?:[a-z]+\\s+){0,2}(?:${CONTACT_SUBJECT_RE.source})`, 'i');
 const CONTACT_GOVERNING_PREPOSITION_RE = /\b(?:during|for|on|at|in|before|after|until|following)\s+(?:the|a|an)?\s*$/i;
 const VISIT_PREDICATE_BEFORE_TIME_RE = /\b(?:is|are|was|were)\s+(?:at|after|scheduled\s+for)\s*$|\bstarts?\s+at\s*$/i;
+// A relative clause or participial modifier can embed a contact noun inside
+// the head visit noun's own description ("appointment that we discussed on
+// the call", "appointment mentioned during the callback") without changing
+// what a timing predicate after it ("is tomorrow") is about — the head noun
+// still governs, so the modifier's own contact noun should never win the
+// nearest-subject search below.
+const EMBEDDED_CONTACT_MODIFIER_RE = new RegExp(`\\b(${VISIT_NOUN})\\s+(?:(?:that|which)\\s+(?:we|i|they|she|he)\\s+)?(?:discussed|mentioned|covered|noted|talked\\s+about)\\s+(?:on|during|in|at|via)\\s+(?:the|a|an|that|this)?\\s*$`, 'i');
+function preferHeadVisitSubject(subject, prefix) {
+  if (!subject || VISIT_SUBJECT_RE.test(subject[0])) return subject;
+  const headModifier = EMBEDDED_CONTACT_MODIFIER_RE.exec(prefix.slice(0, subject.index));
+  return headModifier ? { 0: headModifier[1], index: headModifier.index } : subject;
+}
 
 function isNonVisitPredicate(clause, match) {
   const suffix = clause.slice(match.index + match[0].length);
@@ -818,7 +855,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
         const qualifiesVisit = new RegExp(`^\\s+${VISIT_NOUN}`, 'i').test(visitNounSuffix);
         if (qualifiesVisit) return !GENERIC_APPOINTMENT_PROCESS_RE.test(visitNounSuffix) && !isDisclosureRefusal(prefix);
         let context = prefix;
-        let subject = [...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop();
+        let subject = preferHeadVisitSubject([...prefix.matchAll(DISCLOSURE_SUBJECT_RE)].pop(), prefix);
         const subjectBeforeTime = Boolean(subject);
         // What follows the time, within the same clause: a telephone
         // complement or a governing conditional can still excuse the fact
