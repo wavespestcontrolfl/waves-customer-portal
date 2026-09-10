@@ -3849,24 +3849,26 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/dispatch/:serviceId/rain-out/custom-preview
-// body: { message, target: { date, window } }
+// POST /api/admin/dispatch/:serviceId/rain-out/sms-preview
+// body: { reasonCode, message, target: { date, window } }
 //
-// Server-side segment counter for the Quick Move sheet's Custom mode:
-// renders the EXACT body commit() would send (same template row, link
+// Server-side segment counter for the Quick Move sheet's message box:
+// renders the body commit() measures (the Custom rung's exact body, or a
+// preset reason's v3 notice + appended note — same template row, link
 // selection, and renderer normalizations) and returns the 2-segment math —
 // the sheet keeps no client-side render mirrors (codex #3363 r9).
 // Advisory + read-only: never mints short codes, never moves anything;
 // commit() re-renders and enforces.
-router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
+router.post('/:serviceId/rain-out/sms-preview', async (req, res, next) => {
   try {
-    const { message, target } = req.body || {};
+    const { reasonCode, message, target } = req.body || {};
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
     }
     const RainOut = require('../services/rain-out');
-    const result = await RainOut.previewCustomSms({
+    const result = await RainOut.previewMovedSms({
       serviceId: req.params.serviceId,
+      reasonCode,
       customMessage: message,
       target,
     });
@@ -4451,8 +4453,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const sendOutcome = {};
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
-          const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
-          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+          // Visit-aware (app property scope, PR 3): the anchor visit's NON-primary
+          // saved property owns notify-primary for the series notice.
+          const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
             return renderRequiredTemplate(result.futurePlacementDays === 3
