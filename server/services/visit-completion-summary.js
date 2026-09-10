@@ -431,6 +431,11 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   // Two recipients can bounce in concurrent webhook transactions; holding
   // the shared effect serializes them so the second reads the first's
   // committed outcome instead of its stale 'sent'.
+  // The packet row is held first so this reconciliation serializes with the
+  // coordinator's close: a bounce that lands while the packet is closing
+  // waits for the close (and then alerts on the done packet), and a close
+  // that starts after this commits sees the uncertain effect under its lock.
+  await database('visit_completion_packets').where({ visit_id: visitId }).forUpdate().first('id');
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'sent' })
     .forUpdate().first('id');
   if (!effect) return { reconciled: false };
@@ -493,6 +498,25 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
 }
 
 const PARKED_REVIEW_REASON = 'visit_summary_bounced';
+
+// True while the visit that recorded this service record has a summary leg
+// parked as uncertain: review outreach for it must not reach a provider.
+async function visitSummaryUncertainForRecord(serviceRecordId, database = db) {
+  if (!serviceRecordId) return false;
+  try {
+    const item = await database('visit_completion_packet_items as i').join('visit_completion_packets as p', 'p.id', 'i.packet_id')
+      .where('i.service_record_id', serviceRecordId).first('p.visit_id');
+    if (!item) return false;
+    const uncertain = await database('visit_effects').where({ visit_id: item.visit_id, status: 'unknown_delivery' })
+      .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+    return Boolean(uncertain);
+  } catch (err) {
+    // A read failure here must not park a sequence for good; the parking
+    // operation itself is durable and the coordinator resumes it.
+    require('./logger').warn(`[visit-closeout] summary uncertainty check failed for record ${serviceRecordId}: ${err.message}`);
+    return false;
+  }
+}
 
 // Parks the cadence sequences enrolled for this packet's recorded service
 // records (stopped with a reason of their own and their schedule kept, so
@@ -635,4 +659,5 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
-  retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach };
+  retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
+  PARKED_REVIEW_REASON };

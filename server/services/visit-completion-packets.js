@@ -417,7 +417,11 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
           .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
         return;
       }
-      if (uncertainNow && delivery.state === 'delivered') delivery = { ...delivery, state: 'delivery_review' };
+      if (uncertainNow && delivery.state === 'delivered') {
+        delivery = { ...delivery, state: 'delivery_review' };
+        // Outreach enrolled a moment ago, before the bounce, is parked too.
+        await Summary.parkVisitReviewOutreach(packet.id, trx);
+      }
       const closeReview = payment.state === 'office_required' || delivery.state === 'delivery_review';
       if (closeReview) {
         const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();

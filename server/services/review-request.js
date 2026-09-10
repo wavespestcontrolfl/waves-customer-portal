@@ -1572,6 +1572,14 @@ const ReviewService = {
       );
       return;
     }
+    // A pending ask whose combined-visit summary is parked as uncertain is
+    // removed, exactly as the parking operation does; the coordinator
+    // re-creates it when the summary settles.
+    if (request.service_record_id && await require("./visit-completion-summary").visitSummaryUncertainForRecord(request.service_record_id)) {
+      await db("review_requests").where({ id: requestId, status: "pending" }).del().catch(() => {});
+      logger.info(`[review] Parked request (requestId=${requestId} reason=visit_summary_bounced)`);
+      return;
+    }
     // Route to the service beneficiary (see services/customer-contact.js) —
     // falls back to the billing phone when no service contact is configured.
     const { getServiceContactSmsRecipient } = require("./customer-contact");
@@ -4417,6 +4425,13 @@ const ReviewService = {
       if (prefs && prefs.sms_enabled === false && prefs.email_enabled === false) return stop("opted_out");
     } catch {
       /* ignore */
+    }
+    // A combined-visit summary parked as uncertain (a bounce) must settle
+    // before its review ask reaches a provider: the step parks the sequence
+    // under the reason the closeout coordinator resumes.
+    if (seq.service_record_id) {
+      const Summary = require("./visit-completion-summary");
+      if (await Summary.visitSummaryUncertainForRecord(seq.service_record_id)) return stop(Summary.PARKED_REVIEW_REASON);
     }
 
     // Gate-toggle hygiene (Codex P2, r4): while GATE_REVIEW_SEQUENCES is off

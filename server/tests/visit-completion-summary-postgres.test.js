@@ -1613,6 +1613,73 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a payer assignment attempted during the fenced invoice claim waits for the claim to commit', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    const execute = mockPg.client.constructor.prototype._query;
+    let blockedCode = null;
+    let raced = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function assignDuringClaim(connection, query) {
+      if (!raced && query.sql.startsWith('update "invoices"') && query.bindings.includes('sending')) {
+        raced = true;
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        }).catch((err) => { blockedCode = err.code; });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      await require('../services/invoice').claimPacketInvoiceForSend(invoiceId, fixture.packetId);
+      expect(raced).toBe(true);
+      expect(blockedCode).toBe('55P03');
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sending' });
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a bounce reconciliation serializes behind the packet close and alerts on the closed packet', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    const execute = mockPg.client.constructor.prototype._query;
+    let blockedCode = null;
+    let raced = false;
+    let delivered;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function bounceDuringClose(connection, query) {
+      if (!raced && query.sql.startsWith('update "visit_completion_packets"') && query.bindings.includes('done')) {
+        raced = true;
+        delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+        await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'bounced' });
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx);
+        }).catch((err) => { blockedCode = err.code; });
+      }
+      return execute.call(this, connection, query);
+    });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(raced).toBe(true);
+    expect(blockedCode).toBe('55P03');
+    jest.restoreAllMocks();
+    // After the close commits, the bounce lands on the done packet: alert and parked outreach.
+    await mockPg.transaction(async (trx) => {
+      expect(await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx)).toEqual({ reconciled: true });
+    });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    expect(await Summary.visitSummaryUncertainForRecord(fixture.recordIds[0])).toBe(true);
+    expect(await Summary.visitSummaryUncertainForRecord(randomUUID())).toBe(false);
+  });
+
   test('a recovery that settles the summary before the packet closes keeps the packet on recovery', async () => {
     fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
