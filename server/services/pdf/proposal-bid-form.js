@@ -12,19 +12,26 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 // referenced image, font or graphics state is refused too (GH codex P2 r2 on
 // #4270). Requiring the reviewed page prevents prices being overlaid on a
 // different revision/layout. Originals are supplied per download and never
-// stored. A revised original needs a reviewed profile update: run
-// `node server/scripts/bid-form-fingerprint.js <pdf> <page>` and record both
-// values here.
+// stored. The `packet` value covers every OTHER page of the reviewed
+// original (content, resources and annotation count), so a packet whose
+// bidder or attestation pages were filled and flattened — no AcroForm value
+// left to inspect, the entries baked into those pages' content streams — is
+// refused instead of exported with stale data (GH codex P2 r3 on #4270).
+// A revised original needs a reviewed profile update: run
+// `node server/scripts/bid-form-fingerprint.js <pdf> <page>` on the original
+// and record all three values here.
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8b675577f3453c7d8205de28e12062dc8373556588d3e49f7a36855637be6f6e' },
-  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7' },
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: 'f56ba209011ca8db6793e1f5f75b2099106881c1905979655f2714700f2352e3', packet: 'feddb448e9b0b775ba9096dddab497c91b9d665ddb817757ea772550aa99131e' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7', packet: '1067d901f4a3eb7590b8e8f23eae81ee5156f2d7f2eca08e51af87f23d8d7b13' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 // Hash every object the page's /Resources reaches (dictionaries by sorted
 // key, streams by dictionary + raw bytes), following references once.
-// Standard fonts a previous pdf-lib export added (`/Helvetica-<n>`) are
-// skipped so a fingerprint can be recorded from a reviewed export of the
-// original; the approved content stream never references them.
+// Standard fonts a previous pdf-lib export added (`/Helvetica-<n>`) and the
+// empty resource categories it creates (an `/XObject` dictionary with no
+// entries) are skipped so a fingerprint recorded from a reviewed export of
+// the original equals the original's; the approved content stream never
+// references them.
 function pageResourceHash(document, page) {
   const hash = crypto.createHash('sha256');
   const seen = new Set();
@@ -59,8 +66,9 @@ function pageResourceHash(document, page) {
   const resources = page.node.Resources();
   if (!resources) return hash.update('none').digest('hex');
   for (const [key, value] of sortedEntries(resources)) {
-    hash.update(key.toString());
     const dict = document.context.lookup(value);
+    if (dict instanceof PDFDict && dict.keys().length === 0) continue;
+    hash.update(key.toString());
     if (key.toString() === '/Font' && dict instanceof PDFDict) {
       hash.update('<<');
       for (const [fontKey, fontValue] of sortedEntries(dict)) {
@@ -76,9 +84,27 @@ function pageResourceHash(document, page) {
 function pageFingerprint(document, page) {
   return { contents: pageContentHash(document, page), resources: pageResourceHash(document, page) };
 }
+// Every page except the selected form page, in order: the page count, each
+// page's drawing commands and resources, and how many annotations (the
+// original's own blank widgets) it carries. Flattening a filled field
+// rewrites the content stream and drops the widget; a stamp or an added or
+// removed page changes the sequence. The selected page is excluded because
+// it is fingerprinted on its own, which also lets the value be recorded from
+// a reviewed export whose only change is that page.
+function packetFingerprint(document, selectedIndex) {
+  const hash = crypto.createHash('sha256');
+  const pages = document.getPages();
+  hash.update(`pages:${pages.length};selected:${selectedIndex};`);
+  pages.forEach((page, index) => {
+    if (index === selectedIndex) return;
+    hash.update(`${index}:${pageContentHash(document, page)}:${pageResourceHash(document, page)}:${page.node.Annots()?.size() || 0};`);
+  });
+  return hash.digest('hex');
+}
 function pageContentHash(document, page) {
   const contents = page.node.Contents();
-  const streams = contents instanceof PDFArray ? contents.asArray() : [contents];
+  // A page with no content stream (an inserted blank sheet) hashes as empty.
+  const streams = contents == null ? [] : contents instanceof PDFArray ? contents.asArray() : [contents];
   return crypto.createHash('sha256').update(Buffer.concat(streams.map((ref) => {
     const stream = document.context.lookup(ref);
     if (typeof stream?.getContents !== 'function') throw invalid('The uploaded PDF has an unsupported page format.');
@@ -177,6 +203,7 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   const expected = module.exports.FORM_PAGE_FINGERPRINTS[template];
   const actual = pageFingerprint(document, page);
   if (actual.contents !== expected.contents || actual.resources !== expected.resources) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
+  if (packetFingerprint(document, Number(pageNumber) - 1) !== expected.packet) throw invalid('The other pages of this PDF differ from the reviewed original packet. Upload the untouched original form.');
   const font = await document.embedFont(StandardFonts.Helvetica);
   // Coordinates are points measured from the top of each reviewed original.
   const write = (text, x, top, width, size = 9) => {
@@ -232,4 +259,4 @@ async function buildProposalBidForm({ estimate, sourcePdf, template, pageNumber,
   }
   return Buffer.from(await document.save());
 }
-module.exports = { buildProposalBidForm, mapFormPrices, pageContentHash, pageResourceHash, pageFingerprint, FORM_PAGE_FINGERPRINTS };
+module.exports = { buildProposalBidForm, mapFormPrices, pageContentHash, pageResourceHash, pageFingerprint, packetFingerprint, FORM_PAGE_FINGERPRINTS };

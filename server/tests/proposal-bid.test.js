@@ -3,7 +3,7 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(); db.fn = { now: jest.fn() };
   return db;
 });
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, PDFName } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
@@ -199,12 +199,12 @@ describe('bid form original integrity beyond the content streams', () => {
     await mutate(pdf, page);
     return Buffer.from(await pdf.save());
   };
-  // Treat a synthetic page as the reviewed original by recording ITS
-  // fingerprint, exactly as the reviewer script would for a real one.
+  // Treat a synthetic packet as the reviewed original by recording ITS
+  // fingerprints, exactly as the reviewer script would for a real one.
   const original = form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02;
   const approve = async (sourcePdf) => {
     const doc = await PDFDocument.load(sourcePdf);
-    form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02 = form.pageFingerprint(doc, doc.getPage(0));
+    form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02 = { ...form.pageFingerprint(doc, doc.getPage(0)), packet: form.packetFingerprint(doc, 0) };
   };
   afterEach(() => { form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02 = original; });
   test('the reviewer script fingerprint is stable across reloads and includes resources', async () => {
@@ -229,16 +229,40 @@ describe('bid form original integrity beyond the content streams', () => {
     const sourcePdf = await blankPage(async (pdf, page) => { pdf.getForm().createTextField('bidder').addToPage(page, { x: 50, y: 50, width: 200, height: 20 }); });
     await expect(build(sourcePdf)).rejects.toThrow(/annotations or form fields/);
   });
+  const packet = (text, { flatten = false, extraPage = false } = {}) => blankPage(async (pdf) => {
+    const other = pdf.addPage([612, 792]);
+    other.drawText('Bidder attestation page');
+    const field = pdf.getForm().createTextField('company');
+    field.addToPage(other, { x: 50, y: 50, width: 200, height: 20 });
+    if (text) field.setText(text);
+    if (flatten) pdf.getForm().flatten();
+    if (extraPage) pdf.addPage([612, 792]);
+  });
   test('blank fields elsewhere in the packet are allowed; filled ones are refused', async () => {
-    await approve(await blankPage());
-    const packet = (text) => blankPage(async (pdf) => {
-      const other = pdf.addPage([612, 792]);
-      const field = pdf.getForm().createTextField('company');
-      field.addToPage(other, { x: 50, y: 50, width: 200, height: 20 });
-      if (text) field.setText(text);
-    });
+    await approve(await packet(null));
     await expect(build(await packet(null))).resolves.toBeInstanceOf(Buffer);
     await expect(build(await packet('Previously filled bidder'))).rejects.toThrow(/already filled in/);
+  });
+  test('a packet whose other pages were filled and flattened, or re-paged, is refused (GH codex P2 r3 on #4270)', async () => {
+    await approve(await packet(null));
+    // Flattening leaves no field value to inspect: the entry is baked into
+    // the other page's content stream and its widget is gone.
+    const flattened = await PDFDocument.load(await packet('Previously filled bidder', { flatten: true }));
+    expect(flattened.getForm().getFields().some((field) => field.acroField.dict.get(PDFName.of('V')) != null)).toBe(false);
+    await expect(build(await packet('Previously filled bidder', { flatten: true }))).rejects.toThrow(/other pages of this PDF differ/);
+    await expect(build(await packet(null, { extraPage: true }))).rejects.toThrow(/other pages of this PDF differ/);
+    await expect(build(await blankPage())).rejects.toThrow(/other pages of this PDF differ/);
+  });
+  test('a reviewed export of the original fingerprints like the original', async () => {
+    // pdf-lib adds `/Helvetica-<n>` fonts and an empty `/XObject` dictionary
+    // to the drawn page; neither may move the resource hash, or the real
+    // original is refused against a value recorded from an export.
+    await approve(await packet(null));
+    const exported = await PDFDocument.load(await build(await packet(null)));
+    const page = exported.getPage(0);
+    expect(page.node.Resources().get(PDFName.of('XObject'))).toBeDefined();
+    expect(form.pageResourceHash(exported, page)).toBe(form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02.resources);
+    expect(form.packetFingerprint(exported, 0)).toBe(form.FORM_PAGE_FINGERPRINTS.north_port_pr27_02.packet);
   });
   test('a swapped image behind identical drawing commands is refused (GH codex P2 r2 on #4270)', async () => {
     // Two pages whose content streams are byte-identical: pdf-lib names the
