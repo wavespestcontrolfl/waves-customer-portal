@@ -1510,6 +1510,7 @@ describe('runDaily batching', () => {
       .mockResolvedValueOnce({ outcome: 'completed_published', action_type: 'new_supporting_blog', opportunity_id: 'blog_1' })
       .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
     runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._sendBlogDroughtSms = jest.fn(async () => {});
     runner._withEngineLock = (label, fn) => fn();
 
     const result = await runner.runDaily({ limit: 5 });
@@ -1517,6 +1518,8 @@ describe('runDaily batching', () => {
     // The 9am batch used to halt here (2 consecutive failures) with zero blog
     // attempts; now the remaining slots claim blog-only, failed rows still excluded.
     expect(runner.runNext).toHaveBeenCalledTimes(4);
+    // Not a halt: the drought sender must not be told one happened.
+    expect(runner._sendBlogDroughtSms).toHaveBeenCalledWith(expect.any(Array), { haltBeforeBlog: null });
     expect(runner.runNext).toHaveBeenNthCalledWith(1, { excludeIds: [] });
     expect(runner.runNext).toHaveBeenNthCalledWith(2, { excludeIds: ['city_1'] });
     expect(runner.runNext).toHaveBeenNthCalledWith(3, { excludeIds: ['city_1', 'city_2'], actionType: 'new_supporting_blog' });
@@ -1565,15 +1568,20 @@ describe('runDaily batching', () => {
     await runner._runDailyInner({ limit: 10, actionType: 'create_or_refresh_city_service_page' });
     expect(runner.runNext).toHaveBeenCalledTimes(2);
 
-    // Kill switch → plain halt.
+    // Kill switch → plain halt, and the drought SMS is told it was a halt
+    // before any blog attempt (the only path that may say "batch halted").
     process.env.AUTONOMOUS_CONTENT_BLOG_FALLBACK = 'false';
     try {
       runner = new AutonomousRunner();
       runner.runNext = jest.fn().mockResolvedValue(cityFail('c1'));
       runner._appendToDailyDigest = jest.fn(async () => {});
+      runner._sendBlogDroughtSms = jest.fn(async () => {});
       runner._withEngineLock = (label, fn) => fn();
       await runner.runDaily({ limit: 10 });
       expect(runner.runNext).toHaveBeenCalledTimes(2);
+      expect(runner._sendBlogDroughtSms).toHaveBeenCalledWith(expect.any(Array), {
+        haltBeforeBlog: { failures: 2, lanes: ['create_or_refresh_city_service_page'] },
+      });
     } finally {
       delete process.env.AUTONOMOUS_CONTENT_BLOG_FALLBACK;
     }

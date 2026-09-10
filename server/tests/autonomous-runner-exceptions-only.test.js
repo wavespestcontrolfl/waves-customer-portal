@@ -242,7 +242,7 @@ describe('agent stream EOF retry (session_stream_eof)', () => {
       id: 'brief_eof', action_type: 'new_supporting_blog', page_type: 'supporting-blog', human_review_required: false,
     }),
   });
-  const eof = (session) => ({ ok: false, code: 'session_stream_eof', reason: `streaming_failed: session ${session} stream ended without a terminal event`, session_id: session });
+  const eof = (session, duration_ms = 240000) => ({ ok: false, code: 'session_stream_eof', reason: `streaming_failed: session ${session} stream ended without a terminal event`, session_id: session, duration_ms });
 
   afterEach(() => { delete process.env.AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES; });
 
@@ -253,7 +253,7 @@ describe('agent stream EOF retry (session_stream_eof)', () => {
     const dispatcher = {
       runWithBrief: jest.fn()
         .mockResolvedValueOnce(eof('sesn_1'))
-        .mockResolvedValueOnce({ ok: true, session_id: 'sesn_2', draft: { url: '/blog/eof-retry/', title: 'EOF Retry Post', body: 'Benign copy about seasonal ant pressure in Southwest Florida homes.' } }),
+        .mockResolvedValueOnce({ ok: true, session_id: 'sesn_2', duration_ms: 300000, draft: { url: '/blog/eof-retry/', title: 'EOF Retry Post', body: 'Benign copy about seasonal ant pressure in Southwest Florida homes.' } }),
     };
     const { runner } = loadRunner({
       queue, briefBuilder: makeBriefBuilder(), dispatcher,
@@ -269,6 +269,8 @@ describe('agent stream EOF retry (session_stream_eof)', () => {
     // retry delivered a draft where the first attempt had none.
     expect(result.outcome).not.toBe('failed_agent');
     expect(result.agent_session_id).toBe('sesn_2');
+    // agent_ms is the "Write draft" stage duration — it spans BOTH sessions.
+    expect(result.agent_ms).toBe(540000);
   });
 
   test('a second EOF files failed_agent; deadline timeouts are never retried', async () => {
