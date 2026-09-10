@@ -3812,11 +3812,13 @@ const ReviewService = {
   async _applyOutreachSendResult(request, result, manageRetryVia, channel) {
     const deliveryOutcome = result?.deliveryOutcome;
     if (deliveryOutcome === "accepted") {
-      await db("review_requests").where({ id: request.id }).update({
-        sms_sent_at: new Date(),
-        sent_at: new Date(),
-        status: "sent",
-      });
+      const stamped = await stampWithRetry(
+        () => db("review_requests").where({ id: request.id }).update({
+          sms_sent_at: new Date(), sent_at: new Date(), status: "sent",
+        }),
+        `outreach SMS sent stamp (requestId=${request.id})`,
+      );
+      if (!stamped) throw new Error(`Accepted SMS delivery stamp failed (requestId=${request.id})`);
       return { ok: true, sent: true, channel, requestId: request.id, auditLogId: result.auditLogId };
     }
     if (deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent" && OUTREACH.isAskTemplate(request.template_key)) {

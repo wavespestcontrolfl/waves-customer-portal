@@ -4689,6 +4689,24 @@ test.each(['spacing', 'pin'])('a %s write that loses the pending row cannot revi
 });
 
 describe('direct outreach serialization', () => {
+  test('a transient accepted stamp failure records the send before allowing another outreach attempt', async () => {
+    const customer = { id: 'direct-stamp-retry', first_name: 'Synthetic', phone: '+12025550101' };
+    let failStamp = true;
+    const mock = makeMock({ customers: [customer] }, { onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.sms_sent_at && failStamp) {
+        failStamp = false;
+        throw new Error('transient delivery stamp failure');
+      }
+    } });
+    db.mockImplementation(mock);
+
+    expect(await ReviewService.sendOutreachTouch({ customer, channel: 'sms' })).toMatchObject({ ok: true, sent: true });
+    expect(mock.__state.rows.review_requests[0]).toMatchObject({ status: 'sent', sms_sent_at: expect.any(Date) });
+    expect(mock.__state.rows.sms_log).toHaveLength(0);
+    expect(await ReviewService.sendOutreachTouch({ customer, channel: 'sms' })).toMatchObject({ ok: false, deferred: true });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test.each(['sms', 'email'])('%s respects a delivered staff ask and retains truthful retry ownership', async channel => {
     const customer = { id: 'direct-spacing', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
     const deliveredAt = new Date();
