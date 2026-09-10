@@ -103,27 +103,12 @@ async function decorateCallbackRows(conn, rows) {
   });
 }
 
-// Whether an edit changes the obligation itself: the wording, or the stated
-// deadline at the minute precision the editor round-trips (a no-op save of a
-// row whose due_at carries seconds is still a no-op). A malformed due_at
-// counts as a restatement so applyHumanUpdate rejects it as before.
-function editRestates(row, { description, due_at }) {
-  if (description !== undefined && String(description || '').trim().slice(0, 2000) !== String(row.description || '')) return true;
-  if (due_at !== undefined) {
-    const parsed = require('./call-commitments').parseDueAt(due_at);
-    if (Number.isNaN(parsed)) return true;
-    const minute = (t) => (t ? Math.floor(new Date(t).getTime() / 60000) : null);
-    if (minute(parsed) !== minute(row.due_at)) return true;
-  }
-  return false;
-}
-
 // The edit action's ledger write. Returns whether the obligation was restated.
 async function applyEdit(trx, row, { actorId, description, due_at, note, patch }) {
   const ledger = require('./call-commitments');
   patch.snoozed_until = null;
-  if (editRestates(row, { description, due_at })) {
-    const changed = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', reviewedBy: actorId, description, due_at, note });
+  if (ledger.editRestatesRow(row, { description, due_at })) {
+    const changed = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', reviewedBy: actorId, description, due_at, note, renewalAudit: false });
     if (due_at !== undefined && changed.due_at == null) patch.callback_due_at = null;
     return true;
   }
@@ -184,7 +169,7 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     // that is the only edit boundary on record.
     const restated = action === 'edit' ? await applyEdit(trx, row, { actorId, description, due_at, note, patch }) : null;
     if (['fulfill', 'dismiss', 'reopen', 'confirm'].includes(action)) {
-      await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, note });
+      await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, note, renewalAudit: false });
       patch.snoozed_until = null;
     }
     await trx('call_commitments').where({ id }).update(patch);

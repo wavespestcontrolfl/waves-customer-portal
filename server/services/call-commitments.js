@@ -1804,8 +1804,26 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
 // ── Human corrections ──────────────────────────────────────────────────────
 const HUMAN_ACTIONS = new Set(['confirm', 'dismiss', 'fulfill', 'reopen', 'edit']);
 
-async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy } = {}) {
+// `renewalAudit`: a callback card's reopen, or an edit that changes the
+// obligation, moves the evidence boundary fulfillment refresh honours
+// (obligationRenewedAt reads the audited callback_reopen / callback_edit
+// events). The card action path (callback-cards.actOnCallback) records
+// those events itself and passes false; every other caller — the generic
+// PATCH while the card gate is off, SMS actions — gets them recorded here,
+// so a card reopened after a gate rollback is not closed again by the
+// conversation that fulfilled it before.
+async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy, renewalAudit = true } = {}) {
   if (!HUMAN_ACTIONS.has(action)) throw Object.assign(new Error(`Unknown commitment action: ${action}`), { status: 400 });
+  // The row update and its renewal boundary commit together: a refresh
+  // running between them would close a reopened callback on the old
+  // conversation, and a failed audit insert would leave the boundary
+  // missing for good. Callers that pass the plain connection get one
+  // transaction here; a caller's own transaction is reused as is.
+  if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
+  const before = renewalAudit && ['reopen', 'edit'].includes(action)
+    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'description', 'due_at') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
@@ -1864,7 +1882,27 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   }
   const updated = await conn('call_commitments').where({ id }).update(patch);
   if (!updated) throw Object.assign(new Error('Commitment not found'), { status: 404 });
+  if (before && before.kind === 'callback' && before.party === 'waves') {
+    const restated = action === 'reopen' || editRestatesRow(before, { description, due_at });
+    await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
+      action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { via: 'ledger', ...(action === 'edit' ? { restated } : {}) }, critical: true, trx: conn });
+  }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
+}
+
+// Whether an edit changes the obligation itself: the wording, or the stated
+// deadline at the minute precision the editor round-trips. A malformed
+// due_at counts as a restatement (applyHumanUpdate rejects it anyway).
+function editRestatesRow(row, { description, due_at }) {
+  if (description !== undefined && String(description || '').trim().slice(0, 2000) !== String(row.description || '')) return true;
+  if (due_at !== undefined) {
+    const parsed = parseDueAt(due_at);
+    if (Number.isNaN(parsed)) return true;
+    const minute = (t) => (t ? Math.floor(new Date(t).getTime() / 60000) : null);
+    if (minute(parsed) !== minute(row.due_at)) return true;
+  }
+  return false;
 }
 
 async function addHumanCommitment(conn, callLogId, { party, kind, description, due_at = null, channel = null, reviewedBy = null } = {}) {
@@ -2032,6 +2070,7 @@ module.exports = {
   resolveFulfillment,
   refreshFulfillment,
   applyHumanUpdate,
+  editRestatesRow,
   addHumanCommitment,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
