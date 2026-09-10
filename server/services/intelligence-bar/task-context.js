@@ -530,8 +530,10 @@ const customerSpecific = context => Boolean(context.targets?.length || context.n
 // (it loads that appointment's customer preferences, plan holds and location).
 const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
 // Writers whose customer records ride under role-named ids: both halves of a
-// merge are customer records the task must own, so they are read as the
-// customer collection (readReferences loads and version-stamps every one).
+// merge are customer records, read as the customer collection (readReferences
+// loads and version-stamps every one). The task must own ONE half directly;
+// the other is admitted only as an eligible duplicate-queue candidate under
+// that exact pairing (see the CUSTOMER_PAIR_SELECTORS use in validateRecordTarget).
 const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'] };
 const customerPairIds = (params, toolName) => (CUSTOMER_PAIR_SELECTORS[toolName] || []).map(key => params[key]).filter(Boolean);
 
@@ -668,6 +670,23 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   if (toolName === 'send_email_reply' && !permitted.size) {
     for (const record of records) {
       if (record.kind === 'email_id' && context.explicitEmails?.includes(normalizeEmail(record.from_address))) permitted.add(record.customer_id);
+    }
+  }
+  // Pair authority: the task establishes at most ONE customer target, so a
+  // merge naming a duplicate pair otherwise always fails missingTarget below
+  // — the operator's task could equally be on the stub page (the loser) or
+  // the real customer's page (the winner). Admit the OTHER half only when it
+  // is a live, eligible duplicate-queue candidate under this EXACT
+  // winner/loser pairing — the canonical check customer-dedupe.js owns
+  // (never re-derived here). Neither permitted, or the pair ineligible: the
+  // missingTarget refusal below stands unchanged.
+  const pairSelectors = CUSTOMER_PAIR_SELECTORS[toolName];
+  if (pairSelectors) {
+    const [winnerId, loserId] = pairSelectors.map(key => params[key]);
+    if (winnerId && loserId && permitted.has(winnerId) !== permitted.has(loserId)) {
+      const { duplicatePairEligibility } = require('../customer-dedupe');
+      const eligibility = await duplicatePairEligibility(winnerId, loserId);
+      if (eligibility.eligible) permitted.add(permitted.has(winnerId) ? loserId : winnerId);
     }
   }
   const missingTarget = customerIds(records).some(id => !permitted.has(id));

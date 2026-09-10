@@ -18,7 +18,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
-  findDuplicateGroups, executeMerge, revertMerge, recordLinkedProperty,
+  findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
   countActivityRows, activityColumnsFor,
 } = require('../services/customer-dedupe');
@@ -69,22 +69,22 @@ async function handleMerge(req, res, { linkAsProperty }) {
     // Server-side eligibility recheck: the UI hides merge on red pairs, but a
     // stale or tampered request must not merge a red pair — or two unrelated
     // customers. The pair must still be in the live duplicate queue, under
-    // this exact winner, and not tiered red.
-    const groups = await findDuplicateGroups();
-    const group = groups.find((g) => g.winner.id === winnerId);
-    const candidate = group?.candidates.find((c) => c.loser.id === loserId);
-    if (!candidate) {
+    // this exact winner, and not tiered red. Canonical check, shared with
+    // the IB merge tool and the task-context pair authority — never
+    // re-derive tier/reasons logic here.
+    const eligibility = await duplicatePairEligibility(winnerId, loserId);
+    if (eligibility.code === 'not_in_queue') {
       return res.status(409).json({ error: 'Pair is no longer in the duplicate queue — refresh and retry' });
     }
-    if (candidate.tier === 'red') {
-      return res.status(409).json({ error: 'This pair looks like two different people and cannot be merged from the queue' });
+    if (eligibility.code === 'red_pair') {
+      return res.status(409).json({ error: eligibility.reason });
     }
     // A positive address reason means the duplicate carries a DIFFERENT (or
     // incomparable) service address — a plain merge would retire its only
     // copy (the backfill never overwrites the winner's street). Force the
     // link-as-property path so the address survives as a property row.
-    if (!linkAsProperty && candidate.reasons.some((r) => r.startsWith('address_'))) {
-      return res.status(409).json({ error: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost" });
+    if (!linkAsProperty && eligibility.code === 'address_conflict') {
+      return res.status(409).json({ error: eligibility.reason });
     }
     const result = await executeMerge({
       winnerId,

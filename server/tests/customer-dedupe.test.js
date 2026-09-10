@@ -2003,3 +2003,111 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
     expect(result).toMatch(/moved 1, released 1/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// duplicatePairEligibility — canonical merge eligibility recheck, reused by
+// admin-customer-duplicates.js handleMerge, the IB merge_customers tool, and
+// task-context.js's pair authority (never re-derived in any of them).
+// ---------------------------------------------------------------------------
+describe('duplicatePairEligibility', () => {
+  const winner = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000001',
+    first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
+    address_line1: '4414 Ozark Ave', zip: '34207',
+    // stripe_customer_id pins this row as the cluster winner regardless of
+    // created_at tie-break — findDuplicateGroups() picks the strongest
+    // business-signal row, not the fixture the test author calls "winner".
+    stripe_customer_id: 'cus_winner',
+    pipeline_stage: 'active_customer', created_at: '2026-07-08',
+  };
+  const shellLoser = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000002',
+    first_name: 'Diana', last_name: null, phone: '6124074763',
+    address_line1: null, zip: null,
+    pipeline_stage: 'new_lead', created_at: '2026-07-09',
+  };
+  const addressConflictLoser = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000003',
+    first_name: 'Diana', last_name: null, phone: '6124074763',
+    address_line1: '999 Different St', zip: '34211',
+    pipeline_stage: 'new_lead', created_at: '2026-07-09',
+  };
+  const strangerLoser = {
+    id: 'bbbbbbbb-0000-0000-0000-000000000004',
+    first_name: 'Nicole', last_name: 'Tommelleo', phone: '+16124074763',
+    address_line1: '13712 Saw Palm Creek Trl', zip: '34211',
+    pipeline_stage: 'active_customer', created_at: '2026-07-01',
+  };
+
+  function router({ customers = [], dismissals = [], blockerRows = {} }) {
+    return (table) => {
+      if (table === 'customers') return customers;
+      if (table === 'customer_duplicate_dismissals') return dismissals;
+      return blockerRows[table] || [];
+    };
+  }
+
+  it('eligible: returns the live candidate with its tier and reasons', async () => {
+    installDb(router({ customers: [winner, shellLoser] }));
+    const result = await dedupe.duplicatePairEligibility(winner.id, shellLoser.id);
+    expect(result).toMatchObject({ eligible: true, code: 'eligible', reason: null });
+    expect(result.candidate.tier).toBe('green');
+  });
+
+  it('not_in_queue: the pair is not a live candidate under this winner', async () => {
+    installDb(router({ customers: [winner, shellLoser] }));
+    // A real, unrelated id — never appears as a candidate under `winner`.
+    const result = await dedupe.duplicatePairEligibility(winner.id, 'bbbbbbbb-0000-0000-0000-000000000099');
+    expect(result).toMatchObject({ eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null });
+  });
+
+  it('not_in_queue: the winner id itself is not a live winner (e.g. it lost its own group)', async () => {
+    installDb(router({ customers: [winner, shellLoser] }));
+    const result = await dedupe.duplicatePairEligibility(shellLoser.id, winner.id);
+    expect(result.eligible).toBe(false);
+    expect(result.code).toBe('not_in_queue');
+  });
+
+  it('red_pair: different last names at a conflicting address', async () => {
+    installDb(router({ customers: [winner, strangerLoser] }));
+    const result = await dedupe.duplicatePairEligibility(winner.id, strangerLoser.id);
+    expect(result).toMatchObject({ eligible: false, code: 'red_pair' });
+    expect(result.candidate.tier).toBe('red');
+  });
+
+  it('address_conflict: a positive address_* reason refuses even though the pair is otherwise a live yellow candidate', async () => {
+    installDb(router({ customers: [winner, addressConflictLoser] }));
+    const result = await dedupe.duplicatePairEligibility(winner.id, addressConflictLoser.id);
+    expect(result.eligible).toBe(false);
+    expect(result.code).toBe('address_conflict');
+    expect(result.candidate.reasons.some((r) => r.startsWith('address_'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// customerFkColumns — FK discovery export, cached per process.
+// ---------------------------------------------------------------------------
+describe('customerFkColumns', () => {
+  it('queries information_schema once and caches the result', async () => {
+    const rawResult = { rows: [{ table_name: 'scheduled_services', column_name: 'customer_id' }, { table_name: 'invoices', column_name: 'customer_id' }] };
+    db.raw = jest.fn(async () => rawResult);
+    const first = await dedupe.customerFkColumns(db);
+    expect(first).toEqual(rawResult.rows);
+    expect(db.raw).toHaveBeenCalledTimes(1);
+    const second = await dedupe.customerFkColumns(db);
+    expect(second).toEqual(rawResult.rows);
+    expect(db.raw).toHaveBeenCalledTimes(1); // cached — no second query
+  });
+
+  it('filters out the repoint-excluded tables (e.g. customer_merge_journal)', async () => {
+    db.raw = jest.fn(async () => ({
+      rows: [
+        { table_name: 'invoices', column_name: 'customer_id' },
+        { table_name: 'customer_merge_journal', column_name: 'winner_customer_id' },
+      ],
+    }));
+    const columns = await dedupe.customerFkColumns(db);
+    expect(columns.some((c) => c.table_name === 'customer_merge_journal')).toBe(false);
+    expect(columns.some((c) => c.table_name === 'invoices')).toBe(true);
+  });
+});

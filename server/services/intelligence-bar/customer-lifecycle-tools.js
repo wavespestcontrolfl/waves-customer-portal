@@ -22,17 +22,65 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 
-// Tables whose rows move onto the winner in a merge — used only for the
-// PREVIEW's disclosure of what's about to move (executeMerge itself
-// discovers every customer_id FK at run time; this is a smaller, readable
-// subset for the card, per the assignment's counting recipe).
-const MOVING_TABLES = ['scheduled_services', 'service_records', 'invoices', 'estimates', 'sms_log'];
+// The transferred columns executeMerge backfills between winner and loser
+// (customer-dedupe.js ~1680-1810: stripe_customer_id/billing_mode/payer_id/
+// autopay_enabled/is_primary_profile, the three service-contact slots, and
+// their consent stamp) — disclosed both-sided, null-safe, in the preview so
+// the confirmation card shows exactly what the merge would carry over.
+const BILLING_CONTACT_COLUMNS = [
+  'stripe_customer_id', 'billing_mode', 'payer_id', 'autopay_enabled', 'is_primary_profile',
+  'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role',
+  'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role',
+  'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role',
+  'service_contacts_consent_at', 'service_contacts_consent_source', 'service_contacts_consent_text_version',
+];
 
-async function movingCounts(customerId) {
-  const rows = await Promise.all(
-    MOVING_TABLES.map((table) => db(table).where({ customer_id: customerId }).count({ n: '*' }).first()),
-  );
-  return Object.fromEntries(MOVING_TABLES.map((table, i) => [table, Number(rows[i]?.n || 0)]));
+function billingSnapshot(row) {
+  const snapshot = {};
+  for (const col of BILLING_CONTACT_COLUMNS) snapshot[col] = row[col] ?? null;
+  return snapshot;
+}
+
+// Per-table row counts for the loser across EVERY table the merge engine
+// itself repoints (customerFkColumns — never a hand-picked subset that could
+// omit a table the executor actually moves). Best-effort: a table that fails
+// to count is disclosed as 'unknown', never a thrown error — one bad table
+// must not blank the whole preview.
+async function fullMovingCounts(database, loserId) {
+  const { customerFkColumns } = require('../customer-dedupe');
+  let fkColumns;
+  try {
+    fkColumns = await customerFkColumns(database);
+  } catch (err) {
+    logger.warn(`[intelligence-bar] merge preview: customerFkColumns failed: ${err.message}`);
+    return { total_rows: 0 };
+  }
+  const byTable = new Map();
+  for (const { table_name: table, column_name: column } of fkColumns) {
+    if (!byTable.has(table)) byTable.set(table, []);
+    byTable.get(table).push(column);
+  }
+  const moving = {};
+  let total = 0;
+  await Promise.all([...byTable].map(async ([table, columns]) => {
+    try {
+      let sum = 0;
+      for (const column of columns) {
+        // Sequential per-column, concurrent per-table: two FK columns on one
+        // table are rare, but summing them concurrently would race on the
+        // same accumulator — sequential here avoids that, tables still run
+        // in parallel with each other.
+        const row = await database(table).where(column, loserId).count({ n: '*' }).first();
+        sum += Number(row?.n || 0);
+      }
+      if (sum > 0) { moving[table] = sum; total += sum; }
+    } catch (err) {
+      moving[table] = 'unknown';
+      logger.warn(`[intelligence-bar] merge preview: count failed for table ${table}: ${err.message}`);
+    }
+  }));
+  moving.total_rows = total;
+  return moving;
 }
 
 function customerName(row) {
@@ -41,7 +89,8 @@ function customerName(row) {
 
 async function loadMergePair(winnerId, loserId) {
   const rows = await db('customers').whereIn('id', [winnerId, loserId])
-    .select('id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at');
+    .select('id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at',
+      ...BILLING_CONTACT_COLUMNS, db.raw('updated_at::text AS version'));
   return {
     winner: rows.find((r) => String(r.id) === String(winnerId)) || null,
     loser: rows.find((r) => String(r.id) === String(loserId)) || null,
@@ -50,14 +99,39 @@ async function loadMergePair(winnerId, loserId) {
 
 // ─── merge_customers ────────────────────────────────────────────────────
 
-async function previewMergeCustomers(winnerId, loserId) {
+// Loads the pair and runs every non-mutating refusal check merge_customers
+// shares between preview and confirm: existence, liveness, and the
+// canonical duplicate-eligibility recheck (customer-dedupe.js
+// duplicatePairEligibility — never re-derived here). address_conflict gets
+// an IB-specific message: the Intelligence Bar has no link-as-property path
+// (that stays admin-duplicates-queue only), so it points the operator there
+// instead of offering a merge that would silently drop the loser's address.
+async function loadMergeEligibility(winnerId, loserId) {
   const { winner, loser } = await loadMergePair(winnerId, loserId);
-  if (!winner) return { error: 'winner_customer_id does not match a customer', code: 'record_unavailable' };
-  if (!loser) return { error: 'loser_customer_id does not match a customer', code: 'record_unavailable' };
-  if (winner.deleted_at) return { error: 'The winner customer is already archived — pick a live customer to merge into.', code: 'record_unavailable' };
-  if (loser.deleted_at) return { error: 'The loser customer is already archived — there is nothing to merge.', code: 'record_unavailable' };
+  if (!winner) return { ok: false, error: 'winner_customer_id does not match a customer', code: 'record_unavailable' };
+  if (!loser) return { ok: false, error: 'loser_customer_id does not match a customer', code: 'record_unavailable' };
+  if (winner.deleted_at) return { ok: false, error: 'The winner customer is already archived — pick a live customer to merge into.', code: 'record_unavailable' };
+  if (loser.deleted_at) return { ok: false, error: 'The loser customer is already archived — there is nothing to merge.', code: 'record_unavailable' };
+  const { duplicatePairEligibility } = require('../customer-dedupe');
+  const eligibility = await duplicatePairEligibility(winnerId, loserId);
+  if (!eligibility.eligible) {
+    if (eligibility.code === 'address_conflict') {
+      return {
+        ok: false,
+        code: 'address_conflict',
+        error: `${customerName(loser)} has a different service address than ${customerName(winner)} — merge this pair from the admin duplicates queue using "Merge + keep address" instead (the Intelligence Bar does not support keeping a second address).`,
+      };
+    }
+    return { ok: false, error: eligibility.reason, code: eligibility.code };
+  }
+  return { ok: true, winner, loser, eligibility };
+}
 
-  const moving = await movingCounts(loserId);
+async function previewMergeCustomers(winnerId, loserId) {
+  const check = await loadMergeEligibility(winnerId, loserId);
+  if (!check.ok) return { error: check.error, code: check.code };
+  const { winner, loser, eligibility } = check;
+  const moving = await fullMovingCounts(db, loserId);
   const winnerName = customerName(winner);
   const loserName = customerName(loser);
   return {
@@ -66,17 +140,33 @@ async function previewMergeCustomers(winnerId, loserId) {
     winner_name: winnerName,
     winner_phone: winner.phone || null,
     winner_email: winner.email || null,
+    winner_version: winner.version,
     loser_customer_id: loser.id,
     loser_name: loserName,
     loser_phone: loser.phone || null,
     loser_email: loser.email || null,
+    loser_version: loser.version,
+    pair: { tier: eligibility.candidate.tier, reasons: eligibility.candidate.reasons },
+    billing_and_contacts: { winner: billingSnapshot(winner), loser: billingSnapshot(loser) },
     moving,
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, and message listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable (and revertible) from the duplicates queue afterward. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable (and revertible) from the duplicates queue afterward. Nothing was changed — the operator confirms from the card.`,
   };
 }
 
 async function commitMergeCustomers(winnerId, loserId, actionContext) {
   const { executeMerge } = require('../customer-dedupe');
+  // Before executeMerge: re-read both customer versions and re-run
+  // eligibility, then do it again immediately before the write. The
+  // two-step route already re-runs the (unconfirmed) preview and refuses on
+  // a fingerprint mismatch before reaching this function — this is a second,
+  // narrower belt-and-suspenders check for the gap between that re-run and
+  // this call actually executing the merge.
+  const before = await loadMergeEligibility(winnerId, loserId);
+  if (!before.ok) return { error: before.error, code: before.code, preview_changed: true };
+  const recheck = await loadMergeEligibility(winnerId, loserId);
+  if (!recheck.ok || recheck.winner.version !== before.winner.version || recheck.loser.version !== before.loser.version) {
+    return { error: 'The pair changed after the card was shown — ask again for a fresh confirmation card.', preview_changed: true };
+  }
   try {
     const result = await executeMerge({
       winnerId,
@@ -152,6 +242,26 @@ async function archiveBlockers(customerId, trx = db) {
   return blockers;
 }
 
+async function resolveTwinNames(twins) {
+  if (!twins.length) return [];
+  const ids = [...new Set(twins.map((t) => t.twin_id))];
+  const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
+  const byId = new Map(rows.map((r) => [String(r.id), customerName(r)]));
+  return twins.map((t) => ({ twin_id: t.twin_id, twin_name: byId.get(String(t.twin_id)) || 'Unnamed customer' }));
+}
+
+// Same twin ids (any order) and the same row count — the shape a card cares
+// about; email_key never rides on the disclosed side, so it plays no part
+// in the comparison.
+function samePlan(a, b) {
+  if (a.relinked_count !== b.relinked_count) return false;
+  const idsA = new Set(a.twins.map((t) => t.twin_id));
+  const idsB = new Set(b.twins.map((t) => t.twin_id));
+  if (idsA.size !== idsB.size) return false;
+  for (const id of idsA) if (!idsB.has(id)) return false;
+  return true;
+}
+
 async function previewArchiveCustomer(customer, reason) {
   const blockers = await archiveBlockers(customer.id);
   const name = customerName(customer);
@@ -161,6 +271,9 @@ async function previewArchiveCustomer(customer, reason) {
     // archive would deterministically fail on Confirm.
     return { error: `${name} cannot be archived yet — ${blockers.join('; ')}. Resolve that first, or use merge_customers if this is a duplicate of a live customer.`, code: 'archive_blocked', blockers };
   }
+  const { planRelinkFromArchivedCustomer } = require('../newsletter-subscribers');
+  const plan = await planRelinkFromArchivedCustomer(db, customer.id);
+  const twins = await resolveTwinNames(plan.twins);
   return {
     preview: true,
     customer_id: customer.id,
@@ -168,14 +281,22 @@ async function previewArchiveCustomer(customer, reason) {
     customer_phone: customer.phone || null,
     customer_email: customer.email || null,
     reason: reason || null,
+    newsletter_relink: { count: plan.relinked_count, twins },
     note_to_operator: `${name} will be archived (deleted_at stamped). Any newsletter subscribers linked to this customer are relinked to a live same-email twin, if one exists, in the same commit. Nothing was changed — the operator confirms from the card.`,
   };
 }
 
 async function commitArchiveCustomer(customer, reason, actionContext) {
-  const { relinkSubscribersFromArchivedCustomer } = require('../newsletter-subscribers');
+  const { relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer } = require('../newsletter-subscribers');
   const { recordAuditEvent } = require('../audit-log');
   try {
+    // Fresh, unlocked plan at the START of the confirmed call — recomputed
+    // again under the row lock below. The route already re-runs the
+    // unconfirmed preview and refuses on a fingerprint mismatch before
+    // reaching this function; this closes the narrower gap between that
+    // re-run and the lock actually being held (a subscriber signs up, or a
+    // twin gets archived, in between).
+    const freshPlan = await planRelinkFromArchivedCustomer(db, customer.id);
     const relink = await db.transaction(async (trx) => {
       const locked = await trx('customers').where({ id: customer.id }).forUpdate().first('id', 'deleted_at');
       if (!locked) { const e = new Error('This customer no longer exists.'); e.previewChanged = true; throw e; }
@@ -183,6 +304,12 @@ async function commitArchiveCustomer(customer, reason, actionContext) {
       const freshBlockers = await archiveBlockers(customer.id, trx);
       if (freshBlockers.length) {
         const e = new Error(`Cannot archive — ${freshBlockers.join('; ')} (this changed after the card was shown).`);
+        e.previewChanged = true;
+        throw e;
+      }
+      const lockedPlan = await planRelinkFromArchivedCustomer(trx, customer.id);
+      if (!samePlan(freshPlan, lockedPlan)) {
+        const e = new Error('The newsletter relink plan changed after the card was shown — ask again for a fresh confirmation card.');
         e.previewChanged = true;
         throw e;
       }
@@ -273,5 +400,5 @@ module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   executeCustomerLifecycleTool,
   // exported for tests
-  _test: { archiveBlockers, movingCounts, customerName },
+  _test: { archiveBlockers, fullMovingCounts, customerName, samePlan },
 };

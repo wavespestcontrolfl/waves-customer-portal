@@ -432,6 +432,35 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
   return groups;
 }
 
+// Canonical duplicate-eligibility recheck — the SINGLE place that answers
+// "is this exact (winnerId, loserId) pair still a live, mergeable duplicate
+// candidate right now?" Originally inlined in admin-customer-duplicates.js
+// handleMerge; every other caller (the IB merge_customers tool, the task
+// context's pair authority) reuses this instead of re-deriving tier/reasons
+// logic of its own. Returns exactly one of four outcomes:
+//   not_in_queue      — the pair isn't a live candidate under this winner
+//   red_pair          — tiered red: looks like two different people
+//   address_conflict  — the loser carries a different/incomparable service
+//                        address (a plain merge would retire its only copy);
+//                        callers that support link-as-property (only the
+//                        admin duplicates route does) may still proceed
+//   eligible           — safe to merge; candidate.tier/reasons carried along
+async function duplicatePairEligibility(winnerId, loserId, database = db) {
+  const groups = await findDuplicateGroups(database);
+  const group = groups.find((g) => g.winner.id === winnerId);
+  const candidate = group?.candidates.find((c) => c.loser.id === loserId);
+  if (!candidate) {
+    return { eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null };
+  }
+  if (candidate.tier === 'red') {
+    return { eligible: false, code: 'red_pair', reason: 'This pair looks like two different people and cannot be merged from the queue', candidate };
+  }
+  if (candidate.reasons.some((r) => r.startsWith('address_'))) {
+    return { eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate };
+  }
+  return { eligible: true, code: 'eligible', reason: null, candidate };
+}
+
 // ---------------------------------------------------------------------------
 // Merge executor
 // ---------------------------------------------------------------------------
@@ -4320,11 +4349,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
 
 module.exports = {
   findDuplicateGroups,
+  duplicatePairEligibility,
   executeMerge,
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
   recordLinkedProperty,
+  // FK discovery, exported so callers that disclose "what would move" (the
+  // IB merge preview) enumerate the SAME table set the executor repoints —
+  // never a smaller hand-picked subset that could omit tables.
+  customerFkColumns,
   // Refuse-policy sets, exported so GET /merges' revertible mirror can never
   // drift from the revert endpoint's own count-only refusals.
   REVERT_FINANCIAL_TABLES,
