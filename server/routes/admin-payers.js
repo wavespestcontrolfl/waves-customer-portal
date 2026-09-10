@@ -121,8 +121,9 @@ router.post('/', async (req, res, next) => {
 // PUT /api/admin/payers/:id
 router.put('/:id', async (req, res, next) => {
   try {
-    const { payer, error, notFound } = await PayerService.updatePayer(req.params.id, req.body || {});
+    const { payer, error, notFound, conflict, code } = await PayerService.updatePayer(req.params.id, req.body || {});
     if (notFound) return res.status(404).json({ error });
+    if (conflict) return res.status(409).json({ error, code });
     if (error) return res.status(400).json({ error });
     res.json({ payer });
   } catch (err) {

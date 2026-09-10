@@ -416,15 +416,47 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
 // the customer and billed-member rows while ownership is resolved, and a
 // payer that lands after the claim commits would otherwise reach the
 // homeowner with debt that now belongs to AP.
-async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId = null } = {}, database = db) {
-  if (!customerId && !scheduledServiceId) return false;
+// `payerId` covers the activation writer: a send in flight for any customer
+// or billed member that references the payer would resolve to it once active.
+async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId = null, payerId = null } = {}, database = db) {
+  if (!customerId && !scheduledServiceId && !payerId) return false;
   const query = database('invoices').where({ status: 'sending' }).whereNotNull('visit_completion_packet_id').whereNull('payer_id');
   if (customerId) query.where({ customer_id: customerId });
   if (scheduledServiceId) {
     query.whereIn('visit_completion_packet_id', database('visit_completion_packet_items')
       .where({ scheduled_service_id: scheduledServiceId }).select('packet_id'));
   }
+  if (payerId) {
+    query.where((q) => q
+      .whereIn('customer_id', database('customers').where({ payer_id: payerId }).select('id'))
+      .orWhereIn('visit_completion_packet_id', database('visit_completion_packet_items')
+        .whereIn('scheduled_service_id', database('scheduled_services').where({ payer_id: payerId }).select('id'))
+        .select('packet_id')));
+  }
   return Boolean(await query.first('id'));
+}
+
+// Holds FOR SHARE every payer row the live Bill-To resolution for this
+// packet can consult (the customer default and each billed member's per-job
+// payer), so a payer activation — which changes that resolution without
+// writing a customer or member row — waits for the send claim to commit and
+// then sees it in flight.
+async function lockPacketPayerRows(packetId, trx) {
+  const packet = await trx('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
+  if (!packet) return [];
+  const visit = await trx('service_visits').where({ id: packet.visit_id }).first('customer_id');
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
+    : await trx('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
+  const ids = new Set();
+  const customer = visit && await trx('customers').where({ id: visit.customer_id }).first('payer_id');
+  if (customer?.payer_id) ids.add(customer.payer_id);
+  if (billed.length) {
+    (await trx('scheduled_services').whereIn('id', billed).whereNotNull('payer_id').pluck('payer_id')).forEach((id) => ids.add(id));
+  }
+  const payerIds = [...ids];
+  if (payerIds.length) await trx('payers').whereIn('id', payerIds).forShare().select('id');
+  return payerIds;
 }
 
 // The active third-party payer that now owns a BILLED member, resolved live
@@ -466,10 +498,19 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
         .whereIn('status', ['done', 'processing'])
         .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() }));
     } catch { reopened = null; }
-    // A reopen that ran and touched no packet proves no packet owns this
-    // invoice: the legacy representative-record enrollment stands.
-    if (reopened === 0) return null;
-    return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: reopened > 0 };
+    if (reopened !== 0) return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: reopened > 0 };
+    // A reopen that ran and touched no packet means either no packet owns
+    // this invoice or the owning packet is terminal (the office holds a
+    // failed one). Only the first hands the review to the legacy
+    // representative-record path; the link is re-read to tell them apart.
+    try {
+      packetId = (await database('invoices').where({ id: invoiceId }).first('visit_completion_packet_id'))?.visit_completion_packet_id;
+    } catch (again) {
+      return { enrolled: false, retryable: true, reason: 'error', error: again.message, reopened: false };
+    }
+    if (!packetId) return null;
+    const owner = await database('visit_completion_packets').where({ id: packetId }).first('status');
+    if (owner && !['done', 'processing'].includes(owner.status)) return { enrolled: false, reason: 'packet_owned', packetId, packetStatus: owner.status };
   }
   if (!packetId) return null;
   return enrollVisitCompletionReview(packetId, database);
@@ -572,4 +613,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { packetInvoiceSendInFlight, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };

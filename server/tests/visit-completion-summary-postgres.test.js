@@ -1691,14 +1691,25 @@ postgres('visit summary recipient recovery', () => {
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
       customer_id: fixture.customerId, status: 'sending', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: false }).returning('id');
     try {
       expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(true);
       expect(await packetInvoiceSendInFlight({ scheduledServiceId: fixture.serviceIds[0] })).toBe(true);
       expect(await packetInvoiceSendInFlight({ scheduledServiceId: randomUUID() })).toBe(false);
+      // The activation writer sees the send through the customer default and through a billed member's per-job payer.
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(true);
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(false);
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ payer_id: payer.id });
+      expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(true);
       await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
       expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(false);
+      expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(false);
     } finally {
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ payer_id: null });
       await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
     }
   });
 
@@ -1754,12 +1765,117 @@ postgres('visit summary recipient recovery', () => {
       return execute.call(this, connection, query);
     });
     try {
-      expect(await require('../services/visit-completion-packets').enrollVisitCompletionReviewForInvoice(invoiceId)).toBeNull();
+      // The office owns the failed packet: the paid signal must not fall
+      // through to the legacy representative-record ask.
+      expect(await require('../services/visit-completion-packets').enrollVisitCompletionReviewForInvoice(invoiceId))
+        .toMatchObject({ enrolled: false, reason: 'packet_owned', packetId: fixture.packetId, packetStatus: 'failed' });
     } finally {
       await mockPg('invoices').where({ id: invoiceId }).del();
     }
     expect(interrupted).toBe(true);
     expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'failed' });
+  });
+
+  test('a payer reactivation waits for the fenced invoice claim and is refused while the send is in flight', async () => {
+    const Invoice = require('../services/invoice');
+    const Payer = require('../services/payer');
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: false }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    const execute = mockPg.client.constructor.prototype._query;
+    let blockedCode = null;
+    let raced = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function reactivateDuringClaim(connection, query) {
+      if (!raced && query.sql.startsWith('update "invoices"') && query.bindings.includes('sending')) {
+        raced = true;
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx('payers').where({ id: payer.id }).forUpdate().first();
+        }).catch((err) => { blockedCode = err.code; });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      // An inactive payer is self-pay, so the claim goes through — holding the payer row.
+      expect(await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId)).toMatchObject({ payerBilled: false, claim: { claimed: true } });
+      expect(raced).toBe(true);
+      expect(blockedCode).toBe('55P03');
+      jest.restoreAllMocks();
+      // With the send in flight, the activation is refused like a payer_id write.
+      expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ conflict: true, code: 'invoice_send_in_flight' });
+      expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+      expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ payer: { id: payer.id, active: true } });
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a transient Bill-To re-judge failure under the worker claim returns the send to its queue slot', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sending', total: 120, visit_completion_packet_id: fixture.packetId,
+      scheduled_send_at: new Date(Date.now() - 60000) });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failPacketRead(connection, query) {
+      if (!interrupted && query.sql.startsWith('select "visit_id", "payload" from "visit_completion_packets"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic packet read outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await require('../services/invoice').sendViaSMSAndEmail(invoiceId, { allowClaimed: true })).toMatchObject({ ok: false, code: 'bill_to_fence_failed' });
+      expect(interrupted).toBe(true);
+      const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(invoice.status).toBe('scheduled');
+      expect(invoice.scheduled_send_at).not.toBeNull();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(sendOne).not.toHaveBeenCalled();
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+  test('a review email handoff shares the packet row so a bounce reconciliation waits for the send', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const ReviewService = require('../services/review-request');
+    jest.spyOn(ReviewService, 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    let blockedCode = null;
+    // The library runs the provider request through the caller's handoff; the
+    // bounce lands mid-request and must wait on the held packet row.
+    jest.spyOn(require('../services/email-template-library'), 'sendTemplate').mockImplementation(async (opts) => {
+      const verdict = await opts.withProviderHandoff(async () => {
+        await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'bounced' });
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx);
+        }).catch((err) => { blockedCode = err.code; });
+        opts.onQueued?.({ id: randomUUID() });
+      });
+      return verdict.ok === true ? { sent: true } : { sent: false, blocked: true, code: verdict.code, reason: verdict.reason };
+    });
+    const request = { id: randomUUID(), service_record_id: fixture.recordIds[0], sequence_id: randomUUID(), sequence_step: 1 };
+    const args = { request, customer: { id: fixture.customerId, first_name: 'Fixture' }, contact: { email: fixture.primaryEmail, name: 'Fixture' },
+      reviewUrl: 'https://portal.test/r', techName: 'Fixture', manageRetryVia: 'sequence' };
+    expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ ok: true, sent: true, channel: 'email' });
+    expect(blockedCode).toBe('55P03');
+    // Once the bounce lands, the next email handoff parks the ask instead of sending it.
+    await mockPg.transaction(async (trx) => { await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx); });
+    expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ ok: false, deferred: true, reason: 'visit_summary_parked', channel: 'email' });
   });
 
   test('a bounce reconciliation serializes behind the packet close and alerts on the closed packet', async () => {
