@@ -966,6 +966,24 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a corrected-address recovery judges suppression on its destination, not the bounced original', async () => {
+    const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_email_snapshot: fixture.serviceEmail };
+    await mockPg('email_suppressions').insert({ email: fixture.serviceEmail, status: 'active', suppression_type: 'bounce' });
+    try {
+      let dispatched = 0;
+      expect(await Summary.retrySummaryThroughHandoff(stored, async () => { dispatched += 1; }, { destination: 'corrected@example.invalid' }))
+        .toEqual({ ok: true });
+      expect(dispatched).toBe(1);
+      // The same-address retry rail is still refused by the bounce suppression.
+      expect(await Summary.retrySummaryThroughHandoff(stored, async () => { dispatched += 1; }))
+        .toEqual({ ok: false, reason: 'visit_summary_recipient_suppressed' });
+      expect(dispatched).toBe(1);
+    } finally {
+      await mockPg('email_suppressions').where({ email: fixture.serviceEmail }).del();
+    }
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };

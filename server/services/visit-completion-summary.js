@@ -455,7 +455,11 @@ async function reconcileSummaryEmailBounce(message, database = db) {
 // customer's current summary recipients under their current preferences, and
 // the link must not have been revoked; the rail's own template and
 // suppression checks know nothing about visits.
-async function summaryRetryAuthorized(message, database = db) {
+// `destination` is the address the provider will actually receive when it
+// differs from the recipient snapshot (a corrected-address recovery): the
+// suppression ledger is judged on the destination, since the bounced
+// original carries the very suppression the recovery exists to route around.
+async function summaryRetryAuthorized(message, database = db, { destination = null } = {}) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: true };
   const held = Boolean(database.isTransaction);
@@ -472,14 +476,16 @@ async function summaryRetryAuthorized(message, database = db) {
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
   const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
   if (!current) return { ok: false, reason: 'visit_summary_recipient_changed' };
-  if (await summaryEmailSuppressed(email)) return { ok: false, reason: 'visit_summary_recipient_suppressed' };
+  if (await summaryEmailSuppressed(String(destination || email).trim().toLowerCase())) {
+    return { ok: false, reason: 'visit_summary_recipient_suppressed' };
+  }
   return { ok: true };
 }
 
 // The retry rail's provider request runs while the customer and preference
 // rows are held, so the recipient the fence approved is the recipient the
 // provider receives. `dispatch()` performs the request.
-async function retrySummaryThroughHandoff(message, dispatch, database = db) {
+async function retrySummaryThroughHandoff(message, dispatch, { destination = null, database = db } = {}) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
   return database.transaction(async (trx) => {
@@ -488,7 +494,7 @@ async function retrySummaryThroughHandoff(message, dispatch, database = db) {
     await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
     await createDefaultCustomerRows(trx, visit.customer_id);
     await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
-    const fence = await summaryRetryAuthorized(message, trx);
+    const fence = await summaryRetryAuthorized(message, trx, { destination });
     if (!fence.ok) return fence;
     // The caller may refuse at the last moment (a corrected destination that
     // another party now owns); a refusal is a verdict, not a dispatch.

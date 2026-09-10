@@ -497,7 +497,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId)) return { ok: false, reason: 'corrected_owned_by_other' };
           await dispatchToProvider();
           return { ok: true };
-        });
+        }, { destination: correctedEmail });
       } catch (err) {
         if (!result) throw err;
         logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
