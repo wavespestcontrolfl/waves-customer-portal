@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import ServiceRecapModal from './ServiceRecapModal';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 const CATALOG = [
   {

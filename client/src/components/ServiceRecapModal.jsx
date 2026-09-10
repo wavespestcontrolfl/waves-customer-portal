@@ -19,6 +19,8 @@ import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
+import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
+import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
 
 const PALETTES = {
   dark: {
@@ -76,6 +78,12 @@ function catalogRatePrefill(p, serviceType) {
   return { rate: String(rate), unit: resolved.rateUnit, ...(max != null ? { max } : {}) };
 }
 
+// Current label ceiling for a restored draft rate, only in the rate's own unit.
+function catalogCeiling(product, serviceType, unit) {
+  const prefill = catalogRatePrefill(product, serviceType);
+  return prefill?.max != null && prefill.unit === unit ? prefill.max : null;
+}
+
 function fmtTime(ts) {
   if (!ts) return '';
   try {
@@ -93,10 +101,20 @@ export default function ServiceRecapModal({
   onCompleted,
 }) {
   const isMobile = useIsMobile();
-  const dialogRef = useModalFocus(true, onClose);
+  // Escape must take the same guarded path as the Close button: no close
+  // while a submission is pending, and a confirm before losing edits that
+  // device storage could not save. The guarded close is defined below,
+  // after the draft hook, so the key handler reaches it through a ref.
+  const closeRef = useRef(null);
+  const dialogRef = useModalFocus(true, () => closeRef.current?.());
   const P = PALETTES[theme] || PALETTES.dark;
   const serviceId = service?.id;
   const base = `/admin/dispatch/${serviceId}/pest-recap`;
+  const draftActionStyle = {
+    border: `1px solid ${P.border}`, background: P.card, color: P.text,
+    borderRadius: 10, padding: '12px 18px', minHeight: 48, fontSize: 16,
+    cursor: 'pointer', fontFamily: P.bodyFont,
+  };
 
   const [loading, setLoading] = useState(true);
   const [ctx, setCtx] = useState(null);
@@ -253,6 +271,30 @@ export default function ServiceRecapModal({
     return m;
   }, [products]);
 
+  const [restoredNames, setRestoredNames] = useState({});
+  const draft = useServiceRecapDraft({
+    serviceId, ctx, loading, loadError, submitting,
+    authoritative: selectionAuthoritative.current,
+    unrepresented: unrepresentedProducts.current,
+    form: { note, message, rates, sendText, includeComms, selected, productById, restoredNames },
+    ceilingFor: (id, unit) => catalogCeiling(productById.get(id), ctx?.service?.serviceType, unit),
+  });
+  const restoreDraft = () => {
+    const form = draft.restoreForm();
+    setNote(form.note);
+    setMessage(form.message);
+    setRates(form.rates);
+    setSendText(form.sendText);
+    setIncludeComms(form.includeComms);
+    setSelected(form.selected);
+    setRestoredNames(form.restoredNames);
+    draft.restored();
+  };
+  const close = () => {
+    if (!submitInFlight.current && draft.canClose()) onClose?.();
+  };
+  closeRef.current = close;
+
   const toggleProduct = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -303,7 +345,7 @@ export default function ServiceRecapModal({
   }, [base, note, includeComms, request, selected, productById]);
 
   const handleSubmit = useCallback(async () => {
-    if (submitInFlight.current) return;
+    if (submitInFlight.current || draft.submitBlocked) return;
     const willSend = sendText && !!message.trim() && !!ctx?.service?.hasPhone;
     if (willSend) {
       const name = ctx?.service?.customerName || 'the customer';
@@ -363,15 +405,21 @@ export default function ServiceRecapModal({
             : {}),
           customerRecap: message,
           sendSms: willSend,
+          // Ownership identity the form was built against; the server
+          // re-checks it under its row lock so a visit reassigned after
+          // this context loaded cannot receive the former property's
+          // treatment (codex P1 on #4249).
+          expectedVisit: recapVisitIdentity(ctx?.service),
         }),
       });
+      draft.finish();
       onCompleted?.(result);
     } catch (err) {
-      setError(err?.message || 'Could not complete recap');
+      setError(recapSubmitError(err));
       setSubmitting(false);
       submitInFlight.current = false;
     }
-  }, [base, ctx, message, note, onCompleted, productById, rates, request, selected, sendText]);
+  }, [base, ctx, draft, message, note, onCompleted, productById, rates, request, selected, sendText]);
 
   const timeline = (ctx?.timeline || []).filter((t) => t.to_status !== 'pending');
 
@@ -382,7 +430,7 @@ export default function ServiceRecapModal({
       aria-label="Service Recap"
       role="dialog"
       aria-modal="true"
-      onClick={onClose}
+      onClick={close}
       style={{
         position: 'fixed', inset: 0, zIndex: 1000, background: P.overlay,
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
@@ -417,7 +465,8 @@ export default function ServiceRecapModal({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={close}
+            disabled={submitting}
             aria-label="Close"
             style={{
               border: 'none', background: 'transparent', color: P.muted,
@@ -433,6 +482,8 @@ export default function ServiceRecapModal({
         ) : (
           <>
           <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
+            <RecapDraftPanel draft={draft} onRestore={restoreDraft} actionStyle={draftActionStyle} palette={P} />
+            <fieldset disabled={draft.formLocked} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
             {/* Timeline */}
             {timeline.length > 0 && (
               <div style={{
@@ -505,6 +556,7 @@ export default function ServiceRecapModal({
                 recorded rate is what the tech actually applied, not the
                 catalog default it starts from. Products with no known unit
                 (no catalog default, nothing recorded) record no rate. */}
+            <RecapMissingSelections ids={draft.missingSelections} names={restoredNames} onRemove={toggleProduct} actionStyle={draftActionStyle} palette={P} />
             {[...selected].some((id) => rates[id]?.unit) && (
               <div style={{
                 background: P.card, border: `1px solid ${P.border}`, borderRadius: 12,
@@ -610,15 +662,14 @@ export default function ServiceRecapModal({
                 No mobile number on file — recap will be saved without texting.
               </div>
             )}
-
-
+            </fieldset>
           </div>
             {/* Footer */}
             <div style={{ display: 'flex', flexWrap: 'wrap', flexShrink: 0, gap: 10, padding: '12px 18px 18px', borderTop: `1px solid ${P.border}` }}>
               {error && <div role="alert" style={{ flexBasis: '100%', color: P.red, fontSize: 13 }}>{error}</div>}
               <button
                 type="button"
-                onClick={onClose}
+                onClick={close}
                 disabled={submitting}
                 style={{
                   flex: '0 0 auto', border: `1px solid ${P.border}`, background: 'transparent',
@@ -631,11 +682,11 @@ export default function ServiceRecapModal({
               <button
                 type="button"
                 onClick={handleSubmit}
-                disabled={submitting}
+                disabled={draft.submitBlocked}
                 style={{
                   flex: 1, border: 'none', background: P.green, color: '#fff',
                   borderRadius: 10, padding: '12px 18px', fontSize: 15, fontWeight: 700,
-                  cursor: submitting ? 'default' : 'pointer', opacity: submitting ? 0.7 : 1,
+                  cursor: submitting ? 'default' : 'pointer', opacity: draft.submitBlocked ? 0.5 : 1,
                   fontFamily: P.bodyFont,
                 }}
               >
