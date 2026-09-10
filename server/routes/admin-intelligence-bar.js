@@ -58,6 +58,7 @@ const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../se
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -132,6 +133,7 @@ const SOCIAL_OPS_TOOL_NAMES = new Set(SOCIAL_OPS_TOOLS.map(t => t.name));
 const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => t.name));
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
+const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
 // Every infra module loads with EVERY admin context (any admin page can ask
 // about deploys, errors, or webhook health) and shares the admin-only guard
 // that OPS_TOOLS established — technician tokens never see or execute them.
@@ -153,7 +155,7 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // Communications/Email pages. Call-research rides here too: voice-of-customer
 // questions ("what do callers say about X?") come from any page, and the
 // tool surfaces only redacted text — no names, no customer ids.
-const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS];
+const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS];
 
 const AGENT_ESTIMATE_TOOL_NAMES = require('../services/intelligence-bar/agent-estimate-policy');
 const apiToolDefinition = require('../services/intelligence-bar/tool-definition');
@@ -175,6 +177,11 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Cancel plan (C3) churns accounts and moves billing — admin only, like the
   // requireAdmin Customer 360 endpoints it mirrors.
   'cancel_plan',
+  // Merge and archive retire/repoint whole customer records — admin only,
+  // like the requireAdmin admin-customer-duplicates.js and DELETE
+  // /api/admin/customers/:id routes they mirror.
+  'merge_customers',
+  'archive_customer',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -592,6 +599,22 @@ function confirmationDisplayParams(toolName, params, preview) {
       ...(preview.reason_code ? { reason_code: preview.reason_code } : {}),
       ...(preview.note ? { note: preview.note } : {}),
       ...(preview.termite_retrieval ? { termite_stations: 'retrieval task will be raised' } : {}),
+    };
+  }
+  if (toolName === 'merge_customers' && preview?.preview === true) {
+    // Curated card: name both humans, never the raw ids — the full moving
+    // counts and disclosure text still ride the contract's effects (built
+    // from this same preview object, see authorization-contract.js).
+    return {
+      winner: `${preview.winner_name} (…${(preview.winner_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
+      loser: `${preview.loser_name} (…${(preview.loser_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
+      moving: preview.moving,
+    };
+  }
+  if (toolName === 'archive_customer' && preview?.preview === true) {
+    return {
+      customer: `${preview.customer_name} (…${(preview.customer_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
+      ...(preview.reason ? { reason: preview.reason } : {}),
     };
   }
   if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
@@ -1970,6 +1993,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (CALL_RESEARCH_TOOL_NAMES.has(toolName)) {
     return executeCallResearchTool(toolName, input);
+  }
+  if (CUSTOMER_LIFECYCLE_TOOL_NAMES.has(toolName)) {
+    return executeCustomerLifecycleTool(toolName, input, actionContext);
   }
   if (SEO_TOOL_NAMES.has(toolName)) {
     return executeSeoTool(toolName, input, actionContext);

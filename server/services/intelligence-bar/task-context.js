@@ -529,6 +529,11 @@ const customerSpecific = context => Boolean(context.targets?.length || context.n
 // closeout readers take service_id and the gap reader tests candidate_service_id
 // (it loads that appointment's customer preferences, plan holds and location).
 const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
+// Writers whose customer records ride under role-named ids: both halves of a
+// merge are customer records the task must own, so they are read as the
+// customer collection (readReferences loads and version-stamps every one).
+const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'] };
+const customerPairIds = (params, toolName) => (CUSTOMER_PAIR_SELECTORS[toolName] || []).map(key => params[key]).filter(Boolean);
 
 // Address-bound readers (lookup_property, and find_available_slots inside a
 // customer-scoped task) take a model-supplied address. It must be one of the
@@ -632,6 +637,8 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
   if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
+  const pair = customerPairIds(params, toolName);
+  if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
   const { records } = resolved;

@@ -28,6 +28,7 @@ const MODULES = [
   ['email-tools', 'EMAIL_TOOLS', 'executeEmailTool'],
   ['banking-tools', 'BANKING_TOOLS', 'executeBankingTool'],
   ['estimate-tools', 'ESTIMATE_TOOLS', 'executeEstimateTool'],
+  ['customer-lifecycle-tools', 'CUSTOMER_LIFECYCLE_TOOLS', 'executeCustomerLifecycleTool'],
   ['history-tools', 'HISTORY_TOOLS', 'executeHistoryTool'],
   ['ops-tools', 'OPS_TOOLS', 'executeOpsTool'],
   ['sentry-ops-tools', 'SENTRY_OPS_TOOLS', 'executeSentryOpsTool'],

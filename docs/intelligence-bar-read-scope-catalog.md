@@ -85,6 +85,12 @@ old list).
   is a pure pricing engine and stays available.
 - `block_sender` is a `record` write with no record id; `validateSenderBlock`
   binds it to the task customer's own address.
+- `merge_customers` is `record`: its two role-named ids (`winner_customer_id`,
+  `loser_customer_id`) are mapped to the customer collection by
+  `validateRecordTarget` (`CUSTOMER_PAIR_SELECTORS`), so both halves are loaded,
+  version-stamped, and must belong to the task's customers — a pair naming a
+  customer outside the task is refused like any other foreign record.
+  `archive_customer` takes a plain `customer_id` and is bound normally.
 - Operations and provider readers whose text can echo customer identifiers
   (`get_twilio_alerts`, `get_scheduled_job_health`, `get_railway_logs`, the
   three Sentry readers, the two GrowthBook readers, `get_managed_agent_runs`,

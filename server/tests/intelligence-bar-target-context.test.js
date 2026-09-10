@@ -1042,3 +1042,18 @@ test('the gap reader\'s candidate appointment is an appointment reference bound 
   // A candidate with an unresolved name still has nobody to bind to.
   expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], contactRequested: true, page: { ids: {} } })).code).toBe('target_clarification_required');
 });
+
+test('merge_customers binds both role-named ids as customer records of the task', async () => {
+  const task = await Context.resolve({ prompt: 'Merge the duplicate stub into this customer', pageData: { customer_id: A } });
+  expect(task.target.customer_id).toBe(A);
+  // The loser is a real customer outside the task: refused, never admitted as "references none".
+  const foreign = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, task, { toolName: 'merge_customers' });
+  expect(foreign.error).toBeTruthy();
+  // The ids are read as records: a vanished loser is a record_unavailable, not a pass.
+  rows.customers = rows.customers.filter(row => row.id !== B);
+  const vanished = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, task, { toolName: 'merge_customers' });
+  expect(vanished.code).toBe('record_unavailable');
+  // archive_customer takes the plain selector and is admitted for the task customer.
+  const archive = await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'archive_customer' });
+  expect(archive).toBeNull();
+});
