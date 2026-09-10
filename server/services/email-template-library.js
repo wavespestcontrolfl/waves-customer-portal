@@ -871,6 +871,30 @@ const QUEUED_IN_FLIGHT_MS = 2 * 60 * 1000;
 // retryable — never a delivery, never ambiguous.
 const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
 
+// The caller's locked handoff around one provider request, as a state
+// machine of its own: the request either ran (its result, or its error to
+// classify), was refused before it ran (abort before dispatch), or the
+// caller's guard failed after acceptance (the acceptance is kept). A throw
+// from the request itself propagates for the sender's provider-error path.
+async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey }) {
+  let dispatchStarted = false;
+  let result;
+  let verdict;
+  try {
+    verdict = await withProviderHandoff(async () => {
+      dispatchStarted = true;
+      result = await dispatchToProvider();
+    });
+  } catch (err) {
+    if (dispatchStarted && result === undefined) throw err;
+    if (!dispatchStarted) verdict = { ok: false, reason: err.message };
+    else logger.warn(`[email-template-library] provider handoff guard failed after acceptance for ${templateKey}: ${err.message}`);
+  }
+  if (result !== undefined) return { result };
+  if (verdict?.ok !== true || !dispatchStarted) return { abortedBeforeDispatch: true };
+  throw new Error('provider handoff returned without a provider result');
+}
+
 function queuedRowInFlight(message, now = Date.now()) {
   if (String(message?.status || '').toLowerCase() !== 'queued') return false;
   const queuedAt = message.queued_at ? new Date(message.queued_at).getTime() : null;
@@ -1248,8 +1272,7 @@ async function sendTemplate({
 
   try {
     let result;
-    const dispatchToProvider = async () => {
-      result = await sendgrid.sendOne({
+    const dispatchToProvider = () => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
@@ -1267,33 +1290,12 @@ async function sendTemplate({
         customArgs: { email_message_id: message.id, send_attempt_token: sendAttemptToken },
         suppressErrorLog: suppressProviderErrorLog,
       });
-    };
     if (typeof withProviderHandoff === 'function') {
-      let dispatchStarted = false;
-      let verdict;
-      try {
-        verdict = await withProviderHandoff(async () => {
-          dispatchStarted = true;
-          await dispatchToProvider();
-        });
-      } catch (err) {
-        // The provider request itself failed: the existing provider-error
-        // path below classifies it.
-        if (dispatchStarted && !result) throw err;
-        if (!dispatchStarted) {
-          verdict = { ok: false, reason: err.message };
-        } else {
-          // The caller's guard failed to commit after SendGrid accepted.
-          // Preserve that acceptance so nobody resends this recipient.
-          logger.warn(`[email-template-library] provider handoff guard failed after acceptance for ${templateKey}: ${err.message}`);
-        }
-      }
-      if (!result) {
-        if (verdict?.ok !== true || !dispatchStarted) return abortBeforeDispatch();
-        throw new Error('provider handoff returned without a provider result');
-      }
+      const handoff = await runProviderHandoff({ withProviderHandoff, dispatchToProvider, templateKey });
+      if (handoff.abortedBeforeDispatch) return abortBeforeDispatch();
+      result = handoff.result;
     } else {
-      await dispatchToProvider();
+      result = await dispatchToProvider();
     }
     // Record provider id + send time, and advance status to 'sent' ONLY while
     // still 'queued' — a fast delivery/bounce webhook (resolvable via

@@ -489,6 +489,8 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
           throw Object.assign(new Error('owner email changed mid-rescue'), { code: 'STALE_OWNER' });
         }
       } else {
+        await trx('notification_prefs').where({ customer_id: owner.customer.id }).forUpdate().first('customer_id');
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, candidate);
         const updated = await trx('notification_prefs')
           .where({ customer_id: owner.customer.id })
           .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])

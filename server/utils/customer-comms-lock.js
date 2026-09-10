@@ -134,7 +134,9 @@ async function lockCustomerEmail(trx, email) {
 // established order), in a fixed order so two multi-address writers cannot
 // deadlock on each other. A recovery that found an address unowned then
 // either commits before the assignment or re-judges ownership after it.
-const CUSTOMER_EMAIL_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
+// billing_email (notification_prefs) is the fourth ownership source the
+// recovery consults; its writers pass their prefs update through here too.
+const CUSTOMER_EMAIL_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email', 'billing_email'];
 async function lockAssignedCustomerEmails(trx, updates = {}) {
   const addresses = [...new Set(CUSTOMER_EMAIL_COLUMNS
     .map((column) => String(updates[column] || '').trim().toLowerCase()).filter(Boolean))].sort();

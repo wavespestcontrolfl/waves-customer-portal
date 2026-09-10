@@ -601,7 +601,7 @@ function commitDb({
 } = {}) {
   const fn = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert']) chain[m] = jest.fn(() => chain);
+    for (const m of ['where', 'whereRaw', 'whereNot', 'whereIn', 'andWhere', 'orWhereRaw', 'onConflict', 'ignore', 'modify', 'insert', 'forUpdate']) chain[m] = jest.fn(() => chain);
     chain.select = jest.fn((col) => { chain._sel = col; return chain; });
     const rowsFor = () => {
       if (table === 'customers') return customerOwnerRows;
@@ -622,6 +622,8 @@ function commitDb({
     return chain;
   });
   fn.raw = jest.fn((sql, bindings) => ({ __raw: sql, bindings }));
+  // The billing_email commit runs row → address key → update in a transaction.
+  fn.transaction = jest.fn(async (cb) => cb(fn));
   return fn;
 }
 
@@ -695,6 +697,7 @@ describe('commitRecoveryOnDelivery persists lead/estimate source address (codex 
       correction_rule: 'domain_typo', status: 'resent', record_updated: false, metadata: {},
     };
     db.mockImplementation(commitDb({ rec }));
+    db.transaction = jest.fn(async (cb) => cb(db));
     await recovery.commitRecoveryOnDelivery({ id: 'msg14', recipient_email_snapshot: 'jane@gmail.com' });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('notification_prefs.billing_email');

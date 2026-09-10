@@ -289,6 +289,42 @@ postgres('visit summary recipient recovery', () => {
     expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: false, reason: 'visit_summary_recipient_changed' });
   });
 
+  test('an archived visit customer is refused at replay reauthorization', async () => {
+    const queued = await heldSummary();
+    await mockPg('customers').where({ id: fixture.customerId }).update({ deleted_at: new Date() });
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: false, reason: 'visit_summary_unavailable' });
+    expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: false });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a retryable provider block leaves the summary with the retry rail instead of reopening it', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = false; });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    await mockPg.transaction(async (trx) => {
+      await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'bounce', type: 'blocked', reason: 'IP blocked', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID(), email: delivered.recipient_email_snapshot }, delivered, trx);
+    });
+    expect(await mockPg('email_messages').where({ id: delivered.id }).first()).toMatchObject({ status: 'failed' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'sent' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+  });
+
+  test('a billing-email save assigning the recovery destination waits for the held retry handoff', async () => {
+    const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
+    const destination = `${randomUUID()}@example.invalid`;
+    let blockedCode = null;
+    expect(await Summary.retrySummaryThroughHandoff(message, async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('notification_prefs').where({ customer_id: fixture.customerId }).forUpdate().first('customer_id');
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { billing_email: destination });
+      }).catch((err) => { blockedCode = err.code; });
+      return { ok: true };
+    }, { destination })).toEqual({ ok: true });
+    expect(blockedCode).toBe('55P03');
+  });
+
   test('a queued summary carries its recorded member so the replay applies the same per-property toggles', async () => {
     const queued = await heldSummary();
     expect(fixture.serviceIds).toContain(queued.metadata.scheduled_service_id);
