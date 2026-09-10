@@ -213,6 +213,14 @@ describe('POST /sms', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('a reply reservation failure aborts before the provider', async () => {
+    primeVisit();
+    reserveHumanReply.mockRejectedValueOnce(new Error('reservation unavailable'));
+    await expect(call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } }))
+      .rejects.toMatchObject({ isOperational: true, statusCode: 500, message: 'Tech line text failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a customer row holding a Waves number is refused (never re-enter /voice)', async () => {
     primeVisit({ customer: { id: 'c1', first_name: 'Pat', phone: '+19413187612' } });
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });

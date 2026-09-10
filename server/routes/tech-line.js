@@ -156,9 +156,9 @@ async function textFromLine({ req, ctx, target, body }) {
   if (reply.autoSendInFlight) {
     return { status: 409, json: { error: 'An automatic reply to this customer is being sent right now — try again in a moment', code: 'AUTO_REPLY_IN_FLIGHT' } };
   }
-  // Ambiguous: clear the reservation row only — the parked suggestions are
-  // neither reopened (an autonomous reply on top of a text the customer may
-  // already hold) nor ignored (the thread is not known to be answered).
+  // Ambiguous: retain the reservation and parked suggestions so recovery
+  // cannot reopen a reply the customer may already hold. Provider evidence
+  // can settle the held decisions later.
   const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, reviewedBy: req.technicianId }).catch(() => {});
   let result;
   try {

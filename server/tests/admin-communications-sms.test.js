@@ -79,6 +79,8 @@ jest.mock('../services/sms-suggest-mode', () => ({
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
   parkThreadSuggestions: jest.fn(async () => []),
+  createReplyHoldingReservation: jest.fn(async () => 'resv-1'),
+  settleReplyHoldingReservation: jest.fn(async () => true),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
   sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
@@ -148,6 +150,7 @@ const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { hasActiveAutoSendClaim } = require('../services/sms-auto-send');
+const suggestMode = require('../services/sms-suggest-mode');
 const smsMedia = require('../services/sms-media');
 
 function makeQueryBuilder(rows = []) {
@@ -1605,6 +1608,47 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(409);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test.each([
+    ['returned', async () => sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNKNOWN' })],
+    ['thrown', async () => sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('provider unknown'), { providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } }))],
+  ])('a %s uncertain outcome keeps gate-off claimed suggestions linked for recovery', async (_kind, arrange) => {
+    db.mockImplementation(() => makeUniversalBuilder());
+    suggestMode.parkThreadSuggestions.mockResolvedValueOnce(['parked-1']);
+    await arrange();
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand' }),
+      });
+
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledWith(db, expect.objectContaining({
+        parkedDecisionIds: ['parked-1'],
+      }));
+      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: 'resv-1', uncertain: true });
+      expect(suggestMode.reopenScheduledSuggestions).not.toHaveBeenCalled();
+    });
+  });
+
+  test('does not enter the provider when the durable uncertainty boundary cannot be armed', async () => {
+    mockGates.smsAutoSend = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    suggestMode.settleReplyHoldingReservation.mockResolvedValueOnce(false);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand' }),
+      });
+
+      expect(res.status).toBe(503);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });

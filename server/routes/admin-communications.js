@@ -25,6 +25,8 @@ const {
   HUMAN_REPLY_TYPES,
   markSuggestionScheduled,
   parkThreadSuggestions,
+  createReplyHoldingReservation,
+  settleReplyHoldingReservation,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   sweepStaleSuggestionsAfterReply,
@@ -348,11 +350,13 @@ router.post('/sms', async (req, res, next) => {
     if (!manualReservationId) return;
     const id = manualReservationId;
     manualReservationId = null;
-    await db('sms_log').where({ id }).del().catch((delErr) => {
-      // A leftover reservation is bounded — reconcileAutoSendClaims sweeps
-      // stale 'sending' reservation rows — so a failed delete is non-fatal.
-      logger.warn(`[sms-auto-send] manual reservation cleanup failed (${id}): ${delErr.message}`);
-    });
+    await settleReplyHoldingReservation({ reservationId: id });
+  };
+  const holdManualReservation = async () => {
+    if (!manualReservationId) return;
+    const id = manualReservationId;
+    manualReservationId = null;
+    await settleReplyHoldingReservation({ reservationId: id, uncertain: true });
   };
   try {
     const {
@@ -423,8 +427,9 @@ router.post('/sms', async (req, res, next) => {
       // pass on the same pending card and both text the customer. The
       // guarded single UPDATE is the atomic claim; the loser 409s.
       // 'scheduled' = claimed-for-send: reopened below on blocked/failed/
-      // exception, resolved accepted/corrected on success, and the orphan
-      // sweep reopens it if the process dies in between.
+      // exception and resolved accepted/corrected on success. The linked
+      // reservation below tells recovery whether a crashed attempt is stale
+      // or carries explicit provider uncertainty.
       const claimed = await db('agent_decisions')
         .where({ id: verifiedAgentDecision.id, status: 'pending_review' })
         .update({
@@ -442,13 +447,13 @@ router.post('/sms', async (req, res, next) => {
     // (same as the scheduled path): the post-send sweep can't protect the
     // seconds while Twilio runs, and a parallel admin could still fetch and
     // send the same card. Success resolves them as ignored; blocked/failed/
-    // exception reopens them; a crash mid-send is bounded by the 30-min
-    // orphan recovery.
+    // exception reopens them; recovery reopens an ordinary crashed attempt
+    // after 30 minutes but retains an explicitly uncertain provider outcome.
     let autoSendInFlight = false;
     let staleAtClaim = false;
-    // The auto-send interlock only matters when Phase E auto-send is enabled.
-    // Gated so the manual send path carries ZERO extra work while the feature
-    // is dormant (the usual state): no claim lookup, no reservation row.
+    // The autonomous-claim lookup only matters while Phase E is enabled. The
+    // recovery reservation below is separate: it is also required gate-off
+    // whenever this send claims or parks a suggestion.
     const autoSendInterlock = isEnabled('smsAutoSend');
     try {
       const parkPhoneLast10 = normalizePhoneLast10(to);
@@ -475,35 +480,25 @@ router.post('/sms', async (req, res, next) => {
               autoSendInFlight = true;
               return [];
             }
-            // ...and the symmetric direction: persist a human-typed 'sending'
-            // marker the auto-send's own guard (threadHasLiveAnswer) sees, so an
-            // auto-send claiming AFTER we release the lock won't fire during our
-            // provider window. Deleted once the send resolves (below / in catch).
-            // sms_log.from_phone is NOT NULL, but the route lets callers omit
-            // fromNumber (TwilioService picks the location default at send).
-            // The reservation is a transient marker (deleted after send, never
-            // customer-visible), so its from only needs to be non-null — use
-            // the main-line default. getOutboundNumber() with no location falls
-            // back to the main line.
-            const reservationFrom = fromNumber || TWILIO_NUMBERS.getOutboundNumber();
-            const [resv] = await trx('sms_log')
-              .insert({
-                customer_id: trustedCustomerId || null,
-                direction: 'outbound',
-                from_phone: reservationFrom,
-                to_phone: to,
-                message_body: cleanBody,
-                status: 'sending',
-                message_type: 'manual',
-                admin_user_id: req.technicianId || null,
-                metadata: JSON.stringify({ manual_send_reservation: true }),
-              })
-              .returning('id');
-            manualReservationId = resv?.id || null;
           }
-          return parkThreadSuggestions(
+          const parkedIds = await parkThreadSuggestions(
             { phoneLast10: parkPhoneLast10, excludeDecisionId: verifiedAgentDecision?.id }, trx
           );
+          // The gate controls only the autonomous-send race check. Once this
+          // path claims or parks a suggestion, recovery linkage is required
+          // regardless of the gate's current value.
+          if (autoSendInterlock || claimedDecisionId || parkedIds.length) {
+            manualReservationId = await createReplyHoldingReservation(trx, {
+              to,
+              customerId: trustedCustomerId || null,
+              fromNumber: fromNumber || TWILIO_NUMBERS.getOutboundNumber(),
+              body: cleanBody,
+              adminUserId: req.technicianId || null,
+              agentDecisionId: claimedDecisionId,
+              parkedDecisionIds: parkedIds,
+            });
+          }
+          return parkedIds;
         });
       }
     } catch (parkErr) {
@@ -734,6 +729,12 @@ router.post('/sms', async (req, res, next) => {
     }
 
     const sendStartedAt = new Date();
+    // Everything that can reject without a provider side effect has finished.
+    // Arm the durable marker before entering the provider pipeline; if the DB
+    // cannot record that boundary, fail closed and do not send.
+    if (manualReservationId && !await settleReplyHoldingReservation({ reservationId: manualReservationId, uncertain: true })) {
+      return abortUnsent(503, 'Could not reserve this conversation for provider delivery — try again in a moment.');
+    }
     // Human-authored only when the operator typed the body, not when an
     // unedited AI suggestion is being sent through. The stale-month guard
     // exemption rides on this; an unchanged agent draft stays month-checked
@@ -799,11 +800,14 @@ router.post('/sms', async (req, res, next) => {
           usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
         }))
       : await dispatch();
-    // The reservation has done its job — the real provider row now exists (on
-    // success) or no send happened (on failure). Clear it so it can't linger as
-    // a stuck 'sending' row blocking auto-sends to the thread.
-    await clearManualReservation();
     const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(result);
+    const realProviderSend = autoSendExecutor.isRealProviderSend(result);
+    // A definitive result settles the marker. Uncertainty keeps its linked
+    // decisions held until a sent row or an operator verdict reconciles them.
+    if (ambiguousProviderOutcome) await holdManualReservation();
+    else if (realProviderSend && manualReservationId) {
+      await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: result });
+    } else await clearManualReservation();
     if (result.blocked || result.sent === false || ambiguousProviderOutcome) {
       if (ambiguousProviderOutcome) {
         await holdBearerStateAmbiguous(result);
@@ -950,10 +954,11 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
     }
 
+    let linkedDecisionSettlementComplete = true;
     if (verifiedAgentDecision && verifiedAgentDraft) {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
       try {
-        await db('agent_decisions')
+        const settled = await db('agent_decisions')
           .where({ id: verifiedAgentDecision.id })
           .whereIn('status', ['scheduled', 'pending_review'])
           .update({
@@ -966,7 +971,9 @@ router.post('/sms', async (req, res, next) => {
             reviewed_at: new Date(),
             updated_at: new Date(),
           });
+        if (!settled) linkedDecisionSettlementComplete = false;
       } catch (reviewErr) {
+        linkedDecisionSettlementComplete = false;
         logger.warn(`[agent-review] failed to mark inbox draft decision reviewed: ${reviewErr.message}`);
       }
     }
@@ -975,7 +982,8 @@ router.post('/sms', async (req, res, next) => {
     // operator saw them and chose their own reply; their drafts return to
     // the judge pool against the reply that just went out.
     if (parkedThreadIds.length) {
-      await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
+      const ignored = await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
+      if (ignored !== parkedThreadIds.length) linkedDecisionSettlementComplete = false;
     }
 
     // Cards published BETWEEN the park commit and send completion — the
@@ -988,11 +996,19 @@ router.post('/sms', async (req, res, next) => {
       note: 'Staff sent their own reply from the SMS inbox.',
     });
 
+    // Accepted evidence stays linked until every known decision has durably
+    // settled. Recovery can finish any partial bookkeeping from this row.
+    if (realProviderSend && linkedDecisionSettlementComplete) await clearManualReservation();
+
     res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {
-    // Release the in-flight reservation so a throw mid-send can't strand a
-    // 'sending' row that blocks auto-sends to the thread.
-    await clearManualReservation();
+    const catchProviderOutcome = err?.providerOutcome;
+    const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(catchProviderOutcome);
+    const realProviderSend = autoSendExecutor.isRealProviderSend(catchProviderOutcome);
+    if (ambiguousProviderOutcome) await holdManualReservation();
+    else if (realProviderSend && manualReservationId) {
+      await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: catchProviderOutcome });
+    } else await clearManualReservation();
     // Same for the inline review claim: a throw with NO confirmed provider
     // acceptance means the ask never left — hand the claim back so an
     // immediate retry isn't blocked for the 10-minute stale window. A throw
@@ -1012,7 +1028,6 @@ router.post('/sms', async (req, res, next) => {
     // bearer state exactly as the
     // resolved-result branch does (GH Codex #3851 r5 P1): the provider may
     // hold the text, so the claim and the activated link stay consumed.
-    const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(err?.providerOutcome);
     if (ambiguousProviderOutcome) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
@@ -1058,7 +1073,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // Guarded reopen: anything the send actually resolved before the throw
     // is no longer 'scheduled' and no-ops here.
-    if (!ambiguousProviderOutcome && (claimedDecisionId || parkedThreadIds.length)) {
+    if (!ambiguousProviderOutcome && !realProviderSend && (claimedDecisionId || parkedThreadIds.length)) {
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send errored — suggestion reopened.',
