@@ -3750,6 +3750,13 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     const fields = { firstName: 'first_name', lastName: 'last_name', email: 'email', phone: 'phone', profileLabel: 'profile_label', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city', state: 'state', zip: 'zip', tier: 'waveguard_tier', monthlyRate: 'monthly_rate', active: 'active', leadSource: 'lead_source', companyName: 'company_name', propertyType: 'property_type', crmNotes: 'crm_notes', nextFollowUpDate: 'next_follow_up_date', followUpNotes: 'follow_up_notes', secondaryPhone: 'secondary_phone', secondaryContactName: 'secondary_contact_name', pipelineStage: 'pipeline_stage', serviceContactName: 'service_contact_name', serviceContactPhone: 'service_contact_phone', serviceContactEmail: 'service_contact_email', serviceContact2Name: 'service_contact2_name', serviceContact2Phone: 'service_contact2_phone', serviceContact2Email: 'service_contact2_email', serviceContact3Name: 'service_contact3_name', serviceContact3Phone: 'service_contact3_phone', serviceContact3Email: 'service_contact3_email', hasLeftGoogleReview: 'has_left_google_review', payerId: 'payer_id', billingMode: 'billing_mode', contactRole: 'contact_role' };
     const before = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!before) return res.status(404).json({ error: 'Customer not found' });
+    // A Bill-To change cannot land while a combined-visit invoice minted
+    // self-pay is being delivered: the send claim resolved ownership under
+    // held rows, and a payer assigned after it would still reach the homeowner.
+    if (req.body.payerId !== undefined && String(req.body.payerId ?? '') !== String(before.payer_id ?? '')
+        && await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id })) {
+      return res.status(409).json({ error: 'A combined-visit invoice for this customer is being delivered. Retry the Bill-To change in a moment.', code: 'invoice_send_in_flight' });
+    }
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
       return res.status(400).json({ error: 'Invalid pipeline stage' });
     }
