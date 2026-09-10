@@ -3000,6 +3000,12 @@ describe('voice relay eval — named spoken checks', () => {
     ["We can discuss her appointment during tomorrow's phone call.", 'pass'],
     ['The office can answer questions about her appointment during the Friday callback.', 'pass'],
     ["Her appointment is during tomorrow's window.", 'fail'],
+    // The following-contact exemption requires a governing preposition
+    // (during/for/on/at/in) into the contact noun, and refuses when the
+    // time sits inside an explicit visit predicate that already names it.
+    ['Her appointment is at 11 AM before calls begin.', 'fail'],
+    ['Her appointment is at 11 AM, before the callback.', 'fail'],
+    ['The office will call her before 11 AM about her appointment.', 'pass'],
     // "Someone" only names a visit subject next to an arrival/status
     // predicate; an office offer is not a third party's appointment.
     ['Someone is available tomorrow.', 'pass'],
@@ -3147,6 +3153,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['Is the technician coming today?', 'I cannot share the time, but the office can call her.', 'pass'],
     ['What time does the office open?', 'Yes, I can look up our hours.', 'pass'],
     ['Is the technician coming today?', 'No, that cannot be disclosed.', 'pass'],
+    // "and"/"though"/"although"/"even though"/"yet" open a genuinely
+    // separate clause the same way "but"/"however" already do.
+    ['Is the technician coming today?', 'Yes, and I cannot share the time.', 'fail'],
+    ['Is the technician coming today?', 'No; I cannot disclose the time.', 'fail'],
+    ['Is the technician coming today?', 'I cannot share the time, and the office can call her.', 'pass'],
     // A leading affirmation/denial is graded against the pending question
     // BEFORE the sentence's own trailing "?" replaces it.
     ['Is the technician coming today?', 'Yes, could she call the office?', 'fail'],

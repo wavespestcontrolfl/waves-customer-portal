@@ -556,7 +556,13 @@ const COURTESY_FILLER_RE = /^(?:problem|worries)\b|^\s*not\s+at\s+all\b/i;
 // refusal after it exempts only itself, never the leading yes/no. Without
 // one, a comma before the refusal is just a pause in the same clause — "No,
 // that cannot be disclosed" is one refusal throughout, as it already was.
-const CONTRASTIVE_CLAUSE_RE = /\b(?:but|however)\b/i;
+// A coordinating "and"/"though"/"although"/"even though"/"yet" opens a
+// genuinely separate clause the same way "but"/"however" already does —
+// "Yes, and I cannot share the time" asserts the yes and THEN adds a
+// caveat — as does a semicolon or period, though those are already sentence
+// boundaries the caller-facing split above never hands this function intact.
+// "and" that continues a number ("ten and twelve") is not a boundary.
+const CONTRASTIVE_CLAUSE_RE = new RegExp(`\\b(?:but|however|though|although|even though|yet)\\b|\\band(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b)\\b|[;.]`, 'i');
 function isPrivacyNonAnswer(text) {
   const contrastive = CONTRASTIVE_CLAUSE_RE.exec(text);
   const lead = contrastive ? text.slice(0, contrastive.index) : text;
@@ -645,8 +651,15 @@ const VISIT_COORDINATION_RE = new RegExp(`\\b(?:and(?!\\s+(?:\\d|${NUMBER_WORD_E
 // applied here for the time-qualifies-the-noun case.
 const GENERIC_APPOINTMENT_PROCESS_RE = /^\s+(?:appointments|visits|services|appointment booking|visit booking|service booking)\b[^.!?]*\b(?:(?:can|could|may)\s+be\s+(?:booked|scheduled)|(?:is|are)\s+(?:booked|scheduled)|opens?|open up|become available)\b/i;
 // A contact/callback noun right after a time, allowing a possessive "'s" and
-// up to two filler words ("tomorrow's phone call"), binds the time to it.
+// up to two filler words ("tomorrow's phone call"), binds the time to it —
+// but only when a governing preposition actually introduces the time into
+// that contact activity ("during/for/on/at/in tomorrow's phone call"), and
+// never when the time sits inside an explicit visit predicate ("appointment
+// is at 11 AM", "starts at", "is scheduled for") that already names it:
+// "before calls begin" is an unrelated aside, not a governed contact noun.
 const FOLLOWING_CONTACT_RE = new RegExp(`^\\s*(?:[\\x27\\u2019]s\\s*)?(?:[a-z]+\\s+){0,2}(?:${CONTACT_SUBJECT_RE.source})`, 'i');
+const CONTACT_GOVERNING_PREPOSITION_RE = /\b(?:during|for|on|at|in)\s+(?:the|a|an)?\s*$/i;
+const VISIT_PREDICATE_BEFORE_TIME_RE = /\b(?:is|are|was|were)\s+(?:at|scheduled\s+for)\s*$|\bstarts?\s+at\s*$/i;
 
 function isNonVisitPredicate(clause, match) {
   const suffix = clause.slice(match.index + match[0].length);
@@ -762,7 +775,12 @@ function no_third_party_disclosure(value, record, { spoken }) {
         // binds it instead of a visit noun that happens to precede it:
         // "during tomorrow's phone call" is a callback time, not the
         // appointment's.
-        if (subjectBeforeTime && FOLLOWING_CONTACT_RE.test(afterTime)) return false;
+        if ([
+          subjectBeforeTime,
+          CONTACT_GOVERNING_PREPOSITION_RE.test(prefix),
+          !VISIT_PREDICATE_BEFORE_TIME_RE.test(prefix),
+          FOLLOWING_CONTACT_RE.test(afterTime),
+        ].every(Boolean)) return false;
         // A relative clause or "it" can continue the preceding subject, but
         // the antecedent's own refusal or exemption still governs the fact,
         // the same way a subject sitting in this sentence would.
