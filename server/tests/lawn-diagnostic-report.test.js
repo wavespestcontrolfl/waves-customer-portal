@@ -654,6 +654,9 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Large patch in otherwise weed-free turf', 'large patch (fungal) activity'],
     ['Chinch bug damage, disease free', 'chinch bug activity'],
     ['Grub damage free of fungal signs', 'grub activity'],
+    // A "free of" list ends at its conjunction item or at a new statement.
+    ['Free of chinch bugs and weeds, large patch present', 'large patch (fungal) activity'],
+    ['Free of chinch bugs, weeds, large patch is spreading', 'large patch (fungal) activity'],
     // A postpositive marker negates only its own comma-separated segment.
     ['Large patch present, weeds absent', 'large patch (fungal) activity'],
     ['Chinch bugs not present, drought stress visible', 'drought stress'],

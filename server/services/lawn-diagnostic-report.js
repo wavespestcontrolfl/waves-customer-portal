@@ -596,7 +596,17 @@ let freeDifferential = null;
 function freeDifferentialRe() {
   if (!freeDifferential) {
     const cause = SUMMARY_CAUSE_RE.source.slice(2, -2);
-    freeDifferential = new RegExp(`\\bfree\\s+(?:of|from)\\b.*$|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
+    // "free of/from" consumes its whole enumerated list (items joined by commas
+    // or and/or/nor) but stops at a word that starts a new positive statement, so
+    // "Free of chinch bugs and weeds" is clean while "Free of chinch bugs and
+    // weeds, large patch present" keeps large patch.
+    const state = '(?:present|visible|spreading|active|observed|seen|noted|confirmed|is|are|was|were)';
+    // An item runs to a comma, a conjunction or the clause end; a state word
+    // inside it means it is a new statement, not a list item.
+    const item = `(?:(?!\\b(?:and|or|nor|but|with)\\b|\\b${state}\\b)[\\w‐‑‒–—-]+\\s*)+(?=$|[,.;!?]|(?:and|or|nor|&|\\/)\\b)`;
+    // Comma items, then at most one conjunction item, which closes the list.
+    const freeList = `\\bfree\\s+(?:of|from)\\s+${item}(?:,\\s*${item})*(?:,?\\s*(?:and|or|nor|&|\\/)\\s*${item})?`;
+    freeDifferential = new RegExp(`${freeList}|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
   }
   freeDifferential.lastIndex = 0;
   return freeDifferential;
