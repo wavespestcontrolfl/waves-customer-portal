@@ -118,12 +118,41 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   }
 }
 
+// The self-pay invoice of a packet whose live owner is now a payer is
+// withdrawn under the held customer, member and payer rows; returns that
+// payer, or null when the invoice is self-pay or already terminal.
+async function withdrawPayerOwnedInvoice(packet, database) {
+  const candidate = await database('invoices').where({ visit_completion_packet_id: packet.id }).whereNull('payer_id')
+    .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid']).first('id');
+  if (!candidate) return null;
+  const Packets = require('./visit-completion-packets');
+  const run = async (trx) => {
+    const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packet.id, trx);
+    if (!visit || !payerId) return null;
+    await Packets.withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: candidate.id, visit, billed, payerId });
+    return payerId;
+  };
+  return database.isTransaction ? run(database) : database.transaction(run);
+}
+
 /** One automatic collection decision for the saved visit, using the invoice rail. */
 async function collectVisitCompletionInvoice(packetId, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) throw new Error('Visit completion packet not found');
+  // Live Bill-To is decided under held rows BEFORE any automatic collection:
+  // a payer assigned since the self-pay invoice was minted withdraws it
+  // (stamp, billing hold, office review), so neither the saved card nor
+  // account credit settles debt that belongs to AP. The payer writers refuse
+  // while this collection's own claim is in flight (packetInvoiceSendInFlight).
+  const withdrawnFor = await withdrawPayerOwnedInvoice(packet, database);
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
+  if (withdrawnFor) {
+    const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'suppressed', new Date(), null, {
+      lastError: 'office_required', providerId: invoice?.stripe_payment_intent_id || null,
+    });
+    return { state: finalized.ok ? 'office_required' : 'payment_pending', reason: 'payer_assigned', payerId: withdrawnFor, invoiceId: invoice?.id || null };
+  }
   if (visit.billing_hold || ['void', 'refunded', 'canceled', 'cancelled'].includes(invoice?.status)) {
     if (!visit.billing_hold) {
       await database('service_visits').where({ id: visit.id }).update({

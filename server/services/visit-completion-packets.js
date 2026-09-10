@@ -235,16 +235,14 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
       body: structuredClone(savedForm.body), actor: payload.actor,
     }, { phase: 'effects', itemId: item.id });
     if (result.status !== 200 || result.body.serviceRecordId !== item.service_record_id) {
-      const retryableConflict = result.status === 409
-        && ['service_completion_pending', 'completion_pending', 'completion_side_effects_running'].includes(result.body.code);
+      const verdict = memberEffectRefusal(result);
       // The visit left the packet's technician while effects ran (an office
       // reassignment after the resume boundary): not the member's verdict —
       // the packet stays processing and the caller is told to refresh.
-      if (result.status === 403 && result.body.code === 'service_not_assigned') {
+      if (verdict === 'out_of_scope') {
         return failure(409, 'visit_out_of_scope', 'This visit is no longer in your current schedule. Refresh the schedule.');
       }
-      if (result.status >= 400 && result.status < 500
-          && ![408, 425, 429].includes(result.status) && !retryableConflict) {
+      if (verdict === 'terminal') {
         const code = result.body.code || 'member_effects_rejected';
         const finishedElsewhere = await database.transaction(async (trx) => {
           const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
@@ -297,6 +295,18 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
   return { status: 202, body: { visitId: packet.visit_id, packetId: packet.id, state: 'member_effects_ready' } };
 }
 
+// How a member effect's non-success result is treated: a live conflict with
+// another runner retries, a visit that left the technician mid-run is out of
+// scope (non-terminal), any other 4xx is the member's terminal verdict, and
+// everything else (5xx, 408/425/429) retries.
+function memberEffectRefusal(result) {
+  const code = result.body?.code;
+  if (result.status === 409 && ['service_completion_pending', 'completion_pending', 'completion_side_effects_running'].includes(code)) return 'retry';
+  if (result.status === 403 && code === 'service_not_assigned') return 'out_of_scope';
+  if (result.status >= 400 && result.status < 500 && ![408, 425, 429].includes(result.status)) return 'terminal';
+  return 'retry';
+}
+
 /** Run summary and financial effects only after every member is ready. */
 async function runVisitCompletionPacketEffects(packetId, database = db) {
   const members = await runVisitCompletionPacketMemberEffects(packetId, database);
@@ -309,22 +319,10 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   // encryption key is not a prerequisite for closing it.
   const token = await Summary.packetHasPublishableSummary(packet.id, database)
     ? await Summary.ensureVisitSummaryToken(packet.id, database) : null;
-  // Live Bill-To is decided under held rows BEFORE any automatic collection:
-  // a payer assigned since the self-pay invoice was minted withdraws it (hold,
-  // stamp, office review) so neither the saved card nor account credit can
-  // settle debt that belongs to AP. The payer writers refuse while the
-  // collection's own claim is in flight (packetInvoiceSendInFlight).
-  const selfPayInvoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).whereNull('payer_id')
-    .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid']).first('id');
-  const payerBeforeCollection = selfPayInvoice ? await database.transaction(async (trx) => {
-    const { visit, billed, payerId } = await resolvePacketOwnershipLocked(packet.id, trx);
-    if (visit && payerId) await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: selfPayInvoice.id, visit, billed, payerId });
-    return visit ? payerId : null;
-  }) : null;
+  // The collector decides live Bill-To under held rows before any automatic
+  // collection (visit-completion-payment.js); a withdrawn invoice comes back
+  // as office_required with reason payer_assigned.
   let payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
-  if (payerBeforeCollection && payment.state === 'office_required') {
-    payment = { ...payment, reason: 'payer_assigned', payerId: payerBeforeCollection };
-  }
   // Unpaid invoices use the existing scheduled invoice sender and its
   // durable send claim. Billing contacts receive their financial document;
   // service contacts' summary token never grants access to billing details.
