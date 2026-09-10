@@ -244,6 +244,49 @@ run('callback ledger on PostgreSQL', () => {
     expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
   });
 
+  test('a save that changes nothing does not hide a call returned while the editor was open', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    const edited = await cards.actOnCallback(trx, row.id, { action: 'edit', actorId: staff.id, expectedAt: row.updated_at,
+      description: 'Call about the revised quote', due_at: null, now: new Date() });
+    const editedAt = (await trx('audit_log').where({ resource_id: row.id, action: 'callback_edit' }).first()).created_at;
+    await returnedCall(new Date(new Date(editedAt).getTime() + 1));
+    await tick();
+    // The editor resubmits the same wording and deadline on Save.
+    const saved = await cards.actOnCallback(trx, row.id, { action: 'edit', actorId: staff.id, expectedAt: edited.updated_at,
+      description: 'Call about the revised quote', due_at: null, note: 'left as is', now: new Date() });
+    expect(saved.human_state).toBe('edited');
+    expect(saved.human_note).toBe('left as is');
+    const audits = await trx('audit_log').where({ resource_id: row.id, action: 'callback_edit' }).orderBy('created_at', 'asc');
+    expect(audits.map((a) => a.metadata.restated)).toEqual([true, false]);
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+  });
+
+  test('a callback edited before callback cards existed keeps that review as its evidence boundary', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed({ source: 'ai', last_seen_generation: 1 });
+    const staff = await trx('technicians').where({ employment_status: 'active' }).first('id');
+    await returnedCall(new Date(now.getTime() - 60000));
+    await tick();
+    // The generic commitments path: human_state = 'edited', reviewed_at stamped, no callback_edit audit event.
+    const edited = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', description: 'Call about the fence line', reviewedBy: staff.id });
+    expect(await trx('audit_log').where({ resource_id: row.id, action: 'callback_edit' })).toEqual([]);
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+    // A later claim under callback cards leaves that boundary in place.
+    await cards.actOnCallback(trx, row.id, { action: 'claim', actorId: staff.id, expectedAt: edited.updated_at, now: new Date() });
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+    // Confirming the edited card reaffirms the edit: state and review time stay.
+    const claimed = await trx('call_commitments').where({ id: row.id }).first();
+    await cards.actOnCallback(trx, row.id, { action: 'confirm', actorId: staff.id, expectedAt: claimed.updated_at, now: new Date() });
+    const confirmed = await trx('call_commitments').where({ id: row.id }).first();
+    expect(confirmed.human_state).toBe('edited');
+    expect(confirmed.reviewed_at).toEqual(edited.reviewed_at);
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 0 });
+    await returnedCall(await afterReview(row.id));
+    expect(await ledger.refreshFulfillment(trx, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+  });
+
   test('a human-recorded callback on an old call ignores evidence from before it was typed', async () => {
     const ledger = require('../services/call-commitments');
     const source = await seed();

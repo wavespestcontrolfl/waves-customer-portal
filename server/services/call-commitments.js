@@ -1174,7 +1174,11 @@ async function resolveFulfillment(conn, commitment, call) {
       // pre-policy call keeps the legacy connected-call rule below. The gate
       // plays no part, so rollback cannot weaken a card attempt and enabling
       // the gate cannot strip an earlier attempt of its rule.
-      const policyLink = "COALESCE(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'), FALSE)";
+      // Two plain arms, no COALESCE: each arm implies one of the partial
+      // expression indexes on call_log.metadata (relatedCommitmentId;
+      // relatedCallId under the card policy), so the watchdog's per-promise
+      // probes are index lookups rather than sequential scans of call_log.
+      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
       const policyBindings = [commitment.id, commitment.call_log_id];
       const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
       const connected = await conn('call_log').where('direction', 'outbound')
@@ -1355,11 +1359,20 @@ async function resolveFulfillment(conn, commitment, call) {
 async function obligationRenewedAt(conn, commitment) {
   if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
-  const restated = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
-    .whereIn('action', ['callback_edit', 'callback_reopen']).orderBy('created_at', 'desc').first('created_at');
-  const times = [commitment.source === 'human' ? commitment.created_at : null, restated?.created_at]
-    .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
-  return times.length ? new Date(Math.max(...times)) : null;
+  const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
+  const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
+  // A save that changed nothing (metadata.restated === false) restates nothing.
+  const restatements = events.filter((e) => !(e.action === 'callback_edit' && meta(e).restated === false));
+  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => e.created_at)];
+  // A card edited before callback cards existed went through the generic
+  // path, which wrote no callback_edit event: its reviewed_at is the only
+  // boundary on record (at worst later than the edit, never earlier), so
+  // an outbound call from before that historical edit cannot close the
+  // revised obligation.
+  if (commitment.human_state === 'edited' && !restatements.some((e) => e.action === 'callback_edit')) times.push(commitment.reviewed_at);
+  const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+  return ms.length ? new Date(Math.max(...ms)) : null;
 }
 
 // The rows fulfillment refresh may still write: no human verdict, or a
@@ -1797,7 +1810,14 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
     case 'confirm':
-      patch.human_state = 'confirmed';
+      // Confirming an EDITED callback card reaffirms the edit rather than
+      // un-editing it: the edited state and its review time stay, because
+      // for a card edited before callback cards existed that reviewed_at
+      // is the only evidence boundary on record (obligationRenewedAt).
+      // Other commitments keep the plain confirm.
+      patch.human_state = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN 'edited' ELSE 'confirmed' END");
+      patch.reviewed_at = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN reviewed_at ELSE ? END", [patch.reviewed_at]);
+      patch.reviewed_by = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN reviewed_by ELSE ? END", [patch.reviewed_by]);
       break;
     case 'dismiss':
       patch.human_state = 'dismissed';
