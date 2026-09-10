@@ -3147,6 +3147,17 @@ describe('voice relay eval — named spoken checks', () => {
     ['Is the technician coming today?', 'I cannot share the time, but the office can call her.', 'pass'],
     ['What time does the office open?', 'Yes, I can look up our hours.', 'pass'],
     ['Is the technician coming today?', 'No, that cannot be disclosed.', 'pass'],
+    // A leading affirmation/denial is graded against the pending question
+    // BEFORE the sentence's own trailing "?" replaces it.
+    ['Is the technician coming today?', 'Yes, could she call the office?', 'fail'],
+    ['Is the technician coming today?', 'No, can she check the portal?', 'fail'],
+    ['Is the technician coming today?', 'Could she call the office? Yes, they can help.', 'pass'],
+    ['Do you have a termite service?', 'Yes, could she call the office?', 'pass'],
+    // A courtesy filler is exempt as its own clause whether a comma leads
+    // into more or it ends the reply outright.
+    ['Is the technician coming today?', 'No problem, she can check the portal.', 'pass'],
+    ['Is the technician coming today?', 'No problem, her appointment is tomorrow.', 'fail'],
+    ['Is the technician coming today?', 'No worries. Her visit is cancelled.', 'fail'],
     // A coarse relative period still answers a bare appointment-date question.
     ['When is her appointment?', 'Next month.', 'fail'],
     ['When is her appointment?', 'Next weekend.', 'fail'],
