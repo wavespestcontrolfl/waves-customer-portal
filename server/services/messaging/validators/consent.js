@@ -166,8 +166,11 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // Comms billing reminder), and suppressing those for an email-only customer
   // would leave them with no message at all. Flows with a real email sidecar
   // (the invoice receipt path) opt in.
+  // The visit's saved property owns the appointment toggles when it decided
+  // them (app property scope, PR 3); everything else stays the customer row.
+  const toggles = contactState?.propertyToggles || prefs;
   const purposeToggledOff = [].concat(policy.prefsColumn || [])
-    .some((prefsColumn) => prefs[prefsColumn] === false);
+    .some((prefsColumn) => toggles[prefsColumn] === false);
   const channelGateApplies = policy.channelColumn
     && input.channel === 'sms'
     && !purposeToggledOff
@@ -208,7 +211,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // receipt kill switch and the portal texts toggle) — ALL must be non-false.
   for (const prefsColumn of [].concat(policy.prefsColumn || [])) {
     if (input.channel === 'push' && prefsColumn === 'payment_confirmation_sms') continue;
-    if (prefs[prefsColumn] === false) {
+    if (toggles[prefsColumn] === false) {
       return {
         ok: false,
         code: 'PURPOSE_OPTED_OUT',
@@ -263,12 +266,34 @@ async function checkConsentForPurpose(input, policy, contactState) {
  * Load the recipient's notification_prefs + minimal customer record into
  * contactState. Pure read, no writes.
  */
+// App property scope (PR 3): an appointment send names its visit
+// (input.appointmentId); a NON-primary saved property owns the five
+// appointment toggles the per-purpose gate reads (enforced under
+// GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unreadable under
+// enforcement = lookupFailed → CONSENT_LOOKUP_FAILED (retry), never the
+// customer row's answer. No-op without a visit, a row, or a customer.
+// A customer with NO prefs row keeps that state (the no-record branches of
+// checkConsentForPurpose stay fail-closed); the property decision lands in
+// state.propertyToggles, which the per-purpose gate reads first.
+async function applyVisitPropertyToggles(state, input, dbh) {
+  if (!state.customer || !input.appointmentId || state.lookupFailed) return;
+  try {
+    const resolved = await require('../../property-notification-prefs')
+      .resolveAppointmentPrefs({ customerId: state.customer.id, scheduledServiceId: input.appointmentId, prefs: state.prefs || {}, source: 'consent' }, dbh);
+    if (resolved.propertyDecided) state.propertyToggles = resolved.prefs;
+  } catch (err) {
+    if (dbh.isTransaction) throw err;
+    logger.warn(`[messaging:consent] property toggle lookup failed: ${err.message}`);
+    state.lookupFailed = true;
+  }
+}
+
 async function loadContactState(input, dbh = db) {
   // lookupFailed signals a transient DB error during the consent
   // lookup. The validator distinguishes this from a clean "no record
   // found" outcome so callers can retry instead of suppressing on a
   // DB blip (codex P1 on PR #545).
-  const state = { prefs: null, customer: null, lookupFailed: false };
+  const state = { prefs: null, customer: null, lookupFailed: false, propertyToggles: null };
 
   // Try by customerId first (cheapest, indexed lookup).
   if (input.customerId) {
@@ -306,6 +331,8 @@ async function loadContactState(input, dbh = db) {
       state.lookupFailed = true;
     }
   }
+
+  await applyVisitPropertyToggles(state, input, dbh);
 
   // Reply evidence for the no-prefs-row conversational exception: has this
   // phone ever texted US? Only queried when the consent decision actually
