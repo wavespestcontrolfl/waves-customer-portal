@@ -22,7 +22,7 @@ const history = require('../services/review-ask-history');
 const { dispatchScheduledSms } = require('../services/scheduled-sms-delivery');
 const { holdFinalReviewUncertainty } = require('../services/scheduler');
 
-let row, providerRow, updates;
+let row, reviewRequest, providerRow, updates, reviewUpdates;
 beforeEach(() => {
   jest.useFakeTimers().setSystemTime(new Date('2026-09-09T15:00:00Z'));
   mockHeld.clear();
@@ -30,17 +30,29 @@ beforeEach(() => {
   history.lastManualAskAt.mockReset().mockResolvedValue(null);
   providerRow = null;
   updates = [];
+  reviewUpdates = [];
   row = { id: 'queued-1', customer_id: 'customer-1', status: 'sending',
     message_body: 'Please leave a review: https://g.page/r/example/review',
     metadata: { scheduled_sms_attempts: 3, entry_point: 'durable-test', parked_decision_ids: ['parked-1'] } };
+  reviewRequest = { id: 'review-1', status: 'pending', sms_sent_at: null, scheduled_for: null };
   db.raw = (sql, bindings) => ({ sql, bindings });
-  db.mockImplementation(() => {
+  db.transaction = async work => work(db);
+  db.mockImplementation((table) => {
     const filters = {};
     return {
       where(values) { Object.assign(filters, values); return this; },
+      whereNull(column) { filters[column] = null; return this; },
       whereIn() { return this; }, whereRaw() { return this; },
       first: async () => providerRow,
       update: async patch => {
+        if (table === 'review_requests') {
+          reviewUpdates.push(patch);
+          if (filters.id !== reviewRequest.id
+            || (filters.status && filters.status !== reviewRequest.status)
+            || (filters.sms_sent_at === null && reviewRequest.sms_sent_at != null)) return 0;
+          Object.assign(reviewRequest, patch);
+          return 1;
+        }
         updates.push({ patch, held: mockHeld.has('review-send:customer-1') });
         if (filters.id !== row.id || (filters.status && filters.status !== row.status)) return 0;
         const meta = { ...row.metadata };
@@ -170,7 +182,7 @@ test('repeated settlement failures preserve accepted evidence for the scheduler 
   expect(row.metadata.queued_at).toEqual(queuedAt);
 });
 
-test.each(['recent', 'history', 'busy'])('completion keeps its transactional links when review is held: %s', async kind => {
+test.each(['recent', 'history', 'busy'])('completion durably arms its stripped review fallback through finalization: %s', async kind => {
   const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
   row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
   row.metadata.entry_point = 'dispatch_completion_deferred';
@@ -188,7 +200,17 @@ test.each(['recent', 'history', 'busy'])('completion keeps its transactional lin
   expect(await dispatchScheduledSms(row, meta, send, 'service_complete')).toMatchObject({ sent: true });
   expect(send).toHaveBeenCalledTimes(1);
   expect(row.status).toBe('sent');
+  const expectedRetryMs = Date.now() + (kind === 'recent' ? 72 * 3600000 : 15 * 60000);
+  expect(reviewUpdates).toEqual([{ scheduled_for: new Date(expectedRetryMs) }]);
+  expect(reviewRequest).toMatchObject({
+    id: 'review-1',
+    status: 'pending',
+    sms_sent_at: null,
+    scheduled_for: new Date(expectedRetryMs),
+  });
   expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
+  expect(await require('../services/dispatch-completion-deferred').finalizeDeferredCompletionSend(meta)).toEqual({ ok: true });
+  expect(reviewRequest).toMatchObject({ status: 'pending', sms_sent_at: null, scheduled_for: new Date(expectedRetryMs) });
 });
 
 test('an unpersisted completion rewrite never dispatches a stale bundled ask', async () => {
@@ -197,10 +219,25 @@ test('an unpersisted completion rewrite never dispatches a stale bundled ask', a
   row.metadata.bundled_review_request_id = 'review-1';
   history.lastDeliveredAskAt.mockResolvedValue(new Date());
   const original = db.getMockImplementation();
-  db.mockImplementation((...args) => { const q = original(...args); q.update = async () => { throw new Error('rewrite unavailable'); }; return q; });
+  db.mockImplementation((table) => {
+    const q = original(table);
+    if (table === 'sms_log') q.update = async () => { throw new Error('rewrite unavailable'); };
+    return q;
+  });
+  db.transaction = async work => {
+    const reviewBefore = { ...reviewRequest };
+    try {
+      return await work(db);
+    } catch (err) {
+      Object.assign(reviewRequest, reviewBefore);
+      throw err;
+    }
+  };
   const send = jest.fn();
   await expect(dispatchScheduledSms(row, row.metadata, send, 'service_complete')).rejects.toThrow('rewrite unavailable');
   expect(send).not.toHaveBeenCalled();
+  expect(reviewRequest.scheduled_for).toBeNull();
+  expect(row.metadata.bundled_review_request_id).toBe('review-1');
 });
 
 test.each([true, false].flatMap(review => ['gate-blocked', 'template-disabled', 'owner-silence'].map(id => [review, id])))

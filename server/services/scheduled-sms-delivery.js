@@ -150,12 +150,31 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   if (meta.entry_point === 'dispatch_completion_deferred' && meta.bundled_review_request_id) {
     const body = msg.message_body.replace(/\n\nEnjoyed the service\? A quick review means the world: (?:https?:\/\/)?[^\s]+(?=\s*(?:Reply STOP to (?:unsubscribe|opt out)\.?)?\s*$)/i, '').trim();
     if (body && body !== msg.message_body && !looksLikeReviewAsk(body)) {
-      const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-        message_body: body,
-        metadata: db.raw("COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - 'review_ask_reservation'"),
-        updated_at: new Date(),
+      const explicitRetryAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
+      const reviewRetryAt = explicitRetryAt && !Number.isNaN(explicitRetryAt.getTime())
+        ? explicitRetryAt
+        : new Date(Date.now() + 15 * 60 * 1000);
+      const bundledReviewRequestId = meta.bundled_review_request_id;
+      // The completion/receipt must continue without the optional ask, but
+      // dropping its only replay linkage used to strand an unscheduled inline
+      // request: delivery finalization could no longer mark it delivered and
+      // terminal recovery could no longer arm its standalone fallback. Arm
+      // the still-pending request in the SAME transaction as the body rewrite
+      // so every committed stripped completion leaves one durable send owner.
+      // A zero-row update means the request is already delivered, suppressed,
+      // missing, or actively claimed and therefore owns its own settlement.
+      await db.transaction(async trx => {
+        await trx('review_requests')
+          .where({ id: bundledReviewRequestId, status: 'pending' })
+          .whereNull('sms_sent_at')
+          .update({ scheduled_for: reviewRetryAt });
+        const changed = await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
+          message_body: body,
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) - 'bundled_review_request_id' - 'review_ask_reservation'"),
+          updated_at: new Date(),
+        });
+        if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
       });
-      if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
       msg.message_body = body;
       delete meta.bundled_review_request_id;
       delete meta.review_ask_reservation;
