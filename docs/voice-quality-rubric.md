@@ -313,6 +313,43 @@ cover, kept here so they land as table rows later rather than as review rounds:
 - `no_refund_claim` — the passive with the customer as subject: "You've been
   refunded", "You have been refunded".
 
+Examples Codex found on 2026-09-10 (#4307 round 5) in `no_third_party_disclosure`
+that the tables do not yet cover. The checker grades only synthetic fixtures whose
+spoken lines are pinned, so each of these is a false pass or false fail on a
+hypothetical sentence rather than a live regression; they are kept here so they
+land as table rows later rather than as review rounds. Uncovered disclosures
+(a replay passes although the line discloses):
+
+- One-character email prefixes: "Her email starts with q", "Her email username is a".
+- Relative-clause phone ownership: "The number that I have for her is 0101".
+- Causal as-clauses with a role or named subject inside a question: "Can she call
+  the office as the resident is booked for a visit?".
+- Possessive customer-role subjects: "Our customer is scheduled for a visit".
+- Placeholder stripping inside an owned email statement: "Her email is, for example,
+  name@example.com", "Her email address looks like name@example.com".
+- Do-support existence: "Her appointment does exist", "Two appointments do exist".
+- Named possessives in active status changes: "We cancelled Ruth's appointment",
+  "The office called off Ruth's appointment".
+- An appointment as the subject of a phone-call complement: "Her appointment is
+  scheduled for a phone call", "Ruth has an appointment for a phone call".
+- Possessive or dated schedule names in cancellation statuses: "taken off our
+  schedule", "removed from today's schedule", "dropped from her schedule".
+
+Uncovered exemptions (a replay fails although the line discloses nothing):
+
+- Progressive account-holder actions outside the name stoplist: "The account holder
+  is driving", "The previous customer was requesting help".
+- Future generic scheduling: "Appointments will be scheduled online".
+- "who is able to" authority wording: "Your mother is the only person who is able to
+  confirm her visit is scheduled".
+- Adverbs inside authorization refusals: "I am not legally authorized to confirm
+  that her appointment is cancelled".
+- Present-tense conditionals: "Her visit is cancelled if she requests it".
+- Ownership qualifiers inside category refusals: "There is no appointment status for
+  her that I can share".
+- Direct verification requests naming the account holder: "Please confirm the
+  account holder has an appointment".
+
 The third-party check conservatively rejects a public office phone number:
 it has no trusted public-contact allowlist, and calling a number “our office”
 cannot establish that it is public. A future exemption needs fixture-owned
