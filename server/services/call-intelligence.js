@@ -117,17 +117,23 @@ function describeProcessing(call) {
 }
 
 function nextAction({ commitments, disposition, v2, reviewStatus }) {
+  // Ordered by the deadline the queue judges: a callback card's staffed
+  // (or snoozed) effective_due_at, else the stated due_at. An undated
+  // callback with a staffed deadline is not "infinitely late" behind a
+  // dated promise that falls after it.
+  const dueMs = (c) => { const t = c.effective_due_at || c.due_at; return t ? new Date(t).getTime() : Infinity; };
   const openWaves = commitments
     .filter((c) => c.party === 'waves' && c.status === 'open' && c.human_state !== 'dismissed')
-    .sort((a, b) => (a.due_at ? new Date(a.due_at).getTime() : Infinity) - (b.due_at ? new Date(b.due_at).getTime() : Infinity));
+    .sort((a, b) => dueMs(a) - dueMs(b));
   if (openWaves.length) {
     const c = openWaves[0];
+    const due = c.effective_due_at || c.due_at || null;
     return {
       action: c.description,
       kind: c.kind,
       owner: c.kind === 'technician_follow_up' ? 'technician' : 'office',
-      due_at: c.due_at || null,
-      due_basis: c.due_basis || (c.due_at ? 'stated' : null),
+      due_at: due,
+      due_basis: c.due_basis || (c.due_at ? 'stated' : (due ? 'staffed' : null)),
       commitment_id: c.id,
       basis: c.source === 'human' ? 'office_added' : 'detected_on_call',
     };
