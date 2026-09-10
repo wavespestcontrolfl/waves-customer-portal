@@ -3,7 +3,7 @@ jest.mock('../models/db', () => {
   db.raw = jest.fn(); db.fn = { now: jest.fn() };
   return db;
 });
-const { PDFDocument, PDFName, degrees } = require('pdf-lib');
+const { PDFDocument, PDFName, PDFNumber, PDFString, degrees } = require('pdf-lib');
 const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
@@ -237,7 +237,7 @@ describe('bid form original integrity beyond the content streams', () => {
     if (text) field.setText(text);
     if (flatten) pdf.getForm().flatten();
     if (extraPage) pdf.addPage([612, 792]);
-    mutateOther(other, field);
+    mutateOther(other, field, pdf);
   });
   test('blank fields elsewhere in the packet are allowed; filled ones are refused', async () => {
     await approve(await packet(null));
@@ -261,6 +261,36 @@ describe('bid form original integrity beyond the content streams', () => {
   ])('a %s attestation page elsewhere in the packet is refused (GH codex P2 r4 on #4270)', async (name, mutateOther) => {
     await approve(await packet(null));
     await expect(build(await packet(null, { mutateOther }))).rejects.toThrow(/other pages of this PDF differ/);
+  });
+  const signatureField = (pdf, page, value) => {
+    const dict = pdf.context.obj({ FT: 'Sig', T: PDFString.of('Signature1'), Type: 'Annot', Subtype: 'Widget', Rect: [300, 50, 500, 80], F: 4 });
+    if (value) dict.set(PDFName.of('V'), pdf.context.obj({ Type: 'Sig', Filter: 'Adobe.PPKLite' }));
+    const ref = pdf.context.register(dict);
+    dict.set(PDFName.of('P'), page.ref);
+    page.node.addAnnot(ref);
+    pdf.getForm().acroForm.addField(ref);
+    pdf.getForm().acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(1));
+  };
+  test('the original\'s unsigned signature fields (SigFlags 1) are accepted; a signed or append-only packet is refused', async () => {
+    // The reviewed North Port original ships five empty /Sig fields with
+    // SigFlags 1; the round-1 check refused it outright.
+    const unsigned = await packet(null, { mutateOther: (other) => {} });
+    await approve(await packet(null, { mutateOther: (other, field, pdf) => signatureField(pdf, other, false) }));
+    await expect(build(await packet(null, { mutateOther: (other, field, pdf) => signatureField(pdf, other, false) }))).resolves.toBeInstanceOf(Buffer);
+    await expect(build(await packet(null, { mutateOther: (other, field, pdf) => signatureField(pdf, other, true) }))).rejects.toThrow(/signed or prepared for signature/);
+    await expect(build(await packet(null, { mutateOther: (other, field, pdf) => { signatureField(pdf, other, false); pdf.getForm().acroForm.dict.set(PDFName.of('SigFlags'), PDFNumber.of(3)); } }))).rejects.toThrow(/signed or prepared for signature/);
+    expect(unsigned).toBeInstanceOf(Buffer);
+  });
+  test.each([
+    ['an open action', (pdf) => pdf.catalog.set(PDFName.of('OpenAction'), pdf.context.obj({ S: 'JavaScript', JS: PDFString.of('app.alert(1)') })), /actions, scripts, attachments/],
+    ['document actions', (pdf) => pdf.catalog.set(PDFName.of('AA'), pdf.context.obj({ WC: { S: 'JavaScript', JS: PDFString.of('app.alert(1)') } })), /actions, scripts, attachments/],
+    ['an attachment', (pdf) => pdf.attach(Buffer.from('stale bid'), 'bid.txt'), /actions, scripts, attachments/],
+    ['a permissions dictionary', (pdf) => pdf.catalog.set(PDFName.of('Perms'), pdf.context.obj({})), /actions, scripts, attachments/],
+    ['a page action', (pdf, other) => other.node.set(PDFName.of('AA'), pdf.context.obj({ O: { S: 'JavaScript', JS: PDFString.of('app.alert(1)') } })), /actions, scripts, attachments/],
+    ['document JavaScript the original lacks', (pdf) => pdf.addJavaScript('stale', 'app.alert(1)'), /other pages of this PDF differ/],
+  ])('a packet carrying %s is refused (GH codex P2 r5 on #4270)', async (name, mutateDocument, message) => {
+    await approve(await packet(null));
+    await expect(build(await packet(null, { mutateOther: (other, field, pdf) => mutateDocument(pdf, other) }))).rejects.toThrow(message);
   });
   test('a reviewed export of the original fingerprints like the original', async () => {
     // pdf-lib adds `/Helvetica-<n>` fonts and an empty `/XObject` dictionary

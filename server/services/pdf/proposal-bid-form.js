@@ -21,8 +21,8 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 // `node server/scripts/bid-form-fingerprint.js <pdf> <page>` on the original
 // and record all three values here.
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: 'f56ba209011ca8db6793e1f5f75b2099106881c1905979655f2714700f2352e3', packet: '1f24b0b7dbbd74b53a9d9b8fbf97d5bb93be15c184ed87143400a001b8cbf682' },
-  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7', packet: '51e450425fc1a88ac923b939cec23b379dd5f18fc0f1761466d8736548090976' },
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: 'f56ba209011ca8db6793e1f5f75b2099106881c1905979655f2714700f2352e3', packet: 'aa885d3f6874cbb05f3e63b20726e3c398e39ff2077b20c3e9082527ad886d8a' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'eba4dad62d71a3a86f5b1148d7653f8ad4980710562a95090b58b60f6c7f27d7', packet: '215dee4565fe48425e07df4d6c9bdb3b2e2db3bf13f7c96e28ad850b0ef92afa' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 // Hash every object the page's /Resources reaches (dictionaries by sorted
@@ -36,7 +36,9 @@ const sortedEntries = (dict) => [...dict.entries()].sort((a, b) => (a[0].toStrin
 // Feeds a PDF object graph into `hash`: dictionaries by sorted key, streams
 // by dictionary + raw bytes, references followed once. `/Parent` and `/P`
 // back-links are skipped so a widget hashes without its field's `/V` (checked
-// separately) or its whole page.
+// separately), and a reference to a page object hashes as the reference
+// alone — pages are fingerprinted on their own, and an outline, destination
+// or structure element pointing at the drawn page must not change with it.
 function objectHasher(document, hash) {
   const seen = new Set();
   const visitDict = (dict) => {
@@ -55,6 +57,7 @@ function objectHasher(document, hash) {
       if (seen.has(key)) { hash.update('ref-seen'); return; }
       seen.add(key);
       value = document.context.lookup(value);
+      if (value instanceof PDFDict && value.get(PDFName.of('Type')) === PDFName.of('Page')) { hash.update(`page-ref:${key}`); return; }
     }
     if (value instanceof PDFStream) {
       hash.update('stream');
@@ -117,7 +120,31 @@ function packetFingerprint(document, selectedIndex) {
     if (annots) visit(annots); else hash.update('none');
     hash.update(';');
   });
+  // Catalog state other than the page tree: the name trees (destinations
+  // and the original's JavaScript), viewer preferences, structure, metadata,
+  // and the AcroForm's own settings.
+  hash.update('catalog:');
+  for (const [key, value] of sortedEntries(document.catalog)) {
+    const name = key.toString();
+    if (name === '/Pages') continue;
+    hash.update(name);
+    if (name === '/AcroForm') visitAcroFormSettings(document, value, hash, visit); else visit(value);
+  }
   return hash.digest('hex');
+}
+// Fields are covered by their widgets and the value check; `/DR` holds only
+// the fonts an export may add. Everything else (DA, SigFlags, XFA, CO,
+// NeedAppearances) is pinned.
+function visitAcroFormSettings(document, value, hash, visit) {
+  const acroForm = document.context.lookup(value);
+  hash.update('<<');
+  if (acroForm instanceof PDFDict) {
+    for (const [key, entry] of sortedEntries(acroForm)) {
+      if (key.toString() === '/Fields' || key.toString() === '/DR') continue;
+      hash.update(key.toString()); visit(entry);
+    }
+  }
+  hash.update('>>');
 }
 function pageContentHash(document, page) {
   const contents = page.node.Contents();
@@ -141,11 +168,33 @@ function assertBlankFormState(document, page) {
     && Math.abs(box.width - 612) <= 0.1 && Math.abs(box.height - 792) <= 0.1);
   if (!boxes || page.getRotation().angle !== 0) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
   if ((page.node.Annots()?.size() || 0) > 0) throw invalid('The selected page carries annotations or form fields. Upload the untouched original form.');
+  assertInertDocument(document);
   const acroForm = document.catalog.lookup(PDFName.of('AcroForm'));
   if (!acroForm) return;
-  if (acroForm.get(PDFName.of('SigFlags'))) throw invalid('This PDF has been signed or prepared for signature. Upload the untouched original form.');
-  const filled = document.getForm().getFields().some((field) => field.acroField.dict.get(PDFName.of('V')) != null);
+  // The reviewed North Port original ships unsigned signature fields with
+  // SigFlags 1 (SignaturesExist); a signature is a `/Sig` field carrying a
+  // value, and AppendOnly (bit 2) marks a document locked by one.
+  const fields = document.getForm().getFields();
+  const signed = (Number(acroForm.lookup(PDFName.of('SigFlags'))?.asNumber?.() || 0) & 2) !== 0
+    || fields.some((field) => field.acroField.dict.get(PDFName.of('FT')) === PDFName.of('Sig') && field.acroField.dict.get(PDFName.of('V')) != null);
+  if (signed) throw invalid('This PDF has been signed or prepared for signature. Upload the untouched original form.');
+  const filled = fields.some((field) => field.acroField.dict.get(PDFName.of('V')) != null);
   if (filled) throw invalid('This PDF has form fields already filled in. Upload the untouched original form.');
+}
+
+// Document-level state survives `PDFDocument.save()` untouched, so the
+// catalog may only hold inert, reviewed entries (GH codex P2 r5 on #4270):
+// no open action, document or page actions, embedded files, permissions or
+// collections. The name tree may carry destinations and the original's own
+// JavaScript, which the packet fingerprint pins to the reviewed original.
+const INERT_CATALOG_KEYS = new Set(['/Type', '/Pages', '/AcroForm', '/Lang', '/MarkInfo', '/Metadata', '/Names', '/OutputIntents', '/StructTreeRoot', '/ViewerPreferences', '/PageMode', '/PageLayout', '/Outlines', '/PageLabels', '/Version', '/Extensions', '/Dests', '/OCProperties']);
+const INERT_NAME_TREES = new Set(['/Dests', '/JavaScript']);
+function assertInertDocument(document) {
+  const refuse = () => { throw invalid('This PDF carries actions, scripts, attachments or restrictions the reviewed original does not. Upload the untouched original form.'); };
+  if (document.catalog.keys().some((key) => !INERT_CATALOG_KEYS.has(key.toString()))) refuse();
+  const names = document.catalog.lookup(PDFName.of('Names'));
+  if (names instanceof PDFDict && names.keys().some((key) => !INERT_NAME_TREES.has(key.toString()))) refuse();
+  if (document.getPages().some((page) => page.node.get(PDFName.of('AA')) != null)) refuse();
 }
 
 function mapFormPrices(proposal, template, mapping = {}) {
