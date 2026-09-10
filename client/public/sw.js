@@ -66,10 +66,13 @@ function tagWithBuild(response, buildId) {
 // chunk fetched right now belongs to. Worker globals do not survive
 // termination, so read it from the cache each time (one small parse, and
 // only on an /assets/ cache miss).
+let liveBuildId = null; // memo for this worker lifetime; refreshes update it
 async function currentBuildId(cache) {
+  if (liveBuildId) return liveBuildId;
   const shell = await cache.match(OFFLINE_URL);
   if (!shell) return null;
-  return buildIdOf(shellAssetUrls(await shell.text()));
+  liveBuildId = buildIdOf(shellAssetUrls(await shell.text()));
+  return liveBuildId;
 }
 
 // Every navigation kicks off a background shell refresh, so two can overlap
@@ -108,6 +111,7 @@ async function replaceCompleteShell(shellResponse) {
   const previousBuildId = await currentBuildId(cache);
   await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, tagWithBuild(response, buildId))));
   await cache.put(OFFLINE_URL, shellResponse);
+  liveBuildId = buildId;
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
   // navigation may read the old shell moments before its replacement. Two
@@ -189,7 +193,19 @@ self.addEventListener('fetch', event => {
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(
       caches.open(CACHE_NAME).then(cache => cache.match(event.request).then(cached => {
-        if (cached) return cached;
+        if (cached) {
+          // A chunk unchanged between builds keeps its hash, so a hit under
+          // the live build may still carry an older tag; re-stamp it so the
+          // prune sees it as the live build's when that older one ages out.
+          const touch = currentBuildId(cache).then(buildId => {
+            if (buildId && cached.headers.get(BUILD_HEADER) !== buildId) {
+              return cache.put(event.request, tagWithBuild(cached.clone(), buildId));
+            }
+            return undefined;
+          }).catch(() => {});
+          try { event.waitUntil(touch); } catch { /* fire and forget */ }
+          return cached;
+        }
         return fetch(event.request).then(response => {
           if (response.ok) {
             const clone = response.clone();

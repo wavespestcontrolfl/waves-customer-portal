@@ -200,6 +200,22 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(assetsLeft.length).toBe(4);
   });
 
+  it('re-tags a chunk shared unchanged across builds when the newer build serves it', async () => {
+    // Codex pre-push P1: Shared-XYZ.js has the same hash in AAA and BBB. Loaded
+    // under AAA it is tagged AAA; a cache hit under BBB must move it to BBB,
+    // or CCC's prune deletes it while BBB is still the retained build.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/Shared-XYZ.js');
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])));
+    const hit = await dispatchFetch('/assets/Shared-XYZ.js');
+    expect(await hit.text()).toBe('asset:https://portal.test/assets/Shared-XYZ.js');
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
+  });
+
   it('does not touch cached page chunks when the same shell is refreshed', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse, dispatchFetch } = loadWorker(cache);
@@ -226,7 +242,8 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cached.text()).toBe('asset:https://portal.test/assets/Chunk-AAA.js');
 
     const second = await dispatchFetch('/assets/Chunk-AAA.js');
-    expect(second).toBe(cached);
+    expect(await second.text()).toBe('asset:https://portal.test/assets/Chunk-AAA.js');
+    expect(second).toBe(cached); // same build → the hit is served as-is, no re-stamp
   });
 
   it('derives the build id from the asset set regardless of order', () => {
