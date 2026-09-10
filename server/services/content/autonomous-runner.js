@@ -1571,7 +1571,14 @@ class AutonomousRunner {
     // from the presence of a failure (Codex r1: a lone failure followed by an
     // empty queue, or a fallback probe that found nothing, is not a halt).
     let haltBeforeBlog = null;
-    for (let i = 0; i < batchLimit; i += 1) {
+    // The fallback must get at least one blog-scoped claim even when the
+    // cap lands on the batch's final slot (Codex r2: three successes then
+    // two failures under the default limit of 5 used to narrow and then
+    // exit the loop with the claim never made). Extending by one slot is
+    // bounded — the fallback fires once per batch — and the downstream
+    // per-day/week publish caps still hold.
+    let slotBudget = batchLimit;
+    for (let i = 0; i < slotBudget; i += 1) {
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
       // batch's claim args stay byte-identical.
@@ -1591,6 +1598,7 @@ class AutonomousRunner {
             blogFallbackUsed = true;
             scopedActionType = 'new_supporting_blog';
             consecutiveFailures = 0;
+            if (i + 1 >= slotBudget) slotBudget = i + 2;
             logger.warn(`[autonomous-runner] runDaily: ${nonBlogFailureStreak} consecutive ${run.action_type} failures before any blog attempt (last: ${run.failure_message || run.outcome}); narrowing the rest of the batch to new_supporting_blog`);
             continue;
           }

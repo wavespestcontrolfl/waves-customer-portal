@@ -1527,6 +1527,32 @@ describe('runDaily batching', () => {
     expect(result).toMatchObject({ outcome: 'skipped_no_opportunity', count: 4, failures: 2 });
   });
 
+  test('reserves one blog-scoped claim when the cap lands on the final slot (Codex r2)', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    const ok = (id) => ({ outcome: 'completed_pending_review', action_type: 'rewrite_title_meta', opportunity_id: id });
+    runner.runNext = jest.fn()
+      .mockResolvedValueOnce(ok('m1'))
+      .mockResolvedValueOnce(ok('m2'))
+      .mockResolvedValueOnce(ok('m3'))
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', opportunity_id: 'city_1' })
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', opportunity_id: 'city_2' })
+      .mockResolvedValueOnce({ outcome: 'completed_published', action_type: 'new_supporting_blog', opportunity_id: 'blog_1' })
+      .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._sendBlogDroughtSms = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    // Slot 5 (the last) hit the cap: the narrowed claim still gets exactly
+    // one extra slot instead of the loop exiting with it never made.
+    expect(runner.runNext).toHaveBeenCalledTimes(6);
+    expect(runner.runNext).toHaveBeenNthCalledWith(6, { excludeIds: ['city_1', 'city_2'], actionType: 'new_supporting_blog' });
+    expect(runner._sendBlogDroughtSms).toHaveBeenCalledWith(expect.any(Array), { haltBeforeBlog: null });
+    expect(result).toMatchObject({ outcome: 'completed_published', count: 6, limit: 5, failures: 2 });
+  });
+
   test('the blog fallback fires once: blog-lane failures after narrowing halt for real', async () => {
     const { AutonomousRunner } = require('../services/content/autonomous-runner');
     const runner = new AutonomousRunner();
