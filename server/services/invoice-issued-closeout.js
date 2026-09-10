@@ -108,8 +108,15 @@ async function resumableIssuedCloseoutAttempt(conn, { serviceId, idempotencyKey 
 // Entry point for the send and record-payment paths. Best-effort by
 // contract: the invoice was already delivered / the payment already
 // recorded, so a refused or failed closeout is logged and reported, never
-// thrown back into the send. `trigger` is 'sent' | 'paid'.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, conn = db, today = etDateString() } = {}) {
+// thrown back into the send. `trigger` is 'sent' | 'paid'. `actorRole` is
+// the AUTHENTICATED staff role behind actorTechnicianId (req.techRole —
+// 'admin' | 'technician') and is used ONLY to record the true audit
+// identity below; it is deliberately kept separate from the completion's
+// authorization posture (see the `actor` object further down), which
+// stays 'admin' regardless — the quiet backfill closeout runs the same
+// way whichever staff role triggered it (GitHub r7 P2 #4127: technicians
+// reach this through /api/admin/schedule/:id/prepaid).
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
   // One audit row per linked-visit outcome — completed, refused with the
@@ -118,17 +125,22 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
   // and back-linked) — so rollout diagnostics tell an intentional no-op from
   // a failure (GitHub r5 P2 #4127). The operator behind the send / payment
   // is the actor; an automated trigger (scheduled sends, collections, the
-  // Zelle reconciler) is the system — never the visit's technician.
+  // Zelle reconciler) is the system — never the visit's technician. The
+  // recorded actor_type follows the AUTHENTICATED staff role (GitHub r7
+  // P2): a technician-triggered closeout (the prepaid route) is audited as
+  // 'technician', never folded into 'admin' — callers that don't carry a
+  // role (every admin-only route) keep the prior 'admin' default.
   // Declared outside the try so the catch still knows which linked visit
   // the failure belongs to.
   let invoice = null;
   let linkedVisitId = null;
   let resuming = false;
+  const actorAuditType = actorTechnicianId ? (actorRole === 'technician' ? 'technician' : 'admin') : 'system';
   const audit = async ({ closed, visitId, resumed = false, status = null, code = null, error = null }) => {
     try {
       const { recordAuditEvent } = require('./audit-log');
       await recordAuditEvent({
-        actor_type: actorTechnicianId ? 'admin' : 'system',
+        actor_type: actorAuditType,
         actor_id: actorTechnicianId || null,
         action: closed ? 'visit.completed_on_invoice_issued' : 'visit.completion_on_invoice_issued_refused',
         resource_type: 'scheduled_services',
@@ -181,6 +193,13 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
       // up (job_status_history, tracker audit, activity_log) as the visit's
       // technician closing it out (GitHub r2 P2) — the service record takes
       // its technician from the visit regardless.
+      //
+      // techRole here is AUTHORIZATION POSTURE, not audit identity (GitHub
+      // r7 P2 #4127): the quiet backfill closeout must run the same way
+      // whichever staff role triggered it (a technician reaches this via
+      // /api/admin/schedule/:id/prepaid), so it stays 'admin' regardless of
+      // actorRole — the TRUE staff role is recorded separately, in this
+      // helper's own audit() calls above (actor_type), never here.
       actor: { techRole: 'admin', technicianId: actorTechnicianId || null, technician: null },
       idempotencyKey,
       issuedInvoiceCloseout: { invoiceId: invoice.id, trigger },

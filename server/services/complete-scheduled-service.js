@@ -4813,7 +4813,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it so the mint-chain writers (advisory → customer → visit →
           // invoice) stay serialized against this transaction instead of
           // meeting it in the opposite order.
+          //
+          // A manual customer merge racing this closeout can't be excluded
+          // by row-lock ORDER alone (GitHub r7 P2 #4127): executeMerge locks
+          // the customer row(s) FIRST (customer-dedupe.js ~line 960) and its
+          // FK sweep later updates this same invoice's customer_id
+          // (customer-dedupe.js ~1205-1226) — invoice→customer is required
+          // above for the void race, so no single row-lock order satisfies
+          // both racers. Gated instead on an advisory lock BEFORE either
+          // side touches a row: executeMerge takes the identical lock (same
+          // namespace, sorted winner/loser ids) before its own customer row
+          // lock, so whichever transaction arrives first runs to completion
+          // before the other takes any row lock — no cycle is reachable.
           if (issuedInvoiceCloseout) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+              ['invoice-issued-closeout', String(svc.customer_id)],
+            );
             const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
             await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
             const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');

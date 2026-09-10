@@ -86,11 +86,13 @@ describe('source contracts', () => {
     expect(closeoutAt).toBeGreaterThan(reconcile.indexOf("while reconciling — no changes applied"));
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const fn = schedule.slice(schedule.indexOf('async function generatePrepaidReceiptForService('), schedule.indexOf('// POST /api/admin/schedule/:id/prepaid'));
-    expect(fn).toMatch(/closeOutVisitForIssuedInvoice\(\{ invoiceId: invoice\.id, trigger: 'paid', actorTechnicianId \}\)/);
+    expect(fn).toMatch(/closeOutVisitForIssuedInvoice\(\{ invoiceId: invoice\.id, trigger: 'paid', actorTechnicianId, actorRole \}\)/);
     expect(fn).toMatch(/if \(\['paid', 'prepaid'\]\.includes\(invoice\.status\)\) \{\s*\n\s*await closeOutOnPaid\(\);/);
     expect(fn).toMatch(/await closeOutOnPaid\(\);\s*\n\s*\n\s*return sendPrepaidReceiptForInvoice\(outcome\.invoice/);
-    // The route hands the operator through.
-    expect(schedule).toMatch(/generatePrepaidReceiptForService\(req\.params\.id, \{ operatorInitiated: true, actorTechnicianId: req\.technicianId \|\| null \}\)/);
+    // The route hands the operator through, WITH its authenticated staff
+    // role (GitHub r7 P2 #4127) — a technician (requireTechOrAdmin admits
+    // both) must be audited as 'technician', never folded into 'admin'.
+    expect(schedule).toMatch(/generatePrepaidReceiptForService\(req\.params\.id, \{ operatorInitiated: true, actorTechnicianId: req\.technicianId \|\| null, actorRole: req\.techRole \|\| null \}\)/);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -359,6 +361,76 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
         ['audit_log', { resource_id: ids.serviceId }],
         ['job_status_history', { job_id: ids.serviceId }],
         ['activity_log', { customer_id: ids.customerId }],
+        ['invoices', { id: ids.invoiceId }],
+        ['scheduled_services', { id: ids.serviceId }],
+        ['customers', { id: ids.customerId }],
+      ]) {
+        await database(table).where(where).del().catch(() => {});
+      }
+      mockPg = outer;
+    }
+  });
+
+  test('a customer merge racing the closeout: the merge-race gate lock keeps both queued in order, never deadlocked (GitHub r7 P2)', async () => {
+    // Two real sessions, same fixture/cleanup pattern as the void race
+    // above. executeMerge's OWN lock order is customer-row-first, then (via
+    // its FK sweep) an UPDATE that needs this invoice's row lock — the
+    // exact opposite of this closeout's invoice-first order. Reproduced
+    // here with the merge's two concrete lock acquisitions (its gate lock,
+    // then its customer forUpdate) rather than standing up a full merge
+    // fixture — customer-dedupe.js takes the identical gate lock (same
+    // namespace, same sorted customer ids) before that same customer lock.
+    const outer = mockPg;
+    mockPg = database;
+    const ids = { customerId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID() };
+    const date = etDateString();
+    let merger = null;
+    try {
+      await database('customers').insert({ id: ids.customerId, first_name: 'Race', last_name: 'Merge', phone: '+12025550198',
+        email: `${ids.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application' });
+      await database('scheduled_services').insert({ id: ids.serviceId, customer_id: ids.customerId, service_type: 'Quarterly Pest Control Service',
+        scheduled_date: date, window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 117 });
+      await database('invoices').insert({ id: ids.invoiceId, customer_id: ids.customerId, scheduled_service_id: ids.serviceId, invoice_number: `TST-${ids.invoiceId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''), status: 'sent', total: 117, subtotal: 117, service_date: date, service_type: 'Quarterly Pest Control Service',
+        sent_at: new Date(), line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', amount: 117, quantity: 1, unit_price: 117 }]) });
+      // executeMerge's lock order: the gate lock, then the customer row…
+      merger = await database.transaction();
+      await merger.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['invoice-issued-closeout', String(ids.customerId)]);
+      await merger('customers').where({ id: ids.customerId }).forUpdate().first('id');
+      // …while the closeout runs concurrently and must queue behind the
+      // SAME gate lock — never reaching its own invoice row lock while
+      // blocked (the old hazard: it would hold that row and wait on the
+      // customer the merge already holds, an ABBA cycle).
+      const closeout = closeOutVisitForIssuedInvoice({ invoiceId: ids.invoiceId, trigger: 'sent', actorTechnicianId: null, conn: database });
+      const deadline = Date.now() + 15000;
+      let waiting = 0;
+      while (Date.now() < deadline) {
+        const { rows } = await database.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()");
+        waiting = rows[0].n;
+        if (waiting > 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(waiting).toBeGreaterThan(0);
+      // Proof there is no cycle: the invoice row is still free — the
+      // merge's own transaction can lock it immediately (it never blocked
+      // on the closeout, because the closeout never got past the gate).
+      await merger.raw("SET LOCAL lock_timeout = '4000ms'");
+      await merger('invoices').where({ id: ids.invoiceId }).forUpdate().first('id');
+      await merger.commit();
+      merger = null;
+      // Once the merge's transaction ends, the gate releases and the
+      // closeout proceeds normally — completing the visit.
+      const out = await closeout;
+      expect(out).toMatchObject({ closed: true, visitId: ids.serviceId });
+      expect((await database('scheduled_services').where({ id: ids.serviceId }).first()).status).toBe('completed');
+    } finally {
+      if (merger) await merger.rollback().catch(() => {});
+      for (const [table, where] of [
+        ['service_completion_attempts', { service_id: ids.serviceId }],
+        ['audit_log', { resource_id: ids.serviceId }],
+        ['job_status_history', { job_id: ids.serviceId }],
+        ['activity_log', { customer_id: ids.customerId }],
+        ['service_records', { scheduled_service_id: ids.serviceId }],
         ['invoices', { id: ids.invoiceId }],
         ['scheduled_services', { id: ids.serviceId }],
         ['customers', { id: ids.customerId }],

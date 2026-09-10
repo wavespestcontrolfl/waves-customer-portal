@@ -11103,7 +11103,11 @@ async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false
 // reason the modal can explain.
 // actorTechnicianId: the operator recording the prepayment — the actor of
 // the invoice-issued closeout's visit transition (GitHub r4 P1 #4127).
-async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null } = {}) {
+// actorRole: their AUTHENTICATED staff role (req.techRole) — this route
+// admits technicians (requireTechOrAdmin), so the closeout's own audit
+// must record 'technician' rather than folding every non-null actor into
+// 'admin' (GitHub r7 P2 #4127).
+async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null, actorRole = null } = {}) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -11144,7 +11148,7 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
   // operator's reachable retry); a completed visit refuses quietly.
   const closeOutOnPaid = async () => {
     const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-    await closeOutVisitForIssuedInvoice({ invoiceId: invoice.id, trigger: 'paid', actorTechnicianId });
+    await closeOutVisitForIssuedInvoice({ invoiceId: invoice.id, trigger: 'paid', actorTechnicianId, actorRole });
   };
 
   // Already settled (a prior mark-prepaid, or a card/ACH payment landed): just
@@ -11356,7 +11360,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (decision.attempt) {
       // Authenticated operator action with an explicit receipt request —
       // operator provenance for the 8AM-8PM send window.
-      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null }).catch((err) => {
+      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null }).catch((err) => {
         logger.error(`[schedule] prepaid receipt failed for ${req.params.id}: ${err.message}`);
         return { sent: false, reason: 'error' };
       });

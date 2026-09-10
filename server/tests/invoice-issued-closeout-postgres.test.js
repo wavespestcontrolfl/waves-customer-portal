@@ -148,6 +148,32 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: byOperator.id, actor_type: 'admin', actor_id: 'admin-1' }));
   });
 
+  test('a technician-triggered closeout is audited as technician, never folded into admin — but keeps admin authorization posture (GitHub r7 P2 #4127)', async () => {
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech', role: 'technician', active: true });
+    const svc = await visit();
+    const inv = await invoice({ scheduled_service_id: svc.id });
+    await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', actorTechnicianId: techId, actorRole: 'technician', conn: trx, today: TODAY });
+    // Audit identity is the TRUE role — the /api/admin/schedule/:id/prepaid
+    // route admits technicians (admin-schedule.js requireTechOrAdmin) and
+    // now threads req.techRole through; a technician-triggered closeout
+    // must not read as an administrator's action.
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: svc.id, actor_type: 'technician', actor_id: techId }));
+    // Authorization posture is UNCHANGED — the quiet backfill completion
+    // still runs with techRole 'admin' regardless of who triggered it (the
+    // completion's admin-only gates must keep passing).
+    expect(mockCompleteScheduledService.mock.calls[0][0].actor).toEqual({ techRole: 'admin', technicianId: techId, technician: null });
+    mockCompleteScheduledService.mockClear();
+    recordAuditEvent.mockClear();
+    // A caller that omits actorRole (every admin-only route: reconcile,
+    // send-receipt, the SMS/email delivery legs) keeps the prior default —
+    // a non-null actor is still audited as 'admin'.
+    const svc2 = await visit({ date: '2040-03-02' });
+    const inv2 = await invoice({ scheduled_service_id: svc2.id, date: '2040-03-02' });
+    await closeOutVisitForIssuedInvoice({ invoiceId: inv2.id, trigger: 'paid', actorTechnicianId: techId, conn: trx, today: TODAY });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: svc2.id, actor_type: 'admin', actor_id: techId }));
+  });
+
   test('a linked visit left open is audited as refused with the reason; an invoice with no visit link is logged only', async () => {
     const future = await visit({ date: '2040-03-05' });
     const inv = await invoice({ scheduled_service_id: future.id, date: '2040-03-05' });
