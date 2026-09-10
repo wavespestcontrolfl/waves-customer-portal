@@ -31,20 +31,6 @@ const ALL_PIPELINE_STAGES = [
   'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'past_customer', 'lost', 'dormant',
 ];
 
-// customers.created_via — PROVENANCE of a machine-minted row, stamped by the
-// creating path itself. Row SHAPE cannot carry this: several lead-creation
-// paths write an address-less, ZIP-less, active new_lead row, so anything
-// that must tell them apart has to read a stamp, not infer one. Consumers
-// treat a NULL as "unknown provenance" and stay conservative.
-//
-// No writer currently stamps a value here (the Twilio tracking webhook's
-// 'twilio_tracking_shell' shell-row stamp was retired in #4206 — see
-// historical customers.created_via rows for the old value). Kept as an
-// extension point for the next machine-minted-row path that needs one;
-// historical rows keep whatever string an old writer stamped.
-const CREATED_VIA = {
-};
-
 const { etDateString } = require('../utils/datetime-et');
 
 // A live customer right now = in a customer stage AND active AND not soft-deleted.
@@ -165,6 +151,6 @@ async function promoteCustomerOnBooking(database, customerId, { serviceType = nu
 }
 
 module.exports = {
-  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, CREATED_VIA, whereLiveCustomer,
+  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, whereLiveCustomer,
   CONVERSION_DATE_SQL, stageLifecycleStamps, promoteCustomerOnBooking,
 };
