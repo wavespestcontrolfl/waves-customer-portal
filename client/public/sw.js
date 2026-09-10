@@ -220,8 +220,9 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
   // failed generation would sit in the bucket, unprunable, holding the
   // very quota the next refresh needs. Every started write settles before
   // the lock is released.
+  const created = [];
+  const rollBackCreated = () => Promise.allSettled(created.map(assetUrl => cache.delete(assetUrl)));
   await withAssetWrites(async () => {
-    const created = [];
     const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
       const existing = await cache.match(assetUrl);
       const claims = existing ? [buildId, previousBuildId, ...buildTagsOf(existing)] : [buildId];
@@ -230,11 +231,18 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
     }));
     const failed = results.find(r => r.status === 'rejected');
     if (failed) {
-      await Promise.allSettled(created.map(assetUrl => cache.delete(assetUrl)));
+      await rollBackCreated();
       throw failed.reason;
     }
   });
-  await cache.put(OFFLINE_URL, shellResponse);
+  // The shell write can hit the quota too; the generation is only
+  // committed once '/' points at it, so undo its new entries as well.
+  try {
+    await cache.put(OFFLINE_URL, shellResponse);
+  } catch (err) {
+    await withAssetWrites(rollBackCreated);
+    throw err;
+  }
   cachedShellSeq += 1;
   knownCachedBuild = buildId;
   // Refreshes are queued, so an older one can finish after a newer

@@ -756,6 +756,25 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
       .toContain(buildIdOf(['/assets/index-BBB.js', '/assets/Shared-XYZ.js']));
   });
 
+  it('removes a refresh\'s new entries when storing the shell itself hits the quota', async () => {
+    // Pre-push Codex P1: the asset batch succeeds, then cache.put('/') rejects.
+    // '/' still describes A, so nothing ever prunes B's, C's and D's
+    // entries; they would hold the quota every later refresh needs.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js', '/assets/Shared-XYZ.js'])));
+
+    cache.failPut = (url) => url === 'https://portal.test/';
+    for (const build of ['BBB', 'CCC', 'DDD']) {
+      await expect(cacheCompleteShellResponse(fakeResponse(shellHtml([`/assets/index-${build}.js`, '/assets/Shared-XYZ.js']))))
+        .rejects.toThrow(/Quota/);
+    }
+    cache.failPut = null;
+
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-AAA.js', '/assets/Shared-XYZ.js']));
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-AAA.js']);
+  });
+
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
     // Codex #4335 P1: navigation A begins before a deploy but its response is
     // slow; navigation B begins later, is answered by the new build and its
