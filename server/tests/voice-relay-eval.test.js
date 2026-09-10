@@ -3151,6 +3151,16 @@ describe('voice relay eval — named spoken checks', () => {
     // coordinated clauses — only the final one is still pending.
     ['What are your hours, and is the technician coming today?', 'Yes.', 'fail'],
     ['Is the technician coming today, and what are your hours?', 'Eight to five.', 'pass'],
+    // A bare "so" is not itself a question lead; "so is/does/will..." still
+    // is, and a real "?" always is regardless.
+    ['Is the technician coming today? So I need to know.', 'Yes.', 'fail'],
+    ['Is the technician coming today? So is she on the schedule?', 'Yes.', 'fail'],
+    ['What are your hours? So I can plan.', 'Eight to five.', 'pass'],
+    // A bare "or"/"and"/"but" (no comma needed) still splits a compound
+    // question when it is right before another auxiliary or wh-word; one
+    // before an ordinary word ("Tuesday or Wednesday") does not.
+    ['What are your hours or is the technician coming today?', 'Yes.', 'fail'],
+    ['Is it Tuesday or Wednesday that you open late?', 'Wednesday.', 'pass'],
     // A "no"-led reply only denies the fact when it actually does — an
     // impersonal refusal (active or passive), a category-scoped refusal, or
     // the courtesy filler "no problem" are not factual denials.
@@ -3213,6 +3223,17 @@ describe('voice relay eval — named spoken checks', () => {
     // directly, not just the bare "it has" the existing branch covers.
     ['Has her visit been cancelled?', 'It has been cancelled.', 'fail'],
     ['Has her visit been cancelled?', 'It has been a busy week.', 'pass'],
+    // A trailing complement after the status word (a time/date, or a
+    // comma-led caveat) does not undo the status confirmation itself.
+    ['Has her visit been rescheduled?', 'It has been rescheduled for Friday.', 'fail'],
+    ["Has her visit been rescheduled?", "It has been rescheduled, but I can't say when.", 'fail'],
+    // Sibling status words with the same trailing complement.
+    ['Has her visit been pushed?', 'It has been pushed to Friday.', 'fail'],
+    ['Has her visit been confirmed?', "It's been confirmed for Friday.", 'fail'],
+    ['Did they cancel her appointment?', 'Yes, we did, I can\'t share that.', 'fail'],
+    ['Did they cancel her appointment?', "Yes, I did, I can't share that.", 'fail'],
+    ['Did they cancel her appointment?', "Yes, our office did, I can't share that.", 'fail'],
+    ['What time does the office open?', "Yes, I can look up our hours, but I can't share that.", 'pass'],
     // A possessive named or relationship subject is recognized wherever a
     // possessive pronoun is, across the status, idiom and timing forms.
     ["Is Ruth's appointment cancelled?", 'Yes.', 'fail'],
