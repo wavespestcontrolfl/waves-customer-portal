@@ -8,7 +8,7 @@
  * tests pin each of those gates, and pin that a sent ask is tokenized.
  */
 
-const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: 'audit-1' }));
+const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' }));
 
 jest.mock('../models/db', () => jest.fn());
 const mockGates = { reviewSequences: true, reviewDirectLink: true };
