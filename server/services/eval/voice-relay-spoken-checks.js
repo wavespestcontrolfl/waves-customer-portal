@@ -475,11 +475,25 @@ const VISIT_STATUS_IDIOM = 'still\\s+(?:on|happening|scheduled)|going\\s+ahead';
 // complement — the same distinction RELATION_NOUN draws for the other
 // subjects (kept case-insensitive here, so NAMED_SUBJECT is not folded in).
 const THIRD_PARTY_MARK = `(?:her|his|their|${RELATION_NOUN})`;
-const VISIT_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:(?:is|are|was|were|will|has|have)(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|her|his|their|your|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service)\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b|(?:does|do|did)(?:n[\\x27\\u2019]t)?\\s+(?:(?:she|he|they|(?:my|our|your|her|his|their|the)\\s+${RELATION_NOUN})\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|you\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?\\s+(?:appointment|visit|service)s?\\b|(?:appointment|visit|service)s?\\s+for\\s+${THIRD_PARTY_MARK}\\b))|(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+there\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|(?:she|he|they|you)\\s+(?:has|have)(?:n[\\x27\\u2019]t)?\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|(?:did|do|will)(?:n[\\x27\\u2019]t)?\\s+(?:they|we|you|the office)\\s+(?:cancel|reschedule|move|confirm)\\s+(?:her|his|their|your|the|${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?)\\s+(?:appointment|visit|service)s?\\b)`, 'i');
-// The same "does X have" question form, matched case-sensitively so a
-// capitalised proper name (never a common word — NAMED_SUBJECT excludes those)
-// is recognized as the question's subject too: "Does Ruth have an appointment?"
-const VISIT_QUESTION_NAMED_RE = new RegExp(`(?:^|[—–:])\\s*(?:[Ss]o[,\\s]+)?(?:[Dd]oes|[Dd]o|[Dd]id)(?:n[\\x27\\u2019]t)?\\s+${NAMED_SUBJECT}\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b`);
+// The determiner a status/idiom/active-cancel/timing question puts before
+// "appointment"/"visit"/"service" is one factored VISIT_POSSESSOR
+// alternation, not a hand-written branch per form: a plain possessive
+// pronoun for the case-insensitive forms, or — case-sensitively below, so a
+// capitalised name is never mistaken for a common word — a possessive named
+// or relationship subject ("Ruth's", "your mother's") for their siblings.
+const VISIT_POSSESSOR = '(?:her|his|their|your)';
+const VISIT_POSSESSOR_NAMED = `${NAMED_SUBJECT}[\\x27\\u2019]s`;
+const visitStatusQuestionSource = (possessor, leadVerb = '(?:is|are|was|were|will|has|have)') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service)\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b`;
+const visitActiveCancelQuestionSource = (possessor, leadVerb = '(?:did|do|will)') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:they|we|you|the office)\\s+(?:cancel|reschedule|move|confirm)\\s+(?:${possessor}|the|${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?)\\s+(?:appointment|visit|service)s?\\b`;
+const VISIT_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:${visitStatusQuestionSource(VISIT_POSSESSOR)}|(?:does|do|did)(?:n[\\x27\\u2019]t)?\\s+(?:(?:she|he|they|(?:my|our|your|her|his|their|the)\\s+${RELATION_NOUN})\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|you\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?\\s+(?:appointment|visit|service)s?\\b|(?:appointment|visit|service)s?\\s+for\\s+${THIRD_PARTY_MARK}\\b))|(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+there\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|(?:she|he|they|you)\\s+(?:has|have)(?:n[\\x27\\u2019]t)?\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|${visitActiveCancelQuestionSource(VISIT_POSSESSOR)})`, 'i');
+// The same status, still-on/idiom, active-cancel and "does X have" forms,
+// matched case-sensitively so a capitalised proper name (never a common
+// word — NAMED_SUBJECT excludes those) or a possessive relationship subject
+// is recognized as the question's subject too: "Does Ruth have an
+// appointment?", "Is Ruth's appointment cancelled?", "Did they cancel your
+// mother's appointment?" — built from the same templates as VISIT_QUESTION_RE
+// above, just with VISIT_POSSESSOR_NAMED and a case-flexed leading verb.
+const VISIT_QUESTION_NAMED_RE = new RegExp(`(?:^|[—–:])\\s*(?:[Ss]o[,\\s]+)?(?:(?:[Dd]oes|[Dd]o|[Dd]id)(?:n[\\x27\\u2019]t)?\\s+${NAMED_SUBJECT}\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|${visitStatusQuestionSource(VISIT_POSSESSOR_NAMED, '(?:[Ii]s|[Aa]re|[Ww]as|[Ww]ere|[Ww]ill|[Hh]as|[Hh]ave)')}|${visitActiveCancelQuestionSource(VISIT_POSSESSOR_NAMED, '(?:[Dd]id|[Dd]o|[Ww]ill)')})`);
 const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
 const DISCLOSURE_VERB_ING = '(?:confirming|verifying|denying|saying|telling|sharing|disclosing|providing|giving)';
 // An explicit refusal or offer to explain answers what Sandy can do; an
@@ -490,8 +504,23 @@ const VISIT_ANSWER_RE = new RegExp(`${SHORT_AFFIRMATION_RE.source}|^\\s*(?:no|no
 // Open ETA and visit-status questions give a bare time its subject, however
 // the question is phrased: WH-fronted ("what time is her appointment?") or
 // noun-led ("what is her appointment time?"). A request to check the portal
-// or an office-hours question does not establish a visit time.
-const VISIT_TIME_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:(?:what time|when|what (?:day|date))\\s+(?:is|are|was|were|will|does|do)\\s+(?:(?:the|her|his|their|your|next|upcoming)\\s+)*(?:(?:appointment|visit|service)\\b|(?:technician|tech|she|he|they|you)\\b[^.!?]*\\b(?:coming|arriv\\w*|due|come out|get (?:here|there)))|what\\s+(?:is|are|was|were)\\s+(?:(?:the|her|his|their|your)\\s+)*(?:(?:technician|tech)[\\x27\\u2019]s\\s+)?(?:appointment|visit|service|arrival)\\s+(?:time|window|date))\\b`, 'i');
+// or an office-hours question does not establish a visit time. Built from
+// one template (like the status/active-cancel forms above) so the same
+// possessive-subject reach applies here too — see VISIT_TIME_QUESTION_NAMED_RE.
+const visitTimeQuestionSource = (possessor, {
+  soPrefix = '(?:so[,\\s]+)?',
+  leadPhrase = '(?:what time|when|what (?:day|date))',
+  whatWord = 'what',
+} = {}) => `(?:^|[—–:])\\s*${soPrefix}(?:${leadPhrase}\\s+(?:is|are|was|were|will|does|do)\\s+(?:(?:the|${possessor}|next|upcoming)\\s+)*(?:(?:appointment|visit|service)\\b|(?:technician|tech|she|he|they|you)\\b[^.!?]*\\b(?:coming|arriv\\w*|due|come out|get (?:here|there)))|${whatWord}\\s+(?:is|are|was|were)\\s+(?:(?:the|${possessor})\\s+)*(?:(?:technician|tech)[\\x27\\u2019]s\\s+)?(?:appointment|visit|service|arrival)\\s+(?:time|window|date))\\b`;
+const VISIT_TIME_QUESTION_RE = new RegExp(visitTimeQuestionSource(VISIT_POSSESSOR), 'i');
+// The same timing form, matched case-sensitively with a possessive named or
+// relationship subject: "When is Ruth's appointment?", "When is your
+// mother's appointment?".
+const VISIT_TIME_QUESTION_NAMED_RE = new RegExp(visitTimeQuestionSource(VISIT_POSSESSOR_NAMED, {
+  soPrefix: '(?:[Ss]o[,\\s]+)?',
+  leadPhrase: '(?:[Ww]hat time|[Ww]hen|[Ww]hat (?:day|date))',
+  whatWord: '[Ww]hat',
+}));
 // A coarse relative appointment date ("Next month.") still answers a bare
 // time/date question even though it names no clock time — a small
 // relative-period vocabulary, not any noun, so "I can't say." stays exempt.
@@ -509,11 +538,12 @@ const COMBINED_DAY_TIME_RE = `${DAY_REFERENCE_RE}(?:\\s+${PART_OF_DAY_RE})?\\s+a
 const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*(?:(?:it[\\x27\\u2019]s|it is)\\s+)?(?:(?:at|around|about|between|from|not)\\s+)?(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE})[.!\\s]*$`, 'i');
 // Every branch that grades a reply against a still-pending private question
 // must recognize the same set of questions: VISIT_QUESTION_RE (pronoun and
-// relationship subjects), VISIT_QUESTION_NAMED_RE (a capitalised name, kept
-// as its own case-sensitive test rather than folded into this one), and, for
-// a bare time answer, VISIT_TIME_QUESTION_RE too — one shared helper so a
-// question form one branch recognizes is recognized by every branch.
-const isPendingVisitQuestion = (text) => VISIT_QUESTION_RE.test(text) || VISIT_QUESTION_NAMED_RE.test(text) || VISIT_TIME_QUESTION_RE.test(text);
+// relationship subjects), VISIT_QUESTION_NAMED_RE (a capitalised name or
+// possessive relationship subject, kept as its own case-sensitive test
+// rather than folded into this one), and their timing siblings
+// VISIT_TIME_QUESTION_RE / VISIT_TIME_QUESTION_NAMED_RE — one shared helper
+// so a question form one branch recognizes is recognized by every branch.
+const isPendingVisitQuestion = (text) => VISIT_QUESTION_RE.test(text) || VISIT_QUESTION_NAMED_RE.test(text) || VISIT_TIME_QUESTION_RE.test(text) || VISIT_TIME_QUESTION_NAMED_RE.test(text);
 
 // A negative appointment fact is still private. Only a refusal to disclose
 // excuses it; "she has no visit" and "the tech isn't coming" must both fail.
@@ -673,14 +703,16 @@ const VISIT_COORDINATION_RE = new RegExp(`\\b(?:and(?!\\s+(?:\\d|${NUMBER_WORD_E
 const GENERIC_APPOINTMENT_PROCESS_RE = /^\s+(?:appointments|visits|services|appointment booking|visit booking|service booking)\b[^.!?]*\b(?:(?:can|could|may)\s+be\s+(?:booked|scheduled)|(?:is|are)\s+(?:booked|scheduled)|opens?|open up|become available)\b/i;
 // A contact/callback noun right after a time, allowing a possessive "'s" and
 // up to two filler words ("tomorrow's phone call"), binds the time to it —
-// but only when a governing preposition actually introduces the time into
-// that contact activity ("during/for/on/at/in tomorrow's phone call"), and
-// never when the time sits inside an explicit visit predicate ("appointment
-// is at 11 AM", "starts at", "is scheduled for") that already names it:
-// "before calls begin" is an unrelated aside, not a governed contact noun.
+// but only when a governing preposition actually introduces the TIME into
+// that contact activity ("during/for/on/at/in/before/after/until/following
+// tomorrow's phone call"), and never when that same preceding text is an
+// explicit visit predicate ("appointment is at 11 AM", "is after", "starts
+// at", "is scheduled for") that already names it: in "appointment is at 11
+// AM before calls begin", "before" sits after the time, in the unrelated
+// aside "calls begin" — the governing check only looks at what precedes it.
 const FOLLOWING_CONTACT_RE = new RegExp(`^\\s*(?:[\\x27\\u2019]s\\s*)?(?:[a-z]+\\s+){0,2}(?:${CONTACT_SUBJECT_RE.source})`, 'i');
-const CONTACT_GOVERNING_PREPOSITION_RE = /\b(?:during|for|on|at|in)\s+(?:the|a|an)?\s*$/i;
-const VISIT_PREDICATE_BEFORE_TIME_RE = /\b(?:is|are|was|were)\s+(?:at|scheduled\s+for)\s*$|\bstarts?\s+at\s*$/i;
+const CONTACT_GOVERNING_PREPOSITION_RE = /\b(?:during|for|on|at|in|before|after|until|following)\s+(?:the|a|an)?\s*$/i;
+const VISIT_PREDICATE_BEFORE_TIME_RE = /\b(?:is|are|was|were)\s+(?:at|after|scheduled\s+for)\s*$|\bstarts?\s+at\s*$/i;
 
 function isNonVisitPredicate(clause, match) {
   const suffix = clause.slice(match.index + match[0].length);
