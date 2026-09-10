@@ -670,7 +670,13 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // …plus the sibling-claim RELEASE (codex r14 P2 on #3804): a sibling held
     // while claimed goes back as an inert draft, never a scheduled row the
     // cron would re-enter.
-    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(6);
+    // …plus the grouped fixed-date sibling REVIVE (pre-push codex P1 on
+    // #4270): a re-price-held sibling never comes back customer-viewable
+    // when a longer hold is saved on another property.
+    expect((route.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(7);
+    const reviveAt = route.indexOf("(pre-push codex P1 on #4270)");
+    expect(reviveAt).toBeGreaterThan(-1);
+    expect(route.indexOf('.whereRaw(REPRICE_PENDING_ABSENT_SQL)', reviveAt)).toBeGreaterThan(reviveAt);
     const releaseAt = route.indexOf('async function releaseGroupSiblingClaims');
     expect(releaseAt).toBeGreaterThan(-1);
     expect(route.indexOf('.whereRaw(REPRICE_PENDING_ABSENT_SQL)', releaseAt)).toBeGreaterThan(releaseAt);
