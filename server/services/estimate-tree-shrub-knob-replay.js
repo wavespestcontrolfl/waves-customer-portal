@@ -81,11 +81,10 @@ const PRE_STAMP_TERMITE_STATION_COST = Object.freeze({
   trelona: 22.05, // Apr 2026 wholesale ($352.80 / 16), the value every unstamped quote priced under
   advance: 13.16,
 });
-// The A1 value (2026-09-09, $384 / 16). An UNSTAMPED row can also be a
-// post-A1 client-fallback save (the Admin V1 estimator stamps since A1, but
-// a row saved by a client bundle cached from before this deploy would not),
-// so the stored RESULT is consulted before the pre-stamp default applies.
-const A1_TERMITE_STATION_COST = Object.freeze({ trelona: 24.00, advance: 13.16 });
+// An UNSTAMPED row can also be a post-A1 client-fallback save (the Admin V1
+// estimator stamps since A1, but a row saved by a client bundle cached from
+// before this deploy would not), so the stored RESULT is consulted — against
+// the era table below — before the pre-stamp default applies.
 // Per-station labor-material + misc buildup as it has stood since Apr 2026,
 // and the install multiplier — the reader must not read live constants.
 const TERMITE_INSTALL_BUILDUP = Object.freeze({ laborMaterial: 5.25, misc: 0.75, multiplier: 1.45 });
