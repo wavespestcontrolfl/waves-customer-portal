@@ -179,14 +179,18 @@ async function updatePayer(id, body) {
   // Reactivating a payer changes the live Bill-To decision for every customer
   // and job that still references it, without touching their rows. The
   // combined-visit invoice claim holds this payer row FOR SHARE while it
-  // resolves ownership, so the activation waits for that claim to commit and
-  // is then refused while the homeowner send it would redirect is in flight
-  // (the same 409 the payer_id writers raise).
-  if (dbUpdates.active === true && existing.active !== true) {
+  // resolves ownership, so any write carrying `active` takes the row FOR
+  // UPDATE and decides the transition from that locked row (a pre-lock
+  // snapshot could read the payer as active while a concurrent deactivation
+  // and a send claim land in between): an activation waits for the claim to
+  // commit and is then refused while the homeowner send it would redirect is
+  // in flight (the same 409 the payer_id writers raise).
+  if (Object.prototype.hasOwnProperty.call(dbUpdates, 'active')) {
     return db.transaction(async (trx) => {
       const current = await trx('payers').where({ id: pid }).forUpdate().first();
       if (!current) return { error: 'Payer not found', notFound: true };
-      if (await require('./visit-completion-packets').packetInvoiceSendInFlight({ payerId: pid }, trx)) {
+      const activating = dbUpdates.active === true && current.active !== true;
+      if (activating && await require('./visit-completion-packets').packetInvoiceSendInFlight({ payerId: pid }, trx)) {
         return { error: 'A combined-visit invoice for a customer or job billed to this payer is being sent; try again in a moment.',
           conflict: true, code: 'invoice_send_in_flight' };
       }

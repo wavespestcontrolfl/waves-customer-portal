@@ -563,9 +563,13 @@ async function enrollVisitCompletionReview(packetId, database = db, options = {}
   try {
     return await enrollVisitCompletionReviewOnce(packetId, database, options);
   } catch (err) {
-    await database('visit_completion_packets').where({ id: packetId }).update({
-      status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
-    });
+    // Only a resumable packet reopens: a packet the office owns after a
+    // permanent member-effect rejection stays failed, and the review is not
+    // retried over it.
+    const reopened = Number(await database('visit_completion_packets').where({ id: packetId })
+      .whereIn('status', ['done', 'processing'])
+      .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() }));
+    if (!reopened) return { enrolled: false, reason: 'packet_owned', error: err.message };
     return { enrolled: false, retryable: true, reason: 'error', error: err.message };
   }
 }

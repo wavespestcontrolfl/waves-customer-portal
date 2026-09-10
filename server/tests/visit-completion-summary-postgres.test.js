@@ -1,4 +1,5 @@
 /** Summary delivery recovery on a migrated, task-private PostgreSQL database. */
+jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
@@ -1874,6 +1875,24 @@ postgres('visit summary recipient recovery', () => {
     }
     expect(interrupted).toBe(true);
     expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'failed' });
+    // The direct wrapper (a full invoice projection from manual payment or credit settlement) keeps a failed packet terminal too.
+    jest.restoreAllMocks();
+    const readExecute = mockPg.client.constructor.prototype._query;
+    let failedOnce = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failPacketRead(connection, query) {
+      if (!failedOnce && query.sql.startsWith('select * from "visit_completion_packets"')) {
+        failedOnce = true;
+        return Promise.reject(new Error('Synthetic packet read outage'));
+      }
+      return readExecute.call(this, connection, query);
+    });
+    try {
+      expect(await enrollVisitCompletionReview(fixture.packetId)).toMatchObject({ enrolled: false, reason: 'packet_owned' });
+    } finally {
+      jest.restoreAllMocks();
+    }
+    expect(failedOnce).toBe(true);
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'failed' });
   });
 
   test('a payer reactivation waits for the fenced invoice claim and is refused while the send is in flight', async () => {
@@ -1906,8 +1925,27 @@ postgres('visit summary recipient recovery', () => {
       // With the send in flight, the activation is refused like a payer_id write.
       expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ conflict: true, code: 'invoice_send_in_flight' });
       expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
+      // A full-form save that read the payer as active before a concurrent
+      // deactivation is judged on the locked row, not on its snapshot.
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending' });
+      let deactivatedAfterSnapshot = false;
+      jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function deactivateAfterSnapshot(connection, query) {
+        const result = await execute.call(this, connection, query);
+        if (!deactivatedAfterSnapshot && query.sql.startsWith('select * from "payers"') && !/for update/i.test(query.sql)) {
+          deactivatedAfterSnapshot = true;
+          await mockPg('payers').where({ id: payer.id }).update({ active: false });
+        }
+        return result;
+      });
+      expect(await Payer.updatePayer(payer.id, { active: true, displayName: 'Fixture Property Management' })).toMatchObject({ conflict: true, code: 'invoice_send_in_flight' });
+      jest.restoreAllMocks();
+      expect(deactivatedAfterSnapshot).toBe(true);
+      expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
       await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
       expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ payer: { id: payer.id, active: true } });
+      // An already-active payer's full-form save carrying active: true is not an activation and is never fenced.
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending' });
+      expect(await Payer.updatePayer(payer.id, { active: true, notes: 'unchanged' })).toMatchObject({ payer: { id: payer.id, active: true } });
     } finally {
       jest.restoreAllMocks();
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
