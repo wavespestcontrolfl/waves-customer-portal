@@ -204,6 +204,83 @@ async function markRetryUncertain(message, err, now = new Date()) {
   return updated || null;
 }
 
+// A row stopped before any provider request: terminal for the rail, and a
+// summary's aggregate is settled from the ledger since no webhook follows.
+async function stopRetry(message, { status, reason, exhaustedAlert = false }) {
+  const [updated] = await db('email_messages')
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+    .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
+    .returning('*');
+  if (updated && exhaustedAlert) await alertExhausted(updated, reason);
+  if (message.template_key === 'service.visit_summary') {
+    await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...(updated || {}), status: updated?.status || status })
+      .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
+  }
+  return { sent: false, stopped: true, reason };
+}
+
+// The visit-summary handoff around one provider request. Resolves to the
+// provider result, or to the rail's terminal/uncertain outcome when nothing
+// (or something unknowable) reached the provider.
+async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
+  // Durable before the held handoff and on this worker's own connection
+  // (never a second slot inside the held transaction): an interrupted
+  // worker leaves a row stale-claim recovery settles as uncertain. The
+  // update must own the queued row, or the claim has moved on.
+  const marked = await db('email_messages')
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+    .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
+  if (Number(marked) !== 1) return { outcome: { sent: false, stopped: true, reason: 'claim_lost' } };
+  let fence;
+  try {
+    fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(message, dispatchToProvider);
+  } catch (err) {
+    if (state.dispatchStarted && !state.result) {
+      await markRetryUncertain(message, err);
+      return { outcome: { sent: false, uncertain: true, error: err } };
+    }
+    if (!state.dispatchStarted) {
+      // Fail closed, the same way an unreadable suppression ledger does.
+      await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
+      return { outcome: { sent: false, error: err } };
+    }
+    logger.warn(`[email-provider-retry] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
+  }
+  if (!state.result) {
+    return { outcome: await stopRetry(message, { status: 'blocked', reason: `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}` }) };
+  }
+  return { result: state.result };
+}
+
+// Post-acceptance bookkeeping. A bearer-link summary whose bookkeeping fails
+// after SendGrid accepted it settles as uncertain, never back on the schedule.
+async function recordRetrySend(message, result) {
+  let updated;
+  try {
+    [updated] = await db('email_messages')
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token })
+      .update({
+        provider_message_id: result.messageId,
+        sent_at: new Date(),
+        error_message: null,
+        updated_at: new Date(),
+        status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
+      })
+      .returning('*');
+  } catch (err) {
+    if (message.template_key === 'service.visit_summary') {
+      await markRetryUncertain(message, new Error(`bookkeeping failed after acceptance: ${err.message}`)).catch(() => {});
+      return { sent: false, uncertain: true, error: err };
+    }
+    throw err;
+  }
+  if (updated?.template_key === 'service.visit_summary') {
+    await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
+      .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
+  }
+  return { sent: true, message: updated || message };
+}
+
 async function retryOne(message) {
   let suppression;
   try {
@@ -214,131 +291,51 @@ async function retryOne(message) {
     return { sent: false, error: err };
   }
   if (suppression) {
-    const reason = suppression.suppression_type === 'template_unavailable'
-      ? 'Template is unavailable; retry stopped.'
-      : `Suppressed before retry: ${suppression.suppression_type}`;
-    const [updated] = await db('email_messages')
-      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-      .update({
-        status: suppression.suppression_type === 'template_unavailable' ? 'failed' : 'blocked',
-        error_message: reason,
-        provider_retry_next_at: null,
-        provider_retry_exhausted_at: new Date(),
-        updated_at: new Date(),
-      })
-      .returning('*');
-    if (updated && suppression.suppression_type === 'template_unavailable') await alertExhausted(updated, reason);
-    // A summary blocked here never reaches a provider, so no webhook will
-    // reconcile its aggregate: settle it from the ledger now.
-    if (message.template_key === 'service.visit_summary') {
-      await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...(updated || {}), status: updated?.status || 'blocked' })
-        .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
-    }
-    return { sent: false, stopped: true, reason };
+    const unavailable = suppression.suppression_type === 'template_unavailable';
+    return stopRetry(message, { status: unavailable ? 'failed' : 'blocked', exhaustedAlert: unavailable,
+      reason: unavailable ? 'Template is unavailable; retry stopped.' : `Suppressed before retry: ${suppression.suppression_type}` });
   }
-
-  // A visit summary is a bearer link: its recipient, the customer's
-  // preferences and the link itself are re-authorized while their rows are
-  // held through the provider request, not only the template and the
-  // suppression ledger before it.
-  const withProviderHandoff = message.template_key === 'service.visit_summary'
-    ? (dispatch) => require('./visit-completion-summary').retrySummaryThroughHandoff(message, dispatch)
-    : null;
 
   const group = String(message.suppression_group_key_snapshot || '').trim().toLowerCase();
   const asmGroupId = group === 'transactional_required' ? 0 : sendgrid.serviceGroupId();
+  // dispatchStarted is set immediately before the Mail Send request: a
+  // failure clearing the provider block is provably pre-send and keeps the
+  // ordinary retry schedule.
+  const state = { dispatchStarted: false, result: null };
+  const dispatchToProvider = async () => {
+    // Blocks are a provider-specific suppression distinct from hard bounces.
+    // If it remains, SendGrid will drop the retry before attempting delivery.
+    await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
+    state.dispatchStarted = true;
+    state.result = await sendgrid.sendOne({
+      to: message.recipient_email_snapshot,
+      fromEmail: message.from_email_snapshot,
+      fromName: message.from_name_snapshot,
+      replyTo: message.reply_to_snapshot,
+      subject: message.subject_snapshot,
+      html: message.html_snapshot,
+      text: message.text_snapshot,
+      categories: asArray(message.categories),
+      asmGroupId,
+      customArgs: {
+        email_message_id: message.id,
+        send_attempt_token: message.send_attempt_token,
+      },
+      suppressErrorLog: true,
+    });
+  };
   try {
-    let result;
-    // Set immediately before the Mail Send request: a failure clearing the
-    // provider block is provably pre-send and keeps the ordinary retry schedule.
-    let dispatchStarted = false;
-    const dispatchToProvider = async () => {
-      // Blocks are a provider-specific suppression distinct from hard bounces.
-      // If it remains, SendGrid will drop the retry before attempting delivery.
-      await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
-      dispatchStarted = true;
-      result = await sendgrid.sendOne({
-        to: message.recipient_email_snapshot,
-        fromEmail: message.from_email_snapshot,
-        fromName: message.from_name_snapshot,
-        replyTo: message.reply_to_snapshot,
-        subject: message.subject_snapshot,
-        html: message.html_snapshot,
-        text: message.text_snapshot,
-        categories: asArray(message.categories),
-        asmGroupId,
-        customArgs: {
-          email_message_id: message.id,
-          send_attempt_token: message.send_attempt_token,
-        },
-        suppressErrorLog: true,
-      });
-    };
-    if (withProviderHandoff) {
-      // Durable before the held handoff and on this worker's own connection
-      // (never a second slot inside the held transaction): an interrupted
-      // worker leaves a row stale-claim recovery settles as uncertain. The
-      // update must own the queued row, or the claim has moved on.
-      const marked = await db('email_messages')
-        .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-        .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
-      if (Number(marked) !== 1) return { sent: false, stopped: true, reason: 'claim_lost' };
-      let fence;
-      try {
-        fence = await withProviderHandoff(dispatchToProvider);
-      } catch (err) {
-        if (dispatchStarted && !result) {
-          await markRetryUncertain(message, err);
-          return { sent: false, uncertain: true, error: err };
-        }
-        if (!dispatchStarted) {
-          // Fail closed, the same way an unreadable suppression ledger does.
-          await markRetryFailure(message, new Error(`Visit summary recheck failed: ${err.message}`));
-          return { sent: false, error: err };
-        }
-        logger.warn(`[email-provider-retry] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
-      }
-      if (!result) {
-        const reason = `Suppressed before retry: ${fence?.reason || 'visit_summary_unavailable'}`;
-        await db('email_messages')
-          .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-          .update({ status: 'blocked', error_message: reason, provider_retry_next_at: null,
-            provider_retry_exhausted_at: new Date(), updated_at: new Date() });
-        // No provider request follows, so no webhook will ever reconcile the
-        // summary aggregate: settle it (and its alert) from the ledger now.
-        await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
-          .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
-        return { sent: false, stopped: true, reason };
-      }
+    // A visit summary is a bearer link: its recipient, the customer's
+    // preferences and the link itself are re-authorized while their rows are
+    // held through the provider request, not only the template and the
+    // suppression ledger before it.
+    if (message.template_key === 'service.visit_summary') {
+      const handoff = await retrySummaryThroughHandoff(message, dispatchToProvider, state);
+      if (handoff.outcome) return handoff.outcome;
     } else {
       await dispatchToProvider();
     }
-    let updated;
-    try {
-      [updated] = await db('email_messages')
-        .where({ id: message.id, send_attempt_token: message.send_attempt_token })
-        .update({
-          provider_message_id: result.messageId,
-          sent_at: new Date(),
-          error_message: null,
-          updated_at: new Date(),
-          status: db.raw("CASE WHEN status = 'queued' THEN 'sent' ELSE status END"),
-        })
-        .returning('*');
-    } catch (err) {
-      // SendGrid has the bearer link. A bookkeeping failure after acceptance
-      // must never put the summary back on the retry schedule.
-      if (message.template_key === 'service.visit_summary') {
-        await markRetryUncertain(message, new Error(`bookkeeping failed after acceptance: ${err.message}`)).catch(() => {});
-        return { sent: false, uncertain: true, error: err };
-      }
-      throw err;
-    }
-    if (updated?.template_key === 'service.visit_summary') {
-      await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
-        .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
-    }
-    return { sent: true, message: updated || message };
+    return await recordRetrySend(message, state.result);
   } catch (err) {
     await markRetryFailure(message, err);
     return { sent: false, error: err };

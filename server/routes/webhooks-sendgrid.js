@@ -731,36 +731,44 @@ async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client 
     email_message_id: message?.id || null,
   };
 
-  const existingQuery = client('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [email])
-    .where({
-      status: 'active',
-      suppression_type: suppression.suppression_type,
-    });
-  if (suppression.group_key) existingQuery.where({ group_key: suppression.group_key });
-  else existingQuery.whereNull('group_key');
-  const existing = await existingQuery.first();
+  // Written under the shared per-address lock so a bearer-link email
+  // handoff holding it finishes (or has not yet authorized) before this
+  // suppression is visible.
+  const write = async (trx) => {
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, email);
+    const existingQuery = trx('email_suppressions')
+      .whereRaw('LOWER(email) = ?', [email])
+      .where({
+        status: 'active',
+        suppression_type: suppression.suppression_type,
+      });
+    if (suppression.group_key) existingQuery.where({ group_key: suppression.group_key });
+    else existingQuery.whereNull('group_key');
+    const existing = await existingQuery.first();
 
-  if (existing) {
-    await client('email_suppressions').where({ id: existing.id }).update({
+    if (existing) {
+      await trx('email_suppressions').where({ id: existing.id }).update({
+        source: 'sendgrid_event_webhook',
+        metadata: trx.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(metadata)]),
+        updated_at: at,
+      });
+      return;
+    }
+
+    await trx('email_suppressions').insert({
+      email,
+      group_key: suppression.group_key,
+      suppression_type: suppression.suppression_type,
+      status: 'active',
       source: 'sendgrid_event_webhook',
-      metadata: client.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(metadata)]),
+      suppressed_at: at,
+      metadata: JSON.stringify(metadata),
+      created_at: at,
       updated_at: at,
     });
-    return;
-  }
-
-  await client('email_suppressions').insert({
-    email,
-    group_key: suppression.group_key,
-    suppression_type: suppression.suppression_type,
-    status: 'active',
-    source: 'sendgrid_event_webhook',
-    suppressed_at: at,
-    metadata: JSON.stringify(metadata),
-    created_at: at,
-    updated_at: at,
-  });
+  };
+  if (client.isTransaction) return write(client);
+  return client.transaction(write);
 }
 
 async function handleEmailMessageEvent(ev, message, client = db) {

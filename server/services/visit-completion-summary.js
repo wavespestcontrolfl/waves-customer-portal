@@ -181,13 +181,16 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
 // before its provider request: a throw before that signal (a failed recheck
 // on the held connection) is provably unsent and restores the claim, while a
 // throw after it is the provider outcome and propagates with the mark in place.
-async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, authorized, dispatch }) {
+async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, email = null, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
   const holdAndAuthorize = async (trx, phase) => {
-    // An SMS leg takes the canonical per-phone consent lock first, in the
-    // order the STOP / suppression writers take it, so an opt-out that
-    // commits during the request serializes behind the handoff.
-    if (phone) await require('../utils/customer-comms-lock').lockSmsPhone(trx, phone);
+    // A leg takes its canonical per-address lock first (the SMS phone lock
+    // the STOP / suppression writers take, or the email-address lock the
+    // suppression and address writers take), so an opt-out or an address
+    // claim that commits during the request serializes behind the handoff.
+    const locks = require('../utils/customer-comms-lock');
+    if (phone) await locks.lockSmsPhone(trx, phone);
+    if (email) await locks.lockCustomerEmail(trx, email);
     await trx('customers').where({ id: customerId }).forShare().first('id');
     // FOR SHARE cannot lock an absent row. The canonical seed serializes
     // missing-row creation without inventing marketing consent or replacing
@@ -343,71 +346,78 @@ function summaryEmailRecipients(customer, prefs) {
   return getServiceReportEmailRecipients(customer, prefs);
 }
 
+// One recipient's dispatch through the library and the locked handoff.
+// Returns 'sent' | 'blocked' | 'unknown' (a provider request may have
+// happened) | 'pending' (nothing reached the provider; retry later).
+async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, recipient, idempotencyKey }) {
+  let dispatched = false;
+  try {
+    const result = await require('./email-template-library').sendTemplate({
+      templateKey: 'service.visit_summary', to: recipient.email,
+      payload: { first_name: recipient.name || 'there', summary_url: summaryUrl },
+      recipientType: 'customer', recipientId: customer.id, idempotencyKey,
+      triggerEventId: `visit_summary:${visit.id}`,
+      categories: ['service_visit_summary'], suppressionGroupKey: 'service_operational',
+      suppressProviderErrorLog: true,
+      // A stale aggregate owner cannot hand off a later recipient after
+      // recovery has claimed the visit, and the recipient rows stay held
+      // through the provider request. A claim that cannot be read throws
+      // before dispatch, which the library records as a pre-provider abort.
+      withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
+        kind: 'completion_email', token: claim.token, email: recipient.email,
+        authorized: async (current, currentPrefs, trx) => summaryEmailRecipients(current, currentPrefs)
+          .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
+          && !(await summaryEmailSuppressed(recipient.email, trx)),
+        dispatch: async (_trx, onProviderStart) => { onProviderStart(); dispatched = true; await handoff(); return { ok: true }; } }),
+    });
+    if (result.sent) return 'sent';
+    if (result.blocked) return 'blocked';
+    return dispatched ? 'unknown' : 'pending';
+  } catch (err) {
+    // An administrator archived the template: a deliberate decision, not
+    // a transient failure — the leg is suppressed rather than retried.
+    if (err?.code === 'EMAIL_TEMPLATE_DISABLED') return 'blocked';
+    return dispatched ? 'unknown' : 'pending';
+  }
+}
+
 async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
   const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
-    const { messages, outcomes: states } = await summaryEmailEvidence(scope, database);
+    const { messages } = await summaryEmailEvidence(scope, database);
     const previous = new Map(messages.map((message) => [message.idempotency_key, message]));
     // Corrected-address recovery uses its own idempotency key. A saved send
     // or uncertain handoff to that address also owns it during packet replay.
     const ownedAddresses = new Set(messages.filter((message) => summaryEmailState(message) !== 'retry')
       .map((message) => String(message.recipient_email_snapshot || '').toLowerCase()));
-    let sent = states.includes('sent');
-    let unknown = states.includes('unknown_delivery');
-    let pending = false;
+    const outcomes = [];
     for (const recipient of recipients) {
       const recipientKey = crypto.createHash('sha256').update(recipient.email.toLowerCase()).digest('hex').slice(0, 32);
       const idempotencyKey = `visit_summary:${visit.id}:${recipientKey}`;
       if (summaryEmailState(previous.get(idempotencyKey)) !== 'retry' || ownedAddresses.has(recipient.email.toLowerCase())) continue;
-      let dispatched = false;
-      try {
-        const result = await require('./email-template-library').sendTemplate({
-          templateKey: 'service.visit_summary', to: recipient.email,
-          payload: { first_name: recipient.name || 'there', summary_url: summaryUrl },
-          recipientType: 'customer', recipientId: customer.id, idempotencyKey,
-          triggerEventId: `visit_summary:${visit.id}`,
-          categories: ['service_visit_summary'], suppressionGroupKey: 'service_operational',
-          suppressProviderErrorLog: true,
-          // A stale aggregate owner cannot hand off a later recipient after
-          // recovery has claimed the visit, and the recipient rows stay held
-          // through the provider request. A claim that cannot be read throws
-          // before dispatch, which the library records as a pre-provider abort.
-          withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
-            kind: 'completion_email', token: claim.token,
-            authorized: async (current, currentPrefs, trx) => summaryEmailRecipients(current, currentPrefs)
-              .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
-              && !(await summaryEmailSuppressed(recipient.email, trx)),
-            dispatch: async (_trx, onProviderStart) => { onProviderStart(); dispatched = true; await handoff(); return { ok: true }; } }),
-        });
-        if (result.sent) { sent = true; continue; }
-        if (result.blocked) continue;
-        unknown ||= dispatched;
-        pending ||= !dispatched;
-      } catch (err) {
-        // An administrator archived the template: a deliberate decision, not
-        // a transient failure — the leg is suppressed rather than retried.
-        if (err?.code === 'EMAIL_TEMPLATE_DISABLED') continue;
-        if (dispatched) unknown = true;
-        else pending = true;
-      }
+      outcomes.push(await sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, recipient, idempotencyKey }));
     }
     // The ledger, not the library's return value, decides what was accepted:
     // a bounce webhook can land between the provider handoff and the
     // library's return, in which case the row already carries its terminal
     // status while the call still reports sent.
     const { outcomes: ledger } = await summaryEmailEvidence(scope, database);
-    sent = ledger.includes('sent');
-    unknown ||= ledger.includes('unknown_delivery');
-    // Finish proven-unsent recipients before surfacing an earlier uncertain
-    // recipient. Its durable email row is always skipped on a later retry.
-    const outcome = pending ? 'retry' : unknown ? 'unknown_delivery' : sent ? 'sent' : 'suppressed';
-    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', outcome, new Date(), claim.token);
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email',
+      summaryEmailAggregateOutcome(outcomes, ledger), new Date(), claim.token);
   } catch {
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', 'retry', new Date(), claim.token);
   }
+}
+
+// Finish proven-unsent recipients before surfacing an earlier uncertain
+// recipient. Its durable email row is always skipped on a later retry.
+function summaryEmailAggregateOutcome(outcomes, ledger) {
+  if (outcomes.includes('pending')) return 'retry';
+  if (outcomes.includes('unknown') || ledger.includes('unknown_delivery')) return 'unknown_delivery';
+  return ledger.includes('sent') ? 'sent' : 'suppressed';
 }
 
 async function summaryEmailEvidence(message, database) {
@@ -561,6 +571,10 @@ async function retrySummaryThroughHandoff(message, dispatch, { destination = nul
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { ok: false, reason: 'visit_summary_unavailable' };
   return database.transaction(async (trx) => {
+    // The destination address lock is taken first: suppression and address
+    // writers serialize on it, so the fence below reads a settled ledger and
+    // the request cannot be overtaken by an opt-out or an address claim.
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, destination || message.recipient_email_snapshot);
     const visit = await trx('service_visits').where({ id: match[1] }).forShare().first('customer_id');
     if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
     await trx('customers').where({ id: visit.customer_id }).forShare().first('id');
