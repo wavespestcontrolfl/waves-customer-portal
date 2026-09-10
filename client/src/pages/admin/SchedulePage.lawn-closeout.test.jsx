@@ -583,6 +583,39 @@ it('a governed draft restored under an initial plan outage still submits its rem
   expect(submit.mock.calls[0][1].lawnProtocolCompletion.skippedProducts).toEqual([{ productId: products[0].id, productName: products[0].name }]);
 });
 
+it('a governed draft restored under a plan outage keeps its removed defaults through the next autosave, and a second restore still submits them', async () => {
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).lawnRemovedDefaultIds).toEqual([products[0].id]));
+  view.unmount();
+  failPlan = true;
+  const second = mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  // Typed input after the restore triggers the debounced autosave with no live defaults loaded.
+  fireEvent.change(totals()[0], { target: { value: '2' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).selectedProducts?.[0]?.amount ?? JSON.parse(localStorage.getItem(key)).selectedProducts?.[0]?.totalAmount).toBeTruthy(), { timeout: 3000 });
+  expect(JSON.parse(localStorage.getItem(key)).lawnRemovedDefaultIds).toEqual([products[0].id]);
+  expect(JSON.parse(localStorage.getItem(key)).lawnRemovedDefaultNames).toEqual({ [products[0].id]: products[0].name });
+  second.unmount();
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  const card = within(totals()[0].parentElement);
+  fireEvent.change(card.getAllByRole('combobox')[2], { target: { value: 'broadcast_spray' } });
+  fireEvent.change(card.getAllByRole('combobox')[1], { target: { value: 'fl_oz' } });
+  fireEvent.change(card.getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
+  fireEvent.change(totals()[0], { target: { value: '2' } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.skippedProducts).toEqual([{ productId: products[0].id, productName: products[0].name }]);
+});
+
 it('a removed default deleted from the catalog before the draft is restored is still submitted as a skipped product, named from the draft', async () => {
   enableDefaults();
   const view = mount();

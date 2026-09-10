@@ -12708,7 +12708,9 @@ export function CompletionPanel({
         JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
         JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
-      (lawnDefaultsEnabled && (lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0)) ||
+      // Governed state restored under a plan outage (no live defaults) is
+      // still draft content: the next autosave must not drop it (Codex #4113 P2).
+      ((lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0) && (lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0)) ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -12769,8 +12771,12 @@ export function CompletionPanel({
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
         lawnAreaOverride,
-        lawnRemovedDefaultIds: lawnDefaultsEnabled ? lawnRemovedDefaultIds : undefined,
-        lawnRemovedDefaultNames: lawnDefaultsEnabled ? lawnRemovedDefaultNamesRef.current : undefined,
+        // Persisted whenever removed defaults exist, not only while live
+        // defaults are loaded: a draft restored during a plan outage would
+        // otherwise lose its removed defaults on the next autosave, and the
+        // ledger's unlisted-skip audit with them (Codex #4113 P2).
+        lawnRemovedDefaultIds: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultIds : undefined,
+        lawnRemovedDefaultNames: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultNamesRef.current : undefined,
         lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
