@@ -3594,12 +3594,26 @@ const ReviewService = {
       result = await EmailLib.sendTemplate({
         templateKey: "review_request_email",
         to: contact.email,
-        // Re-judged immediately before the SendGrid request.
+        // The SendGrid request runs inside the packet handoff the SMS rail
+        // uses, so a summary bounce reconciliation (which takes the packet
+        // row before parking this outreach) waits for the send or parks the
+        // ask before it could go out; the uncertainty verdict is judged under
+        // that same held row.
         withProviderHandoff: async (dispatch) => {
-          const verdict = await this._visitSummaryPreDispatch(request?.service_record_id);
-          if (verdict.ok !== true) { summaryBlock = { blocked: true, code: verdict.code }; return verdict; }
-          await dispatch();
-          return { ok: true };
+          let started = false;
+          let verdict;
+          try {
+            verdict = await require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request?.service_record_id, async () => {
+              started = true;
+              await dispatch();
+              return { ok: true };
+            });
+          } catch (err) {
+            if (started) throw err;
+            verdict = { ok: false, code: "VISIT_SUMMARY_STATE_UNAVAILABLE", reason: "The visit summary state could not be read", retryable: true };
+          }
+          if (verdict.ok !== true) summaryBlock = { blocked: true, code: verdict.code };
+          return verdict;
         },
         payload: {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
@@ -4592,8 +4606,19 @@ const ReviewService = {
       // status is now 'stopped' and these update 0 rows — so a stop during the
       // send window is honored (the next touch won't be scheduled) rather than
       // silently undone by re-activating the row.
+      // A summary bounce can park this sequence after the provider accepted
+      // the step but before this bookkeeping (the packet handoff ends at
+      // provider return). The delivered step is still recorded on the parked
+      // row — status untouched — so the recovery resumes the NEXT step at its
+      // schedule instead of replaying the one that went out.
+      const advanceSentStep = async (updates) => {
+        const active = await db("review_sequences").where({ id: seq.id, status: "active" }).update(updates);
+        if (active) return active;
+        const Summary = require("./visit-completion-summary");
+        return db("review_sequences").where({ id: seq.id, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }).update(updates);
+      };
       if (nextStep >= plan.length) {
-        await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        await advanceSentStep({
           status: "completed",
           stop_reason: "completed",
           current_step: nextStep,
@@ -4606,7 +4631,7 @@ const ReviewService = {
         return { ran: true, sent: true, completed: true, step: seq.current_step };
       }
       const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep] });
-      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+      await advanceSentStep({
         current_step: nextStep,
         touches_sent: seq.touches_sent + 1,
         last_touch_at: new Date(),

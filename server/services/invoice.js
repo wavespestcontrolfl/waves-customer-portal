@@ -887,6 +887,10 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
       const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
         : await trx("visit_completion_packet_items").where({ packet_id: packetId }).pluck("scheduled_service_id");
       if (billed.length) await trx("scheduled_services").whereIn("id", billed).forShare().select("id");
+      // The payer rows the resolver consults are held too: a reactivation of
+      // an inactive payer (which flips the same ownership decision without
+      // touching a customer or member row) serializes behind the claim.
+      await Packets.lockPacketPayerRows(packetId, trx);
       const payerId = await Packets.liveThirdPartyPayerForPacket(packetId, trx);
       if (payerId) {
         await trx("invoices").where({ id: invoiceId }).whereIn("status", ["scheduled", "sending"])
@@ -2815,9 +2819,22 @@ const InvoiceService = {
     // customer and billed-member rows with a live Bill-To recheck (see
     // claimPacketInvoiceForSend); a payer assigned since scheduling owns the
     // debt, so the homeowner never receives the pay link.
-    const packetClaim = accrualPre?.visit_completion_packet_id && !accrualPre.payer_id
-      ? await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed })
-      : null;
+    let packetClaim = null;
+    if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
+      try {
+        packetClaim = await claimPacketInvoiceForSend(invoiceId, accrualPre.visit_completion_packet_id, { allowClaimed });
+      } catch (err) {
+        // The scheduled-send worker already fenced and claimed this send; a
+        // transient failure of the re-judge here left no provider request
+        // behind, so the invoice goes back to its queue slot instead of
+        // sitting in 'sending' until stale-claim recovery strands it.
+        if (!allowClaimed) throw err;
+        await restoreSendClaim(invoiceId, "scheduled", true);
+        logger.warn(`[invoice] Bill-To re-judge failed for ${invoiceId} — send left queued: ${err.message}`);
+        return { ok: false, error: `Bill-To check failed: ${err.message}`, code: "bill_to_fence_failed",
+          sms: { ok: false, code: "bill_to_fence_failed" }, email: { ok: false, code: "bill_to_fence_failed" } };
+      }
+    }
     if (packetClaim?.payerBilled) {
       return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
         sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
@@ -3389,6 +3406,10 @@ const InvoiceService = {
       if (result.code === "payer_billed") {
         // Withdrawn at delivery: the invoice already left the queue.
         held += 1;
+        continue;
+      }
+      if (result.code === "bill_to_fence_failed") {
+        // Already restored to its queue slot by the sender; no attempt spent.
         continue;
       }
 
