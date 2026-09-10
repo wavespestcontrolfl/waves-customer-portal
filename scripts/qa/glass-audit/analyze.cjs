@@ -1,0 +1,113 @@
+#!/usr/bin/env node
+'use strict';
+// Cross-capture digest for one or more glass-audit runs → markdown + JSON.
+//   node scripts/qa/glass-audit/analyze.cjs <run> [<run>…]  (names under .tmp/glass-audit)
+const fs = require('node:fs');
+const path = require('node:path');
+
+const root = path.resolve(__dirname, '../../..');
+const runs = process.argv.slice(2);
+if (!runs.length) { console.error('usage: analyze.cjs <run> [<run>…]'); process.exit(1); }
+const results = [];
+for (const run of runs) {
+  const dir = path.join(root, '.tmp/glass-audit', run);
+  for (const sc of fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
+    for (const f of fs.readdirSync(path.join(dir, sc.name)).filter((x) => x.endsWith('.json'))) {
+      results.push({ run, ...JSON.parse(fs.readFileSync(path.join(dir, sc.name, f), 'utf8')) });
+    }
+  }
+}
+const withMetrics = results.filter((r) => r.metrics);
+const key = (r) => `${r.scenario}/${r.state}`;
+const byScenario = {};
+for (const r of withMetrics) (byScenario[key(r)] = byScenario[key(r)] || []).push(r);
+
+const count = (map, k) => { map[k] = (map[k] || 0) + 1; };
+const lines = [];
+const out = { runs, captures: results.length, withMetrics: withMetrics.length, failures: results.filter((r) => r.failure).map((r) => ({ id: key(r), width: r.width, failure: r.failure })) };
+lines.push(`# glass-audit digest — runs: ${runs.join(', ')}`, '', `Captures: ${results.length} (${withMetrics.length} with metrics, ${out.failures.length} failed)`, '');
+
+// 1. Per-scenario summary table (390 + 1440)
+lines.push('## Per-scenario summary (390 / 1440)', '', '| scenario/state | glass | h1 | <14px | >700 | off-scale | ctrl<44 | nested blur | inline blur | pills | heading≠sheet | contrast<AA | overflow-x | main | footer | unmatched | errors |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+const pick = (rs, w) => rs.find((r) => r.width === w);
+const fmt2 = (a, b, f) => `${a ? f(a) : '–'} / ${b ? f(b) : '–'}`;
+for (const [k, rs] of Object.entries(byScenario)) {
+  const a = pick(rs, 390); const b = pick(rs, 1440);
+  const m = (r) => r.metrics;
+  lines.push(`| ${k} | ${fmt2(a, b, (r) => m(r).theme.mounted ? (m(r).theme.attr || 'on') : 'OFF')} | ${fmt2(a, b, (r) => m(r).h1Count)} | ${fmt2(a, b, (r) => m(r).text.under14.length)} | ${fmt2(a, b, (r) => m(r).text.over700.length)} | ${fmt2(a, b, (r) => m(r).text.offScale.length)} | ${fmt2(a, b, (r) => m(r).controls.small.length)} | ${fmt2(a, b, (r) => m(r).glass.nestedBlur.length)} | ${fmt2(a, b, (r) => m(r).glass.inlineBlur.length)} | ${fmt2(a, b, (r) => m(r).pills.length)} | ${fmt2(a, b, (r) => m(r).headingIssues.length)} | ${fmt2(a, b, (r) => r.contrast.length)} | ${fmt2(a, b, (r) => m(r).layout.overflowX)} | ${fmt2(a, b, (r) => m(r).layout.mainCount)} | ${fmt2(a, b, (r) => m(r).layout.footer.present ? 'y' : 'n')} | ${fmt2(a, b, (r) => r.unmatched.length)} | ${fmt2(a, b, (r) => r.pageErrors.length)} |`);
+}
+lines.push('');
+
+// 2. Detail lists (deduped by scenario + selector + text)
+function section(title, getter, fmt, limitPer = 12) {
+  lines.push(`## ${title}`, '');
+  const seen = new Set();
+  const grouped = {};
+  for (const r of withMetrics.filter((x) => x.width === 390 || x.width === 1440)) {
+    for (const it of getter(r) || []) {
+      const id = `${r.scenario}|${fmt(it)}`;
+      if (seen.has(id)) continue; seen.add(id);
+      (grouped[r.scenario] = grouped[r.scenario] || []).push(`${fmt(it)} @${r.width}`);
+    }
+  }
+  const total = Object.values(grouped).reduce((n, a) => n + a.length, 0);
+  lines.push(`_${total} distinct items across ${Object.keys(grouped).length} scenarios_`, '');
+  for (const [sc, items] of Object.entries(grouped)) {
+    lines.push(`- **${sc}** (${items.length}): ${items.slice(0, limitPer).join('; ')}${items.length > limitPer ? `; … +${items.length - limitPer}` : ''}`);
+  }
+  lines.push('');
+  out[title] = grouped;
+}
+section('Text under 14px', (r) => r.metrics.text.under14, (t) => `${t.sel} ${t.size}px/${t.weight} “${t.text.slice(0, 30)}”`);
+section('Weights above 700', (r) => r.metrics.text.over700, (t) => `${t.sel} ${t.size}px/${t.weight} “${t.text.slice(0, 30)}”`);
+section('Off-scale sizes (not 14/15/16/18/20/26/32–40)', (r) => r.metrics.text.offScale, (t) => `${t.sel} ${t.size}px “${t.text.slice(0, 30)}”`);
+section('Controls under 44px (non-inline)', (r) => r.metrics.controls.small, (c) => `${c.sel} ${c.h}px “${c.name.slice(0, 24)}”`);
+section('Inputs (height / font / radius / placeholder)', (r) => r.metrics.controls.inputs, (i) => `${i.sel} h${i.h} ${i.size}px r${i.radius} ph:${i.placeholder ? i.placeholder.size + ' ' + i.placeholder.color : '-'} labelled:${i.labelled}`);
+section('Heading sizes ≠ sheet', (r) => r.metrics.headingIssues, (h) => `${h.why} “${h.text.slice(0, 30)}”`);
+section('Nested backdrop-filter (glass inside glass)', (r) => r.metrics.glass.nestedBlur, (g) => `${g.sel}`);
+section('Elements extending past the viewport edge (clipped overflow)', (r) => r.metrics.layout.overflowers, (o) => `${o.sel} right=${o.right} w=${o.w} y=${o.y}`);
+section('Untagged inline backdrop-filter surfaces', (r) => r.metrics.glass.inlineBlur, (g) => `${g.sel} ${g.backdrop} r${g.radius}`);
+section('Status-chip-like pills (no-chips ruling)', (r) => r.metrics.pills, (p) => `${p.sel} “${p.text.slice(0, 24)}” ${p.size}px r${p.radius} ${p.bg}`);
+section('Contrast below AA on composited background', (r) => r.contrast, (c) => `${c.sel} “${c.text.slice(0, 24)}” ${c.size}px ${c.color} on ${c.bg} = ${c.avg}:1 (min ${c.min})`);
+section('Icon-only controls without a name', (r) => r.metrics.controls.iconOnlyUnnamed, (c) => c.sel);
+section('Focus probe: focusable controls with no visible ring', (r) => (r.focusProbe || []).filter((f) => f.focusable !== false && !f.ring), (f) => `${f.sel} “${(f.name || '').slice(0, 20)}” outline:${f.outline}`);
+section('Dialogs / overlays captured', (r) => r.interactions.flatMap((i) => (i.metrics ? i.metrics.overlays.dialogs.map((d) => ({ ...d, ix: i.name })) : [])), (d) => `${d.ix}: ${d.sel} glass=${d.glass} r${d.radius} label=${d.label}`);
+section('Scrims captured', (r) => r.interactions.flatMap((i) => (i.metrics ? i.metrics.overlays.scrims.map((s) => ({ ...s, ix: i.name })) : [])), (s) => `${s.ix}: ${s.bg} ${s.backdrop}`);
+section('Interaction failures', (r) => r.interactions.filter((i) => !i.ok), (i) => `${i.name}: ${(i.error || '').slice(0, 80)}`);
+section('Unmatched API calls', (r) => r.unmatched.map((u) => ({ u })), (x) => x.u);
+section('Page errors', (r) => r.pageErrors.map((u) => ({ u })), (x) => x.u.slice(0, 100));
+
+// 3. Cross-scenario distributions
+lines.push('## Glass tier radius by scenario (390)', '');
+for (const r of withMetrics.filter((x) => x.width === 390)) {
+  const rb = r.metrics.glass.radiusByTier;
+  lines.push(`- ${key(r)}: ${Object.entries(rb).map(([t, m]) => `${t}=${Object.entries(m).map(([rad, n]) => `${rad}×${n}`).join(',')}`).join(' | ')}`);
+}
+lines.push('', '## Layout geometry (gutter / widest card / header / footer / sticky / fixed-bottom)', '');
+for (const w of [320, 390, 768, 1024, 1440]) {
+  const rs = withMetrics.filter((x) => x.width === w);
+  if (!rs.length) continue;
+  lines.push(`### @${w}`, '');
+  for (const r of rs) {
+    const L = r.metrics.layout;
+    lines.push(`- ${key(r)}: gutter=${L.gutterLeft} widest=${L.widestCard} lefts=[${L.cardLefts.slice(0, 5).join(',')}] header=${L.header ? `${L.header.h}px ${L.header.position} pt:${L.header.pt}` : 'none'} footer=${L.footer.present ? `${L.footer.h}px${L.footer.belowFold ? ' BELOW-FOLD' : ''}` : 'none'} sticky=[${L.stickyTop.filter((s) => !s.sel.includes('glass-scene')).map((s) => `${s.sel} ${s.h}px pt:${s.pt}`).join('; ')}] fixedBottom=[${L.fixedBottom.filter((s) => !s.sel.includes('glass-scene')).map((s) => `${s.sel} ${s.h}px pb:${s.pb}`).join('; ')}] main=${L.mainWidth}`);
+  }
+  lines.push('');
+}
+lines.push('## Typography census per scenario (390): sizes / weights / families / distinct colours', '');
+for (const r of withMetrics.filter((x) => x.width === 390)) {
+  const T = r.metrics.text;
+  lines.push(`- ${key(r)}: sizes {${Object.entries(T.sizeHist).sort((a, b) => a[0] - b[0]).map(([s, n]) => `${s}:${n}`).join(' ')}} weights {${Object.entries(T.weightHist).map(([s, n]) => `${s}:${n}`).join(' ')}} families {${Object.entries(T.familyHist).map(([s, n]) => `${s}:${n}`).join(' ')}} colours=${Object.keys(T.colorHist).length} h1=${r.metrics.headings.filter((h) => h.tag === 'h1').map((h) => h.size).join('/')} h2=${[...new Set(r.metrics.headings.filter((h) => h.tag === 'h2').map((h) => h.size))].join('/')} h3=${[...new Set(r.metrics.headings.filter((h) => h.tag === 'h3').map((h) => h.size))].join('/')} eyebrows=${[...new Set(r.metrics.eyebrows.map((e) => `${e.size}/${e.weight}/${e.ls}`))].join(',')}`);
+}
+lines.push('', '## Text colours used (390, all scenarios)', '');
+const colours = {};
+for (const r of withMetrics.filter((x) => x.width === 390)) for (const [c, n] of Object.entries(r.metrics.text.colorHist)) { colours[c] = colours[c] || { n: 0, sc: new Set() }; colours[c].n += n; colours[c].sc.add(r.scenario); }
+for (const [c, v] of Object.entries(colours).sort((a, b) => b[1].n - a[1].n)) lines.push(`- ${c}: ${v.n} elements in ${v.sc.size} scenarios`);
+lines.push('', '## Fonts actually loaded / computed families', '');
+for (const r of withMetrics.filter((x) => x.width === 1440)) lines.push(`- ${key(r)}: body=${(r.metrics.fonts.body || '').split(',')[0]} h1=${(r.metrics.fonts.h1 || '').split(',')[0]} button=${(r.metrics.fonts.button || '').split(',')[0]} loaded=[${r.metrics.fonts.loaded.slice(0, 6).join(', ')}]`);
+
+const runLabel = runs.join('+');
+const mdPath = path.join(root, '.tmp/glass-audit', `digest-${runLabel}.md`);
+fs.writeFileSync(mdPath, lines.join('\n'));
+fs.writeFileSync(path.join(root, '.tmp/glass-audit', `digest-${runLabel}.json`), JSON.stringify(out, null, 2));
+console.log(`digest → ${path.relative(root, mdPath)} (${lines.length} lines)`);
