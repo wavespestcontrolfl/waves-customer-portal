@@ -463,6 +463,29 @@ function ownerDb(byTable = {}) {
   });
 }
 
+describe('resolveCustomerEmailField (account-primary fallback)', () => {
+  beforeEach(() => db.mockReset());
+
+  test('a secondary profile addressed at its account primary resolves to the primary row\'s email field', async () => {
+    const secondary = { id: 'sec-1', account_id: 'acct-1', is_primary_profile: false, email: null, service_contact_email: null, service_contact2_email: null, service_contact3_email: null };
+    const primary = { id: 'pri-1', first_name: 'Pat', phone: null, email: 'primary@example.com' };
+    db.mockImplementation((table) => {
+      const chain = {};
+      let byId = false;
+      for (const m of ['where', 'whereNull', 'orWhereRaw', 'forShare']) {
+        chain[m] = jest.fn((arg) => { if (arg && typeof arg === 'object' && 'id' in arg) byId = true; if (typeof arg === 'function') arg(chain); return chain; });
+      }
+      chain.first = jest.fn(async () => {
+        if (table === 'customers') return byId ? secondary : primary;
+        return null;
+      });
+      return chain;
+    });
+    await expect(recovery.resolveCustomerEmailField({ recipient_type: 'customer', recipient_id: 'sec-1' }, 'primary@example.com'))
+      .resolves.toEqual({ customerId: 'pri-1', field: 'email' });
+  });
+});
+
 describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
   beforeEach(() => db.mockReset());
 

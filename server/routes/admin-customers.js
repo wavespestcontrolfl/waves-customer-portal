@@ -4098,6 +4098,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // A Bill-To edit that can make a withdrawn combined-visit invoice
+          // self-pay again (payer cleared) requeues it through the shared
+          // reconciliation, inside this same transaction.
+          if (updates.payer_id !== undefined) {
+            await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { customerId: req.params.id });
+          }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed
           // move must never leave the former home's lat/lng readable beside
