@@ -16364,6 +16364,12 @@ function savedFloorReplayOverrides(estData) {
   const tsKnobs = require('../services/estimate-tree-shrub-knob-replay')
     .treeShrubKnobSignalForReplay(estData);
   if (tsKnobs) overrides.treeShrubPricingKnobs = tsKnobs;
+  // Termite station-cost snapshot (plan 2026-09-03 §A1) — same home, same
+  // tri-state: stamped replays verbatim, unstamped termite replays the
+  // pre-stamp constant, no termite line injects nothing.
+  const termiteKnobs = require('../services/estimate-tree-shrub-knob-replay')
+    .termiteKnobSignalForReplay(estData);
+  if (termiteKnobs) overrides.termitePricingKnobs = termiteKnobs;
   // Shared with serverRecomputeFromEstimateData (admin-estimate-persistence)
   // — codex #3432 r2 P0: the authoritative recompute path replays the same
   // stored inputs and must resolve the same commercial-floor evidence.
@@ -26105,6 +26111,7 @@ module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;
 // keeps an already-sent Tree & Shrub quote at its sent price after an admin
 // flips the v4.7 pricing_config knobs.
 module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-shrub-knob-replay').treeShrubKnobSignalForReplay;
+module.exports.estimateTermiteKnobSignal = require('../services/estimate-tree-shrub-knob-replay').termiteKnobSignalForReplay;
 // Test hooks (measured-basis lane 2026-08-12): the treatable-area line the
 // lawn PriceCard renders beside its per-application price.
 module.exports.measuredBasisForSection = measuredBasisForSection;
