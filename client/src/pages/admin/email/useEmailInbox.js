@@ -91,7 +91,7 @@ export default function useEmailInbox(active, clearDraftResult) {
   });
   if (filter !== "all") params.set("category", filter);
   if (searchQuery) params.set("search", searchQuery);
-  const [status, loadStatus, , statusState] = useEmailResource(
+  const [status, loadStatus, setStatus, statusState] = useEmailResource(
     "/api/admin/email/oauth/status",
     null,
   );
@@ -295,10 +295,26 @@ export default function useEmailInbox(active, clearDraftResult) {
       setEmails((current) => current.filter((email) => email.id !== emailId));
       if (isSelected(emailId)) closeEmail(emailId);
       loadStats();
-      setActionFeedback({ message: action === "archive" ? "Email archived." : "Email moved to trash." });
+      setActionFeedback({ message: action === "archive" ? "Email archived." : "Email removed from the portal inbox." });
     } catch {
       setActionFeedback({ error: true, message: action === "archive" ? "Could not archive the email. Try again." : "Could not move the email to trash. Try again." });
     } finally { finishAction(); }
+  };
+
+  // Re-read one row after a partial-success response; a failed refresh keeps
+  // the current row rather than replacing the server's error message. GET
+  // /message/:id marks an unread row read server-side, so only a row the
+  // client already knows is read is refreshed — that read is side-effect
+  // free and cannot race the open conversation's own mark-as-read request.
+  const refreshEmail = async (emailId) => {
+    const row = emails.find((email) => email.id === emailId) || (selectedEmail?.id === emailId ? selectedEmail : null);
+    if (!row?.is_read) return;
+    try {
+      const r = await adminFetch(`/api/admin/email/message/${encodeURIComponent(emailId)}`);
+      if (!r.ok) return;
+      const email = await r.json();
+      if (email?.id === emailId) patchEmail(emailId, email);
+    } catch { /* keep the stale row; the error feedback still explains the outcome */ }
   };
 
   const handleReclassify = async (emailId) => {
@@ -308,14 +324,23 @@ export default function useEmailInbox(active, clearDraftResult) {
         `/api/admin/email/message/${emailId}/reclassify`,
         { method: "POST" },
       );
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      patchEmail(emailId, { classification: data.classification?.category, extracted_data: data.classification });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        // The endpoint's non-2xx payloads carry operator instructions (restore
+        // from Gmail Trash, retry a failed follow-up), and some 502s fire after
+        // the new category was already persisted — surface the server's own
+        // message and re-read the row so the list shows the real category.
+        await refreshEmail(emailId);
+        setActionFeedback({ error: true, message: typeof data?.error === "string" && data.error.trim() ? data.error : "Could not reclassify the email. Try again." });
+        return;
+      }
+      patchEmail(emailId, { classification: data?.classification?.category, extracted_data: data?.classification });
       setActionFeedback({ message: "Email reclassified." });
     } catch {
       setActionFeedback({ error: true, message: "Could not reclassify the email. Try again." });
     } finally { finishAction(); }
   };
+
 
   const handleBlock = async () => {
     const value = blockInput.trim().toLowerCase().replace(/^@/, "");
@@ -360,9 +385,14 @@ export default function useEmailInbox(active, clearDraftResult) {
     } finally { finishAction(); }
   };
 
+  // Only the latest download may publish an error: a retry or a second
+  // attachment supersedes an older pending request, whose late rejection
+  // would otherwise overwrite a successful newer download's blank feedback.
+  const attachmentSequenceRef = useRef(0);
   const handleDownloadAttachment = async (event, msg, att) => {
     event.preventDefault();
     clearFeedback("attachment");
+    const request = ++attachmentSequenceRef.current;
     try {
       const r = await adminFetch(
         `/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`,
@@ -381,6 +411,7 @@ export default function useEmailInbox(active, clearDraftResult) {
       a.remove();
       URL.revokeObjectURL(url);
     } catch {
+      if (request !== attachmentSequenceRef.current) return;
       setActionFeedback({ error: true, message: "Could not download the attachment. Try again.", source: "attachment" });
     }
   };
@@ -396,6 +427,9 @@ export default function useEmailInbox(active, clearDraftResult) {
     actionFeedback, pendingAction,
     loadStatus, loadEmails, loadBlocked, loadDigest,
     retrySelection: () => setSelectionRetry((current) => current + 1),
+    // A retry after a failed check drops the stale status first, so the
+    // workspace does not reappear on old data while the new check is pending.
+    retryStatus: () => { setStatus(null); loadStatus(); },
     status,
     stats,
     digest,

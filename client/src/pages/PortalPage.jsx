@@ -9,6 +9,7 @@ import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
 import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
+import { propertyRelationshipChip } from '../lib/contact-roles';
 import { fmtMoney } from '../lib/money';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -613,18 +614,34 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand', 
 // =========================================================================
 // LAWN HEALTH HOOK
 // =========================================================================
-function useLawnHealth(customerId) {
+// `scope` (app property scope, PR 4): the entry the consuming tab shows.
+// A lawn read the server scoped to ANOTHER house than the tab shows (the
+// selected house retired, or the gate flipped) is withheld here, centrally,
+// so Home and My Plan cannot render a fallback house's lawn under the shown
+// address (GitHub codex #4322 r0 P1). A read with no echo under a saved
+// selection is the customer-wide default — consumers keep their own rule
+// for that (Home withholds it under a secondary).
+function useLawnHealth(customerId, scope = null) {
   const [data, setData] = useState({
     scores: null, initialScores: null, hasLawnCare: false, loading: true,
     photos: [], beforeAfter: null, trend: [], recommendations: null,
     assessmentCount: 0, nextMilestone: null,
     seasonalContext: null, neighborBenchmark: null,
   });
+  const scopeStale = !!(scope && data.propertyScope
+    && scopeEchoMismatch(data.propertyScope, scope.currentEntry || null, !!scope.savedScope, scope.selectedPropertyId || null));
+  useEffect(() => {
+    if (scopeStale && scope?.onSavedScopeUnavailable) scope.onSavedScopeUnavailable();
+  }, [scopeStale, scope?.onSavedScopeUnavailable]);
 
   useEffect(() => {
     if (!customerId) return;
     api.getLawnHealth(customerId)
       .then(d => setData({
+        // The selection the read was scoped to (app property scope, PR 4):
+        // Home shows the lawn teaser under a secondary house only when the
+        // server says the lawn data is that house's.
+        propertyScope: d.propertyScope || null,
         scores: d.scores,
         initialScores: d.initialScores,
         hasLawnCare: d.hasLawnCare,
@@ -642,6 +659,9 @@ function useLawnHealth(customerId) {
       .catch(() => setData(prev => ({ ...prev, loading: false })));
   }, [customerId]);
 
+  if (scopeStale) {
+    return { ...data, scopeStale: true, hasLawnCare: false, scores: null, initialScores: null, photos: [], beforeAfter: null, trend: [], recommendations: null };
+  }
   return data;
 }
 
@@ -2720,7 +2740,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   const [instagramPosts, setInstagramPosts] = useState([]);
   const [blogPosts, setBlogPosts] = useState([]);
   const [newsletterPosts, setNewsletterPosts] = useState([]);
-  const lawnHealth = useLawnHealth(customer.id);
+  const lawnHealth = useLawnHealth(customer.id, { currentEntry: dashboardEntry, savedScope: dashboardSavedScope, selectedPropertyId: dashboardSelectionNamed, onSavedScopeUnavailable });
+  // Under a NON-primary selection the lawn read is customer-keyed unless the
+  // server resolved it to the shown house (GATE_LAWN_PROPERTY_HISTORY +
+  // the session property — app property scope, PR 4): its echo must name
+  // this entry, exactly like the next/last reads.
+  // The hook withholds a mismatched echo for every consumer (scopeStale); here
+  // only "did the server resolve the lawn to the shown house" remains.
+  const lawnScopedToShownHouse = !!(dashboardEntry?.propertyId && lawnHealth.propertyScope?.enabled && !lawnHealth.scopeStale
+    && String(lawnHealth.propertyScope.propertyId || '') === String(dashboardEntry.propertyId));
   // Unified Property Score (GATE_PROPERTY_SCORE) — null until the gate is on
   // and the load succeeds, so the card costs nothing while dark.
   const propertyScore = usePropertyScore();
@@ -3048,7 +3076,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       {dashboardSecondarySelection ? (
         <section data-glass="card" style={{ ...card, padding: compact ? 18 : 22 }} data-testid="home-primary-facts-notice">
           <div style={{ fontSize: 14, color: muted, lineHeight: 1.5 }}>
-            Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.
+            {lawnScopedToShownHouse
+              ? 'Your protection score and local alerts are shown for your primary address. Switch to that property to see them.'
+              : 'Your protection score, lawn health and local alerts are shown for your primary address. Switch to that property to see them.'}
           </div>
         </section>
       ) : (
@@ -3365,7 +3395,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
           stays visible without the full card. The pre-assessment state
           (mowing height + "tracking will start soon") moved with it. */}
       {/* Lawn health is read by CUSTOMER (useLawnHealth(customer.id)) — the primary's turf; withheld under a secondary with the score and alerts (uncapped codex r1u P1). */}
-      {!dashboardSecondarySelection && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
+      {(!dashboardSecondarySelection || lawnScopedToShownHouse) && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
         const lawnScore = Math.round(lawnHealth.scores.overallScore);
         const lawnInitial = Math.round(lawnHealth.initialScores.overallScore);
         return (
@@ -3495,6 +3525,10 @@ function ServicesTab() {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
+  // The Completed list stays CUSTOMER-wide by ruling (PR 2 r1f; kept in PR 4
+  // after review): a retired house has no picker entry left to reach its
+  // visits and reports, and pre-linkage visits must stay reachable when the
+  // primary itself is retired. The disclosure below says so.
   const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
   const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
@@ -4068,6 +4102,9 @@ const CHANNEL_OPTIONS = [
   { value: 'email', label: 'Email' },
   { value: 'both', label: 'Both' },
 ];
+// The five appointment toggles a saved property owns once GATE_APP_PROPERTY_TEXTS
+// enforces (server: property-notification-prefs APPOINTMENT_TOGGLES).
+const PROPERTY_OWNED_PREF_KEYS = ['appointmentConfirmation', 'serviceReminder72h', 'serviceReminder24h', 'techEnRoute', 'techArrived'];
 const APP_CHANNEL_KEYS = ['appointmentConfirmationChannel', 'serviceReminder72hChannel', 'serviceReminder24hChannel', 'enRouteChannel', 'techArrivedChannel', 'serviceCompleteChannel', 'paymentConfirmationChannel', 'invoiceChannel', 'paymentIssueChannel', 'requestChannel'];
 const APP_OPTION = { value: 'push', label: 'App' };
 const REMINDER_CHANNEL_LABELS = { sms: 'text', email: 'email', both: 'text + email', push: 'app' };
@@ -4281,7 +4318,18 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
     };
   }, [open, place]);
   if (!current && !savedEntries) return null;
-  const label = (p) => p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property');
+  // Saved-property entries (a `propertyId`) are named by the HOUSE — its
+  // label, else its relationship chip, else "Primary residence" / "Property"
+  // — and only the primary PROPERTY reads "Primary residence" (GitHub codex
+  // #4299 r2 P2). Profile entries keep the profile label.
+  const savedEntry = (p) => p.propertyId !== undefined && p.propertyId !== null;
+  // "Primary residence" = the primary PROFILE's primary property only; a
+  // sibling profile's primary house keeps that profile's identity.
+  const isPrimaryEntry = (p) => p.isPrimaryProfile === true && (!savedEntry(p) || p.isPrimaryProperty === true);
+  const label = (p) => (savedEntry(p)
+    ? (p.label || propertyRelationshipChip(p) || (isPrimaryEntry(p) ? 'Primary residence' : (p.isPrimaryProfile ? 'Property' : (p.profileLabel || 'Property'))))
+    : (p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')));
+  const subline = (p) => `${isPrimaryEntry(p) ? 'Primary residence · ' : ''}${formatPropertyAddress(p) || 'No address on file'}`;
   const busy = !!switchingId;
   return (
     <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
@@ -4312,7 +4360,7 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
             {busy ? 'Switching…' : (current ? label(current) : 'Select a property')}
           </span>
           <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {current ? `${current.isPrimaryProfile ? 'Primary residence · ' : ''}${formatPropertyAddress(current) || 'No address on file'}` : 'Your properties are still loading'}
+            {current ? subline(current) : 'Your properties are still loading'}
           </span>
         </span>
         <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>
@@ -4349,10 +4397,10 @@ function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId,
                   textAlign: 'left', fontFamily: 'inherit', color: B.glassNavy,
                 }}
               >
-                <GlassTile name={p.isPrimaryProfile ? 'home' : 'building'} />
+                <GlassTile name={isPrimaryEntry(p) ? 'home' : 'building'} />
                 <span style={{ minWidth: 0, flex: 1 }}>
                   <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>{label(p)}</span>
-                  <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{p.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(p) || 'No address on file'}</span>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{subline(p)}</span>
                   {nextById && (
                     <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 2 }}>
                       {nextById[p.id] ? `Next visit ${nextVisitLabel(nextById[p.id])}` : 'No visit scheduled'}
@@ -4409,6 +4457,11 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
+  // The Appointment-texts card lists one entry per SAVED property once the
+  // server answers that shape (app property scope, PR 3); a profile-shaped
+  // list keeps the per-profile card.
+  const perPropertyTexts = savedScope && propertyPrefs.some((p) => p.propertyId);
+  const shownTextsEntry = perPropertyTexts ? propertyPrefs.find((p) => p.id === activePropertyId) || null : null;
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
@@ -4562,14 +4615,25 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
         : p
     )));
     try {
-      const result = await api.updatePropertyNotificationPrefs(propertyId, { [key]: newVal });
+      // Saved-property entries (app property scope, PR 3) address the PROFILE
+      // and name the saved property; a profile entry is addressed by its id.
+      const result = await api.updatePropertyNotificationPrefs(property.customerId || propertyId, {
+        [key]: newVal,
+        ...(property.propertyId ? { propertyId: property.propertyId } : {}),
+      });
+      // Only THIS toggle from the response: two quick taps on different
+      // alerts run concurrently and an earlier snapshot arriving last would
+      // otherwise revert the other switch (GitHub codex r4 P2).
+      const confirmed = result?.preferences && result.preferences[key] !== undefined ? { [key]: result.preferences[key] } : {};
       setPropertyPrefs(prev => prev.map(p => (
         p.id === propertyId
-          ? { ...p, preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } }
+          ? { ...p, preferences: { ...(p.preferences || {}), ...confirmed } }
           : p
       )));
-      if (propertyId === customer.id) {
-        setPrefs(prev => ({ ...(prev || {}), ...(result.preferences || {}) }));
+      // The signed-in profile's own row changed (its primary property, or the
+      // profile entry): the account-level card mirrors it.
+      if ((property.customerId || propertyId) === customer.id && property.isPrimaryProperty !== false) {
+        setPrefs(prev => ({ ...(prev || {}), ...confirmed }));
       }
     } catch (err) {
       setPropertyPrefs(prev => prev.map(p => (
@@ -4639,15 +4703,24 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     const lockKey = `${propertyId}:contact`;
     setPrefsLocked(prev => ({ ...prev, [lockKey]: true }));
     try {
-      const result = await api.updatePropertyNotificationPrefs(propertyId, {
+      // Contacts are stored per PROFILE (ruling R2 pending): a saved-property
+      // entry saves to its profile, and every entry of that profile shows the
+      // same list afterwards.
+      const targetProfileId = property.customerId || propertyId;
+      const result = await api.updatePropertyNotificationPrefs(targetProfileId, {
         serviceContacts: savedContacts,
         serviceContactsConsent: !!contactConsent[propertyId],
       });
+      const sameProfile = (p) => (p.customerId ? String(p.customerId) === String(targetProfileId) : p.id === propertyId);
+      // The response carries the PROFILE row's toggles: they belong to the
+      // profile entry / primary property only — a secondary house keeps its
+      // own effective toggles (GitHub codex #4299 r1 P2).
+      const profileToggles = (p) => !p.propertyId || p.isPrimaryProperty === true;
       setPropertyPrefs(prev => prev.map(p => (
-        p.id === propertyId
+        sameProfile(p)
           ? {
             ...p,
-            preferences: { ...(p.preferences || {}), ...(result.preferences || {}) },
+            ...(p.id === propertyId && profileToggles(p) ? { preferences: { ...(p.preferences || {}), ...(result.preferences || {}) } } : {}),
             serviceContacts: result.serviceContacts || savedContacts,
           }
           : p
@@ -5323,7 +5396,14 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     const supportsApp = prefs.appPreferencesAvailable && APP_CHANNEL_KEYS.includes(p.channelKey);
                     const emailOptions = hasEmail && p.channelKey !== 'serviceCompleteChannel' ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
                     const opts = supportsApp ? [...emailOptions, APP_OPTION] : emailOptions;
-                    const selectable = isOn && opts.length > 1;
+                    // With per-property texts active the on/off answer for the
+                    // five appointment alerts is the SELECTED house's, so its
+                    // delivery choice stays selectable when the house enables an
+                    // alert the profile row has off (GitHub codex #4299 r3 P2).
+                    const alertOn = perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key)
+                      ? shownTextsEntry?.preferences?.[p.key] !== false
+                      : isOn;
+                    const selectable = alertOn && opts.length > 1;
                     return (
                       <select
                         value={prefs[p.channelKey] === 'push' || hasEmail ? (prefs[p.channelKey] || 'sms') : 'sms'}
@@ -5344,7 +5424,15 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                     {/* Real switch semantics: the old plain div was invisible
                         to keyboards and screen readers. */}
-                    <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
+                    {/* Once appointment texts are per SAVED property, the five
+                        category switches live on the property card below —
+                        this row keeps only the account-level delivery choice
+                        (GitHub codex #4299 r2 P2). */}
+                    {perPropertyTexts && PROPERTY_OWNED_PREF_KEYS.includes(p.key) ? (
+                      <span data-testid={`per-property-${p.key}`} style={{ fontSize: 14, fontWeight: 700, color: muted, whiteSpace: 'nowrap' }}>Set per property below</span>
+                    ) : (
+                      <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
+                    )}
                     {p.locked && (
                       <span style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
@@ -5369,21 +5457,21 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
       {propertyPrefs.length > 0 && !cancelledAccount && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
-            {propertyPrefs.length > 1 ? (
+            {(propertyPrefs.length > 1 || perPropertyTexts) ? (
               <>
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
                 <div style={{ marginTop: 12 }}>
-                  {/* Appointment texts and on-location contacts are stored per
-                      PROFILE (notification_prefs / customers.service_contact*),
-                      so this picker lists profiles even under the saved-property
-                      scope — a saved-house picker here would show house B while
-                      an edit applied to every house on the profile. Per-property
-                      texts arrive with the notifications PR of the lane. */}
+                  {/* Under the saved-property scope the server lists one entry
+                      per SAVED property (id = the entry key, so this picker
+                      and the page selection agree): a primary property reads
+                      its profile's notification_prefs row, a non-primary one
+                      its own toggles (app property scope, PR 3). A profile-
+                      shaped list (gate off) still lists profiles. */}
                   <PropertyScopeSelect
                     id="notifications-property-scope"
                     properties={savedScope ? propertyPrefs : properties}
-                    currentId={savedScope ? customer.id : activePropertyId}
+                    currentId={savedScope && !perPropertyTexts ? customer.id : activePropertyId}
                     onSelect={onSelectProperty}
                     switchingId={switchingPropertyId}
                     nextById={savedScope ? null : nextById}
@@ -5392,13 +5480,23 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                 </div>
                 {savedScope && (
                   <div style={{ fontSize: 14, color: muted, marginTop: 8 }}>
-                    These settings apply to every property on this profile.
+                    {perPropertyTexts
+                      ? 'Each property keeps its own appointment texts. On-location contacts are shared across this profile.'
+                      : 'These settings apply to every property on this profile.'}
                   </div>
                 )}
                 <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
-                  {customer.isPrimaryProfile
-                    ? 'Your primary residence gets every alert unless you turn one off.'
-                    : 'Other properties start quiet. Turn on what you want to hear about here.'}
+                  {perPropertyTexts && !shownTextsEntry
+                    ? 'Select a property above to manage its appointment texts.'
+                    : perPropertyTexts
+                    ? (shownTextsEntry?.isPrimaryProperty
+                      ? 'Your primary residence gets every alert unless you turn one off.'
+                      : shownTextsEntry?.quietByDefault
+                        ? 'Rentals and managed properties start quiet. Turn on what you want to hear about here.'
+                        : 'This property follows your primary residence until you change a setting here.')
+                    : (customer.isPrimaryProfile
+                      ? 'Your primary residence gets every alert unless you turn one off.'
+                      : 'Other properties start quiet. Turn on what you want to hear about here.')}
                 </div>
               </>
             ) : (
@@ -5417,8 +5515,13 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             )}
           </div>
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {(propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
-              const label = property.profileLabel || 'Service property';
+            {/* A lone SECONDARY saved property (the primary retired) still gets its
+                own toggles — never the contacts-only card editing the profile
+                defaults (GitHub codex r0 P2). */}
+            {(perPropertyTexts ? propertyPrefs.filter((p) => p.id === activePropertyId) : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
+              const label = property.propertyId
+                ? (property.label || propertyRelationshipChip(property) || property.profileLabel || 'Service property')
+                : (property.profileLabel || 'Service property');
               const address = formatPropertyAddress(property);
               // One distinct icon per alert (2026-09-06: no repeats, one tile style).
               const options = [
@@ -5433,13 +5536,13 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
               const alertCount = options.length - 1;
               const contacts = displayContacts(property);
               const contactLockKey = `${property.id}:contact`;
-              const multiProperty = propertyPrefs.length > 1;
+              const multiProperty = propertyPrefs.length > 1 || perPropertyTexts;
               return (
                 <div key={property.id} style={{
                   border: '1px solid #E7E2D7',
                   borderRadius: 8,
                   padding: 14,
-                  background: property.id === customer.id ? '#F8FCFE' : subtle,
+                  background: (property.propertyId ? property.isPrimaryProperty : property.id === customer.id) ? '#F8FCFE' : subtle,
                 }}>
                   {!multiProperty && (
                     <div style={{ marginBottom: 10 }}>
@@ -10515,7 +10618,7 @@ function PlanStationMap({ map }) {
   );
 }
 
-function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
+function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, currentEntry = null, savedScope = false, selectedProperty = null, onSavedScopeUnavailable = null }) {
   const portalGlass = usePortalGlass();
   // focusService pre-expands a row on mount — set by the home-page lawn
   // teaser and by ?tab=plan&service=<catalog id> deep-links.
@@ -10543,7 +10646,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   // disables the hook so the default Plan tab mount doesn't 401 into the
   // API client's retry traffic for data the cancelled panel never renders
   // (codex GH r17 P2).
-  const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id);
+  const lawnHealth = useLawnHealth(customer?.cancelled === true ? null : customer.id, { currentEntry, savedScope, selectedPropertyId: selectedProperty?.propertyId || null, onSavedScopeUnavailable });
   const compact = useIsMobile(760);
   // Real billing mode (owner 2026-07-11): per-application / prepaid plans
   // must not present a "$X per month" plan rate — same source of truth as
@@ -16628,7 +16731,7 @@ export default function PortalPage() {
         <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
           onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties}  focusRequestId={new URLSearchParams(location.search).get('requestId')} />}
-        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
+        {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} currentEntry={activeProperty} savedScope={portalProperties.some((p) => p.key)} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} activePropertyId={activePropertyId} selectedProperty={selectedProperty} onSavedScopeUnavailable={refreshProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
           setVisitsSubTab(sub);
           // Keep the URL's legacy token in step so refresh/share restores the

@@ -45,7 +45,7 @@ export default function EmailPage({ navigation, active }) {
     {actionFeedback && <ActionFeedback error={actionFeedback.error} className="mb-4">{actionFeedback.message}</ActionFeedback>}
     {editor.sendFeedback.compose && !editor.showCompose && <ActionFeedback error={editor.sendFeedback.compose.error} className="mb-4">{editor.sendFeedback.compose.message}</ActionFeedback>}
     {statusState.error ? <div className="min-h-64 rounded-md border-hairline border-zinc-200 bg-white p-6">
-      <ActionFeedback error onRetry={mailbox.loadStatus}>Email connection status is unavailable.</ActionFeedback>
+      <ActionFeedback error onRetry={mailbox.retryStatus}>Email connection status is unavailable.</ActionFeedback>
     </div> : !status ? <div className="min-h-64 rounded-md border-hairline border-zinc-200 bg-white p-6" role="status">Loading email…</div>
       : !connected ? <div className="mx-auto my-10 max-w-lg rounded-md border-hairline border-zinc-200 bg-white p-6 text-center">
         <Mail size={28} className="mx-auto mb-4 text-ink-secondary" aria-hidden />

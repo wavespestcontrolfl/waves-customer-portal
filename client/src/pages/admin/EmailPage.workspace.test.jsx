@@ -66,6 +66,28 @@ describe("Email workspace feedback and request ownership", () => {
     expect(calls("/oauth/status")).toHaveLength(2);
   });
 
+  it("keeps the workspace hidden while a status retry is still pending", async () => {
+    let attempts = 0;
+    overrides.set("/api/admin/email/oauth/status", () => {
+      attempts += 1;
+      if (attempts === 1) return response({ connected: true });
+      if (attempts === 2) return response({ connected: false, error: "Fixture unavailable" }, 503);
+      return new Promise(() => {});
+    });
+    const view = mount();
+    expect(await screen.findByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(a.subject) })).toBeInTheDocument();
+    // Re-activating the page re-checks the connection; this check fails.
+    view.rerender(emailRoute(false));
+    view.rerender(emailRoute(true));
+    await screen.findByText("Email connection status is unavailable.");
+    // The retry hangs: the stale connected status must not bring the inbox back.
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await screen.findByText("Loading email…");
+    expect(screen.queryByRole("button", { name: (name) => name.startsWith("Open email:") })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New email" })).not.toBeInTheDocument();
+    expect(calls("/oauth/status")).toHaveLength(3);
+  });
+
   it("shows a loading inbox and retries a failed search with the same query", async () => {
     let finish;
     overrides.set("/api/admin/email/inbox", () => new Promise((resolve) => { finish = resolve; }));

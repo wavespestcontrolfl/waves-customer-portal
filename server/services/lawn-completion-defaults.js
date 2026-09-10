@@ -56,7 +56,12 @@ async function loadLawnCompletionContext(service, knex) {
 }
 
 function completionMethod(item, protocolProduct) {
-  if (item.scope?.includes('SPOT') || protocolProduct?.applicationMode === 'spot') return 'spot_treatment';
+  // The operating layer's explicit mode wins over the field-reference line
+  // parse: classifyProtocolLine tags every SpeedZone line SPOT_ALLOWANCE, yet
+  // the seeded Bahia March row is application_mode 'broadcast'. Only a row
+  // without an explicit mode lets the parsed scope decide (Codex r13 P1).
+  const mode = protocolProduct?.applicationMode;
+  if (mode === 'spot' || (!mode && item.scope?.includes('SPOT'))) return 'spot_treatment';
   if (item.product?.applicationMethod) return item.product.applicationMethod;
   // Weighed WDG/WG/WSG/WP concentrates are still sprayed. The catalog
   // formulation, never the quantity unit, distinguishes spreader granules
@@ -150,13 +155,14 @@ function buildLawnCompletionDefaults(plan, context) {
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
   const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
   const products = protocol?.products || [];
+  const protocolProductFor = (item) => products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
   const items = eligible ? plan.mixCalculator.items.filter((item) => {
-    const product = products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
+    const product = protocolProductFor(item);
     // defaultInPlan distinguishes defaults from opt-in rows. Gates can also
     // carry annual counters or safety metadata on a selected base product;
     // the planner's blocks still withhold any unavailable suggested quantity.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
-  }).map((item) => completionItem(item, products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id)), amountsAllowed)) : [];
+  }).map((item) => completionItem(item, protocolProductFor(item), amountsAllowed)) : [];
   // The planner's recipe comes from the field reference (protocols.json);
   // the defaults list is the owner-edited operating layer. When a live
   // window registers none of the recipe's selected products as defaults,
@@ -169,9 +175,15 @@ function buildLawnCompletionDefaults(plan, context) {
     lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
     propertyMatchesProfile: context.propertyMatchesProfile,
     items, history: context.history,
+    // An option carries the protocol row's application mode: the catalog
+    // category alone reads a broadcast herbicide (SpeedZone in its window) as
+    // spot work, and the closeout must record the mode the protocol prescribes.
+    // A protocol row whose catalog product was deactivated is not offered:
+    // the completion writer rejects an inactive product row, so the option
+    // would be an action that cannot be completed (Codex r12 P2).
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
-      .filter(item => products.some(row => row.productId === (item.substitution?.originalProductId || item.product?.id)))
-      .map(item => ({ product: { id: item.product.id, name: item.product.name } })) : [],
+      .filter(item => protocolProductFor(item) && item.product?.active !== false)
+      .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)) })) : [],
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'
         : !protocolMatches ? 'The appointment protocol could not be resolved. Enter the actual work.'
