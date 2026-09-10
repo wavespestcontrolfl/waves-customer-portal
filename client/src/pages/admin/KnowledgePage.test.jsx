@@ -182,6 +182,32 @@ describe("KnowledgePage embedded navigation", () => {
     expect(screen.getByText("Answer one")).toBeInTheDocument();
   });
 
+  it.each(["article", "health"])("retries a rejected %s read without changing its request", async (kind) => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const target = kind === "article" ? "/api/admin/knowledge/article/fixture" : "/api/admin/knowledge/health";
+    let reads = 0;
+    fetch.mockImplementation(async (url) => {
+      if (url === target) {
+        reads += 1;
+        if (reads === 1) return response({ error: "Synthetic read failure" }, { ok: false, status: 503 });
+        return response(kind === "article"
+          ? { article: { title: "Fixture article", content: "Fixture article body", tags: "malformed" } }
+          : { healthScore: 75, totalArticles: 1, issues: [{ title: "Fixture health finding", detail: "Review required", severity: "high" }] });
+      }
+      return response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] });
+    });
+    renderWiki(`/admin/knowledge?source=fixture&wikiTab=${kind === "article" ? "articles" : "health"}`);
+    if (kind === "article") fireEvent.click(await screen.findByText("Fixture article"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Synthetic read failure");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText(kind === "article" ? "Fixture article body" : "Fixture health finding")).toBeInTheDocument();
+    expect(reads).toBe(2);
+    expect(fetch).toHaveBeenCalledWith(target, expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "Bearer admin-token" }),
+    }));
+    expect(screen.getByTestId("location-search")).toHaveTextContent("source=fixture");
+  });
+
   it("explains why an answer without a query ID cannot be filed", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url, options) => (
