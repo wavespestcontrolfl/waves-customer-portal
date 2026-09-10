@@ -868,9 +868,17 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, database =
 // the send is claimed, so a payer assignment serializes behind the claim
 // instead of racing it. A payer means the debt now belongs to AP: the
 // invoice leaves the scheduled-send queue and the visit goes on billing hold.
-async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = false } = {}) {
+async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = false, requireDue = false } = {}) {
   const Packets = require("./visit-completion-packets");
   return db.transaction(async (trx) => {
+    // The worker's claim keeps the scheduled queue's own predicates: due
+    // now, still scheduled, under the attempt cap.
+    if (requireDue) {
+      const due = await trx("invoices").where({ id: invoiceId, status: "scheduled" })
+        .whereNotNull("scheduled_send_at").where("scheduled_send_at", "<=", new Date())
+        .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5)).first("id");
+      if (!due) return { payerBilled: false, claim: null };
+    }
     const packet = await trx("visit_completion_packets").where({ id: packetId }).first("visit_id", "payload");
     const visit = packet && await trx("service_visits").where({ id: packet.visit_id }).first("id", "customer_id");
     if (visit) {
@@ -3337,7 +3345,7 @@ const InvoiceService = {
       if (inv.visit_completion_packet_id && !inv.payer_id) {
         // A failed fence leaves the invoice queued for the next pass; the
         // batch never aborts on it.
-        const fenced = await claimPacketInvoiceForSend(inv.id, inv.visit_completion_packet_id, { allowClaimed: false })
+        const fenced = await claimPacketInvoiceForSend(inv.id, inv.visit_completion_packet_id, { allowClaimed: false, requireDue: true })
           .catch((err) => ({ payerBilled: false, error: err }));
         if (fenced.payerBilled) {
           held += 1;

@@ -8218,27 +8218,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if ((payerChanged || poChanged || selfPayChanged) && req.techRole !== 'admin') {
             return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
           }
-          // A Bill-To change is applied under the service's row lock, where the
-          // in-flight check is re-judged: the combined-visit send claim holds
-          // the billed member rows FOR SHARE while it resolves ownership, so
-          // this lock waits for the claim to commit and then sees the invoice
-          // in 'sending'. A payer can never land between the claim and the
-          // provider request.
-          if (payerChanged || selfPayChanged) {
-            const billTo = {};
-            if (payerChanged) billTo.payer_id = nextPayerId;
-            if (selfPayChanged) billTo.self_pay_override = nextSelfPay;
-            const inFlight = await db.transaction(async (trx) => {
-              await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
-              if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) return true;
-              await trx('scheduled_services').where({ id: req.params.id }).update({ ...billTo, updated_at: new Date() });
-              return false;
-            });
-            if (inFlight) {
-              return res.status(409).json({ error: 'The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.', code: 'invoice_send_in_flight' });
-            }
-          }
+          if (payerChanged) updates.payer_id = nextPayerId;
           if (poChanged) updates.po_number = nextPo;
+          if (selfPayChanged) updates.self_pay_override = nextSelfPay;
         }
       } catch {}
     }
@@ -9272,6 +9254,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const makeRecurringPreRow = updates.is_recurring === true
           ? await trx('scheduled_services').where({ id: req.params.id }).first('id', 'customer_id', 'is_recurring', 'recurring_parent_id')
           : null;
+        // A Bill-To change is re-judged here, under this transaction's row
+        // lock: the combined-visit send claim holds the billed member rows
+        // FOR SHARE while it resolves ownership, so this lock waits for the
+        // claim to commit and then sees the invoice in 'sending'. A payer can
+        // never land between the claim and the provider request. Recurring
+        // children keep inheriting the parent's Bill-To through this update.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
+          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
+            throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call
