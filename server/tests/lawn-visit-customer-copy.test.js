@@ -227,6 +227,8 @@ describe('customer publication', () => {
     ['Non-fungal stress', 'Fungal activity is spreading.'],
     ['Non‑fungal stress', 'Fungal activity is spreading.'],
     ['Non fungal stress', 'Fungal activity is spreading.'],
+    ['Chinch bugs never observed', 'Chinch bug activity is damaging the edge.'],
+    ['Never observed chinch bugs', 'Chinch bug activity is damaging the edge.'],
   ])('negative-prefix finding %s cannot authorize customer prose', (name, text) => {
     for (const confidence of ['moderate', 'high']) {
       const evidence = { name, label: 'general lawn stress', confidence };

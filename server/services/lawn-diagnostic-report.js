@@ -561,11 +561,14 @@ const CLEAN_CLAUSE_LEAD = /^\s*(?:no|none|not|clear|nothing)\b/;
 // A negation marker anywhere in a clause withdraws that clause from label mapping,
 // so a negated alias ("Rhizoctonia ruled out", "Take-all was not observed",
 // "Sod-webworm not present") never maps to its positive label. Clauses split on
-// punctuation and contrast words, so a positive finding that carries a negated
-// differential ("Possible fungal disease; no weed pressure") still maps its
-// positive clause. Same marker set as the copy module's establishesCause.
-const CLAUSE_SPLIT = /[;,.:]|\b(?:but|while|although|though|whereas|however|yet)\b/;
-const NEGATION_MARKER = /\b(?:no|not|none|non|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
+// sentence punctuation and contrast words only: a comma or colon continues the
+// clause, so one negation keeps its scope across an enumerated list ("No weeds,
+// disease, or pests observed", "No chinch bugs: drought ruled out") while a
+// positive finding that carries a negated differential ("Possible fungal disease;
+// no weed pressure", "Chinch bugs not present, but drought stress visible") still
+// maps its positive clause. Same marker set as the copy module's establishesCause.
+const CLAUSE_SPLIT = /[;.]|\b(?:but|while|although|though|whereas|however|yet)\b/;
+const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;

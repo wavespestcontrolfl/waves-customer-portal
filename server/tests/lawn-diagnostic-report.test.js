@@ -577,6 +577,9 @@ describe('lawn diagnostic auto-release ladder', () => {
   test.each([
     'Rhizoctonia ruled out', 'Take-all was not observed', 'Sod-webworm not present', 'Large patch ruled-out',
     'Chinch bugs weren\u2019t observed', 'Non-fungal stress', 'Gray leaf spot absent', 'Dollar spot unlikely', 'Disease-free turf',
+    'Chinch bugs never observed', 'Never observed chinch bugs',
+    // One negation keeps its scope across an enumerated list.
+    'No weeds, disease, or pests observed', 'No chinch bugs: drought stress ruled out', 'Not drought, chinch bugs, or grubs',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -586,7 +589,7 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Rhizoctonia ruled out; dollar spot lesions', 'dollar spot'],
     ['Sod-webworm not present. Grub damage at the edge', 'grub activity'],
     ['No weeds; large patch is visible', 'large patch (fungal) activity'],
-    ['Not drought, chinch bug damage along the edge', 'chinch bug activity'],
+    ['Not drought; chinch bug damage along the edge', 'chinch bug activity'],
     ['Healthy overall, some yellowing', 'color and nutrient stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);

@@ -100,7 +100,7 @@ function governedTerms(text) {
 }
 // True when a reviewed finding is positive, unambiguous evidence for the causes
 // its name and label carry. A negated name ("Chinch bugs weren't observed",
-// "Chinch bug activity — unconfirmed", "Non-fungal stress",
+// "Chinch bug activity — unconfirmed", "Non-fungal stress", "Chinch bugs never observed",
 // "Neither chinch bugs nor drought stress"), an unresolved differential ("Chinch
 // bugs or drought stress", "chinch vs. drought", "chinch/drought", "Chinch bugs?")
 // and any name carrying more than one distinct governed cause ("Chinch bugs and
@@ -112,7 +112,7 @@ function establishesCause(finding) {
   if (!finding || !finding.label || (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) < CONFIDENCE_RANK.moderate) return false;
   if (finding.negated || finding.label === NO_STRESS_LABEL) return false;
   const name = finding.name || '';
-  if (/\b(?:no|not|none|non|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
+  if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
   return distinctCauseCount(name) <= 1;
 }
