@@ -461,6 +461,9 @@ describe('unstamped Advance quotes recover their era (codex r7)', () => {
     const replayed = priceTermiteBait({ footprint: 2000, features: { complexity: 'standard' } }, { system: 'advance', knobs: signal });
     expect(replayed.stations).toBe(23);
     expect(replayed.installation.price).toBe(805);
+    // The Admin V1 envelope carries BOTH installs — an Advance quote reads ai, never ti (codex r9 P0).
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'advance', sta: 23, ai: 639, ti: 610 } } } })).toMatchObject({ system: 'advance', stationCost: 13.16, installMultiplier: 1.45 });
+    expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'trelona', sta: 15, ai: 639, ti: 610 } } } })).toMatchObject({ system: 'trelona', stationCost: 22.05 });
     // A post-April Advance row (13.16 × 1.45 → 639) still resolves to that era.
     expect(replay.termiteKnobSignalForReplay({ result: { results: { tmBait: { selectedSystem: 'advance', sta: 23, ai: 639 } } } })).toMatchObject({ stationCost: 13.16, installMultiplier: 1.45 });
     // A tuned Advance row with neutral stored modifiers inverts under the era multipliers (1.45 first).

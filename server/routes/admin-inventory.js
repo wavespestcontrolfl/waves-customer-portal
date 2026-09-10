@@ -3857,6 +3857,11 @@ router.put('/:id', async (req, res, next) => {
       if (lockedSizeChanged) await recalcBestPrice(req.params.id, trx);
       return trx('products_catalog').where({ id: req.params.id }).first();
     });
+    // Any product edit can change the catalog IDENTITY the pricing engine's
+    // links match on (name, container_size, active, needs_pricing) without
+    // touching best_price, so the bridge cache is invalidated here too, after
+    // the transaction committed (codex #4313 r9 P1).
+    invalidatePricingCacheAfterCommit(null);
     res.json({ success: true, product: updated });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });

@@ -189,11 +189,17 @@ function storedTermiteResult(estData = {}) {
   const m = mapped || {};
   const r = line || {};
   const install = r.installation || {};
+  const system = String(firstDefined(m.selectedSystem, m.system, r.selectedSystem, r.system, 'trelona')).toLowerCase();
+  // The Admin V1 envelope carries BOTH installs (ai = Advance, ti =
+  // Trelona); the stored system decides which one this quote sold
+  // (codex #4313 r9 P0). Only the other is a fallback when the sold one
+  // is absent (older single-system envelopes).
+  const mappedInstall = system === 'advance' ? firstDefined(m.ai, m.ti) : firstDefined(m.ti, m.ai);
   return {
     stamp: firstDefined(m.pricingKnobs, r.pricingKnobs) || null,
-    system: String(firstDefined(m.selectedSystem, m.system, r.selectedSystem, r.system, 'trelona')).toLowerCase(),
+    system,
     stations: firstDefined(m.sta, r.stations),
-    install: firstDefined(m.ti, m.ai, install.retailValue, install.price),
+    install: firstDefined(mappedInstall, install.retailValue, install.price),
     materialCost: install.materialCost,
     modifiers: storedTermiteModifiers(estData),
   };

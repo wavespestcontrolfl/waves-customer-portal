@@ -4777,28 +4777,12 @@ function termiteProgramCostModel({ stations, installMaterialCost, installLabor, 
   };
 }
 
-function priceTermiteBait(property, options = {}) {
-  const {
-    // No destructure default (codex P2): an absent system must reach
-    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
-    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
-    // it and quote 10-ft Advance for direct callers.
-    system,
-    // Quote-time cost-basis snapshot replayed from a stored estimate
-    // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, injected
-    // by both authoritative replay paths). Absent on fresh quotes, which
-    // resolve the live constant / catalog-linked station cost.
-    knobs = null,
-    monitoringTier = 'basic',
-    // 'own' (customer buys the stations, one-time install charge) or 'rent'
-    // (Waves retains ownership, $0 install, recovery rides the quarterly).
-    // Anything unrecognized falls back to 'own' — the long-standing behavior.
-    ownership: requestedOwnership = 'own',
-    modifiers = {},
-  } = options;
-  const ownership = String(requestedOwnership).toLowerCase() === 'rent' ? 'rent' : 'own';
-
-  property = property || {};
+// Everything priceTermiteBait resolves BEFORE it can price: the system and
+// tier requests, the footprint / perimeter measurements and their state, the
+// property install modifiers, and the warning / review lists they produce.
+// Pure resolution — no price is computed here (extracted so the pricer
+// itself stays under the complexity limit, codex #4313 r9 P2).
+function resolveTermiteBaitContext(property, options, { system, monitoringTier, modifiers }) {
   const systemResolution = normalizeTermiteSystem(system);
   const monitoringResolution = normalizeTermiteMonitoringTier(monitoringTier);
   const selectedSystem = systemResolution.selectedSystem;
@@ -4846,6 +4830,40 @@ function priceTermiteBait(property, options = {}) {
       ? ['stories_estimated']
       : []),
   ]);
+  return {
+    systemResolution, monitoringResolution, selectedSystem, selectedMonitoringTier,
+    footprintResolution, perimeterResolution, complexity, computedPerimeter, footprintRequired,
+    measurementState, constructionMult, foundationAdj, measurementWarnings, manualReviewReasons,
+  };
+}
+
+function priceTermiteBait(property, options = {}) {
+  const {
+    // No destructure default (codex P2): an absent system must reach
+    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
+    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
+    // it and quote 10-ft Advance for direct callers.
+    system,
+    // Quote-time cost-basis snapshot replayed from a stored estimate
+    // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, injected
+    // by both authoritative replay paths). Absent on fresh quotes, which
+    // resolve the live constant / catalog-linked station cost.
+    knobs = null,
+    monitoringTier = 'basic',
+    // 'own' (customer buys the stations, one-time install charge) or 'rent'
+    // (Waves retains ownership, $0 install, recovery rides the quarterly).
+    // Anything unrecognized falls back to 'own' — the long-standing behavior.
+    ownership: requestedOwnership = 'own',
+    modifiers = {},
+  } = options;
+  const ownership = String(requestedOwnership).toLowerCase() === 'rent' ? 'rent' : 'own';
+
+  property = property || {};
+  const {
+    systemResolution, monitoringResolution, selectedSystem, selectedMonitoringTier,
+    footprintResolution, perimeterResolution, complexity, computedPerimeter, footprintRequired,
+    measurementState, constructionMult, foundationAdj, measurementWarnings, manualReviewReasons,
+  } = resolveTermiteBaitContext(property, options, { system, monitoringTier, modifiers });
   if (perimeterResolution.value === null) {
     return {
       service: 'termite_bait',
