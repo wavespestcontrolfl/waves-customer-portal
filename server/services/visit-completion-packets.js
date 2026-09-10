@@ -307,7 +307,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     // receive a pay link for debt that now belongs to AP: the visit goes on
     // billing hold for the office instead. A lookup failure rethrows so the
     // recovery sweep retries rather than assuming self-pay.
-    const owner = await liveThirdPartyPayer(packet, database);
+    const owner = await liveThirdPartyPayerForPacket(packet.id, database);
     if (owner) {
       await database('service_visits').where({ id: packet.visit_id }).update({ billing_hold: true, updated_at: database.fn.now() });
       payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
@@ -401,13 +401,21 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   } };
 }
 
-// The active third-party payer that now owns a billed member or the customer,
-// resolved live through the canonical Bill-To resolver. null = self-pay.
-async function liveThirdPartyPayer(packet, database = db) {
+// The active third-party payer that now owns a BILLED member, resolved live
+// through the canonical Bill-To resolver with its per-job precedence (a
+// per-job payer wins, a per-job self-pay override blocks the customer default,
+// otherwise the customer default applies). Members the invoice excluded
+// (inspection-only, declined, incomplete, recap-only) are not consulted, so an
+// unrelated per-job payer cannot hold a valid homeowner invoice. null = self-pay.
+async function liveThirdPartyPayerForPacket(packetId, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
+  if (!packet) return null;
   const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
-  const memberIds = await database('visit_completion_packet_items').where({ packet_id: packet.id }).pluck('scheduled_service_id');
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
+    : await database('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
   const Payer = require('./payer');
-  for (const scheduledServiceId of [...memberIds, null]) {
+  for (const scheduledServiceId of billed) {
     const resolved = await Payer.resolveForInvoice({ database, customerId: visit.customer_id, scheduledServiceId, throwOnError: true });
     if (resolved.payerId) return resolved.payerId;
   }
@@ -531,4 +539,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };

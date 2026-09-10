@@ -425,6 +425,10 @@ async function reconcileSummaryEmailBounce(message, database = db) {
   if (!flipped.length) return { reconciled: false };
   const packet = await database('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id');
   const member = packet ? await VisitGroups.recordedPacketMember(packet.id, database) : null;
+  // The review ask follows the summary. Outreach enrolled while the summary
+  // looked delivered is parked now that a required recipient failed; the
+  // coordinator re-enrolls it when the recovery settles the summary.
+  if (packet) await parkVisitReviewOutreach(packet.id, database);
   if (packet && member) {
     // Same transaction as the effect flip: a webhook that fails after this
     // point rolls both back, and SendGrid's redelivery cannot leave an alert
@@ -459,6 +463,19 @@ async function summaryRetryAuthorized(message, database = db) {
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
   const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
   return current ? { ok: true } : { ok: false, reason: 'visit_summary_recipient_changed' };
+}
+
+// Stops the cadence sequences and removes the pending legacy asks that were
+// enrolled for this packet's recorded service records.
+async function parkVisitReviewOutreach(packetId, database = db) {
+  const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
+    .whereNotNull('service_record_id').pluck('service_record_id');
+  if (!records.length) return { parked: 0 };
+  const sequences = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' }).select('id');
+  const Reviews = require('./review-request');
+  for (const sequence of sequences) await Reviews.stopReviewSequence(sequence.id, 'visit_summary_bounced');
+  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' }).del();
+  return { parked: sequences.length + Number(removed || 0) };
 }
 
 // The retry rail's provider request runs while the customer and preference
@@ -503,8 +520,10 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     // The bounce alert, or the coordinator's delivery-review alert when the
     // email leg was the only reason for review: an SMS leg still parked as
     // unknown_delivery is terminal and needs the office, so that alert stays.
+    // Only the summary's own legs count: an older tracker effect parked as
+    // uncertain is unrelated to this delivery and its deferred review.
     const otherUncertain = await trx('visit_effects').where({ visit_id: visitId, status: 'unknown_delivery' })
-      .whereNot('id', effect.id).first('id');
+      .whereIn('effect_type', ['completion_sms', 'completion_email']).whereNot('id', effect.id).first('id');
     const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
       .whereRaw("payload->>'visitId' = ?", [visitId])
       .where(function reviewOnlyForDelivery() {
