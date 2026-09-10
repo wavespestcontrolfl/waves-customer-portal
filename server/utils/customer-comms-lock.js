@@ -106,10 +106,25 @@ async function withSmsConsentLock(dbh, { phone, customerId }, fn) {
 // merge-undo and the email-fanout claim guard take): suppression writers and
 // bearer-link email handoffs serialize on it so an opt-out or an address
 // claim commits either before a handoff's authorization or after its request.
+// Google ignores local-part dots and everything after '+', so every dot/tag
+// variant of one mailbox delivers to one inbox: a Google address also takes
+// its mailbox-identity key (after the exact key, always in that order), so
+// a handoff to john.doe@gmail.com and an assignment of johndoe+x@gmail.com
+// serialize on the same key. Mirrors email-bounce-recovery.js's
+// gmailMailboxOwnedByOther identity.
+function googleMailboxIdentity(normalized) {
+  const [local, domain] = normalized.split('@');
+  if (!local || !['gmail.com', 'googlemail.com'].includes(domain)) return null;
+  const mailbox = local.split('+')[0].replace(/\./g, '');
+  return mailbox ? `${mailbox}@gmail.com` : null;
+}
+
 async function lockCustomerEmail(trx, email) {
   const normalized = String(email || '').trim().toLowerCase();
   if (!normalized) throw new Error('Email authority requires an address');
   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${normalized}`]);
+  const mailbox = googleMailboxIdentity(normalized);
+  if (mailbox) await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-mailbox:${mailbox}`]);
 }
 
 // Every column a customer's email can be recorded in — the same set the
