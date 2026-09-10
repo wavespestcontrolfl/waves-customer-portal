@@ -114,6 +114,29 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(screen.queryByText(/saved photos could not be restored/)).toBeNull();
   });
 
+  it('restores the technician-approved photo summary with its photo set and carries it on departure', async () => {
+    // The summary describes the saved photo set; a reload or billing detour
+    // must bring it back with the photos or the submit path silently omits
+    // the reviewed customer narrative (Codex r-375c002 P1).
+    const draft = { serviceId: service.id, draftId: 'draft-one', savedAt: '2099-01-01T12:00:00Z',
+      notes: 'Exterior inspected', generationPhotoCount: 1, servicePhotos: photos, sendSms: false,
+      typedPhotoSummary: 'Exterior perimeter treated; no active harborage seen.' };
+    const { servicePhotos: _photos, ...metadata } = draft;
+    localStorage.setItem(key, JSON.stringify(metadata));
+    await putCompletionDraft(service.id, draft);
+    const first = await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    const summary = screen.getByDisplayValue('Exterior perimeter treated; no active harborage seen.');
+    fireEvent.change(summary, { target: { value: 'Exterior perimeter treated; monitor the north bed.' } });
+    first.unmount();
+    expect(await getCompletionDraft(service.id)).toMatchObject({
+      servicePhotos: photos, typedPhotoSummary: 'Exterior perimeter treated; monitor the north bed.',
+    });
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(screen.getByDisplayValue('Exterior perimeter treated; monitor the north bed.')).toBeTruthy();
+  });
+
   it('retains failed uploads across reloads and retries only photos, with one request per double tap', async () => {
     await seed();
     const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });

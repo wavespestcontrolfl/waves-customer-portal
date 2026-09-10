@@ -7,9 +7,9 @@
  * no service_record exists; the cached PDF key is cleared on every success;
  * a render is re-queued ONLY when one was queued before (never starts a
  * render for a report that never rendered); an in-flight render answers 409
- * so the panel keeps its marker; a Tree & Shrub visit with an existing
- * assessment raises a one-time dispatch alert instead of silently keeping the
- * partial scoring; a failed PDF-key write fails the request (fail-closed).
+ * so the panel keeps its marker; a Tree & Shrub visit raises a one-time
+ * dispatch alert instead of silently keeping the partial scoring — with or
+ * without an assessment row yet (the auto-scorer may still be running); a failed PDF-key write fails the request (fail-closed).
  */
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
@@ -161,11 +161,29 @@ describe('POST /:id/photos/reconcile', () => {
     });
   });
 
-  test('a Tree & Shrub visit without an assessment is not flagged', async () => {
+  test('a Tree & Shrub visit whose auto-score has not landed yet is STILL flagged (scorer closes over the closeout subset)', async () => {
+    // Completion waits at most 12 s for the scorer and schedules a 60 s
+    // retry; a recovery in that window finds no row, but the row that lands
+    // later covers only the closeout-time photos (Codex r-375c002 P1).
     tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'palm' }];
     await withServer(async (baseUrl) => {
       const res = await reconcile(baseUrl);
-      expect((await res.json()).treeShrub).toEqual({ assessmentId: null, rescored: false, flaggedForReview: false });
+      expect(res.status).toBe(200);
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: null, rescored: false, flaggedForReview: true });
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+      expect(mockAlert.mock.calls[0][0]).toMatchObject({
+        type: 'tree_shrub_assessment_partial_photos', severity: 'warn', jobId: 'svc-1', techId: 'tech-1',
+        payload: { source: 'photo_recovery', serviceRecordId: 'rec-1', assessmentId: null, scoringPending: true },
+      });
+      expect(mockAlert.mock.calls[0][0].payload.message).toMatch(/once scoring lands/);
+    });
+  });
+
+  test('a non-Tree & Shrub visit never raises the partial-photos alert', async () => {
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).treeShrub).toBeNull();
       expect(mockAlert).not.toHaveBeenCalled();
     });
   });

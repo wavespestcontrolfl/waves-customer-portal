@@ -12593,6 +12593,7 @@ export function CompletionPanel({
       typedActivityScore != null ||
       typedNextStepChips.length ||
       typedRecommendations.trim() ||
+      typedPhotoSummary.trim() ||
       Object.values(companionState).some(
         (entry) =>
           Object.keys(entry?.values || {}).length ||
@@ -12743,6 +12744,11 @@ export function CompletionPanel({
         typedActivityTouched,
         typedNextStepChips,
         typedRecommendations,
+        // The technician-approved AI photo summary rides with the photo set
+        // it describes — without it a reload or billing detour restores the
+        // photos but submits no `typedPhotoSummary`, silently dropping the
+        // customer narrative the tech reviewed (Codex r-375c002 P1).
+        typedPhotoSummary,
         // Companion section state rides the same draft (and the same
         // billing-409 checkout detour survival).
         companionState,
@@ -12815,6 +12821,7 @@ export function CompletionPanel({
     typedActivityTouched,
     typedNextStepChips,
     typedRecommendations,
+    typedPhotoSummary,
     companionState,
     service.city,
     service.address,
@@ -12833,6 +12840,14 @@ export function CompletionPanel({
     // photos (Codex #4091 P1).
     draftSnapshotRef.current = { ...savedDraft, servicePhotos: restoredPhotos, restoredFromStorage: true };
     setServicePhotos(restoredPhotos);
+    // The saved summary describes exactly the restored photo set, so it
+    // comes back verbatim; a draft without one (or without photos) restores
+    // empty and the tech re-analyzes.
+    setTypedPhotoSummary(
+      restoredPhotos.length && typeof savedDraft.typedPhotoSummary === "string"
+        ? savedDraft.typedPhotoSummary
+        : "",
+    );
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;

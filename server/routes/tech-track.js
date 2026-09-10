@@ -925,31 +925,36 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
 
     // 4. Tree & Shrub: the closeout assessment scored only the photos that
     //    uploaded then. Flag it for review; never re-score behind the tech.
+    //    The auto-scorer closes over that closeout-time subset and can still
+    //    be running when the tech recovers (completion waits at most 12 s,
+    //    then a 60 s background retry) — so a missing row is NOT proof the
+    //    visit is fine. Raise the warning either way; the payload says
+    //    whether the row existed yet (Codex r-375c002 P1).
     let treeShrub = null;
     const { TREE_SHRUB_SERVICE_LINES } = require('../services/tree-shrub-closeout');
     if (TREE_SHRUB_SERVICE_LINES.has(String(record.service_line || '').toLowerCase())) {
       const assessment = await db('tree_shrub_assessments')
         .where({ service_record_id: record.id })
         .first('id');
-      if (assessment) {
-        const { createAlertOnce } = require('../services/dispatch-alerts');
-        await createAlertOnce({
-          type: 'tree_shrub_assessment_partial_photos',
-          severity: 'warn',
-          techId: svc.technician_id || null,
-          jobId: svc.id,
-          payload: {
-            source: 'photo_recovery',
-            serviceRecordId: record.id,
-            assessmentId: assessment.id,
-            customerId: svc.customer_id,
-            message: 'Tree & Shrub assessment was scored before recovered photos were attached; review the diagnosis.',
-          },
-        });
-        treeShrub = { assessmentId: assessment.id, rescored: false, flaggedForReview: true };
-      } else {
-        treeShrub = { assessmentId: null, rescored: false, flaggedForReview: false };
-      }
+      const assessmentId = assessment ? assessment.id : null;
+      const { createAlertOnce } = require('../services/dispatch-alerts');
+      await createAlertOnce({
+        type: 'tree_shrub_assessment_partial_photos',
+        severity: 'warn',
+        techId: svc.technician_id || null,
+        jobId: svc.id,
+        payload: {
+          source: 'photo_recovery',
+          serviceRecordId: record.id,
+          assessmentId,
+          scoringPending: !assessmentId,
+          customerId: svc.customer_id,
+          message: assessmentId
+            ? 'Tree & Shrub assessment was scored before recovered photos were attached; review the diagnosis.'
+            : 'Tree & Shrub photos were recovered after closeout; any auto-scored assessment covers only the photos uploaded then. Review the diagnosis once scoring lands.',
+        },
+      });
+      treeShrub = { assessmentId, rescored: false, flaggedForReview: true };
     }
 
     logger.info(
