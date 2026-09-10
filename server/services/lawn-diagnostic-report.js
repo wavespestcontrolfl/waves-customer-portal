@@ -569,14 +569,31 @@ const CLEAN_CLAUSE_LEAD = /^\s*(?:no|none|not|clear|nothing)\b/;
 // maps its positive clause. Same marker set as the copy module's establishesCause.
 const CLAUSE_SPLIT = /[;.]|\b(?:but|while|although|though|whereas|however|yet)\b/;
 const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
+// Negation scope inside one clause. A determiner-style marker (no / without /
+// non / neither, and not / never when a cause term follows) negates what FOLLOWS
+// it, so the text before it stays positive: "Large patch with no weed pressure"
+// keeps large patch, "Drought stress, not chinch bugs" keeps drought. Any other
+// marker (ruled out, absent, unlikely, n't, none, "not present", "never observed",
+// "not a factor") negates the whole clause, because it describes the subject
+// that precedes it. Anything the rule cannot place is treated as negated.
+const FORWARD_NEGATION = /\b(no|not|never|without|non|neither)\b/;
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
+  const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
   for (const clause of lower.split(CLAUSE_SPLIT)) {
     const text = clause.trim();
     if (!text) continue;
-    if (CLEAN_CLAUSE_LEAD.test(text) || NEGATION_MARKER.test(text)) negated = true;
-    else positive.push(text);
+    if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
+    negated = true;
+    const forward = FORWARD_NEGATION.exec(text);
+    if (!forward) continue;
+    const head = text.slice(0, forward.index).trim();
+    const rest = text.slice(forward.index + forward[0].length);
+    const scopesForward = !/^(?:not|never)$/.test(forward[1]) || causeAhead.test(rest);
+    // A whole-clause marker anywhere else in the clause still negates all of it.
+    const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
+    if (scopesForward && head && !wholeClauseMarker) positive.push(head);
   }
   return { positive, negated };
 }
@@ -725,9 +742,14 @@ function classifyReleaseMode(contract = {}) {
 // linkers ("remain active", "stays active", "continue to be active") are
 // downgraded like the copulas.
 const HISTORICAL_QUALIFIER = /\b(previously|formerly|historically|initially|originally)\b/i;
-const PREDICATE_LINKER = '(?<linker>is|are|was|were|has|have|had|remains?|remained|stays?|stayed|continues?\\s+to\\s+be|continued\\s+to\\s+be)';
-const PAST_LINKER = /^(?:was|were|had|remained|stayed|continued\b)/i;
-const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+${PREDICATE_LINKER}`;
+const PREDICATE_LINKER = '(?<linker>is|are|was|were|has|have|had|remains?|remained|stays?|stayed|continues?\\s+(?:to\\s+be|being)|continued\\s+(?:to\\s+be|being)|keeps?\\s+being|kept\\s+being)';
+const PAST_LINKER = /^(?:was|were|had|remained|stayed|continued|kept)\b/i;
+const PLURAL_LINKER = /^(?:are|have|remain|stay|continue|keep)\b/i;
+// The cause plus any consumed noun phrase (short parenthetical, activity/damage/…
+// suffix) is kept in the rewrite so the published sentence keeps its subject:
+// "Fungal activity is confirmed in the shade" → "Fungal activity appears most
+// consistent with the visible pattern in the shade".
+const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?<phrase>(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*)\\s+${PREDICATE_LINKER}`;
 const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3})\\s+confirmed\\b`, 'gi');
 const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3})\\s+active\\b`, 'gi');
 // Named groups survive SUMMARY_CAUSE_RE's own groups; the cause is always $1.
@@ -735,8 +757,10 @@ function predicateParts(args) {
   const groups = args[args.length - 1];
   const historical = HISTORICAL_QUALIFIER.exec(groups.adverbs || '');
   const qualifier = historical ? `${historical[1].toLowerCase()} ` : '';
-  const past = PAST_LINKER.test(groups.linker || '') || !!historical;
-  return { cause: args[1], qualifier, past };
+  const linker = groups.linker || '';
+  const past = PAST_LINKER.test(linker) || !!historical;
+  const appears = past ? 'appeared' : (PLURAL_LINKER.test(linker) ? 'appear' : 'appears');
+  return { subject: `${args[1]}${groups.phrase || ''}`, qualifier, past, appears };
 }
 function stripConfirmedLanguage(text) {
   if (!text) return text;
@@ -744,15 +768,15 @@ function stripConfirmedLanguage(text) {
     .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
     .replace(CONFIRMED_PREDICATE, (...args) => {
-      const { cause, qualifier, past } = predicateParts(args);
-      return past ? `${cause} ${qualifier}appeared most consistent with the visible pattern` : `${cause} most consistent with the visible pattern`;
+      const { subject, qualifier, appears } = predicateParts(args);
+      return `${subject} ${qualifier}${appears} most consistent with the visible pattern`;
     })
     // Cause-first active predicate ("Chinch bugs are active along the edge"). Both
     // predicate passes accept a short parenthetical after the cause
     // ("Large patch (Rhizoctonia) is confirmed").
     .replace(ACTIVE_PREDICATE, (...args) => {
-      const { cause, qualifier, past } = predicateParts(args);
-      return past ? `${cause} may have been ${qualifier}active` : `${cause} may be active`;
+      const { subject, qualifier, past } = predicateParts(args);
+      return past ? `${subject} may have been ${qualifier}active` : `${subject} may be active`;
     })
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }

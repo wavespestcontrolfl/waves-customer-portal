@@ -110,7 +110,9 @@ function governedTerms(text) {
 // ("Chinch bug damage and thinning") is still a single cause.
 function establishesCause(finding) {
   if (!finding || !finding.label || (CONFIDENCE_RANK[String(finding.confidence || '').toLowerCase()] ?? 0) < CONFIDENCE_RANK.moderate) return false;
-  if (finding.negated || finding.label === NO_STRESS_LABEL) return false;
+  // A finding the technician removed (keep: false) is never evidence, on every
+  // publication path, not only reviewedObservations.
+  if (finding.keep === false || finding.negated || finding.label === NO_STRESS_LABEL) return false;
   const name = finding.name || '';
   if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;

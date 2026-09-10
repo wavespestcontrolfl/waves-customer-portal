@@ -519,7 +519,20 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Chinch bugs remained active last visit.', 'Chinch bugs may have been active last visit.'],
     ['Chinch bugs were active yesterday, but none are present now.', 'Chinch bugs may have been active yesterday, but none are present now.'],
     ['Drought was confirmed last month.', 'Drought appeared most consistent with the visible pattern last month.'],
+    ['Chinch bugs continue being active.', 'Chinch bugs may be active.'],
+    ['Grubs keep being active.', 'Grubs may be active.'],
+    ['Grubs kept being active.', 'Grubs may have been active.'],
   ])('scrubCustomerText downgrades aspectual and past-tense claims in %s without changing tense', (text, expected) => {
+    expect(scrubCustomerText(text)).toBe(expected);
+  });
+
+  test.each([
+    ['Fungal activity is confirmed in the shade.', 'Fungal activity appears most consistent with the visible pattern in the shade.'],
+    ['Chinch bug pressure is confirmed.', 'Chinch bug pressure appears most consistent with the visible pattern.'],
+    ['Chinch bugs are confirmed.', 'Chinch bugs appear most consistent with the visible pattern.'],
+    ['Large patch (Rhizoctonia) is confirmed.', 'Large patch (Rhizoctonia) appears most consistent with the visible pattern.'],
+    ['Chinch bug activity has been confirmed.', 'Chinch bug activity appears most consistent with the visible pattern.'],
+  ])('scrubCustomerText keeps the subject noun phrase and a copula when downgrading %s', (text, expected) => {
     expect(scrubCustomerText(text)).toBe(expected);
   });
 
@@ -580,6 +593,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Chinch bugs never observed', 'Never observed chinch bugs',
     // One negation keeps its scope across an enumerated list.
     'No weeds, disease, or pests observed', 'No chinch bugs: drought stress ruled out', 'Not drought, chinch bugs, or grubs',
+    // A subject-describing negation negates the whole clause.
+    'Chinch bugs not a factor', 'Chinch bugs were never seen', 'Large patch with no weed pressure ruled out',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -590,6 +605,11 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Sod-webworm not present. Grub damage at the edge', 'grub activity'],
     ['No weeds; large patch is visible', 'large patch (fungal) activity'],
     ['Not drought; chinch bug damage along the edge', 'chinch bug activity'],
+    // A determiner-style negation scopes forward, so the positive head survives.
+    ['Large patch with no weed pressure', 'large patch (fungal) activity'],
+    ['Large patch without dollar spot', 'large patch (fungal) activity'],
+    ['Drought stress, not chinch bugs', 'drought stress'],
+    ['Chinch bugs, no drought', 'chinch bug activity'],
     ['Healthy overall, some yellowing', 'color and nutrient stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);

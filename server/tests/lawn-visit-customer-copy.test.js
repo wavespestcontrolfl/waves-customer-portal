@@ -128,6 +128,13 @@ describe('customer publication', () => {
     },
   );
 
+  test('a finding marked keep: false is never evidence on any publication path', () => {
+    const removed = { name: 'Nutsedge', label: 'weed pressure', confidence: 'moderate', keep: false };
+    expect(copy.customerObservations('Nutsedge is spreading along the walk.', [removed])).toBe(copy.NO_OBSERVATIONS);
+    expect(copy.safeConfirmationStep('Nutsedge is spreading along the walk.', removed)).toBe('');
+    expect(copy.customerObservations('Nutsedge is spreading along the walk.', [{ ...removed, keep: true }])).toMatch(/nutsedge/i);
+  });
+
   describe('display limits never manufacture prohibited copy', () => {
     const filler = 'The turf along the front walk is thin in two spots and should be watched. '.repeat(8); // 592 chars
     const idiom = 'The treated area is safe once dry; your technician confirms the timing.';
