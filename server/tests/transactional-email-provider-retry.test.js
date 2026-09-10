@@ -13,6 +13,7 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/visit-completion-summary', () => ({
   retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
+  reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
 }));
 
 const retry = require('../services/transactional-email-provider-retry');
@@ -130,6 +131,7 @@ describe('transactional email provider retry classification', () => {
     expect(result).toMatchObject({ sent: false, stopped: true, reason: 'Suppressed before retry: visit_summary_recipient_changed' });
     expect(summary.retrySummaryThroughHandoff).toHaveBeenCalledWith(stored, expect.any(Function));
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'blocked', provider_retry_next_at: null }));
+    expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledTimes(1);
     expect(sendgrid.clearBlockedAddress).not.toHaveBeenCalled();
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
@@ -166,6 +168,23 @@ describe('transactional email provider retry classification', () => {
     expect(await retry.retryOne(stored)).toMatchObject({ sent: false });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: expect.any(Date) }));
+  });
+
+  test('a visit summary retry whose bookkeeping fails after SendGrid accepted settles as uncertain, never requeued', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn().mockRejectedValueOnce(new Error('connection reset')).mockResolvedValue([{ id: 'message-1', status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'provider-9' });
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001',
+      send_attempt_token: 'attempt-6', provider_retry_count: 0 });
+    expect(await retry.retryOne(stored)).toMatchObject({ sent: false, uncertain: true });
+    expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null,
+      error_message: expect.stringMatching(/^Provider outcome unknown/) }));
+    expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
   });
 
   test('other templates never consult the visit summary fence', async () => {
