@@ -2624,8 +2624,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // or re-pointed invoice means the office changed its mind, and a
     // closeout would otherwise complete the visit and, under the REQUIRED
     // posture, mint a replacement the operator never asked for. 409 before
-    // the claim, so the visit simply stays open for a human.
-    if (completionInput.issuedInvoiceCloseout) {
+    // the claim, so the visit simply stays open for a human. A COMMITTED
+    // attempt (record and status already written, side effects still owed:
+    // side_effects_pending / running, or a lost-response retry) SKIPS this
+    // refusal (pre-push P1 r7): its quiet / no-mint posture is frozen and no
+    // replacement can be minted from a resume, so a void that lands after
+    // the commit must not strand the remaining tracker / snapshot work
+    // behind a 409 on every retry. The lookup fails soft toward REFUSING.
+    if (completionInput.issuedInvoiceCloseout
+      && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), false))) {
       const InvoiceServiceForIssued = require('../services/invoice');
       const issued = await db('invoices').where({ id: completionInput.issuedInvoiceCloseout.invoiceId }).first('id', 'status', 'scheduled_service_id');
       if (!issued || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issued.status))

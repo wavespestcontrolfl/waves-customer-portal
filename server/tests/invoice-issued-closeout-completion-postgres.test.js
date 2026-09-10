@@ -94,6 +94,10 @@ describe('source contracts', () => {
     // both) must be audited as 'technician', never folded into 'admin'.
     expect(schedule).toMatch(/generatePrepaidReceiptForService\(req\.params\.id, \{ operatorInitiated: true, actorTechnicianId: req\.technicianId \|\| null, actorRole: req\.techRole \|\| null \}\)/);
   });
+  test('the pre-claim issued-invoice refusal is skipped for a COMMITTED attempt (pre-push P1 r7)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/if \(completionInput\.issuedInvoiceCloseout\s*\n\s*&& !\(await failSoftRead\(db, \(k\) => CompletionAttempts\.hasCommittedCompletionAttempt\(svc\.id, k\), false\)\)\) \{/);
+  });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const persistAt = source.indexOf('const persistRecord = async (trx) => {');
@@ -295,6 +299,24 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(result).toMatchObject({ status: 409, body: { code: 'issued_invoice_not_reusable' } });
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
+  });
+
+  test('a COMMITTED closeout whose invoice is voided after the commit is not refused as not-reusable — the resume can finish (pre-push P1 r7)', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const idempotencyKey = randomUUID();
+    // The completion committed (record + status) and still owes side effects.
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed' });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: f.serviceId, idempotency_key: idempotencyKey, status: 'side_effects_pending', request_hash: 'x' });
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+    const result = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
+      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey },
+      actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
+    // Whatever the resume claim decides, the pre-claim invoice check no
+    // longer stands in its way — and no replacement invoice is minted.
+    expect(result?.body?.code).not.toBe('issued_invoice_not_reusable');
+    expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
+    await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).del();
   });
 
   test('a reschedule that lands between the unlocked read and the record transaction refuses the closeout — the locked day decides (GitHub r6 P2)', async () => {
