@@ -43,6 +43,34 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
     }
   });
 
+  test('reselecting a legacy single hold upgrades its policy and rejects catalog growth after shutdown', async () => {
+    const catalog = await f.db('services').where({ service_key: 'pest_general_quarterly' }).first();
+    try {
+      await f.db('services').where({ id: catalog.id }).update({
+        scheduling_duration_policy: { version: 1, default_duration_minutes: 60, min_duration_minutes: 60, max_duration_minutes: 60 },
+      });
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      const args = { estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], 60) };
+      const legacy = await reserveSlot(args);
+      expect((await f.db('scheduled_services').where({ id: legacy.scheduledServiceId }).first()).reservation_policy_version)
+        .not.toBe(2);
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const current = await reserveSlot(args);
+      expect((await f.db('scheduled_services').where({ id: current.scheduledServiceId }).first()).reservation_policy_version)
+        .toBe(2);
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      await f.db('services').where({ id: catalog.id }).update({
+        scheduling_duration_policy: { version: 1, default_duration_minutes: 90, min_duration_minutes: 90, max_duration_minutes: 90 },
+      });
+      await expect(commitReservation({ scheduledServiceId: current.scheduledServiceId, customerId: f.ids.customer }))
+        .rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed' });
+      expect(await f.db('scheduled_services').where({ id: current.scheduledServiceId }).first())
+        .toMatchObject({ customer_id: null, estimated_duration_minutes: 60 });
+    } finally {
+      await f.db('services').where({ id: catalog.id }).update({ scheduling_duration_policy: catalog.scheduling_duration_policy });
+    }
+  });
+
   test('a changed route invalidates a prepared commit and leaves the hold intact', async () => {
     const held = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0]) });
     const preparedCapacity = await prepareReservationCommit(held.scheduledServiceId);
