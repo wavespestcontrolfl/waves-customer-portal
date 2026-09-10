@@ -52,12 +52,25 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 // Evaluate the worker in a sandbox whose fetch() serves any /assets/* URL, and
 // hand back the functions the shell-refresh path is built from plus a way to
 // drive the fetch handler the way the browser would.
-function loadWorker(cache) {
+// Web Locks double shared between worker instances: one chain per name.
+function fakeLocks() {
+  const chains = new Map();
+  return {
+    request(name, fn) {
+      const prev = chains.get(name) || Promise.resolve();
+      const run = prev.then(fn);
+      chains.set(name, run.catch(() => {}));
+      return run;
+    },
+  };
+}
+
+function loadWorker(cache, { locks } = {}) {
   const listeners = {};
   const sandbox = {
     self: {
       addEventListener(name, fn) { listeners[name] = fn; },
-      navigator: {}, location: { origin: 'https://portal.test' }, registration: {},
+      navigator: locks ? { locks } : {}, location: { origin: 'https://portal.test' }, registration: {},
     },
     caches: { async open() { return cache; }, async keys() { return []; }, async delete() { return true; } },
     Request: class { constructor(url) { this.url = url; } },
@@ -101,6 +114,16 @@ describe('customer service-worker update contract', () => {
       .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse)'));
     expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
+  });
+
+  it('serializes cache writes with origin-wide Web Locks so an installing worker queues behind the active one', () => {
+    // Codex #4335 P1: a newer sw.js installing beside the active worker
+    // shares the cache but not module globals, so a per-instance promise
+    // chain cannot order its install-time prune against the active
+    // worker's re-tags. Same fallback shape as the badge lock.
+    expect(source).toContain("const ASSET_WRITE_LOCK = 'waves-asset-writes'");
+    expect(source).toContain("const SHELL_REFRESH_LOCK = 'waves-shell-refresh'");
+    expect(source).toContain('if (self.navigator.locks?.request) return self.navigator.locks.request(name, fn)');
   });
 
   it('does not swallow install failure or delete caches outside this app', () => {
@@ -416,6 +439,33 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await tick();
     releaseDelete();
     await refreshC;
+    await hit.settled();
+
+    expect(await cache.match('/assets/Shared-XYZ.js')).toBeTruthy();
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js', '/assets/index-CCC.js']);
+  });
+
+  it('queues an installing worker\'s prune behind the active worker\'s re-tag (two instances, one lock)', async () => {
+    // Codex #4335 P1 (cross-instance): the installing worker precaches C and
+    // prunes while the active worker, a separate global scope on the same
+    // cache, re-tags Shared-XYZ.js for the retained build. Two module-local
+    // chains cannot order these; the origin-wide lock must.
+    const cache = fakeCache();
+    const locks = fakeLocks();
+    const active = loadWorker(cache, { locks });
+    await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await active.dispatchFetch('/assets/Shared-XYZ.js'); // tagged A
+    await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])));
+
+    const installer = loadWorker(cache, { locks });
+    let releaseDelete;
+    cache.deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+    const install = installer.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    await tick(); // the installer's prune read the tags and is parked on delete()
+    const hit = await active.dispatchFetch('/assets/Shared-XYZ.js', { settle: false }); // active worker re-tags
+    await tick();
+    releaseDelete();
+    await install;
     await hit.settled();
 
     expect(await cache.match('/assets/Shared-XYZ.js')).toBeTruthy();

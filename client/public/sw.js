@@ -134,12 +134,23 @@ async function currentBuildId(cache) {
 // Asset-cache writes — the prune, a cache hit's re-tag, a miss's store —
 // run one at a time. Unserialized, the prune reads a chunk's old tag, a
 // page of the retained build re-tags it meanwhile, and the prune's delete
-// then removes an entry whose new tag it would have kept.
-let assetWriteChain = Promise.resolve();
-function withAssetWrites(fn) {
-  const run = assetWriteChain.then(fn);
-  assetWriteChain = run.catch(() => {});
+// then removes an entry whose new tag it would have kept. The lock is
+// origin-wide (Web Locks): a newer sw.js installing beside the active
+// worker shares CACHE_NAME but not module globals, so its install-time
+// prune must queue behind the active worker's writes too. A lock held by
+// a terminated worker is released with it. Never nested: a shell refresh
+// takes the asset lock only for bounded, non-reentrant steps.
+const ASSET_WRITE_LOCK = 'waves-asset-writes';
+const SHELL_REFRESH_LOCK = 'waves-shell-refresh';
+function serializeOn(name, fallbackChain, fn) {
+  if (self.navigator.locks?.request) return self.navigator.locks.request(name, fn);
+  const run = fallbackChain.promise.then(fn);
+  fallbackChain.promise = run.catch(() => {});
   return run;
+}
+const assetWriteChain = { promise: Promise.resolve() };
+function withAssetWrites(fn) {
+  return serializeOn(ASSET_WRITE_LOCK, assetWriteChain, fn);
 }
 
 // Add build claims to a cached entry. Runs under the write lock and merges
@@ -157,14 +168,12 @@ function claimBuilds(cache, request, fallback, claims) {
 // across a deploy (old shell A and new shell B in flight together). Each
 // refresh reads the previous shell, writes, then prunes — interleaved, A's
 // prune deletes B's assets after B stored its shell, leaving '/' pointing
-// at a missing entry script. Serialize the whole read-write-prune unit on
-// a promise chain; overlap only exists within one worker lifetime, so a
-// module-level chain is the right scope (Web Locks would outlive it).
-let shellRefreshChain = Promise.resolve();
+// at a missing entry script. Serialize the whole read-write-prune unit,
+// origin-wide for the same reason as the asset writes: an installing
+// worker's precache and the active worker's navigation refresh overlap.
+const shellRefreshChain = { promise: Promise.resolve() };
 async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq) {
-  const run = shellRefreshChain.then(() => replaceCompleteShell(shellResponse, enqueuedSeq));
-  shellRefreshChain = run.catch(() => {});
-  return run;
+  return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, () => replaceCompleteShell(shellResponse, enqueuedSeq));
 }
 
 async function replaceCompleteShell(shellResponse, enqueuedSeq) {
