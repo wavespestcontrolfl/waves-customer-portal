@@ -8,11 +8,8 @@ const KEY = 'service.visit_summary';
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('audit_log'))) return;
-  // Only a migration-created template is attributed to the system: the
-  // retained seed writes no created_by, while an administrator-created
-  // template carries its author and keeps its own audit history.
-  const template = await knex('email_templates').where({ template_key: KEY }).first('id', 'created_by');
-  if (!template || template.created_by) return;
+  const template = await knex('email_templates').where({ template_key: KEY }).first('id');
+  if (!template) return;
   const recorded = await knex('audit_log')
     .where({ action: 'email_template.seeded', resource_type: 'email_template', resource_id: template.id })
     .first('id');
