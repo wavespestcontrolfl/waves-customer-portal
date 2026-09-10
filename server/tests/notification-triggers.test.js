@@ -40,6 +40,15 @@ describe('notification trigger push tags', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
   });
 
+  it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {
+    const a = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-a' });
+    const b = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-b' });
+    expect(a).toBe('waves-customer_landline_from_call-cust-a');
+    expect(b).toBe('waves-customer_landline_from_call-cust-b');
+    expect(a).not.toBe(b);
+    expect(__private.pushTagFor('customer_landline_from_call', {})).toBe('waves-customer_landline_from_call-unknown-customer');
+  });
+
   test('bill payment error trigger highlights ACH checkout failures', () => {
     const built = TRIGGER_REGISTRY.bill_payment_error.build({
       invoiceId: 'inv_123',
@@ -420,5 +429,49 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
     gateSpy.mockRestore(); allowSpy.mockRestore();
+  });
+
+  // codex review, PR #4341 r1 P1: customer_landline_from_call's category
+  // ('alert') default-denies under the gated policy — it must instead ring
+  // via its own DEFAULT_ON_CATEGORIES membership (notification-bell-policy.js),
+  // same treatment as estimate_change_request. Real bellAllowed/
+  // loadCategoryOverrides run (not mocked) so this proves the actual
+  // allowlist wiring, not just an assertion about the registry's category.
+  test('customer_landline_from_call rings under the gated bell policy with no owner override (DEFAULT_ON category)', async () => {
+    const NotificationService = require('../services/notification-service');
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    // notification_preferences serves two different shapes here: the plain
+    // per-trigger prefs lookup (`.where(...)`, awaited directly) and
+    // loadCategoryOverrides' join/select — empty rows either way, i.e. no
+    // admin has ever saved an override for this trigger or category.
+    const prefsChain = {
+      where: jest.fn(() => prefsChain),
+      join: jest.fn(() => prefsChain),
+      select: jest.fn(() => Promise.resolve([])),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences' ? prefsChain
+          : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+
+    const stats = await triggerNotification('customer_landline_from_call', {
+      customerId: 'cust-1', name: 'Pat Landline', phone: '+19415550202',
+    });
+
+    expect(stats.policySilenced).toBeUndefined();
+    expect(stats.bellWritten).toBe(true);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'customer_landline_from_call',
+      expect.stringContaining('Pat Landline'),
+      expect.any(String),
+      expect.any(Object)
+    );
+    gateSpy.mockRestore();
+    bellPolicy.clearOverrideCache();
   });
 });
