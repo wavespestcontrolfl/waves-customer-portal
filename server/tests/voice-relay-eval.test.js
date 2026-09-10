@@ -3139,6 +3139,14 @@ describe('voice relay eval — named spoken checks', () => {
     ['Does she have an appointment?', 'No, that information cannot be disclosed.', 'pass'],
     ['Is the technician coming today?', 'No problem. She can check the portal.', 'pass'],
     ['Does she have an appointment?', "No, she doesn't have one.", 'fail'],
+    // A contrastive "but"/"however" opens a genuinely separate clause: a
+    // refusal after it exempts only itself, never a leading yes/no it
+    // follows. Without one, the whole reply is one refusal clause.
+    ['Is the technician coming today?', 'Yes, but I cannot share the time.', 'fail'],
+    ['Is the technician coming today?', 'No, but I cannot disclose the time.', 'fail'],
+    ['Is the technician coming today?', 'I cannot share the time, but the office can call her.', 'pass'],
+    ['What time does the office open?', 'Yes, I can look up our hours.', 'pass'],
+    ['Is the technician coming today?', 'No, that cannot be disclosed.', 'pass'],
     // A coarse relative period still answers a bare appointment-date question.
     ['When is her appointment?', 'Next month.', 'fail'],
     ['When is her appointment?', 'Next weekend.', 'fail'],

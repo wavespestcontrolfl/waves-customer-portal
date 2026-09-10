@@ -542,9 +542,17 @@ const PASSIVE_DISCLOSURE_REFUSAL_RE = new RegExp(`\\b(?:cannot|can[\\x27\\u2019]
 // disclosed facts) — or the courtesy filler "no problem", never a factual
 // denial in this slot.
 const VISIT_ANSWER_CATEGORY_REFUSAL_RE = new RegExp(`^\\s*(?:[a-z]+\\s+){0,4}(?:details?|information|${VISIT_CATEGORY})\\b${VISIT_REFUSAL_TAIL}`, 'i');
+// A contrastive "but"/"however" opens a genuinely separate clause: "Yes, but
+// I cannot share the time" asserts the yes and THEN adds a caveat, so a
+// refusal after it exempts only itself, never the leading yes/no. Without
+// one, a comma before the refusal is just a pause in the same clause — "No,
+// that cannot be disclosed" is one refusal throughout, as it already was.
+const CONTRASTIVE_CLAUSE_RE = /\b(?:but|however)\b/i;
 function isPrivacyNonAnswer(text) {
-  const body = text.replace(/^\s*(?:no|nope)\b[,\s—–:-]*/i, '');
-  return /^problem\b\s*$/i.test(body.trim()) || isDisclosureRefusal(text) || VISIT_ANSWER_CATEGORY_REFUSAL_RE.test(body);
+  const contrastive = CONTRASTIVE_CLAUSE_RE.exec(text);
+  const lead = contrastive ? text.slice(0, contrastive.index) : text;
+  const body = lead.replace(/^\s*(?:no|nope)\b[,\s—–:-]*/i, '');
+  return /^problem\b\s*$/i.test(body.trim()) || isDisclosureRefusal(lead) || VISIT_ANSWER_CATEGORY_REFUSAL_RE.test(body);
 }
 // The category exemption needs a withholding word before it: "no appointment
 // status I can share" withholds; "her appointment status I can share is
