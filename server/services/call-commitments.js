@@ -1073,13 +1073,15 @@ function whereEstimateCustomerOwnership(query, customerId) {
 
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
-  // Evidence counts from the end of the call — or, for a callback card the
-  // office has reviewed (claimed, snoozed, called, or REOPENED), from that
-  // review: the record that kept the promise before staff reopened it is
-  // not proof it was kept again.
-  const reviewed = commitment?.human_state === 'confirmed' && commitment?.reviewed_at ? new Date(commitment.reviewed_at) : null;
+  // Evidence counts from the end of the call — or, for a callback card whose
+  // obligation was RENEWED (reopened by staff, or edited into a new
+  // promise), from that renewal: the record that kept the promise before
+  // is not proof it was kept again. Claiming, snoozing or confirming does
+  // not move the boundary, so a call returned before that action still
+  // counts.
   const ended = callEndedAt(call);
-  const after = ended && reviewed && reviewed.getTime() > ended.getTime() ? reviewed : ended;
+  const renewed = ended ? await obligationRenewedAt(conn, commitment) : null;
+  const after = renewed && renewed.getTime() > ended.getTime() ? renewed : ended;
   if (!started || Number.isNaN(started.getTime()) || !after) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
@@ -1311,12 +1313,27 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
+// When a callback card's obligation was last renewed: an edit stamps a new
+// promise at reviewed_at; a reopen is the card's audited callback_reopen
+// event (the row itself carries no reopen mark). Null for anything else.
+async function obligationRenewedAt(conn, commitment) {
+  if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
+  if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
+  const edited = commitment.human_state === 'edited' && commitment.reviewed_at ? new Date(commitment.reviewed_at) : null;
+  const reopen = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id, action: 'callback_reopen' })
+    .orderBy('created_at', 'desc').first('created_at');
+  const reopened = reopen?.created_at ? new Date(reopen.created_at) : null;
+  if (edited && reopened) return edited.getTime() > reopened.getTime() ? edited : reopened;
+  return edited || reopened;
+}
+
 // The rows fulfillment refresh may still write: no human verdict, or a
-// callback card's confirm while the card policy is on or the card already
-// placed a call (a persisted attempt keeps its proof path after rollback).
+// callback card's confirm / edit while the card policy is on or the card
+// already placed a call (a persisted attempt keeps its proof path after
+// rollback).
 function refreshableVerdictSql() {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
-  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state = 'confirmed' AND (? OR EXISTS ("
+  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state IN ('confirmed', 'edited') AND (? OR EXISTS ("
     + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
     + " AND COALESCE(attempt.source, '') <> ?))))",
   [require('./callback-cards').enabled(), VOICE_RELAY_SANDBOX_SOURCE]];
