@@ -226,6 +226,9 @@ const SCOPE_SNAPSHOT = {
     // messages, and deployment branch names are human-typed strings.
     'get_cloudflare_pages_builds', 'get_google_ads_disapprovals', 'get_google_ads_serving_status', 'get_meta_ads_delivery_status',
     'get_meta_ads_issues', 'intent_routing_report', 'query_top_queries',
+    // Third-party anchor text + agent-written strategy summaries, provider
+    // error messages, human-typed Play release names.
+    'get_backlink_overview', 'get_integration_token_health', 'get_play_store_status',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],

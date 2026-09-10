@@ -357,7 +357,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_blocked_senders": {
     "module": "email-tools.js",
@@ -629,7 +629,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_kpi_snapshot": {
     "module": "dashboard-tools.js",
@@ -781,7 +781,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_pnl": {
     "module": "tax-tools.js",

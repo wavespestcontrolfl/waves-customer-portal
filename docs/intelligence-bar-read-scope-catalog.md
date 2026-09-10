@@ -147,9 +147,23 @@ old list).
   Search Console queries (`query_top_queries`, `intent_routing_report`), the
   advertising readers that return campaign, ad-group and ad names and provider
   issue messages (both Google Ads and both Meta readers), and
-  `get_cloudflare_pages_builds` (deployment branch names). The remaining SEO
-  and infrastructure readers return URLs, counts, statuses and scores and
-  stay `none`.
+  `get_cloudflare_pages_builds` (deployment branch names),
+  `get_backlink_overview` (third-party anchor text and agent-written strategy
+  summaries), `get_integration_token_health` (provider error messages, like
+  the Sentry and Twilio readers) and `get_play_store_status` (human-typed
+  release names). The remaining SEO and infrastructure readers return URLs,
+  counts, statuses and scores and stay `none`.
+
+  The line the sweeps draw: **per-item free text typed or echoed about an
+  event or an item** — descriptions, reasons, notes, messages, titles, search
+  queries, campaign/ad/branch/release names, error text — is `broad`, because
+  a customer's name or address can be typed into it. **Business catalog
+  labels** — product, vendor, technician, pricing-tier, equipment, lead-source
+  and infrastructure service names — are `none`: they name the business's own
+  things, and a catalog reader that lists them touches no customer row.
+  Aggregates keyed by such labels (technician revenue, vendor pricing, tax
+  advisor prose generated from equipment and revenue tables only) stay
+  `none` for the same reason.
 - A word after "for" is a filter rather than an unresolved customer when the
   database verifies it as a customer city, an active technician, a vendor or
   expense vendor, a lead source name or channel, or it is a known marketing
