@@ -773,6 +773,12 @@ async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client 
 
 async function handleEmailMessageEvent(ev, message, client = db) {
   const now = eventOccurredAt(ev);
+  // The recipient's address key comes FIRST, before this row is touched: the
+  // retry rail's handoff holds that key and then marks this row on its own
+  // connection, so an event that took the row first and then waited on the
+  // key would form a cycle PostgreSQL cannot see. Key → row on both sides.
+  const address = String(ev?.email || message?.recipient_email_snapshot || '').trim().toLowerCase();
+  if (client.isTransaction && address) await require('../utils/customer-comms-lock').lockCustomerEmail(client, address);
   await client('email_message_events').insert({
     email_message_id: message.id,
     provider: 'sendgrid',

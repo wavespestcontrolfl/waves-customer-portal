@@ -224,6 +224,18 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
   let field = CUSTOMER_EMAIL_FIELDS.find(
     (f) => String(customer[f] || '').trim().toLowerCase() === bouncedEmail,
   ) || null;
+  // A secondary property profile with no email of its own is addressed at
+  // its account primary's email (customer-contact withAccountPrimaryContact):
+  // the message records the profile as recipient, but the address lives on
+  // the primary's row, which is the row a correction must update.
+  if (!field) {
+    const { withAccountPrimaryContact } = require('./customer-contact');
+    const filled = await withAccountPrimaryContact(customer).catch(() => customer);
+    const fallback = filled?.account_primary_fallback;
+    if (fallback?.fields?.includes('email') && String(filled.email || '').trim().toLowerCase() === bouncedEmail) {
+      return { customerId: fallback.customer_id, field: 'email' };
+    }
+  }
   // notification_prefs.billing_email is also a sendable customer address (the
   // invoice/balance path resolves it via getInvoiceEmailRecipients) but lives on
   // a separate table. If the bounce was to that address, mark the field so the
