@@ -103,6 +103,37 @@ async function decorateCallbackRows(conn, rows) {
   });
 }
 
+// Whether an edit changes the obligation itself: the wording, or the stated
+// deadline at the minute precision the editor round-trips (a no-op save of a
+// row whose due_at carries seconds is still a no-op). A malformed due_at
+// counts as a restatement so applyHumanUpdate rejects it as before.
+function editRestates(row, { description, due_at }) {
+  if (description !== undefined && String(description || '').trim().slice(0, 2000) !== String(row.description || '')) return true;
+  if (due_at !== undefined) {
+    const parsed = require('./call-commitments').parseDueAt(due_at);
+    if (Number.isNaN(parsed)) return true;
+    const minute = (t) => (t ? Math.floor(new Date(t).getTime() / 60000) : null);
+    if (minute(parsed) !== minute(row.due_at)) return true;
+  }
+  return false;
+}
+
+// The edit action's ledger write. Returns whether the obligation was restated.
+async function applyEdit(trx, row, { actorId, description, due_at, note, patch }) {
+  const ledger = require('./call-commitments');
+  patch.snoozed_until = null;
+  if (editRestates(row, { description, due_at })) {
+    const changed = await ledger.applyHumanUpdate(trx, row.id, { action: 'edit', reviewedBy: actorId, description, due_at, note });
+    if (due_at !== undefined && changed.due_at == null) patch.callback_due_at = null;
+    return true;
+  }
+  if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
+  // Saving an unreviewed AI callback unchanged is still the office vouching
+  // for it (the same review a claim records).
+  if (row.human_state == null) await ledger.applyHumanUpdate(trx, row.id, { action: 'confirm', reviewedBy: actorId });
+  return false;
+}
+
 async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, description, due_at, note, now = new Date() } = {}) {
   if (!enabled()) throw error('Callback cards are disabled');
   if (!['claim', 'release', 'snooze', 'fulfill', 'dismiss', 'reopen', 'confirm', 'edit'].includes(action)) throw error('Unknown callback action', 400);
@@ -143,15 +174,24 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
     if (['claim', 'release', 'snooze'].includes(action) && row.human_state == null) {
       await require('./call-commitments').applyHumanUpdate(trx, id, { action: 'confirm', reviewedBy: actorId });
     }
-    if (['fulfill', 'dismiss', 'reopen', 'confirm', 'edit'].includes(action)) {
-      const changed = await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, description, due_at, note });
-      if (action === 'edit' && due_at !== undefined && changed.due_at == null) patch.callback_due_at = null;
+    // A Save that restates nothing is not a new promise. The editor submits
+    // description and due_at on every save, so the submitted obligation is
+    // compared with the locked row before the edit boundary fulfillment
+    // refresh honours is advanced: a return call that landed while the
+    // panel was open must still close the callback. An unchanged save
+    // still takes ownership, clears the snooze and keeps a note, but leaves
+    // reviewed_at alone — for a card edited before callback cards existed
+    // that is the only edit boundary on record.
+    const restated = action === 'edit' ? await applyEdit(trx, row, { actorId, description, due_at, note, patch }) : null;
+    if (['fulfill', 'dismiss', 'reopen', 'confirm'].includes(action)) {
+      await require('./call-commitments').applyHumanUpdate(trx, id, { action, reviewedBy: actorId, note });
       patch.snoozed_until = null;
     }
     await trx('call_commitments').where({ id }).update(patch);
     await prepareCallbackCards(trx, { callId: row.call_log_id });
     await recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: `callback_${action}`,
-      resource_type: 'call_commitment', resource_id: id, metadata: { snoozed_until: until?.toISOString() || null }, critical: true, trx });
+      resource_type: 'call_commitment', resource_id: id,
+      metadata: { snoozed_until: until?.toISOString() || null, ...(action === 'edit' ? { restated } : {}) }, critical: true, trx });
     // Every action retires the reminder for the version staff just acted on
     // AND releases its per-day dedupe identity: a snoozed, released or
     // edited callback that is still open rings again the next time the

@@ -1321,11 +1321,20 @@ async function resolveFulfillment(conn, commitment, call) {
 async function obligationRenewedAt(conn, commitment) {
   if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
   if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
-  const restated = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
-    .whereIn('action', ['callback_edit', 'callback_reopen']).orderBy('created_at', 'desc').first('created_at');
-  const times = [commitment.source === 'human' ? commitment.created_at : null, restated?.created_at]
-    .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
-  return times.length ? new Date(Math.max(...times)) : null;
+  const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
+  const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
+  // A save that changed nothing (metadata.restated === false) restates nothing.
+  const restatements = events.filter((e) => !(e.action === 'callback_edit' && meta(e).restated === false));
+  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => e.created_at)];
+  // A card edited before callback cards existed went through the generic
+  // path, which wrote no callback_edit event: its reviewed_at is the only
+  // boundary on record (at worst later than the edit, never earlier), so
+  // an outbound call from before that historical edit cannot close the
+  // revised obligation.
+  if (commitment.human_state === 'edited' && !restatements.some((e) => e.action === 'callback_edit')) times.push(commitment.reviewed_at);
+  const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+  return ms.length ? new Date(Math.max(...ms)) : null;
 }
 
 // The rows fulfillment refresh may still write: no human verdict, or a
