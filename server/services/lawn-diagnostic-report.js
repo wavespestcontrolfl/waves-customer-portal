@@ -554,6 +554,26 @@ const GENERIC_STRESS_LABEL = 'general lawn stress';
 // that carries a negated differential ("Possible fungal disease; no weed pressure").
 const LEADING_NEGATION = /^\s*(no|none|not|clear|healthy|looks good|looks healthy|nothing)\b/;
 
+// A negation marker anywhere in a clause withdraws that clause from label mapping,
+// so a negated alias ("Rhizoctonia ruled out", "Take-all was not observed",
+// "Sod-webworm not present") never maps to its positive label. Clauses split on
+// punctuation and contrast words, so a positive finding that carries a negated
+// differential ("Possible fungal disease; no weed pressure") still maps its
+// positive clause. Same marker set as the copy module's establishesCause.
+const CLAUSE_SPLIT = /[;,.:]|\b(?:but|while|although|though|whereas|however|yet)\b/;
+const NEGATION_MARKER = /\b(?:no|not|none|non|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
+function positiveClauses(lower) {
+  const positive = [];
+  let negated = false;
+  for (const clause of lower.split(CLAUSE_SPLIT)) {
+    const text = clause.trim();
+    if (!text) continue;
+    if (LEADING_NEGATION.test(text) || NEGATION_MARKER.test(text)) negated = true;
+    else positive.push(text);
+  }
+  return { positive, negated };
+}
+
 // Map any stored finding name (client/LLM free text) to a fixed, allowlisted
 // customer-facing condition label, gated by confidence. Single source of truth for the
 // public egress route, the customer-summary builder, AND the narrative context — so no
@@ -563,11 +583,14 @@ function safeConditionLabel(rawName, confidence) {
   const lower = String(rawName || '').toLowerCase();
   if (!lower) return null;
   let label = 'a lawn condition we are monitoring';
-  if (LEADING_NEGATION.test(lower)) {
+  const { positive, negated } = positiveClauses(lower);
+  if (LEADING_NEGATION.test(lower) || (negated && !positive.length)) {
     label = 'no major visible stress';
   } else {
+    // Only the non-negated clauses may map to a label.
+    const mappable = positive.join('; ');
     for (const [pattern, mapped] of CONDITION_LABELS) {
-      if (pattern.test(lower)) { label = mapped; break; }
+      if (pattern.test(mappable)) { label = mapped; break; }
     }
   }
   if (confidence !== undefined && CAUSE_LABELS.has(label) && confidenceRank(confidence) < CONFIDENCE_ORDER.moderate) {
@@ -685,18 +708,35 @@ function classifyReleaseMode(contract = {}) {
 // and "confirmed" / "active" ("has just been confirmed", "is currently confirmed",
 // "are clearly active") — any -ly word or a short function-word set — rather than
 // a closed adverb list.
+// A historical qualifier in the adverb run ("were previously active", "had
+// historically been confirmed") keeps its tense through the downgrade, so a
+// resolved past claim never becomes a present possibility that contradicts the
+// rest of the sentence ("…, but none are present now").
+const HISTORICAL_QUALIFIER = /\b(previously|formerly|historically|initially|originally)\b/i;
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text).replace(/\s+/g, ' ')
     .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
     .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3}\\s+confirmed\\b`, 'gi'),
-      '$1 most consistent with the visible pattern')
+      (match, cause) => {
+        // SUMMARY_CAUSE_RE carries its own groups, so read the run from the match.
+        const historical = HISTORICAL_QUALIFIER.exec(match);
+        return historical
+          ? `${cause} ${historical[1].toLowerCase()} appeared most consistent with the visible pattern`
+          : `${cause} most consistent with the visible pattern`;
+      })
     // Cause-first active predicate ("Chinch bugs are active along the edge"). Both
     // predicate passes accept a short parenthetical after the cause
     // ("Large patch (Rhizoctonia) is confirmed").
     .replace(new RegExp(`\\b(${SUMMARY_CAUSE_RE.source})(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*\\s+(?:is|are|was|were|has|have|had)(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3}\\s+active\\b`, 'gi'),
-      '$1 may be active')
+      (match, cause) => {
+        // SUMMARY_CAUSE_RE carries its own groups, so read the run from the match.
+        const historical = HISTORICAL_QUALIFIER.exec(match);
+        return historical
+          ? `${cause} may have been ${historical[1].toLowerCase()} active`
+          : `${cause} may be active`;
+      })
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 

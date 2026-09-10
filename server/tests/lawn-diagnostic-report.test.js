@@ -504,6 +504,20 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(scrubCustomerText('We saw active caterpillar damage.')).toMatch(/suspected caterpillar/i);
   });
 
+  test.each([
+    ['Chinch bugs were previously active, but none are present now.', 'Chinch bugs may have been previously active, but none are present now.'],
+    ['Large patch was formerly active in the shade.', 'Large patch may have been formerly active in the shade.'],
+    ['Grubs had historically been active here.', 'Grubs may have been historically active here.'],
+  ])('scrubCustomerText keeps the historical qualifier and tense when downgrading %s', (text, expected) => {
+    expect(scrubCustomerText(text)).toBe(expected);
+  });
+
+  test('scrubCustomerText keeps a historical qualifier when downgrading a confirmed claim', () => {
+    const out = scrubCustomerText('Chinch bugs were previously confirmed, but none are present now.');
+    expect(out).not.toMatch(/\bconfirmed\b/i);
+    expect(out).toBe('Chinch bugs previously appeared most consistent with the visible pattern, but none are present now.');
+  });
+
   test('scrubCustomerText strips emails, phone numbers, and links from egress copy', () => {
     const out = scrubCustomerText('Reach me at tech@waves.com or 941-555-1234, see https://x.co/abc.');
     expect(out).not.toMatch(/@waves\.com/);
@@ -547,6 +561,21 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel('Chinch bug pressure')).toBe('chinch bug activity');
     // A positive finding with a negated differential is NOT clean.
     expect(safeConditionLabel('Possible fungal disease; no weed pressure')).toBe('fungal activity');
+  });
+
+  test.each([
+    'Rhizoctonia ruled out', 'Take-all was not observed', 'Sod-webworm not present', 'Large patch ruled-out',
+    'Chinch bugs weren\u2019t observed', 'Non-fungal stress', 'Gray leaf spot absent', 'Dollar spot unlikely', 'Disease-free turf',
+  ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
+    expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
+  });
+
+  test.each([
+    ['Chinch bugs not present, but drought stress visible', 'drought stress'],
+    ['Rhizoctonia ruled out; dollar spot lesions', 'dollar spot'],
+    ['Sod-webworm not present. Grub damage at the edge', 'grub activity'],
+  ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
+    expect(safeConditionLabel(name, 'high')).toBe(label);
   });
 
   test.each([

@@ -123,6 +123,17 @@ describe('customer publication', () => {
     },
   );
 
+  test.each(['were previously active', 'had formerly been active', 'were historically active'])(
+    'preserves the historical qualifier and tense of %s on both customer surfaces', (claim) => {
+      const text = `Chinch bugs ${claim}, but none are present now.`;
+      const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
+      const qualifier = claim.match(/previously|formerly|historically/)[0];
+      const expected = `Chinch bugs may have been ${qualifier} active, but none are present now.`;
+      expect(copy.customerObservations(text, [evidence])).toBe(expected);
+      expect(copy.safeConfirmationStep(text, evidence)).toBe(expected);
+    },
+  );
+
   test.each([['Molds are spreading in the shade.', 'Mold activity'], ['Mildews are spreading in the shade.', 'Mildew activity'], ['Molds are spreading in the shade.', 'Fungal activity']])(
     'plural %s publishes with matching fungal evidence named %s', (text, name) => {
       const evidence = { name, label: 'fungal activity', confidence: 'moderate' };
