@@ -596,7 +596,14 @@ async function bindSavedAddress(supplied, targets) {
       address: formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }),
       lat: coordinate(row.latitude), lng: coordinate(row.longitude),
     }));
-  const match = saved.find(({ row, address }) => localityVerified(row) && sameStreetAddress(text, address, { requireExactUnit: true }));
+  // A bare street line that matches two different saved parcels (the same
+  // street and unit in two cities) names neither; the caller must supply the
+  // locality. Duplicate rows for one parcel (customer row + property row)
+  // are one match.
+  const matches = saved.filter(({ row, address }) => localityVerified(row) && sameStreetAddress(text, address, { requireExactUnit: true }));
+  const { addressKey } = require('../customer-properties');
+  const parcels = new Set(matches.map(({ row }) => addressKey(row)));
+  const match = parcels.size === 1 ? matches[0] : null;
   return match ? { address: match.address, lat: match.lat, lng: match.lng } : null;
 }
 

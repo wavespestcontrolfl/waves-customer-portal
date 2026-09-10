@@ -974,6 +974,15 @@ test('address-keyed readers take only a task customer\'s own active saved addres
   rows.customer_properties = rows.customer_properties.filter(row => row.id !== '30000000-0000-4000-8000-000000000006');
   expect((await read('123 Main St, Tampa FL 33601', context(C))).code).toBe('target_clarification_required');
   expect((await read('123 Main St', context(C))).code).toBe('target_clarification_required');
+  // A bare street line matching two different saved parcels binds neither; the locality picks one. The customer row
+  // and a property row for the SAME parcel are one match.
+  rows.customer_properties.push(
+    { id: '30000000-0000-4000-8000-000000000011', customer_id: A, address_line1: '77 Twin St', city: 'Venice', state: 'FL', zip: '34285', active: true },
+    { id: '30000000-0000-4000-8000-000000000012', customer_id: A, address_line1: '77 Twin St', city: 'Sarasota', state: 'FL', zip: '34236', active: true },
+    { id: '30000000-0000-4000-8000-000000000013', customer_id: A, address_line1: '1234 Main St', city: 'Bradenton', state: 'FL', zip: '34203', active: true });
+  expect((await read('77 Twin St', context())).code).toBe('target_clarification_required');
+  expect(await read('77 Twin St, Sarasota', context())).toEqual({ input: { address: '77 Twin St, Sarasota, FL 34236' } });
+  expect(await read('1234 Main St', context())).toEqual({ input: { address: main } });
   // An inactive property, a different house number, another customer's property and an empty address are refused.
   expect((await read('7 Old Rd, Venice FL', context())).code).toBe('target_clarification_required');
   expect((await read('12345 Main St', context())).code).toBe('target_clarification_required');

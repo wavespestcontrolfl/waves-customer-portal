@@ -26,7 +26,7 @@ Read tools (`kind: read`):
 | `broad` | lists other customers' identifiable rows and takes no selector, or returns provider/operations text that can echo customer identifiers (alert bodies, error text, log lines, targeting predicates, trip traces, call quotes keyed by call id) | refused whenever the request is customer-specific (resolved target, unresolved name, or a phone/email literal) |
 | `actor_wide` | the operator's own conversation history, quoting any customer | refused whenever the request is customer-specific |
 | `phone_keyed` / `email_keyed` | keyed by a contact | the key must belong to a task customer (`target_clarification_required`); refused when the named customer did not resolve |
-| `address_keyed` | keyed by a street address (`lookup_property`) | the address must be one of the task customers' ACTIVE saved properties (customer address or service property), compared as a full address by the estimator's canonical comparer (same street, exact unit, no conflicting city or ZIP), and the reader receives the saved property's full address rather than the supplied text, so a substituted, partial or same-street-different-city address cannot expose or price another property; a saved row with neither city nor ZIP cannot verify a locality and never binds, and every city, state or ZIP the supplied text carries must be present on the saved row and equal to it; refused when the named customer did not resolve; open outside a customer-scoped task, where new leads have no saved address yet |
+| `address_keyed` | keyed by a street address (`lookup_property`) | the address must be one of the task customers' ACTIVE saved properties (customer address or service property), compared as a full address by the estimator's canonical comparer (same street, exact unit, no conflicting city or ZIP), and the reader receives the saved property's full address rather than the supplied text, so a substituted, partial or same-street-different-city address cannot expose or price another property; a saved row with neither city nor ZIP cannot verify a locality and never binds, every city, state or ZIP the supplied text carries must be present on the saved row and equal to it, and a bare street line that matches two different saved parcels binds neither; refused when the named customer did not resolve; open outside a customer-scoped task, where new leads have no saved address yet |
 
 Write tools (`kind: internal_write` or `external_action`):
 
@@ -143,8 +143,13 @@ old list).
   do the SEO readers that return blog or page titles, target keywords and
   concept labels (`get_content_pipeline`, `get_content_workflow_brief`,
   `query_blog_performance`, `get_content_decay_alerts`, `query_seo_rankings`,
-  `inspect_url`, `get_semantic_concept_map`). The remaining SEO readers return
-  URLs, counts, statuses and scores and stay `none`.
+  `inspect_url`, `get_semantic_concept_map`), the readers that return raw
+  Search Console queries (`query_top_queries`, `intent_routing_report`), the
+  advertising readers that return campaign, ad-group and ad names and provider
+  issue messages (both Google Ads and both Meta readers), and
+  `get_cloudflare_pages_builds` (deployment branch names). The remaining SEO
+  and infrastructure readers return URLs, counts, statuses and scores and
+  stay `none`.
 - A word after "for" is a filter rather than an unresolved customer when the
   database verifies it as a customer city, an active technician, a vendor or
   expense vendor, a lead source name or channel, or it is a known marketing

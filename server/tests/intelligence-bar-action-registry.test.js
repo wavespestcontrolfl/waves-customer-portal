@@ -222,6 +222,10 @@ const SCOPE_SNAPSHOT = {
     // operator-authored strings returned verbatim.
     'get_content_decay_alerts', 'get_content_pipeline', 'get_content_workflow_brief', 'get_semantic_concept_map', 'inspect_url',
     'query_blog_performance', 'query_seo_rankings',
+    // Raw search queries, ad campaign/ad-group names and provider issue
+    // messages, and deployment branch names are human-typed strings.
+    'get_cloudflare_pages_builds', 'get_google_ads_disapprovals', 'get_google_ads_serving_status', 'get_meta_ads_delivery_status',
+    'get_meta_ads_issues', 'intent_routing_report', 'query_top_queries',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],

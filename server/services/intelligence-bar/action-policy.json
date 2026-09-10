@@ -413,7 +413,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_cloudflare_zones": {
     "module": "cloudflare-ops-tools.js",
@@ -589,7 +589,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_google_ads_serving_status": {
     "module": "google-ads-ops-tools.js",
@@ -597,7 +597,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_growthbook_experiments": {
     "module": "growthbook-tools.js",
@@ -677,7 +677,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_meta_ads_issues": {
     "module": "meta-ads-ops-tools.js",
@@ -685,7 +685,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_mileage_summary": {
     "module": "tax-tools.js",
@@ -1245,7 +1245,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "internal_link_graph": {
     "module": "seo-tools.js",
@@ -1389,7 +1389,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "query_vendors": {
     "module": "procurement-tools.js",
