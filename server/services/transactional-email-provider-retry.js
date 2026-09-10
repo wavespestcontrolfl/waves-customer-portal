@@ -98,19 +98,34 @@ async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
   });
 }
 
+// Written on the queued row immediately before a visit-summary provider
+// request: a worker lost after this point may have had its request accepted,
+// so stale-claim recovery settles such a row as uncertain instead of
+// scheduling another attempt (a bearer link is never sent twice on a guess).
+const HANDOFF_STARTED = 'provider_handoff_started';
+
 async function recoverStaleClaims(now = new Date()) {
   const staleBefore = new Date(now.getTime() - STALE_CLAIM_MS);
-  return db('email_messages')
-    // provider_retry_count > 0 distinguishes retry-worker claims from normal
-    // sendTemplate rows that are independently protected by their own stale
-    // in-flight logic.
+  // provider_retry_count > 0 distinguishes retry-worker claims from normal
+  // sendTemplate rows that are independently protected by their own stale
+  // in-flight logic.
+  const stale = () => db('email_messages')
     .where({ status: 'queued' })
     .where('provider_retry_count', '>', 0)
     .whereNull('provider_retry_next_at')
     .whereNull('provider_retry_exhausted_at')
     .whereNull('provider_message_id')
     .whereNull('sent_at')
-    .where('queued_at', '<=', staleBefore)
+    .where('queued_at', '<=', staleBefore);
+  const uncertain = await stale().where({ error_message: HANDOFF_STARTED }).update({
+    status: 'failed',
+    provider_retry_next_at: null,
+    provider_retry_exhausted_at: now,
+    error_message: 'Provider outcome unknown: interrupted after the provider handoff began',
+    updated_at: now,
+  });
+  const requeued = await stale()
+    .where((q) => q.whereNull('error_message').orWhereNot('error_message', HANDOFF_STARTED))
     .update({
       status: 'failed',
       provider_retry_next_at: now,
@@ -121,6 +136,7 @@ async function recoverStaleClaims(now = new Date()) {
       error_message: 'Interrupted provider retry claim recovered',
       updated_at: now,
     });
+  return Number(requeued || 0) + Number(uncertain || 0);
 }
 
 async function alertExhausted(message, reason) {
@@ -240,6 +256,12 @@ async function retryOne(message) {
       // Blocks are a provider-specific suppression distinct from hard bounces.
       // If it remains, SendGrid will drop the retry before attempting delivery.
       await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
+      if (message.template_key === 'service.visit_summary') {
+        // Durable before the request: an interrupted worker leaves a row
+        // stale-claim recovery settles as uncertain, never re-sends.
+        await db('email_messages').where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+          .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
+      }
       dispatchStarted = true;
       result = await sendgrid.sendOne({
         to: message.recipient_email_snapshot,
@@ -342,6 +364,7 @@ async function runDueRetries({ limit = CLAIM_LIMIT } = {}) {
 }
 
 module.exports = {
+  HANDOFF_STARTED,
   RETRY_DELAYS_MS,
   MAX_RETRIES,
   asArray,
