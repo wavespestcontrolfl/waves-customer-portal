@@ -720,6 +720,13 @@ function mapV1ToLegacyShape(v1Result) {
       // selector renders and re-prices from THESE persisted figures.
       bondOptions: tbLI.bondOptions || null,
       selectedBondTerm: (lineItems.find(l => l.service === 'termite_bond') || {}).bondTerm || null,
+      // Quote-time station-cost snapshot (plan 2026-09-03 §A1). Admin V2
+      // persists ONLY this mapped envelope, so without carrying the stamp
+      // here a public view/accept replay would re-price an already-sent
+      // install off the live constant / catalog
+      // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay reads it back).
+      pricingKnobs: tbLI.pricingKnobs || null,
+      materialCostSource: tbLI.materialCostSource || null,
     };
   }
 
