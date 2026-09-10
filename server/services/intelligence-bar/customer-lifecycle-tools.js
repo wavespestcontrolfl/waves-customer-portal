@@ -33,7 +33,36 @@ const BILLING_CONTACT_COLUMNS = [
   'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role',
   'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role',
   'service_contacts_consent_at', 'service_contacts_consent_source', 'service_contacts_consent_text_version',
+  // Money the executor moves or adopts: cached credit balance (added to the
+  // winner), per-application fee (rides along with a loser-only billing mode).
+  'per_application_fee', 'account_credits',
 ];
+
+// The executor's special-case money effects, stated as amounts the card can
+// show — not inferable from FK row counts: the loser's cached credit balance
+// is added to the winner; a loser-only per-application billing mode (and its
+// fee) is adopted when the winner has none; the loser's plan-rate rows are
+// DELETED, not repointed (customer_plan_rates is excluded from the generic
+// FK repoint — the ledger is rebuilt on the winner).
+async function financialEffects(database, winner, loser) {
+  const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
+  const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
+  const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
+    && loser.per_application_fee != null && loser.per_application_fee !== '';
+  let loserPlanRates = 0;
+  try {
+    const row = await database('customer_plan_rates').where({ customer_id: loser.id }).count({ n: '*' }).first();
+    loserPlanRates = Number(row?.n || 0);
+  } catch {
+    loserPlanRates = 'unknown';
+  }
+  return {
+    account_credits_moved_to_winner: credits,
+    billing_mode_adopted_from_loser: adoptsBillingMode ? loser.billing_mode : null,
+    per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
+    loser_plan_rate_rows_deleted: loserPlanRates,
+  };
+}
 
 function billingSnapshot(row) {
   const snapshot = {};
@@ -132,6 +161,7 @@ async function previewMergeCustomers(winnerId, loserId) {
   if (!check.ok) return { error: check.error, code: check.code };
   const { winner, loser, eligibility } = check;
   const moving = await fullMovingCounts(db, loserId);
+  const financial_effects = await financialEffects(db, winner, loser);
   const winnerName = customerName(winner);
   const loserName = customerName(loser);
   return {
@@ -148,6 +178,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     loser_version: loser.version,
     pair: { tier: eligibility.candidate.tier, reasons: eligibility.candidate.reasons },
     billing_and_contacts: { winner: billingSnapshot(winner), loser: billingSnapshot(loser) },
+    financial_effects,
     moving,
     note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable (and revertible) from the duplicates queue afterward. Nothing was changed — the operator confirms from the card.`,
   };
@@ -175,6 +206,9 @@ async function commitMergeCustomers(winnerId, loserId, actionContext) {
       performedById: actionContext.technicianId || null,
       mode: 'intelligence_bar',
       evidence: { via: 'intelligence_bar' },
+      // Validated by the executor UNDER its row locks — the preflights above
+      // narrow the window, this closes it.
+      expectedVersions: { winner: before.winner.version, loser: before.loser.version },
     });
     logger.info(`[intelligence-bar] merge_customers committed loser=${loserId} -> winner=${winnerId} (journal ${result.journalId})`);
     return {
@@ -191,7 +225,7 @@ async function commitMergeCustomers(winnerId, loserId, actionContext) {
     // message; nothing committed (the whole executor runs in one txn). A
     // refusal naming a vanished/deleted row means the pair drifted since
     // the card was shown — ask for a fresh proposal instead of a bare retry.
-    const drifted = /deleted|not found/i.test(err.message || '');
+    const drifted = err.previewChanged === true || /deleted|not found/i.test(err.message || '');
     return { error: err.message, ...(drifted ? { preview_changed: true } : {}) };
   }
 }

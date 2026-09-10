@@ -930,7 +930,7 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {} }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -989,13 +989,29 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (dialingCase) {
       throw new Error('executeMerge: deferred — a collection call is in flight for one of these customers; retry after it completes');
     }
-    const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
+    // updated_at::text rides with the lock: the full-precision version an
+    // approved snapshot (expectedVersions) is validated against below.
+    const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*', trx.raw('updated_at::text AS version'));
     const winner = locked.find((r) => r.id === winnerId);
     const loser = locked.find((r) => r.id === loserId);
     winnerBeforeMerge = winner;
     mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
+    // An approved snapshot (the Intelligence Bar's confirmation card) is
+    // validated HERE, under the row locks, not in a caller-side preflight:
+    // updated_at::text is the same full-precision version the card pinned,
+    // so any change to either customer between approval and this lock
+    // refuses the merge with previewChanged for a fresh card.
+    if (expectedVersions) {
+      const drifted = ['winner', 'loser'].filter((side) => expectedVersions[side] != null
+        && (side === 'winner' ? winner : loser).version !== expectedVersions[side]);
+      if (drifted.length) {
+        const err = new Error(`executeMerge: the ${drifted.join(' and ')} customer changed since this merge was approved — review a fresh proposal`);
+        err.previewChanged = true;
+        throw err;
+      }
+    }
     // The surviving row must be live: retiring an active customer into an
     // inactive winner would hide them from every live-customer surface.
     if (winner.active === false) throw new Error('executeMerge: winner is inactive — reactivate it first or keep the other row');

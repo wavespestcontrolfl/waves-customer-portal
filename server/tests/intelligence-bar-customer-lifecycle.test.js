@@ -68,8 +68,8 @@ const LOSER_ID = '10000000-0000-4000-8000-000000000002';
 const CUSTOMER_ID = '10000000-0000-4000-8000-000000000003';
 const TWIN_ID = '10000000-0000-4000-8000-000000000004';
 
-const winnerRow = { id: WINNER_ID, first_name: 'Real', last_name: 'Customer', phone: '9415550101', email: 'real@example.com', deleted_at: null, version: 'v1-winner' };
-const loserRow = { id: LOSER_ID, first_name: 'Unknown', last_name: '', phone: '9415550101', email: null, deleted_at: null, version: 'v1-loser' };
+const winnerRow = { id: WINNER_ID, first_name: 'Real', last_name: 'Customer', phone: '9415550101', email: 'real@example.com', deleted_at: null, version: '2026-09-10 20:00:00.000001+00', account_credits: '0' };
+const loserRow = { id: LOSER_ID, first_name: 'Unknown', last_name: '', phone: '9415550101', email: null, deleted_at: null, version: '2026-09-10 20:05:00.000002+00', account_credits: '12.50', billing_mode: 'per_application', per_application_fee: '85.00' };
 const customerRow = { id: CUSTOMER_ID, first_name: 'Stale', last_name: 'Stub', phone: '9415550199', email: 'stub@example.com', deleted_at: null };
 
 const ELIGIBLE = { eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: ['name_conflict'] } };
@@ -112,15 +112,22 @@ describe('merge_customers', () => {
     expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(WINNER_ID, LOSER_ID);
     expect(result).toMatchObject({
       preview: true,
-      winner_customer_id: WINNER_ID, winner_name: 'Real Customer', winner_phone: '9415550101', winner_email: 'real@example.com', winner_version: 'v1-winner',
-      loser_customer_id: LOSER_ID, loser_name: 'Unknown', loser_phone: '9415550101', loser_email: null, loser_version: 'v1-loser',
+      winner_customer_id: WINNER_ID, winner_name: 'Real Customer', winner_phone: '9415550101', winner_email: 'real@example.com', winner_version: winnerRow.version,
+      loser_customer_id: LOSER_ID, loser_name: 'Unknown', loser_phone: '9415550101', loser_email: null, loser_version: loserRow.version,
       pair: { tier: 'yellow', reasons: ['name_conflict'] },
       moving: { scheduled_services: 3, sms_log: 5, total_rows: 8 },
     });
     expect(result.moving.invoices).toBeUndefined(); // zero counts are dropped
     expect(result.billing_and_contacts).toEqual({
-      winner: expect.objectContaining({ stripe_customer_id: null, billing_mode: null }),
-      loser: expect.objectContaining({ stripe_customer_id: null, billing_mode: null }),
+      winner: expect.objectContaining({ stripe_customer_id: null, billing_mode: null, per_application_fee: null, account_credits: '0' }),
+      loser: expect.objectContaining({ stripe_customer_id: null, billing_mode: 'per_application', per_application_fee: '85.00', account_credits: '12.50' }),
+    });
+    // The executor's special-case money effects, as amounts (pre-push Codex P1).
+    expect(result.financial_effects).toEqual({
+      account_credits_moved_to_winner: 12.5,
+      billing_mode_adopted_from_loser: 'per_application',
+      per_application_fee_adopted_from_loser: 85,
+      loser_plan_rate_rows_deleted: 0,
     });
     expect(result.note_to_operator).toMatch(/archived/);
     expect(db.__qb.update).not.toHaveBeenCalled();
@@ -196,6 +203,7 @@ describe('merge_customers', () => {
       performedById: 'tech-42',
       mode: 'intelligence_bar',
       evidence: { via: 'intelligence_bar' },
+      expectedVersions: { winner: winnerRow.version, loser: loserRow.version },
     });
     expect(result).toMatchObject({ success: true, journal_id: 'journal-1' });
   });

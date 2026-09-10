@@ -740,6 +740,25 @@ describe('executeMerge', () => {
       .resolves.toBeTruthy();
   });
 
+  it('validates an approved snapshot (expectedVersions) under the row locks and refuses drift with previewChanged', async () => {
+    const build = () => buildTrx({
+      winner: { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', version: '2026-09-10 20:00:00.000001+00' },
+      loser: { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', version: '2026-09-10 20:05:00.000002+00' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({
+      winnerId: WINNER, loserId: LOSER, performedBy: 'test',
+      expectedVersions: { winner: '2026-09-10 20:00:00.000001+00', loser: '2026-09-10 20:05:00.000002+00' },
+    })).resolves.toBeTruthy();
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    const drift = dedupe.executeMerge({
+      winnerId: WINNER, loserId: LOSER, performedBy: 'test',
+      expectedVersions: { winner: '2026-09-10 20:00:00.000001+00', loser: '2026-09-10 20:06:00.000000+00' },
+    });
+    await expect(drift).rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/loser customer changed since this merge was approved/) });
+  });
+
   it('refuses when both rows have Stripe profiles', async () => {
     const { trx } = buildTrx({
       winner: { id: WINNER, stripe_customer_id: 'cus_a', phone: '+19995550003' },
@@ -2012,8 +2031,8 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
 describe('duplicatePairEligibility', () => {
   const winner = {
     id: 'bbbbbbbb-0000-0000-0000-000000000001',
-    first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
-    address_line1: '4414 Ozark Ave', zip: '34207',
+    first_name: 'Synthetic', last_name: 'Winner', phone: '+15550100123',
+    address_line1: '100 Test Street', zip: '34207',
     // stripe_customer_id pins this row as the cluster winner regardless of
     // created_at tie-break — findDuplicateGroups() picks the strongest
     // business-signal row, not the fixture the test author calls "winner".
@@ -2022,20 +2041,20 @@ describe('duplicatePairEligibility', () => {
   };
   const shellLoser = {
     id: 'bbbbbbbb-0000-0000-0000-000000000002',
-    first_name: 'Diana', last_name: null, phone: '6124074763',
+    first_name: 'Synthetic', last_name: null, phone: '5550100123',
     address_line1: null, zip: null,
     pipeline_stage: 'new_lead', created_at: '2026-07-09',
   };
   const addressConflictLoser = {
     id: 'bbbbbbbb-0000-0000-0000-000000000003',
-    first_name: 'Diana', last_name: null, phone: '6124074763',
+    first_name: 'Synthetic', last_name: null, phone: '5550100123',
     address_line1: '999 Different St', zip: '34211',
     pipeline_stage: 'new_lead', created_at: '2026-07-09',
   };
   const strangerLoser = {
     id: 'bbbbbbbb-0000-0000-0000-000000000004',
-    first_name: 'Nicole', last_name: 'Tommelleo', phone: '+16124074763',
-    address_line1: '13712 Saw Palm Creek Trl', zip: '34211',
+    first_name: 'Other', last_name: 'Person', phone: '+15550100123',
+    address_line1: '200 Different Test Street', zip: '34211',
     pipeline_stage: 'active_customer', created_at: '2026-07-01',
   };
 
