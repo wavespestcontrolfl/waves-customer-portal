@@ -83,7 +83,11 @@ async function replaceCompleteShell(shellResponse) {
   const previousAssets = previousShell ? shellAssetUrls(await previousShell.text()) : [];
   await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, response)));
   await cache.put(OFFLINE_URL, shellResponse);
-  if (!sameAssetSet(previousAssets, assets)) await pruneStaleAssets(cache, assets);
+  // Keep the generation just replaced too: a tab still running the previous
+  // build lazy-loads its chunks after the shell moved on, and an offline
+  // navigation may read the old shell moments before its replacement. Two
+  // generations bound the cache; the one before them is dead weight.
+  if (!sameAssetSet(previousAssets, assets)) await pruneStaleAssets(cache, [...assets, ...previousAssets]);
 }
 
 function sameAssetSet(a, b) {
@@ -92,12 +96,13 @@ function sameAssetSet(a, b) {
   return b.every(url => set.has(url));
 }
 
-// Drop every cached /assets/* entry the current shell does not reference.
-// Runs only when the shell's asset set changed (a deploy), never on a plain
-// navigation, so lazily loaded page chunks of the live build stay cached
-// between deploys and are re-fetched at most once per build. Hashed names
-// carry no build id, so "referenced by the current shell" is the only
-// signal that survives SW termination.
+// Drop every cached /assets/* entry neither the current nor the previous
+// shell references. Runs only when the shell's asset set changed (a deploy),
+// never on a plain navigation, so lazily loaded page chunks of the live
+// build stay cached between deploys and each build's chunks are re-fetched
+// at most once after it is two deploys old. Hashed names carry no build id,
+// so "referenced by a retained shell" is the only signal that survives SW
+// termination.
 async function pruneStaleAssets(cache, keepUrls) {
   const keep = new Set(keepUrls);
   const requests = await cache.keys();

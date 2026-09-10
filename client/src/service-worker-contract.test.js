@@ -103,7 +103,7 @@ describe('customer service-worker update contract', () => {
 });
 
 describe('service-worker shell refresh keeps the asset cache bounded to the current build', () => {
-  it('prunes hashed assets from superseded builds when the shell changes', async () => {
+  it('keeps the current and previous build and prunes everything older when the shell changes', async () => {
     const cache = fakeCache();
     const { cacheCompleteShellResponse } = loadWorker(cache);
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js', '/assets/index-AAA.css'])));
@@ -114,8 +114,19 @@ describe('service-worker shell refresh keeps the asset cache bounded to the curr
 
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js', '/assets/index-AAA.css'])));
 
-    const kept = [...cache.store.keys()].map(u => new URL(u).pathname).sort();
-    expect(kept).toEqual(['/', '/assets/index-AAA.css', '/assets/index-BBB.js', '/waves-logo.png']);
+    // Codex pre-push P1: a tab still running AAA must keep its entry chunk
+    // after BBB ships, so the previous generation is retained. Its lazily
+    // cached page chunk is not referenced by either shell and goes now;
+    // a tab that still needs it re-fetches from the server (lazyWithRetry).
+    let kept = [...cache.store.keys()].map(u => new URL(u).pathname).sort();
+    expect(kept).toEqual(['/', '/assets/index-AAA.css', '/assets/index-AAA.js', '/assets/index-BBB.js', '/waves-logo.png']);
+
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js', '/assets/index-CCC.css'])));
+
+    // Two deploys later AAA is dead weight; BBB (and the shared CSS it still
+    // references) is the retained previous generation.
+    kept = [...cache.store.keys()].map(u => new URL(u).pathname).sort();
+    expect(kept).toEqual(['/', '/assets/index-AAA.css', '/assets/index-BBB.js', '/assets/index-CCC.css', '/assets/index-CCC.js', '/waves-logo.png']);
   });
 
   it('serializes overlapping refreshes so the stored shell always has its assets', async () => {
@@ -144,8 +155,11 @@ describe('service-worker shell refresh keeps the asset cache bounded to the curr
     const referenced = [...(await stored.text()).matchAll(/src="(\/assets\/[^"]+)"/g)].map(m => m[1]);
     expect(referenced.length).toBeGreaterThan(0);
     for (const asset of referenced) expect(await cache.match(asset), asset).toBeTruthy();
-    expect((await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/')).sort())
-      .toEqual(referenced.slice().sort());
+    // Whichever refresh won, the loser's build is the retained previous
+    // generation; build 000 (two generations back) must be gone.
+    const assetsLeft = (await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/'));
+    expect(assetsLeft).not.toContain('/assets/index-000.js');
+    expect(assetsLeft.length).toBe(4);
   });
 
   it('does not touch lazily cached chunks when the same shell is refreshed', async () => {
