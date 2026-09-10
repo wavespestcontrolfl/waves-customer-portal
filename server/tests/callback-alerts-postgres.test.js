@@ -207,8 +207,32 @@ run('callback reminder transitions on PostgreSQL', () => {
       created_at: new Date(now.getTime() - 60000), updated_at: ago });
     const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;
     expect((await load()).some((r) => r.id === row.call_log_id)).toBe(true);
+    // A dated sibling on the same call does not hide the undated one.
+    const [sibling] = await trx('call_commitments').insert({ id: randomUUID(), call_log_id: row.call_log_id, commitment_key: `fixture:sibling:${row.id}`,
+      party: 'waves', kind: 'callback', status: 'open', source: 'human', description: 'Sibling callback', callback_due_at: ago, created_at: ago, updated_at: ago }).returning('*');
+    expect((await load()).some((r) => r.id === row.call_log_id)).toBe(true);
     await trx('call_commitments').where({ id: row.id }).update({ status: 'fulfilled' });
     expect((await load()).some((r) => r.id === row.call_log_id)).toBe(false);
+    await trx('call_commitments').where({ id: sibling.id }).del();
+  });
+
+  test('the digest card count leaves out internal-test customers', async () => {
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
+    const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;
+    const real = await seed();
+    const test = await seed();
+    await trx('customers').insert({ id: INTERNAL_TEST_CUSTOMER_IDS[0], first_name: 'App', last_name: 'Review', email: 'appreview+fixture@example.invalid', phone: '+15555550199' }).onConflict('id').ignore();
+    await trx('call_log').where({ id: test.call_log_id }).update({ customer_id: INTERNAL_TEST_CUSTOMER_IDS[0] });
+    const summary = (await load()).find((r) => r.callback_card_summary);
+    expect(summary).toBeTruthy();
+    const counted = await trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+      .whereIn('cc.id', [real.id, test.id]).whereNot('cl.customer_id', INTERNAL_TEST_CUSTOMER_IDS[0]).count('cc.id as n').first();
+    expect(Number(counted.n)).toBe(1);
+    const all = await trx('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
+      .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' }).whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= NOW()')
+      .where((b) => b.whereNull('cl.customer_id').orWhereNotIn('cl.customer_id', INTERNAL_TEST_CUSTOMER_IDS)).count('cc.id as n').first();
+    expect(Number(summary.total_count)).toBe(Number(all.n));
+    expect(Number(summary.total_count)).toBeLessThan(Number((await trx('call_commitments as cc').where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' }).whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= NOW()').count('cc.id as n').first()).n));
   });
 
   test.each([0, 5])('unchanged association hints preserve read reminders with %i companion callbacks', async (companions) => {

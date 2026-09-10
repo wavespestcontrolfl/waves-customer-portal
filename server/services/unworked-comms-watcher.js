@@ -94,9 +94,14 @@ async function loadCallbackCalls(cutoff = new Date()) {
   const { staleAiRowSql } = require('./call-commitments');
   let cards = [];
   if (cardsEnabled) {
+    // Internal-test customers are excluded the way the reminder scan
+    // excludes them (call-commitments-watchdog): synthetic work is never an
+    // actionable count for staff.
+    const { INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
     cards = await db('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
       .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
       .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+      .where((b) => b.whereNull('cl.customer_id').orWhereNotIn('cl.customer_id', INTERNAL_TEST_CUSTOMER_IDS))
       .whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= NOW()')
       .whereRaw('(cc.snoozed_until IS NULL OR cc.snoozed_until <= NOW())')
       .select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
@@ -134,13 +139,23 @@ async function loadCallbackCalls(cutoff = new Date()) {
       -- call carrying it is scheduled work, not an unworked callback.
       AND c.disposition = 'callback_task_created'
       -- While cards are on, retain disposition-only work if recording its
-      -- commitment failed. A represented promise (including staff-closed
-      -- work) must not reappear in the fallback digest.
-      AND (:cards_enabled = FALSE OR NOT EXISTS (
-        SELECT 1 FROM call_commitments cc
-        WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
-          AND NOT ${staleAiRowSql('cc')}
-          AND (cc.status <> 'open' OR COALESCE(cc.due_at, cc.callback_due_at) IS NOT NULL)
+      -- commitment failed, and while ANY live open callback of the call is
+      -- still undated (a calendar/configuration failure left it without a
+      -- deadline, so neither the card summary nor the watchdog carries it).
+      -- A call whose every live callback is closed or dated is represented
+      -- and must not reappear in the fallback digest.
+      AND (:cards_enabled = FALSE OR NOT (
+        EXISTS (
+          SELECT 1 FROM call_commitments cc
+          WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
+            AND NOT ${staleAiRowSql('cc')}
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM call_commitments cc
+          WHERE cc.call_log_id = c.id AND cc.kind = 'callback' AND cc.party = 'waves'
+            AND NOT ${staleAiRowSql('cc')}
+            AND cc.status = 'open' AND COALESCE(cc.due_at, cc.callback_due_at) IS NULL
+        )
       ))
       -- Not yet due (codex r37): an explicitly agreed future callback
       -- time (scheduling.follow_up_start_at) is scheduled work, not an
