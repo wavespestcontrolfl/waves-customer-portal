@@ -10928,7 +10928,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
               completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
             }
           } catch (claimErr) {
-            logger.info(`[dispatch] invoice ${invoice.id} delivery claimed elsewhere — completion text goes report-only: ${claimErr.message}`);
+            // Classify the refusal (pre-push P1 r4): a row that is settled or
+            // gone (paid / prepaid / voided / not found / a non-sendable status
+            // such as a processing ACH) has nothing left to deliver — report-
+            // only is right. An admin send holding the claim right now, or a
+            // transient read failure, is NOT verified delivery: that send may
+            // still fail and give the row back, so the completion keeps a
+            // retryable delivery obligation — the same release-for-resume 503
+            // as a rejected text; the tech's retry re-attempts the claim.
+            const claimMessage = String(claimErr?.message || '');
+            const nothingLeftToDeliver = /Cannot send a (paid|prepaid|voided) invoice|Invoice not found|Invoice is not sendable/i.test(claimMessage);
+            if (!nothingLeftToDeliver) {
+              logger.warn(`[dispatch] invoice ${invoice.id} delivery claim unavailable (${claimMessage}) — closeout saved, delivery left retryable`);
+              return exitForCompletionSmsResume(new Error(`Invoice ${invoice.id} delivery claim unavailable: ${claimMessage}`));
+            }
+            logger.info(`[dispatch] invoice ${invoice.id} needs no delivery from the completion — report-only: ${claimMessage}`);
             reusedInvoiceClaimedElsewhere = true;
           }
         }
