@@ -112,4 +112,20 @@ async function lockCustomerEmail(trx, email) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${normalized}`]);
 }
 
-module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail };
+// Every column a customer's email can be recorded in — the same set the
+// bounce recovery's ownership check consults (email-bounce-recovery.js
+// CUSTOMER_EMAIL_FIELDS). A writer assigning any of them takes the address
+// key for each new value, AFTER its customers row lock (row → key is the
+// established order), in a fixed order so two multi-address writers cannot
+// deadlock on each other. A recovery that found an address unowned then
+// either commits before the assignment or re-judges ownership after it.
+const CUSTOMER_EMAIL_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
+async function lockAssignedCustomerEmails(trx, updates = {}) {
+  const addresses = [...new Set(CUSTOMER_EMAIL_COLUMNS
+    .map((column) => String(updates[column] || '').trim().toLowerCase()).filter(Boolean))].sort();
+  for (const address of addresses) await lockCustomerEmail(trx, address);
+  return addresses;
+}
+
+module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail,
+  lockAssignedCustomerEmails, CUSTOMER_EMAIL_COLUMNS };
