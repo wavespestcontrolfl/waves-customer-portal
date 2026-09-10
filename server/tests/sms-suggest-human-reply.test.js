@@ -30,12 +30,16 @@ function trxWith({ pending = [], parked = [] } = {}) {
 
 beforeEach(() => { jest.clearAllMocks(); isEnabled.mockReturnValue(false); });
 
-test('parks the thread\'s pending suggestions under the lock; no reservation while auto-send is dark', async () => {
+test('parks the thread and links its decisions even while auto-send is dark', async () => {
   const { trx, inserted } = trxWith({ pending: [{ id: 'd1' }, { id: 'd2' }], parked: [{ id: 'd1' }, { id: 'd2' }] });
   const out = await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi', adminUserId: 'tech-1' });
-  expect(out).toEqual({ parkedDecisionIds: ['d1', 'd2'], reservationId: null, autoSendInFlight: false, phoneLast10: '9415550100', startedAt: expect.any(Date) });
+  expect(out).toEqual({ parkedDecisionIds: ['d1', 'd2'], heldDecisionIds: ['d1', 'd2'], reservationId: 'resv-1', autoSendInFlight: false, phoneLast10: '9415550100', startedAt: expect.any(Date) });
   expect(trx.raw).toHaveBeenCalled(); // lockSuggestThread
-  expect(inserted).toHaveLength(0);
+  expect(JSON.parse(inserted[0].row.metadata)).toEqual({
+    manual_send_reservation: true,
+    provider_outcome_uncertain: true,
+    parked_decision_ids: ['d1', 'd2'],
+  });
   expect(hasActiveAutoSendClaim).not.toHaveBeenCalled();
 });
 
@@ -44,7 +48,7 @@ test('with auto-send on: backs off an active claim, else leaves the sending mark
   hasActiveAutoSendClaim.mockResolvedValueOnce(true);
   trxWith();
   expect(await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi' }))
-    .toEqual(expect.objectContaining({ parkedDecisionIds: [], reservationId: null, autoSendInFlight: true }));
+    .toEqual(expect.objectContaining({ parkedDecisionIds: [], heldDecisionIds: [], reservationId: null, autoSendInFlight: true }));
 
   const { inserted } = trxWith();
   const out = await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi', adminUserId: 'tech-1' });
@@ -75,6 +79,16 @@ test('settle: deletes the marker; sent → parked ignored, not sent → reopened
   expect(del).not.toHaveBeenCalled();
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending_review' }));
   expect(db.raw).not.toHaveBeenCalled(); // no sweep on an unsent reply
+});
+
+test('settle: provider uncertainty retains the linked marker and leaves decisions held', async () => {
+  const { del, update } = settleDb();
+  await suggest.settleHumanReply({
+    phoneLast10: '9415550100', startedAt: new Date(),
+    parkedDecisionIds: [], heldDecisionIds: ['d1'], reservationId: 'resv-1', sent: false,
+  });
+  expect(del).not.toHaveBeenCalled();
+  expect(update).toHaveBeenCalledWith(expect.objectContaining({ updated_at: expect.any(Date) }));
 });
 
 test('settle (sent): sweeps a card published between the park commit and the accept, under the thread lock, cutoff at send start', async () => {

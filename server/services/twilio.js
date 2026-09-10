@@ -840,9 +840,17 @@ const TwilioService = {
         }
         if (options.explicitPushOnly) {
           if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
-          if (pushed.retryable) return { success: false, appRetryable: true, error: pushed.reason, retryAfterMs: pushed.retryAfterMs };
-          if (pushed.pending) return { success: false, appPending: true, error: pushed.reason };
+          if (pushed.pending) return { success: false, appPending: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason };
+          if (pushed.retryable) return { success: false, appRetryable: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, retryAfterMs: pushed.retryAfterMs };
+          if (pushed.deliveryOutcome === 'uncertain') {
+            return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',
+              error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs };
+          }
           return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
+        }
+        if (pushed.deliveryOutcome === 'uncertain') {
+          return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',
+            error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs };
         }
         // The push attempt consumed real time (each leg is bounded at 8s but
         // a multi-device fan-out adds up) — the 20:00 ET boundary can pass
