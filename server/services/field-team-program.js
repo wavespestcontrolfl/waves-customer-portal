@@ -243,6 +243,13 @@ async function allocationForVisit(conn, data, visit) {
   const sameProperty = properties.length ? properties.includes(allocation?.property_id) : allocation?.property_id == null;
   if (!allocation || !owners.includes(allocation.customer_id) || !sameProperty || allocation.service_key !== visit.service_key) reject('Use this property’s allocation for the same service key.');
   if (visit.service_date < dateOnly(allocation.coverage_start) || visit.service_date > dateOnly(allocation.coverage_end)) reject('The service date is outside the allocation coverage period.');
+  // A customer merge retains both accounts' pools. Two equivalent pools over
+  // one period would double the retained value, so crediting fails closed
+  // until an admin resolves the duplicate.
+  const twin = await conn('field_credit_allocations').whereIn('customer_id', owners).where({ service_key: allocation.service_key }).whereNot('id', allocation.id)
+    .where(q => properties.length ? q.whereIn('property_id', properties) : q.whereNull('property_id'))
+    .where('coverage_start', '<=', allocation.coverage_end).where('coverage_end', '>=', allocation.coverage_start).first('id');
+  if (twin) reject('Duplicate accepted-value pools cover this service and period across merged accounts. Resolve them before crediting a service.', 409);
   if (data.ordinal == null || data.ordinal > allocation.planned_visits) reject('Choose an application number within the original scheduled count.');
   const claim = await conn('field_service_evidence').where({ allocation_id: data.allocation_id, ordinal: data.ordinal, claims_allocation: true }).first();
   if (claim && claim.service_id !== visit.id) reject('This application number is already credited to another service.', 409);
@@ -332,6 +339,8 @@ async function saveAssessment(input, actor) {
     await employee(trx, data.technician_id, { lock: true });
     const prior = await replay(trx, 'field_promotion_assessments', data, actor);
     if (prior) return calendarRow(prior, ['assessed_date']);
+    const level = await levelAt(trx, data.technician_id, data.assessed_date);
+    if (level?.role_key !== data.from_role) reject(level ? `The starting role must match the employee’s effective level on the assessment date (${level.role_key}).` : 'Record the employee’s program level before assessing the next step.');
     if (data.previous_id) {
       const previous = await trx('field_promotion_assessments').where({ id: data.previous_id, technician_id: data.technician_id, to_role: data.to_role }).first();
       if (!previous || dateOnly(previous.assessed_date) > data.assessed_date) reject('Reassessment must follow this employee’s assessment for the same next step.');
@@ -362,11 +371,13 @@ async function serviceRows(conn, technicianId, range, serviceId = null) {
   return rows.map(row => ({ ...row, service_date: dateOnly(row.service_date), workweek_start: etWeekStart(parseETDateTime(`${dateOnly(row.service_date)}T12:00`)), facts: { ...row.facts, participants: row.facts.participants.filter(p => p.technician_id === technicianId) } }));
 }
 
-async function missingServices(conn, technicianId, range, evidence) {
+async function missingServices(conn, technicianId, range) {
   const rows = await conn('scheduled_services').where({ technician_id: technicianId })
     .where('scheduled_date', '>=', range.start).where('scheduled_date', '<', range.end)
     .where(q => q.where('status', 'completed').orWhereNotNull('actual_end_time').orWhereNotNull('completed_at'))
-    .whereNotIn('id', evidence.map(row => row.service_id))
+    // Evidence freezes its participants, so a service reassigned after review
+    // is neither missing for the new assignee nor writable by a revision.
+    .whereNotExists(function () { this.select(conn.raw('1')).from('field_service_evidence as e').whereRaw('e.service_id = scheduled_services.id'); })
     .select('id', 'service_type', 'scheduled_date', 'status').orderBy('scheduled_date').orderBy('id').limit(5001);
   if (rows.length > 5000) reject('Too many services without evidence to calculate this period.', 409);
   return rows.map(row => ({ ...row, scheduled_date: dateOnly(row.scheduled_date) }));
@@ -397,7 +408,7 @@ async function loadOverview(conn, technicianId, selectedMonth) {
     conn('field_simulation_statements').where({ technician_id: technicianId, month: selectedMonth }).select('id', 'created_at', 'statement').orderBy('created_at', 'desc').limit(20),
   ]);
   if (businesses.length > 5000) reject('Too many new-business records to calculate this period.', 409);
-  const missing = await missingServices(conn, technicianId, range, entries);
+  const missing = await missingServices(conn, technicianId, range);
   const level = levels.find(row => dateOnly(row.effective_date) <= today) || null;
   const monthlyLevel = levels.find(row => dateOnly(row.effective_date) <= range.start) || null;
   const businessRules = businesses.length ? await conn('field_program_rules').whereIn('id', businesses.map(row => row.rule_id).filter(Boolean)) : [];
