@@ -863,7 +863,7 @@ describe('admin communications SMS route', () => {
       });
 
       test('a throw the provider ACCEPTED still writes the marker; one it did not accept writes nothing', async () => {
-        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true } }));
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' } }));
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
           expect(res.status).toBe(500);
@@ -1178,7 +1178,9 @@ describe('admin communications SMS route', () => {
         // Owner phone does NOT match the recipient below.
         first.mockResolvedValue({ id: 'cust-A', phone: '+19998887777' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1212,7 +1214,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1245,7 +1249,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1280,7 +1286,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1316,7 +1324,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1349,7 +1359,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1384,7 +1396,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1418,7 +1432,9 @@ describe('admin communications SMS route', () => {
       } else if (table === 'customers') {
         first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
       }
-      return { where: jest.fn(function () { return this; }), first };
+      const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
     });
 
     await withServer(async (baseUrl) => {
@@ -1453,7 +1469,9 @@ describe('admin communications SMS route', () => {
         } else if (table === 'customers') {
           first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
         }
-        return { where: jest.fn(function () { return this; }), first };
+        const builder = makeUniversalBuilder();
+      builder.first = first;
+      return builder;
       });
     };
     const send = (baseUrl, extra) => fetch(`${baseUrl}/admin/communications/sms`, {
@@ -1487,7 +1505,7 @@ describe('admin communications SMS route', () => {
     test('a throw after provider acceptance still emails the Both copy and says so', async () => {
       const ReviewService = require('../services/review-request');
       const accepted = new Error('audit write failed');
-      accepted.providerOutcome = { sent: true };
+      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' };
       sendCustomerMessage.mockRejectedValue(accepted);
       // The error path fires the async Twilio failure alert (a promise).
       require('../services/twilio-failure-alerts').alertTwilioFailure.mockResolvedValue(undefined);
@@ -1519,8 +1537,8 @@ describe('admin communications SMS route', () => {
 
     test('never emails when the text did not really send (claim released)', async () => {
       const ReviewService = require('../services/review-request');
-      // sent:true without a providerMessageId = a suppression sentinel, not a real send.
-      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false });
+      // A suppression sentinel is definitive non-delivery.
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, deliveryOutcome: 'not_sent', providerMessageId: 'owner-silence' });
       wireInlineRow();
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl, { reviewRequestEmail: true });
@@ -1795,6 +1813,8 @@ describe('Communications review ask serialization', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     held.clear();
+    require('../services/short-url').existingShortUrlFor.mockReset().mockResolvedValue(null);
+    mockGates.smsAutoSend = false;
     history.lastDeliveredAskAt.mockReset().mockResolvedValue(null);
     history.lastManualAskAt.mockReset().mockResolvedValue(null);
     locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
@@ -1853,13 +1873,21 @@ describe('Communications review ask serialization', () => {
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
   });
-  test.each(['accepted', 'accepted throw', 'stamp failure'])('bare ask retains durable spacing without the provider SMS log: %s', async mode => {
+  test.each(['accepted', 'accepted throw', 'stamp failure', 'tracked stamp failure', 'tracked accepted throw'])('ask retains durable spacing when accepted evidence cannot settle: %s', async mode => {
+    const tracked = mode.startsWith('tracked');
+    if (tracked) {
+      require('../services/short-url').existingShortUrlFor.mockResolvedValue('https://wavespest.co/l/abc123');
+      reviews.markInlineDelivered.mockRejectedValue(new Error('delivery stamp unavailable'));
+      expect(jest.requireActual('../services/review-ask-history').looksLikeReviewAsk('wavespest.co/l/abc123')).toBe(false);
+    }
     let reserved = false;
     const deleted = jest.fn();
     db.mockImplementation(table => {
       const b = makeUniversalBuilder();
       if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'review_requests') b.first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
       if (table === 'sms_log') {
+        if (tracked) b.first.mockResolvedValue({ id: 'provider-log' });
         b.insert.mockImplementation(values => {
           expect(held.has('review-send:cust-A')).toBe(true);
           expect(JSON.parse(values.metadata).review_ask_reservation).toBe(true);
@@ -1878,11 +1906,11 @@ describe('Communications review ask serialization', () => {
     history.lastManualAskAt.mockImplementation(async () => reserved ? new Date() : null);
     sendCustomerMessage.mockImplementation(async () => {
       expect(reserved).toBe(true);
-      if (mode === 'accepted throw') throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });
+      if (mode.includes('throw')) throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });
       return { sent: true, providerMessageId: 'SM-accepted' };
     });
     await withServer(async baseUrl => {
-      expect((await send(baseUrl)).status).toBe(mode === 'accepted throw' ? 500 : 200);
+      expect((await send(baseUrl, tracked ? { reviewRequestId: 'rr-1', body: 'wavespest.co/l/abc123' } : {})).status).toBe(mode.includes('throw') ? 500 : 200);
       expect(reserved).toBe(true);
       expect(deleted).not.toHaveBeenCalled();
       const retry = await send(baseUrl);
@@ -1901,7 +1929,7 @@ describe('Communications review ask serialization', () => {
       if (table === 'sms_log') { b.del = deleted; b.update = stamped; }
       return b;
     });
-    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId });
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId, deliveryOutcome: 'not_sent' });
     await withServer(async baseUrl => {
       await send(baseUrl);
       expect(deleted).toHaveBeenCalledTimes(1);
@@ -1909,30 +1937,69 @@ describe('Communications review ask serialization', () => {
     });
   });
 
-  test.each([false, true])('definite retryable no-send releases the bare reservation (audit throw: %s)', async auditThrows => {
-    let reserved = false;
+  test.each(['bare', 'tracked', 'tracked inferred'].flatMap(kind => [false, true].flatMap(auditThrows => [
+    ['timeout', new Error('socket timeout'), true],
+    ['reset', Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }), true],
+    ['server error', Object.assign(new Error('server failed'), { status: 503 }), true],
+    ['refusal', { success: false, preSendBlocked: true, code: 'QUIET_HOURS_HOLD' }, false],
+    ['suppression', { success: true, suppressed: true, sid: 'owner-sms-disabled' }, false],
+  ].map(([label, providerResult, retained]) => ({ kind, auditThrows, label, providerResult, retained })))))
+  ('$kind $label retains only uncertain delivery (audit throw: $auditThrows)', async ({ kind, auditThrows, providerResult, retained }) => {
+    mockGates.smsAutoSend = kind === 'tracked inferred';
+    let reservations = [];
     db.mockImplementation(table => {
       const b = makeUniversalBuilder();
       if (table === 'customers') b.first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+      if (table === 'review_requests') b.first.mockResolvedValue({ id: 'rr-1', customer_id: 'cust-A', status: 'pending', sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123' });
       if (table === 'sms_log') {
-        b.insert.mockImplementation(() => { reserved = true; return b; });
+        let selected;
+        b.where.mockImplementation(predicate => {
+          selected = reservations.find(row => row.id === predicate.id);
+          return b;
+        });
+        b.insert.mockImplementation(values => {
+          selected = { ...values, metadata: JSON.parse(values.metadata), id: `resv-${reservations.length + 1}` };
+          reservations.push(selected);
+          b.returning.mockResolvedValue([{ id: selected.id }]);
+          return b;
+        });
+        b.update.mockImplementation(values => {
+          Object.assign(selected, values, { metadata: values.metadata ? JSON.parse(values.metadata) : selected.metadata });
+          return b;
+        });
         b.del.mockImplementation(async () => {
-          expect(held.has('review-send:cust-A')).toBe(true);
-          reserved = false;
+          reservations = reservations.filter(row => row !== selected);
           return 1;
         });
       }
       return b;
     });
-    history.lastManualAskAt.mockImplementation(async () => reserved ? new Date() : null);
-    const outcome = { sent: false, retryable: true, deferred: true, code: 'PROVIDER_FAILURE' };
-    if (auditThrows) sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
-    else sendCustomerMessage.mockResolvedValueOnce(outcome);
+    history.lastManualAskAt.mockImplementation(async customerId => reservations.some(row =>
+      row.customer_id === customerId && row.metadata.review_ask_reservation) ? new Date() : null);
+    // Exercise the actual adapter's classification, including its thrown-error
+    // path. The wrapper's post-provider audit failure preserves this outcome.
+    require('../services/twilio').sendSMS = jest.fn(async () => {
+      if (providerResult instanceof Error) throw providerResult;
+      return providerResult;
+    });
+    sendCustomerMessage.mockImplementationOnce(async input => {
+      const outcome = await jest.requireActual('../services/messaging/providers/twilio-sms').sendViaTwilio(input);
+      if (auditThrows) throw Object.assign(new Error('audit failed'), { providerOutcome: outcome });
+      return outcome;
+    });
     await withServer(async baseUrl => {
-      await send(baseUrl);
-      expect(reserved).toBe(false);
-      expect((await send(baseUrl)).status).toBe(200);
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      await send(baseUrl, kind !== 'bare' ? { ...inline, reviewRequestEmail: true,
+        ...(kind === 'tracked inferred' ? { customerId: null } : {}) } : {});
+      expect(reservations.some(row => row.metadata.review_ask_reservation)).toBe(retained);
+      expect(reviews.markInlineDelivered).not.toHaveBeenCalled();
+      expect(reviews.sendInlineEmailCopy).not.toHaveBeenCalled();
+      if (kind !== 'bare') {
+        if (retained) expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+        else expect(reviews.releaseInlineClaim).toHaveBeenCalled();
+      }
+      const retry = await send(baseUrl);
+      expect(retry.status).toBe(retained ? 409 : 200);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(retained ? 1 : 2);
     });
   });
 
@@ -1978,7 +2045,7 @@ describe('Communications review ask serialization', () => {
     });
   });
   test('an accepted provider throw stamps delivery before unlocking', async () => {
-    sendCustomerMessage.mockRejectedValue(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true } }));
+    sendCustomerMessage.mockRejectedValue(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' } }));
     reviews.markInlineDelivered.mockImplementation(async () => { expect(held.has('review-send:cust-A')).toBe(true); });
     await withServer(async baseUrl => {
       expect((await send(baseUrl, inline)).status).toBe(500);

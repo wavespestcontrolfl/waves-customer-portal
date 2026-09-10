@@ -62,6 +62,13 @@ function formatTwilioSendError(err) {
   return parts.filter(Boolean).join(": ") || "Twilio send failed";
 }
 
+function isDefinitiveTwilioRejection(err) {
+  const transportSignal = `${err?.code || ""} ${err?.message || ""}`.toLowerCase();
+  if (/timeout|timed out|econnreset|etimedout|socket hang up/.test(transportSignal)) return false;
+  const status = Number(err?.status);
+  return Number.isInteger(status) && status >= 400 && status < 500 && status !== 408;
+}
+
 async function sendCustomerPolicySms(input) {
   if (input.purpose === "marketing" && input.consentBasis?.status !== "opted_in") {
     throw new Error("Marketing SMS requires explicit opted-in consent basis");
@@ -548,6 +555,12 @@ const TwilioService = {
     // concurrent START against this instant (messaging/sync-optout.js).
     let smsAttemptAt = new Date();
     let attemptedFrom = options.fromNumber || null;
+    // Provenance for callers that must decide whether a retry can duplicate
+    // an SMS. Status codes alone are insufficient here because this method's
+    // broad catch also sees preparation failures before the SDK call.
+    let deliveryOutcome = "not_sent";
+    let acceptedMessage = null;
+    let handoffAt = null;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
       if (internalRedirect) return internalRedirect;
@@ -708,7 +721,7 @@ const TwilioService = {
         logger.warn(
           `[twilio] Cannot send SMS — client not initialized. To: ${maskPhone(to)}`,
         );
-        return { success: false, sid: null, error: "Twilio not configured" };
+        return { success: false, sid: null, deliveryOutcome: "not_sent", error: "Twilio not configured" };
       }
 
       const domain =
@@ -844,7 +857,6 @@ const TwilioService = {
       // clearance outranks the bounced send — an insert-time default is
       // post-handoff and can postdate a START that raced the log write,
       // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
-      let handoffAt;
       // Re-anchor the 21610 ordering timestamp at the ACTUAL provider
       // handoff (codex #3495): entry-time capture predates template/
       // customer lookups and the push-first attempt, so a START received
@@ -855,14 +867,21 @@ const TwilioService = {
         handoffAt = new Date();
         smsAttemptAt = handoffAt;
         dispatchStarted = true;
+        // A timeout/reset/5xx after this point may have reached Twilio even
+        // though no SID made it back to us. Only a concrete 4xx response can
+        // move the outcome back to definitive non-delivery in the catch.
+        deliveryOutcome = "uncertain";
         message = await c.messages.create(msgPayload);
+        if (!message?.sid) throw new Error("Twilio messages.create returned no SID");
+        acceptedMessage = message;
+        deliveryOutcome = "accepted";
       };
       if (typeof options.withSmsHandoff === 'function') {
         let verdict;
         try {
           verdict = await options.withSmsHandoff(dispatch);
         } catch (err) {
-          if (!message && dispatchStarted) throw err;
+          if (!acceptedMessage && dispatchStarted) throw err;
           if (!dispatchStarted) {
             verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
               reason: 'SMS handoff authority check failed', retryable: true };
@@ -872,7 +891,8 @@ const TwilioService = {
             logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
           }
         }
-        if (!message) {
+        if (!acceptedMessage) {
+          if (dispatchStarted) throw new Error('SMS handoff ended without confirmed provider acceptance');
           return { success: false, preSendBlocked: true,
             code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED',
             error: verdict?.reason || 'SMS handoff authority was not established',
@@ -971,8 +991,11 @@ const TwilioService = {
         })
         .catch(() => {});
 
-      return { success: true, sid: message.sid, fromNumber };
+      return { success: true, sid: message.sid, fromNumber, deliveryOutcome: "accepted" };
     } catch (err) {
+      if (deliveryOutcome === "uncertain" && isDefinitiveTwilioRejection(err)) {
+        deliveryOutcome = "not_sent";
+      }
       const providerError = formatTwilioSendError(err);
       logger.error(`SMS send failed to ${maskPhone(to)}: ${providerError}`);
       void require("./twilio-failure-alerts")
@@ -1008,6 +1031,13 @@ const TwilioService = {
       wrapped.providerError = providerError;
       wrapped.code = err.code;
       wrapped.status = err.status;
+      wrapped.providerOutcome = {
+        sent: deliveryOutcome === "accepted",
+        provider: "twilio",
+        deliveryOutcome,
+        ...(acceptedMessage?.sid ? { providerMessageId: acceptedMessage.sid } : {}),
+        ...(deliveryOutcome === "accepted" && handoffAt ? { sentAt: handoffAt.toISOString() } : {}),
+      };
       throw wrapped;
     }
   },
