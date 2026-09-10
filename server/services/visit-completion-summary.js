@@ -176,9 +176,11 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
 // leaves an uncertain effect, never a reclaimable one. The second holds the
 // same rows again, re-authorizes the recipient on them and runs the provider
 // request while they stay held. A refusal by the sender's own rechecks
-// before the request returns the mark to its pre-dispatch state; a throw
-// from the handoff is the provider request failing and propagates with the
-// mark in place.
+// before the request returns the mark to its pre-dispatch state. `dispatch`
+// receives (trx, onProviderStart) and calls onProviderStart immediately
+// before its provider request: a throw before that signal (a failed recheck
+// on the held connection) is provably unsent and restores the claim, while a
+// throw after it is the provider outcome and propagates with the mark in place.
 async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
   const holdAndAuthorize = async (trx, phase) => {
@@ -215,11 +217,10 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
   try {
     verdict = await db.transaction(async (trx) => {
       if (!(await holdAndAuthorize(trx, 'dispatch'))) return lost;
-      dispatching = true;
-      return dispatch(trx);
+      return dispatch(trx, () => { dispatching = true; });
     });
   } catch (err) {
-    // A failed re-authorization read is not a provider outcome.
+    // A failed read before the provider request is not a provider outcome.
     if (!dispatching) await unmark();
     throw err;
   }
@@ -285,7 +286,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
         authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
           && currentPrefs.service_completed !== false
           && getServiceContactSmsRecipient(current).phone === recipient.phone,
-        dispatch: (trx) => { dispatched = true; return handoff(trx); } }),
+        dispatch: (trx, onProviderStart) => handoff(trx, () => { dispatched = true; onProviderStart(); }) }),
     });
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
       dispatched = false; // The provider boundary can also prove it held before sending.
@@ -322,11 +323,13 @@ function summaryEmailState(message) {
 // The suppression ledger the template library consulted before queuing can
 // gain a do_not_email or bounce row before the provider request. It is
 // rechecked at the handoff, after the recipient rows are held.
-async function summaryEmailSuppressed(email) {
+// Reads run on the caller's held transaction: a held handoff must never
+// acquire a second pool connection for them.
+async function summaryEmailSuppressed(email, database = db) {
   const library = require('./email-template-library');
-  const loaded = await library.loadTemplateByKey('service.visit_summary');
+  const loaded = await library.loadTemplateByKey('service.visit_summary', database);
   if (!loaded?.template) return true;
-  return Boolean(await library.activeSuppressionFor(loaded.template, email, 'service_operational'));
+  return Boolean(await library.activeSuppressionFor(loaded.template, email, 'service_operational', database));
 }
 
 // The customer's Email Messages kill switch and the Service Complete Report
@@ -370,10 +373,10 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
           // before dispatch, which the library records as a pre-provider abort.
           withProviderHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
             kind: 'completion_email', token: claim.token,
-            authorized: async (current, currentPrefs) => summaryEmailRecipients(current, currentPrefs)
+            authorized: async (current, currentPrefs, trx) => summaryEmailRecipients(current, currentPrefs)
               .some((candidate) => candidate.email.toLowerCase() === recipient.email.toLowerCase())
-              && !(await summaryEmailSuppressed(recipient.email)),
-            dispatch: async () => { dispatched = true; await handoff(); return { ok: true }; } }),
+              && !(await summaryEmailSuppressed(recipient.email, trx)),
+            dispatch: async (_trx, onProviderStart) => { onProviderStart(); dispatched = true; await handoff(); return { ok: true }; } }),
         });
         if (result.sent) { sent = true; continue; }
         if (result.blocked) continue;
@@ -483,7 +486,7 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
   const email = String(message.recipient_email_snapshot || '').trim().toLowerCase();
   const current = summaryEmailRecipients(customer, prefs).some((recipient) => recipient.email.toLowerCase() === email);
   if (!current) return { ok: false, reason: 'visit_summary_recipient_changed' };
-  if (await summaryEmailSuppressed(String(destination || email).trim().toLowerCase())) {
+  if (await summaryEmailSuppressed(String(destination || email).trim().toLowerCase(), database)) {
     return { ok: false, reason: 'visit_summary_recipient_suppressed' };
   }
   return { ok: true };
