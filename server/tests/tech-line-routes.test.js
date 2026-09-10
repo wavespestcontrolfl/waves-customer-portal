@@ -173,6 +173,18 @@ describe('POST /sms', () => {
     await expect(call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } })).rejects.toMatchObject({ statusCode: 500 });
     expect(chains.sms_send_claims).toBeUndefined();
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ parkedDecisionIds: [], sent: false }));
+    // Canonical uncertainty is authoritative even without legacy retry flags.
+    primeVisit(); settleHumanReply.mockClear();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNKNOWN' });
+    r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.body).toMatchObject({ mayHaveSent: true });
+    expect(chains.sms_send_claims).toBeUndefined();
+    // A proven 429 rejection is retryable but definitively did not send.
+    primeVisit(); settleHumanReply.mockClear();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: '20429' });
+    r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.body.mayHaveSent).toBeUndefined();
+    expect(chains.sms_send_claims.del).toHaveBeenCalled();
   });
 
   test('a delivered text stamps the first response on any open lead with this phone — a suppressed send does not (codex #4072 r8 P2)', async () => {

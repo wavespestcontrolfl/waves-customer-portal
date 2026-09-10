@@ -236,7 +236,7 @@ async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
     try {
       result = await dispatch();
     } catch (err) {
-      if (err?.providerOutcome?.sent === true) await mark('after a throw');
+      if (require('../services/sms-auto-send').isRealProviderSend(err?.providerOutcome)) await mark('after a throw');
       throw err;
     }
     if (result?.sent && require('../services/sms-auto-send').isRealProviderSend(result)) await mark('(text already sent)');
@@ -309,9 +309,9 @@ router.post('/sms', async (req, res, next) => {
     }
   };
   // AMBIGUOUS provider outcome (GH Codex #3851 r4 P1 — the card funnel's own
-  // rule): a provider-phase retryable/deferred result (Twilio timeout, 5xx,
-  // 429) is NOT a definitive no-send — the provider may already hold the
-  // message. blocked:true is a validator stop and stays definitive. Bearer
+  // rule): an explicit uncertain result is not a definitive no-send — the
+  // provider may already hold the message. Legacy providers fall back to
+  // retryable/deferred classification. Bearer
   // state is kept consumed: the card claim finalizes through the service's
   // maybe-sent marker (no email twin — nothing is known to have left, and
   // the marker is what the stale lease reads), and an activated contract
@@ -322,7 +322,7 @@ router.post('/sms', async (req, res, next) => {
     if (contractActivations) {
       const ids = contractActivations.map((a) => a.id).join(', ');
       contractActivations = null;
-      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — prepared contract links stay activated (${ids})`);
+      logger.error(`[communications] send outcome ambiguous (${code}) — prepared contract links stay activated (${ids})`);
     }
     // The project delivery claim stays too (GH Codex #3893 r12 P1): the
     // provider may still hold the text, and restoring the row's state would
@@ -331,12 +331,12 @@ router.post('/sms', async (req, res, next) => {
     if (projectClaim) {
       const claim = projectClaim;
       projectClaim = null;
-      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
+      logger.error(`[communications] send outcome ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
     }
     if (cardClaim) {
       const claim = cardClaim;
       cardClaim = null;
-      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the card request claim for visits ${claim.cards.map((c) => c.scheduledServiceId).join(', ')}`);
+      logger.error(`[communications] send outcome ambiguous (${code}) — keeping the card request claim for visits ${claim.cards.map((c) => c.scheduledServiceId).join(', ')}`);
       try {
         await require('../services/composer-customer-links').markCardRequestSends(claim, { emailTwin: false });
       } catch (markErr) {
@@ -803,8 +803,9 @@ router.post('/sms', async (req, res, next) => {
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.
     await clearManualReservation();
-    if (result.blocked || result.sent === false) {
-      if (!result.blocked && (result.retryable || result.deferred)) {
+    const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(result);
+    if (result.blocked || result.sent === false || ambiguousProviderOutcome) {
+      if (ambiguousProviderOutcome) {
         await holdBearerStateAmbiguous(result);
       } else {
         // The reply never left — release the claims and the parked cards.
@@ -814,13 +815,15 @@ router.post('/sms', async (req, res, next) => {
       // Definitive no-send: the project delivery claim is handed back (an
       // ambiguous outcome kept it above — this is a no-op then).
       await releaseProjectClaim();
-      if (claimedReviewRequestId) {
+      if (claimedReviewRequestId && !ambiguousProviderOutcome) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
-      await reopenScheduledSuggestions({
-        decisionIds: [claimedDecisionId, ...parkedThreadIds],
-        reason: 'Send was blocked or failed — suggestion reopened.',
-      });
+      if (!ambiguousProviderOutcome) {
+        await reopenScheduledSuggestions({
+          decisionIds: [claimedDecisionId, ...parkedThreadIds],
+          reason: 'Send was blocked or failed — suggestion reopened.',
+        });
+      }
       return res.status(422).json({
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
@@ -1005,13 +1008,12 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
     }
-    // A throw carrying an AMBIGUOUS provider outcome (retryable/deferred,
-    // not accepted, not a validator block — the audit write failed after a
-    // Twilio timeout/5xx/429) holds the bearer state exactly as the
+    // A throw carrying an explicit uncertain provider outcome holds the
+    // bearer state exactly as the
     // resolved-result branch does (GH Codex #3851 r5 P1): the provider may
     // hold the text, so the claim and the activated link stay consumed.
-    if (err?.providerOutcome && err.providerOutcome.sent !== true && !err.providerOutcome.blocked
-      && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
+    const ambiguousProviderOutcome = autoSendExecutor.isAmbiguousProviderOutcome(err?.providerOutcome);
+    if (ambiguousProviderOutcome) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
     // The project delivery claim is handed back on a throw too — accepted,
@@ -1019,7 +1021,7 @@ router.post('/sms', async (req, res, next) => {
     await releaseProjectClaim();
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
-      if (err?.providerOutcome?.sent === true) {
+      if (autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
         const claim = cardClaim;
         cardClaim = null;
         try {
@@ -1033,7 +1035,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // Same convention for the statement stamp (GH Codex #3844 r3 P1): an
     // accepted-then-thrown send DID deliver the statement.
-    if (statementLinkIds && err?.providerOutcome?.sent === true) {
+    if (statementLinkIds && autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
       try {
         await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
       } catch (stampErr) {
@@ -1042,7 +1044,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // And for the activated contract links: accepted → record, else hand back.
     if (contractActivations) {
-      if (err?.providerOutcome?.sent === true) {
+      if (autoSendExecutor.isRealProviderSend(err?.providerOutcome)) {
         const activations = contractActivations;
         contractActivations = null;
         try {
@@ -1056,7 +1058,7 @@ router.post('/sms', async (req, res, next) => {
     }
     // Guarded reopen: anything the send actually resolved before the throw
     // is no longer 'scheduled' and no-ops here.
-    if (claimedDecisionId || parkedThreadIds.length) {
+    if (!ambiguousProviderOutcome && (claimedDecisionId || parkedThreadIds.length)) {
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
         reason: 'Send errored — suggestion reopened.',
@@ -2046,7 +2048,9 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
 // the 10-minute stale window.
 async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailRequested }) {
   const ReviewService = require('../services/review-request');
-  if (err?.providerOutcome?.sent !== true) {
+  const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+  if (isAmbiguousProviderOutcome(err?.providerOutcome)) return;
+  if (!isRealProviderSend(err?.providerOutcome)) {
     await ReviewService.releaseInlineClaim(requestId, claimToken);
     return;
   }

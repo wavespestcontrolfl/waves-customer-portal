@@ -84,9 +84,23 @@ const SUPPRESSION_SENTINELS = new Set([
  */
 function isRealProviderSend(result) {
   if (!result || result.sent !== true) return false;
+  if (result.deliveryOutcome && result.deliveryOutcome !== 'accepted') return false;
   const id = result.providerMessageId;
   if (!id) return false;
   return !SUPPRESSION_SENTINELS.has(id);
+}
+
+/**
+ * Does a send-once owner need to retain its claim because delivery is
+ * unresolved? Canonical outcomes are authoritative. The retryable/deferred
+ * fallback remains only for callers that have not reached that contract yet.
+ */
+function isAmbiguousProviderOutcome(result) {
+  if (!result) return false;
+  if (result.deliveryOutcome === 'uncertain') return true;
+  if (result.deliveryOutcome === 'accepted' || result.deliveryOutcome === 'not_sent') return false;
+  if (result.deliveryOutcome != null) return true;
+  return result.sent !== true && !result.blocked && Boolean(result.retryable || result.deferred);
 }
 
 /**
@@ -410,10 +424,14 @@ async function maybeAutoSend(params = {}) {
         },
       });
     } catch (err) {
-      await failClaim(claim.decisionId, `send threw: ${err.message}`);
-      await reopenParked('Auto-send errored before delivery — suggestion reopened.');
-      logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
-      return { sent: false, reason: 'send_error' };
+      if (isRealProviderSend(err?.providerOutcome) || isAmbiguousProviderOutcome(err?.providerOutcome)) {
+        result = err.providerOutcome;
+      } else {
+        await failClaim(claim.decisionId, `send threw: ${err.message}`);
+        await reopenParked('Auto-send errored before delivery — suggestion reopened.');
+        logger.warn(`[sms-auto-send] send threw (decision ${claim.decisionId}): ${err.message}`);
+        return { sent: false, reason: 'send_error' };
+      }
     }
 
     // sent:true is not enough — an upstream suppression (gate off, template
@@ -433,6 +451,11 @@ async function maybeAutoSend(params = {}) {
       }
       logger.info(`[sms-auto-send] SENT customer=${customerId || 'unknown'} intent=${intent} decision=${claim.decisionId} sid=${result.providerMessageId || 'n/a'}`);
       return { sent: true, decisionId: claim.decisionId, providerMessageId: result.providerMessageId || null };
+    }
+
+    if (isAmbiguousProviderOutcome(result)) {
+      logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
+      return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
     }
 
     const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');
@@ -523,6 +546,7 @@ module.exports = {
   SAFE_AUTO_SEND_ACTION,
   SUPPRESSION_SENTINELS,
   isRealProviderSend,
+  isAmbiguousProviderOutcome,
   autoSendActionsSafe,
   autoSendPreflight,
   hasActiveAutoSendClaim,
