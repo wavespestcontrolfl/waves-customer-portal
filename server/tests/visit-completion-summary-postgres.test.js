@@ -1532,9 +1532,10 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
   });
 
-  test('a resend from the provider-retry rail settles a bounced summary back to delivered', async () => {
+  test('a provider block stays with the retry rail; only an exhausted recipient reopens the summary, and a later delivery to the other cannot settle it', async () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
     const messages = await mockPg('email_messages').where({ recipient_id: fixture.customerId }).orderBy('id');
+    expect(messages).toHaveLength(2);
     const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
     for (const message of messages) {
       // A provider block (not a bad mailbox): the webhook schedules the
@@ -1542,33 +1543,47 @@ postgres('visit summary recipient recovery', () => {
       await handleEmailMessageEvent({ event: 'blocked', reason: '550 temporarily deferred', type: 'blocked',
         timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
     }
-    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
-      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
-    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
-    // The existing rail retries one blocked recipient and the provider accepts it.
-    expect(await mockPg('email_messages').where({ id: messages[0].id }).first()).toMatchObject({ status: 'failed' });
-    await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
-    await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: null });
-    sendOne.mockClear();
-    // The inline reconciliation after the resend fails transiently: the
-    // message is sent and off the rail, so the delivery webhook must settle it.
-    jest.spyOn(Summary, 'reconcileSummaryEmailRecovery').mockRejectedValueOnce(new Error('Synthetic reconcile outage'));
-    expect(await require('../services/transactional-email-provider-retry').runDueRetries()).toMatchObject({ claimed: 1, sent: 1 });
-    expect(require('../services/logger').warn.mock.calls.filter(([m]) => /summary recovery/.test(m))).toHaveLength(1);
-    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
-      .toMatchObject({ status: 'unknown_delivery' });
-    const resent = await mockPg('email_messages').where({ id: messages[0].id }).first();
-    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, resent);
-    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
-      .toMatchObject({ status: 'unknown_delivery' });
-    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
-    await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
-    expect(await require('../services/transactional-email-provider-retry').runDueRetries()).toMatchObject({ claimed: 1, sent: 1 });
+    // Both recipients are on the rail: the summary still reads delivered and
+    // nothing asks the office yet.
+    expect((await mockPg('email_messages').whereIn('id', messages.map((m) => m.id)).orderBy('id')).map((m) => m.status)).toEqual(['failed', 'failed']);
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
       .toMatchObject({ status: 'sent', last_error: null });
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+    const { MAX_RETRIES, runDueRetries } = require('../services/transactional-email-provider-retry');
+    const { clearBlockedAddress } = require('../services/sendgrid-mail');
+    // The second recipient's final attempt cannot clear the provider block:
+    // the rail exhausts it, and that terminal failure reopens the summary.
+    await mockPg('email_messages').where({ id: messages[1].id })
+      .update({ provider_retry_count: MAX_RETRIES - 1, provider_retry_next_at: new Date(Date.now() - 1000) });
+    await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: null });
+    sendOne.mockClear();
+    clearBlockedAddress.mockRejectedValueOnce(new Error('SendGrid blocks endpoint unavailable'));
+    expect(await runDueRetries()).toMatchObject({ claimed: 1, sent: 0 });
+    expect(sendOne).not.toHaveBeenCalled();
+    const exhausted = await mockPg('email_messages').where({ id: messages[1].id }).first();
+    expect(exhausted).toMatchObject({ status: 'failed', provider_retry_count: MAX_RETRIES, provider_retry_next_at: null });
+    expect(exhausted.provider_retry_exhausted_at).not.toBeNull();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
     const { getCloseoutStatus } = require('../services/closeout-status');
-    expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'done' });
+    expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'unknown' });
+    // The rail resends the other recipient and the provider accepts it. The
+    // inline reconciliation after the resend fails transiently: the message
+    // is sent and off the rail, so the delivery webhook is the durable retry.
+    await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
+    jest.spyOn(Summary, 'reconcileSummaryEmailRecovery').mockRejectedValueOnce(new Error('Synthetic reconcile outage'));
+    expect(await runDueRetries()).toMatchObject({ claimed: 1, sent: 1 });
+    expect(require('../services/logger').warn.mock.calls.filter(([m]) => /summary recovery/.test(m))).toHaveLength(1);
+    const resent = await mockPg('email_messages').where({ id: messages[0].id }).first();
+    expect(resent).toMatchObject({ status: 'sent' });
+    await handleEmailMessageEvent({ event: 'delivered', timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, resent);
+    // One recipient's delivery cannot settle the exhausted one: the leg stays
+    // with the office and the closeout still reads uncertain.
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    expect((await getCloseoutStatus(fixture.serviceIds[0])).facts.reportDelivery).toMatchObject({ state: 'unknown' });
   });
 
   test.each([
@@ -1584,6 +1599,9 @@ postgres('visit summary recipient recovery', () => {
       await handleEmailMessageEvent({ event: 'blocked', reason: '550 temporarily deferred', type: 'blocked',
         timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID() }, message);
     }
+    // A retryable block leaves the delivered summary with the rail.
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
     await mockPg('email_messages').where({ id: messages[0].id }).update({ provider_retry_next_at: new Date(Date.now() - 1000) });
     await mockPg('email_messages').where({ id: messages[1].id }).update({ provider_retry_next_at: null });
     sendOne.mockClear();
@@ -1596,10 +1614,11 @@ postgres('visit summary recipient recovery', () => {
     expect(sendOne).not.toHaveBeenCalled();
     expect(await mockPg('email_messages').where({ id: messages[0].id }).first())
       .toMatchObject({ status: 'blocked', error_message: expect.stringMatching(/^Suppressed before retry: visit_summary_/) });
-    // The leg stays on office review: the bounce alert and the reopened effect remain.
+    // A refused retry is a suppression, not a failed delivery: the summary
+    // was never reopened, so nothing changes and the office is not asked.
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
-      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
-    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+      .toMatchObject({ status: 'sent', last_error: null });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
   });
 
   test('a recovery delivery keeps the coordinator alert while the SMS leg is still uncertain', async () => {
