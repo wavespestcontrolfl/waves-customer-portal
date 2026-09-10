@@ -22,6 +22,17 @@ export function showScheduleSaveNotice(message) {
   listeners.forEach((listener) => listener());
 }
 
+// Session boundary: logout is an SPA navigation, so this module (and its
+// undismissed notices) outlives the account that produced them. The next
+// operator signing in on the same tab must not inherit warnings about
+// outcomes they did not perform (Codex #4091 P2). Nested admin route changes
+// never call this — only the logout handlers do.
+export function clearScheduleSaveNotices() {
+  if (!messages.length) return;
+  messages = [];
+  listeners.forEach((listener) => listener());
+}
+
 export default function ScheduleSaveNotice() {
   const notices = useSyncExternalStore(subscribe, snapshot);
   if (!notices.length) return null;
@@ -32,10 +43,7 @@ export default function ScheduleSaveNotice() {
       <div role="status" className="max-h-[35dvh] overflow-y-auto whitespace-pre-line space-y-3">
         {notices.map(({ id, message }) => <p key={id}>{message}</p>)}
       </div>
-      <Button className="mt-3 min-h-11 text-sm" onClick={() => {
-        messages = [];
-        listeners.forEach((listener) => listener());
-      }}>Dismiss notices</Button>
+      <Button className="mt-3 min-h-11 text-sm" onClick={clearScheduleSaveNotices}>Dismiss notices</Button>
     </aside>, document.body,
   );
 }

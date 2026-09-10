@@ -937,7 +937,15 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
         .where({ service_record_id: record.id })
         .first('id');
       const assessmentId = assessment ? assessment.id : null;
+      // Only the tree_shrub line auto-scores at closeout
+      // (complete-scheduled-service.js: reportServiceLine === 'tree_shrub');
+      // a palm visit has no scorer, so with no row there is nothing pending
+      // and no alert to raise (Codex r-05933b2 P2).
+      const scoringPending = !assessmentId && String(record.service_line || '').toLowerCase() === 'tree_shrub';
       const { createAlertOnce } = require('../services/dispatch-alerts');
+      if (!assessmentId && !scoringPending) {
+        treeShrub = { assessmentId: null, rescored: false, flaggedForReview: false };
+      } else {
       await createAlertOnce({
         type: 'tree_shrub_assessment_partial_photos',
         severity: 'warn',
@@ -947,7 +955,7 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
           source: 'photo_recovery',
           serviceRecordId: record.id,
           assessmentId,
-          scoringPending: !assessmentId,
+          scoringPending,
           customerId: svc.customer_id,
           message: assessmentId
             ? 'Tree & Shrub assessment was scored before recovered photos were attached; review the diagnosis.'
@@ -955,6 +963,7 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
         },
       });
       treeShrub = { assessmentId, rescored: false, flaggedForReview: true };
+      }
     }
 
     logger.info(

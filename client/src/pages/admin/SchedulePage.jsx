@@ -857,6 +857,16 @@ export function completionWillReview({
   return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
 }
 
+// Durable discard marker: set BEFORE the IndexedDB delete is issued and
+// removed only once that delete commits. A page killed in between leaves
+// the full photo-bearing row behind with no metadata; the loader would
+// otherwise offer that explicitly discarded draft again (Codex #4091 P2).
+// Carries the discarded draftId so a draft minted AFTER the discard (new id)
+// is never suppressed.
+function completionDraftTombstoneKey(serviceId) {
+  return `${completionDraftKey(serviceId)}_discarded`;
+}
+
 function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
 }
@@ -12689,9 +12699,16 @@ export function CompletionPanel({
   }
 
   function clearSavedDraft() {
+    const discardedId = draftSnapshotRef.current?.draftId || savedDraft?.draftId || "";
     draftSnapshotRef.current = null;
-    try { localStorage.removeItem(completionDraftKey(service.id)); } catch { /* unavailable */ }
-    void deleteCompletionDraft(service.id);
+    try {
+      localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
+      localStorage.removeItem(completionDraftKey(service.id));
+    } catch { /* unavailable */ }
+    void deleteCompletionDraft(service.id).then((deleted) => {
+      if (!deleted) return;
+      try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+    });
   }
 
   // Also flush on pagehide: browser reload/navigation does not unmount React.
@@ -12719,8 +12736,22 @@ export function CompletionPanel({
       const raw = localStorage.getItem(completionDraftKey(service.id));
       if (raw) metadata = JSON.parse(raw);
     } catch { /* Fall back to the full IndexedDB draft. */ }
-    void getCompletionDraft(service.id).then((stored) => {
+    let tombstone = null;
+    try { tombstone = localStorage.getItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+    void getCompletionDraft(service.id).then((loaded) => {
       if (cancelled) return;
+      let stored = loaded;
+      // A residual row whose delete never committed (page killed mid-discard)
+      // is not a draft: drop it and finish the delete now.
+      if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
+        stored = null;
+        void deleteCompletionDraft(service.id).then((deleted) => {
+          if (!deleted) return;
+          try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+        });
+      } else if (tombstone !== null) {
+        try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+      }
       // Metadata can survive a killed page before its IDB write commits.
       // Reuse persisted photos only when the photo revision still matches.
       const draft = metadata?.serviceId === service.id

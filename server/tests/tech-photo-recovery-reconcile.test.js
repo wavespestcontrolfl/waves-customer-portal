@@ -165,7 +165,7 @@ describe('POST /:id/photos/reconcile', () => {
     // Completion waits at most 12 s for the scorer and schedules a 60 s
     // retry; a recovery in that window finds no row, but the row that lands
     // later covers only the closeout-time photos (Codex r-375c002 P1).
-    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'palm' }];
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'tree_shrub' }];
     await withServer(async (baseUrl) => {
       const res = await reconcile(baseUrl);
       expect(res.status).toBe(200);
@@ -176,6 +176,26 @@ describe('POST /:id/photos/reconcile', () => {
         payload: { source: 'photo_recovery', serviceRecordId: 'rec-1', assessmentId: null, scoringPending: true },
       });
       expect(mockAlert.mock.calls[0][0].payload.message).toMatch(/once scoring lands/);
+    });
+  });
+
+  test('a palm visit without an assessment is NOT flagged — palm has no closeout scorer, so nothing is pending', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'palm' }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect(res.status).toBe(200);
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: null, rescored: false, flaggedForReview: false });
+      expect(mockAlert).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a palm visit WITH an assessment row is still flagged (the row was scored on the partial set)', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'palm' }];
+    tables.tree_shrub_assessments = [{ id: 'ta-9', service_record_id: 'rec-1' }];
+    await withServer(async (baseUrl) => {
+      const res = await reconcile(baseUrl);
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: 'ta-9', rescored: false, flaggedForReview: true });
+      expect(mockAlert.mock.calls[0][0].payload).toMatchObject({ assessmentId: 'ta-9', scoringPending: false });
     });
   });
 

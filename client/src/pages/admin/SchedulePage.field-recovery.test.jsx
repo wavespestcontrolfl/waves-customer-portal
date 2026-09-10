@@ -62,6 +62,32 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(await getCompletionDraft(service.id)).toBeNull();
   });
 
+  it('does not offer a discarded draft whose IndexedDB delete never committed (Codex #4091 P2)', async () => {
+    await seed();
+    const first = await mount();
+    // The delete is issued but the page dies before it commits: the full
+    // photo-bearing row survives with no metadata.
+    vi.spyOn(completionStore, 'deleteCompletionDraft').mockResolvedValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Discard', exact: true }));
+    expect(localStorage.getItem(key)).toBeNull();
+    expect(localStorage.getItem(`${key}_discarded`)).toBe('draft-one');
+    first.unmount();
+    vi.restoreAllMocks();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ draftId: 'draft-one' });
+    await mount();
+    expect(screen.queryByRole('button', { name: 'Restore', exact: true })).toBeNull();
+    await waitFor(async () => expect(await getCompletionDraft(service.id)).toBeNull());
+    await waitFor(() => expect(localStorage.getItem(`${key}_discarded`)).toBeNull());
+  });
+
+  it('a tombstone for an older draftId never suppresses a draft minted after the discard', async () => {
+    localStorage.setItem(`${key}_discarded`, 'draft-zero');
+    await seed();
+    await mount();
+    expect(screen.getByRole('button', { name: 'Restore', exact: true })).toBeTruthy();
+    expect(localStorage.getItem(`${key}_discarded`)).toBeNull();
+  });
+
   it('restores persisted photos with newer fields when the departure write is lost', async () => {
     await seed();
     const first = await mount();
