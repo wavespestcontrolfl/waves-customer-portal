@@ -3,7 +3,7 @@ import {
   ActionFeedback, Badge, Button, Card, CardBody, CardHeader, CardTitle,
   Field, Input, Select, UiSurface,
 } from "../../../components/ui";
-import { adminFetch, adminPost, errorMessage } from "./api";
+import { adminFetch } from "../../../utils/admin-fetch";
 
 const EMPTY_ADD_FORM = {
   filename: "",
@@ -44,7 +44,7 @@ export default function KnowledgeSources() {
         if (active) setSources(data.sources || []);
       })
       .catch((requestError) => {
-        if (active) setLoadError(errorMessage(requestError, "Could not load sources."));
+        if (active) setLoadError(requestError?.message || "Could not load sources.");
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -58,10 +58,13 @@ export default function KnowledgeSources() {
     setCompilingIds((current) => new Set(current).add(sourceId));
     setActionError("");
     try {
-      await adminPost("/admin/knowledge/compile", { sourceId });
+      await adminFetch("/admin/knowledge/compile", {
+        method: "POST",
+        body: JSON.stringify({ sourceId }),
+      });
       await loadSources({ afterMutation: true });
     } catch (requestError) {
-      setActionError(errorMessage(requestError, "Could not compile this source."));
+      setActionError(requestError?.message || "Could not compile this source.");
     } finally {
       compilingRef.current.delete(sourceId);
       setCompilingIds((current) => {
@@ -79,12 +82,15 @@ export default function KnowledgeSources() {
     setAdding(true);
     setActionError("");
     try {
-      await adminPost("/admin/knowledge/sources", addForm);
+      await adminFetch("/admin/knowledge/sources", {
+        method: "POST",
+        body: JSON.stringify(addForm),
+      });
       setShowAdd(false);
       setAddForm(EMPTY_ADD_FORM);
       await loadSources({ afterMutation: true });
     } catch (requestError) {
-      setActionError(errorMessage(requestError, "Could not add source."));
+      setActionError(requestError?.message || "Could not add source.");
     } finally {
       addingRef.current = false;
       setAdding(false);
