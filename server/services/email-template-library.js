@@ -590,10 +590,10 @@ function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
 // blocked (the lawn-email gap check) must see every applicable row —
 // picking an arbitrary first match there let a bounce mask a coexisting
 // opt-out (codex #3341 r3 P2).
-async function activeSuppressionsFor(template, email, suppressionGroupKey) {
+async function activeSuppressionsFor(template, email, suppressionGroupKey, database = db) {
   if (!email) return [];
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
-  const rows = await db('email_suppressions')
+  const rows = await database('email_suppressions')
     .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
     .where({ status: 'active' });
   const globalTypes = new Set(['bounce', 'spam_complaint', 'do_not_email']);
@@ -607,8 +607,10 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey) {
   ));
 }
 
-async function activeSuppressionFor(template, email, suppressionGroupKey) {
-  const rows = await activeSuppressionsFor(template, email, suppressionGroupKey);
+// `database` lets a caller already holding a transaction read on that
+// connection instead of acquiring a second one from the pool.
+async function activeSuppressionFor(template, email, suppressionGroupKey, database = db) {
+  const rows = await activeSuppressionsFor(template, email, suppressionGroupKey, database);
   return rows[0] || null;
 }
 
@@ -658,11 +660,11 @@ function templateContentHash(template, version) {
   ])).digest('hex');
 }
 
-async function loadTemplateByKey(templateKey) {
-  const template = await db('email_templates').where({ template_key: templateKey }).first();
+async function loadTemplateByKey(templateKey, database = db) {
+  const template = await database('email_templates').where({ template_key: templateKey }).first();
   if (!template) return null;
   const activeVersion = template.active_version_id
-    ? await db('email_template_versions').where({ id: template.active_version_id }).first()
+    ? await database('email_template_versions').where({ id: template.active_version_id }).first()
     : null;
   return { template, activeVersion };
 }
