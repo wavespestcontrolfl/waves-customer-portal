@@ -1315,9 +1315,11 @@ async function resolveFulfillment(conn, commitment, call) {
 // callback card's confirm while the card policy is on or the card already
 // placed a call (a persisted attempt keeps its proof path after rollback).
 function refreshableVerdictSql() {
+  const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
   return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state = 'confirmed' AND (? OR EXISTS ("
-    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text))))",
-  [require('./callback-cards').enabled()]];
+    + "SELECT 1 FROM call_log attempt WHERE attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
+    + " AND COALESCE(attempt.source, '') <> ?))))",
+  [require('./callback-cards').enabled(), VOICE_RELAY_SANDBOX_SOURCE]];
 }
 
 async function refreshFulfillment(conn, callLogId, call = null) {
