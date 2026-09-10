@@ -194,14 +194,17 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     Capacity holds also take selected-technician and unassigned day fences
 //     in canonical order before any row lock. This fences dispatch membership
 //     changes from another technician to unassigned through certification.
-//   services/slot-reservation.js commitReservation  1
+//   services/slot-reservation.js commitReservation  1 -> 3 (capacity)
 //     Keys rung 1 off an UNLOCKED read of the hold row's date; its
 //     FOR UPDATE follows the lock, and a date moved in between fails into
 //     RESERVATION_EXPIRED (the row-lock rule above). Inside the estimate-
 //     accept txn the SAME key was already pre-locked at txn start and
 //     passed as preLockedDate — a pre-read/preLockedDate mismatch fails
 //     into RESERVATION_EXPIRED before any lock, and the matching-key
-//     acquisition is a reentrant no-op.
+//     acquisition is a reentrant no-op. Capacity commits pre-acquire both
+//     selected-technician and unassigned day fences before row locks; callers
+//     pass the technician alongside preLockedDate, and both identities are
+//     rechecked before further acquisition or route-order writes.
 //     + probe with includeHolds:false excluding its own hold row — runs even
 //     when no accept-time duration resolved (the narrow tech-scoped check is
 //     skipped then, but graduation still commits real occupancy).

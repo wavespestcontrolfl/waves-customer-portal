@@ -10100,6 +10100,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // acceptance back (a committed accepted-but-unconverted estimate is
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
+    const capacityHold = reservationRow || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow) ? existingAppointmentRow : null);
+    const preparedReservationCapacity = capacityHold
+      ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
+        ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
+        serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
+        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -10122,6 +10128,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // RESERVATION_NOT_FOUND from its pre-read, BEFORE taking any lock of
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
+      let acceptPreLockedTechId = null;
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -10130,9 +10137,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (acceptHoldRow) {
           const holdDateRow = await trx('scheduled_services')
             .where({ id: acceptHoldRow.id })
-            .first('scheduled_date');
+            .first('scheduled_date', 'technician_id');
           acceptPreLockedDate = holdDateRow ? (dateOnly(holdDateRow.scheduled_date) || null) : null;
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
+          acceptPreLockedTechId = holdDateRow?.technician_id || null;
+          if (preparedReservationCapacity) await require('../services/scheduling/tech-day-lock').lockTechDays(trx,
+            [{ techId: acceptPreLockedTechId, date: acceptPreLockedDate }, { techId: null, date: acceptPreLockedDate }]);
           // The shared invoice MINT lock joins the pre-row-lock rung too
           // (PR #3476 r22 P1): scheduled-invoice writers lock advisory →
           // customer KEY SHARE → visit row, while this txn locks customer
@@ -10733,6 +10743,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
+            preLockedTechId: acceptPreLockedTechId,
+            preparedCapacity: preparedReservationCapacity,
             trx,
           });
           reservationCommitted = true;
@@ -10790,6 +10802,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
+              preLockedTechId: acceptPreLockedTechId,
+              preparedCapacity: preparedReservationCapacity,
               trx,
             });
             reservationCommitted = true;

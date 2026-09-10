@@ -509,6 +509,7 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
 
   test.each([
     ['async function reserveSlot(', 'await acquireOccupancyLock(trx, date);', "await trx('scheduled_services').insert({"],
+    ['async function commitReservation(', 'await acquireOccupancyLock(client, lockedDate);', '.update(updates)'],
   ])('capacity certification stays under the occupancy lock before writes in %s', (startMarker, lockMarker, writeMarker) => {
     const src = read('services/slot-reservation.js');
     const start = src.indexOf(startMarker);

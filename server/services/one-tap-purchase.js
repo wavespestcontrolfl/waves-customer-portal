@@ -863,6 +863,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
   const EstimateConverter = require('./estimate-converter');
   let txOut;
   try {
+    const preparedReservationCapacity = await slotReservation.prepareReservationCommit(purchase.scheduled_service_id, { serviceMode: 'recurring' });
     txOut = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // copied from the estimate-accept txn, which documents the real
@@ -872,12 +873,15 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       // RESERVATION_EXPIRED re-pick recovery.
       const holdDateRow = await trx('scheduled_services')
         .where({ id: purchase.scheduled_service_id })
-        .first('scheduled_date');
+        .first('scheduled_date', 'technician_id');
       if (!holdDateRow) {
         throw httpError(409, 'Your held time expired — pick a slot again.', { code: 'RESERVATION_EXPIRED' });
       }
       const preLockedDate = dateOnly(holdDateRow.scheduled_date) || null;
       if (preLockedDate) await acquireOccupancyLock(trx, preLockedDate);
+      const preLockedTechId = holdDateRow.technician_id || null;
+      if (preparedReservationCapacity) await require('./scheduling/tech-day-lock').lockTechDays(trx,
+        [{ techId: preLockedTechId, date: preLockedDate }, { techId: null, date: preLockedDate }]);
       // Shared invoice mint lock BEFORE any row lock (PR #3476 r22 P1) —
       // same ordering contract as the estimate-accept txn; downstream
       // re-acquisition is a no-op.
@@ -1004,6 +1008,8 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           estimate: { ...est, status: 'accepted' },
           serviceMode: 'recurring',
           preLockedDate,
+          preLockedTechId,
+          preparedCapacity: preparedReservationCapacity,
           trx,
         });
       } catch (commitErr) {

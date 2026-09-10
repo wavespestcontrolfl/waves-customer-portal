@@ -1223,10 +1223,10 @@ describe('slot reservation helpers', () => {
   // date's key mid-txn when the hold moved: that unsorted second key is the
   // exact inversion the ordering contract bans.
 
-  function makeCommitHarness({ preReadDate, rowDate }) {
+  function makeCommitHarness({ preReadDate, rowDate, preReadTechId = 'tech-1' }) {
     const dateProbeBuilder = {
       where: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue({ scheduled_date: preReadDate }),
+      first: jest.fn().mockResolvedValue({ scheduled_date: preReadDate, technician_id: preReadTechId }),
     };
     const reservationBuilder = {
       where: jest.fn().mockReturnThis(),
@@ -1291,6 +1291,18 @@ describe('slot reservation helpers', () => {
       customer_id: 'customer-1',
       reservation_expires_at: null,
     }));
+  });
+
+  test('capacity commit rejects a changed pre-locked technician without acquiring another fence', async () => {
+    const { trx, advisoryCalls, reservationBuilder } = makeCommitHarness({
+      preReadDate: '2027-05-20', rowDate: '2027-05-20', preReadTechId: 'tech-2',
+    });
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', trx,
+      preparedCapacity: {}, preLockedDate: '2027-05-20', preLockedTechId: 'tech-1',
+    })).rejects.toMatchObject({ code: 'RESERVATION_EXPIRED' });
+    expect(advisoryCalls()).toEqual([]);
+    expect(reservationBuilder.forUpdate).not.toHaveBeenCalled();
   });
 
   test('commitReservation with a STALE preLockedDate (hold moved dates) fails RESERVATION_EXPIRED without taking ANY lock', async () => {

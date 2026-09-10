@@ -528,6 +528,19 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
   return profile;
 }
 
+async function prepareReservationCommit(scheduledServiceId, options = {}) {
+  const row = await db('scheduled_services').where({ id: scheduledServiceId }).first();
+  if (!row) return null;
+  const held = require('./combined-visit-capacity').capacityFromReservation(row);
+  if (held?.version === 1 || (!capacityEnabled() && row.reservation_policy_version !== 2)) return null;
+  const profile = await resolveReservationServiceProfile(db, row, { ...options, preserveCombinedCapacity: !!held });
+  const durationMinutes = profile?.durationMinutes || Number(row.estimated_duration_minutes) || 60;
+  return prepareArrivalCapacity({ serviceId: row.id, date: dateOnly(row.scheduled_date),
+    technicianId: row.technician_id, windowStart: String(row.window_start).slice(0, 5),
+    windowEnd: addMinutesToTime(row.window_start, durationMinutes), durationMinutes,
+    preserveCapacity: row.reservation_policy_version === 2 });
+}
+
 /**
  * Reserve a slot for an estimate. Atomic — if the slot is already taken
  * (by another committed visit, or by a live reservation that hasn't
@@ -1258,7 +1271,7 @@ async function reserveSlot({
  * the acquisition below is a reentrant no-op (pg advisory xact locks are
  * re-acquirable by the owning transaction).
  *
- * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, trx? }
+ * opts: { scheduledServiceId, customerId, paymentMethodPreference?, estimatedPrice?, preLockedDate?, preLockedTechId?, preparedCapacity?, trx? }
  * returns: updated scheduled_services row
  */
 async function commitReservation({
@@ -1272,8 +1285,13 @@ async function commitReservation({
   serviceCadences = null,
   durationMinutes,
   preLockedDate = null,
+  preLockedTechId = null,
+  preparedCapacity = null,
   trx,
 }) {
+  if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
+    estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
+  });
   // Body is shared between the "caller already has a txn" path (use it) and
   // the "no caller txn" path (open our own). Either way the SELECT runs
   // FOR UPDATE so a concurrent commit/release/expiry-cleanup can't race
@@ -1286,9 +1304,9 @@ async function commitReservation({
     // the commit-time duration is resolved from the accepted service profile
     // and may exceed the held one. The conflict check below is tech-scoped
     // ONLY when the row carries a technician — an unassigned hold makes it
-    // date-wide/tech-blind outright — and this path takes no tech or zone
-    // lock at all, so rung 1 is the only thing serializing it against the
-    // rebooker and the self-booking confirms.
+    // date-wide/tech-blind outright. Capacity commits additionally take the
+    // tech-day fence before row locks to serialize route-order rewrites
+    // against manual and nightly reorders.
     //
     // Taken BEFORE the FOR UPDATE row lock on purpose: a writer already
     // holding the date lock may need this row, so grabbing the row first and
@@ -1305,7 +1323,7 @@ async function commitReservation({
     // locked key down as preLockedDate (checked against the pre-read below).
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('scheduled_date');
+      .first('scheduled_date', 'technician_id');
     if (!preRow) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
@@ -1320,14 +1338,21 @@ async function commitReservation({
     // pattern exists to prevent. Fail into the same RESERVATION_EXPIRED
     // recovery the accept flow already handles (the customer re-picks a
     // time) WITHOUT taking any lock.
-    if (preLockedDate && lockedDate !== dateOnly(preLockedDate)) {
+    if (preLockedDate && (lockedDate !== dateOnly(preLockedDate)
+      || (preparedCapacity && (preRow.technician_id || null) !== preLockedTechId))) {
       const err = new Error('reservation moved off the pre-locked date');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
     }
+    if (preparedCapacity && (preparedCapacity.options.date !== lockedDate
+      || (preparedCapacity.options.technicianId || null) !== (preRow.technician_id || null))) throw capacityError();
     // Reentrant no-op when the caller pre-locked this same key; kept
     // unconditional so the standalone path still takes rung 1 first.
     if (lockedDate) await acquireOccupancyLock(client, lockedDate);
+    // The public accept/one-tap caller already acquired both day fences
+    // before its own row locks. Standalone commits acquire it here.
+    if (preparedCapacity) await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate },
+      { techId: null, date: lockedDate }]);
 
     // Canonical order with the scheduled-invoice writers (PR #3476 r21
     // P1): the shared advisory mint lock comes BEFORE this row FOR
@@ -1350,7 +1375,8 @@ async function commitReservation({
       err.code = 'RESERVATION_NOT_FOUND';
       throw err;
     }
-    if (dateOnly(row.scheduled_date) !== lockedDate) {
+    if (dateOnly(row.scheduled_date) !== lockedDate
+      || (preparedCapacity && (row.technician_id || null) !== (preRow.technician_id || null))) {
       const err = new Error('reservation moved to another date');
       err.code = 'RESERVATION_EXPIRED';
       throw err;
@@ -1406,6 +1432,8 @@ async function commitReservation({
     const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
       ? Number(serviceProfile.durationMinutes)
       : null;
+    const heldCapacity = require('./combined-visit-capacity').capacityFromReservation(row);
+    const useCapacity = row.reservation_policy_version === 2 || (capacityEnabled() && heldCapacity?.version !== 1);
     if (serviceProfile?.reservationServiceMix) {
       const { capacityUnavailable } = require('./combined-visit-capacity');
       if (!row.technician_id) throw capacityUnavailable();
@@ -1419,12 +1447,17 @@ async function commitReservation({
       ? addMinutesToTime(windowStart, effectiveDurationMinutes)
       : null;
 
-    if (serviceProfile?.reservationServiceMix
+    if (!useCapacity && serviceProfile?.reservationServiceMix
       && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
       throw require('./combined-visit-capacity').capacityUnavailable();
     }
 
-    if (windowEnd) {
+    const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
+      conn: client, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
+      serviceTypes: serviceProfile?.services.map(service => service.label || service.service),
+    }) : null;
+
+    if (windowEnd && !useCapacity) {
       const conflict = await client('scheduled_services')
         .where({ scheduled_date: scheduledDate })
         .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
@@ -1464,7 +1497,7 @@ async function commitReservation({
           ? Number(row.estimated_duration_minutes)
           : DEFAULT_DURATION_MINUTES)
         : null);
-    if (scheduledDate && windowStart && probeWindowEnd) {
+    if (!useCapacity && scheduledDate && windowStart && probeWindowEnd) {
       const committedClash = await findConflictingVisits({
         db: client,
         date: scheduledDate,
@@ -1535,6 +1568,7 @@ async function commitReservation({
       .where({ id: scheduledServiceId })
       .update(updates)
       .returning('*');
+    if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
     // Tech-facing "new visit" card (tech-visit-notifications.js): the hold
     // kept its technician, and graduating it IS the booking — no assignment
     // write follows to announce it. Rides `client` so it waits for the
@@ -1727,6 +1761,7 @@ async function releaseExpiredReservations() {
 
 module.exports = {
   reserveSlot,
+  prepareReservationCommit,
   commitReservation,
   releaseReservation,
   releaseExpiredReservations,
