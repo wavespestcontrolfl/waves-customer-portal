@@ -30,13 +30,15 @@ function looksLikeReviewAsk(body) {
     || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+link\b/i.test(text));
 }
 
-function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
+function deliveredAskRows(customerId, { since = null, excludeRequestId = null, includeReservations = true } = {}) {
+  const timestampColumns = ['sms_sent_at', 'sent_at', 'followup_delivered_at'];
+  if (includeReservations) timestampColumns.push('followup_reserved_at');
   const q = db('review_requests')
     .where({ customer_id: customerId })
-    .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL OR followup_delivered_at IS NOT NULL OR followup_reserved_at IS NOT NULL)')
+    .whereRaw(`(${timestampColumns.map(column => `${column} IS NOT NULL`).join(' OR ')})`)
     .whereRaw(ASK_TOUCH_SQL)
     .select('id', 'sequence_id', 'template_key', 'sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_reserved_at');
-  if (since) q.whereRaw('GREATEST(sms_sent_at, sent_at, followup_delivered_at, followup_reserved_at) > ?', [since]);
+  if (since) q.whereRaw(`GREATEST(${timestampColumns.join(', ')}) > ?`, [since]);
   if (excludeRequestId) q.where('id', '!=', excludeRequestId);
   return q;
 }
@@ -44,15 +46,19 @@ function deliveredAskRows(customerId, { since = null, excludeRequestId = null } 
 // An unresolved follow-up reservation conservatively holds spacing until its
 // real outcome is recorded; it does not populate the delivery timestamp.
 // A retried email leg can be later than the SMS of the same request.
-function latestDeliveredAt(rows) {
+function latestDeliveredAt(rows, { includeReservations = true } = {}) {
+  const timestampFields = ['sms_sent_at', 'sent_at', 'followup_delivered_at'];
+  if (includeReservations) timestampFields.push('followup_reserved_at');
   return rows.reduce((latest, row) => {
-    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at, row.followup_reserved_at].map(value => value ? new Date(value).getTime() : 0));
+    const at = Math.max(...timestampFields.map(field => row[field] ? new Date(row[field]).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
   }, null);
 }
 
 async function lastDeliveredAskAt(customerId, options) {
-  return latestDeliveredAt(await deliveredAskRows(customerId, options));
+  return latestDeliveredAt(await deliveredAskRows(customerId, options), {
+    includeReservations: options?.includeReservations !== false,
+  });
 }
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.
@@ -75,9 +81,15 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
     try { return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}; }
     catch { return {}; }
   };
-  // Pre-send evidence survives provider-log and settlement failures.
+  const isReviewReservation = row => metadata(row).review_ask_reservation === true;
+  // An unresolved provider attempt conservatively holds the same 72-hour
+  // window only when the caller includes reservations. A confirmed marker
+  // belongs in candidates below: it is durable delivery evidence even when
+  // its short-link body is not independently recognizable as a review ask,
+  // and the normal request/log correlation must still distinguish an
+  // automated pipeline send from a staff ask.
   const reservations = includeReservations
-    ? outbound.filter(row => metadata(row).review_ask_reservation === true)
+    ? outbound.filter(row => row.status === 'sending' && isReviewReservation(row))
     : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
@@ -85,8 +97,9 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
   }, null);
   const candidates = outbound.filter(row => {
     const meta = metadata(row);
-    if (meta.review_ask_reservation === true || (row.status === 'sending' && !meta.finalize_only)) return false;
-    return looksLikeReviewAsk(row.message_body) || !!(meta.bundled_review_request_id || meta.review_ask_delivered_at);
+    if (row.status === 'sending' && !meta.finalize_only) return false;
+    return isReviewReservation(row) || looksLikeReviewAsk(row.message_body)
+      || !!(meta.bundled_review_request_id || meta.review_ask_delivered_at);
   });
   if (!candidates.length) return reservedAt;
   const sends = await db('review_requests')
