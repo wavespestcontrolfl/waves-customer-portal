@@ -65,17 +65,22 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
     .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
     .orderBy('created_at', 'desc')
     .select('message_body', 'created_at', 'status', 'metadata');
+  const isReviewReservation = row => row.metadata?.review_ask_reservation === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
-  // window. These pre-send markers survive failed delivery-log writes.
+  // window only when the caller includes reservations. A confirmed marker
+  // belongs in candidates below: it is durable delivery evidence even when
+  // its short-link body is not independently recognizable as a review ask,
+  // and the normal request/log correlation must still distinguish an
+  // automated pipeline send from a staff ask.
   const reservations = includeReservations
-    ? outbound.filter(row => row.metadata?.review_ask_reservation === true)
+    ? outbound.filter(row => row.status === 'sending' && isReviewReservation(row))
     : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
     return at >= sinceAt && (!latest || at > latest) ? at : latest;
   }, null);
   const candidates = outbound.filter(row => row.status !== 'sending'
-    && row.metadata?.review_ask_reservation !== true && looksLikeReviewAsk(row.message_body));
+    && (isReviewReservation(row) || looksLikeReviewAsk(row.message_body)));
   if (!candidates.length) return reservedAt;
   const sends = await db('review_requests')
     .where({ customer_id: customerId })
