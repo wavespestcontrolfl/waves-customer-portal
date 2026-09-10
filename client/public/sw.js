@@ -139,6 +139,17 @@ function withAssetWrites(fn) {
   return run;
 }
 
+// Add build claims to a cached entry. Runs under the write lock and merges
+// into whatever the cache holds NOW — a queued write must not carry an
+// older copy's tags over an entry a shell refresh re-wrote meanwhile.
+// `fallback` is stored when the entry is gone (pruned in between).
+function claimBuilds(cache, request, fallback, claims, pinnedBuildId = null) {
+  return withAssetWrites(async () => {
+    const latest = (await cache.match(request)) || fallback;
+    return cache.put(request, tagWithBuild(latest, claims, pinnedBuildId));
+  });
+}
+
 // Every navigation kicks off a background shell refresh, so two can overlap
 // across a deploy (old shell A and new shell B in flight together). Each
 // refresh reads the previous shell, writes, then prunes — interleaved, A's
@@ -173,7 +184,11 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
   // Read the previous build BEFORE overwriting its shell: a different id
   // means a deploy shipped, and everything older than that build is dead weight.
   const previousBuildId = await cachedBuildId(cache);
-  await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, tagWithBuild(response, buildId))));
+  // Under the write lock, keeping the claims an existing entry already holds.
+  await withAssetWrites(() => Promise.all(assetResponses.map(async ([assetUrl, response]) => {
+    const existing = await cache.match(assetUrl);
+    await cache.put(assetUrl, tagWithBuild(response, [buildId, ...buildTagsOf(existing)]));
+  })));
   await cache.put(OFFLINE_URL, shellResponse);
   // Refreshes are queued, so an older one can finish after a newer
   // navigation already advanced the live build — writing its own build back
@@ -292,7 +307,7 @@ self.addEventListener('fetch', event => {
             // The cached shell's build is retained by the next prune; pin it
             // so the tag cap cannot shed it behind a run of live-only builds.
             const pinned = await cachedBuildId(cache);
-            return withAssetWrites(() => cache.put(event.request, tagWithBuild(copy, buildId, pinned)));
+            return claimBuilds(cache, event.request, copy, [buildId], pinned);
           }).catch(() => {});
           try { event.waitUntil(touch); } catch { /* fire and forget */ }
           return cached;
@@ -307,7 +322,7 @@ self.addEventListener('fetch', event => {
             // be the requester (a newer navigation whose refresh failed is
             // live yet never cached), so the cached build claims it too.
             const store = Promise.all([currentBuildId(cache), cachedBuildId(cache)])
-              .then(([buildId, cachedId]) => withAssetWrites(() => cache.put(event.request, tagWithBuild(clone, [buildId || 'untagged', cachedId]))))
+              .then(([buildId, cachedId]) => claimBuilds(cache, event.request, clone, [buildId || 'untagged', cachedId]))
               .catch(() => {});
             // The respondWith promise is still pending here, so the event
             // can still be extended; if a browser disagrees, fall back to

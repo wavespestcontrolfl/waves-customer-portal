@@ -96,8 +96,8 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq)');
     expect(source).toContain('async function precacheCompleteShell()');
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
-    expect(source).toContain('await Promise.all(assetResponses.map');
-    expect(source.indexOf('await Promise.all(assetResponses.map'))
+    expect(source).toContain('await withAssetWrites(() => Promise.all(assetResponses.map');
+    expect(source.indexOf('await withAssetWrites(() => Promise.all(assetResponses.map'))
       .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse)'));
     expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
@@ -560,5 +560,39 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     setFetch(async (request) => fakeResponse(`asset:${request.url}`));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
+  });
+
+  it('merges a queued re-tag into the entry a refresh re-wrote meanwhile', async () => {
+    // Pre-push Codex P1: shell A cached, B live after a failed refresh. A hit
+    // on Shared-XYZ.js is parked while it reads the cached shell; refresh C,
+    // whose shell references that asset, re-writes the entry tagged C. The
+    // resumed re-tag must merge into that entry, not overwrite it with its
+    // pre-refresh copy — or D's prune deletes it although C is retained.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/Shared-XYZ.js'); // tagged A
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' }); // B live, never cached
+
+    let releaseShell;
+    const shellGate = new Promise(resolve => { releaseShell = resolve; });
+    cache.store.set('https://portal.test/', gatedResponse(shellHtml(['/assets/index-AAA.js']), shellGate));
+    const hit = await dispatchFetch('/assets/Shared-XYZ.js', { settle: false }); // parked reading the shell
+    await tick();
+    cache.store.set('https://portal.test/', fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js', '/assets/Shared-XYZ.js'])));
+    releaseShell();
+    await hit.settled();
+
+    const tags = (await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(',');
+    expect(tags).toContain(buildIdOf(['/assets/index-CCC.js', '/assets/Shared-XYZ.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-CCC.js', '/assets/index-DDD.js']);
   });
 });
