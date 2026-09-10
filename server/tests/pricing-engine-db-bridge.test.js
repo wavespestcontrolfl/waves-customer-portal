@@ -543,6 +543,7 @@ describe('pricing engine DB bridge', () => {
           const q = {
             whereIn: jest.fn(() => q),
             where: jest.fn(() => q),
+            whereRaw: jest.fn(() => q),
             select: jest.fn(async () => approvedVendorPricingRows),
           };
           return q;

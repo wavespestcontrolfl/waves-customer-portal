@@ -5,8 +5,6 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
-const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
@@ -15,8 +13,6 @@ const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { properCase } = require('../utils/name-case');
-const { applyContactNormalization } = require('../utils/intake-normalize');
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
 // numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
@@ -67,58 +63,6 @@ async function findSingleCustomerByPhone(phone) {
   if (matches.length > 1) {
     logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
   }
-  return null;
-}
-
-function cleanIntroNameSegment(segment) {
-  const text = String(segment || '')
-    .replace(/[“”]/g, '"')
-    .replace(/[’]/g, "'")
-    .split(/[.,;!?]/)[0]
-    .replace(/\s+(?:and|but|because|who|that|i|we)\b.*$/i, '')
-    .replace(/\s+(?:from|in|at|with|seeking|looking|need|needs|want|wants|live|lives|located)\b.*$/i, '')
-    .trim();
-  const words = text.match(/[a-z][a-z' -]*/gi);
-  if (!words) return '';
-  const candidate = words.join(' ').replace(/\s+/g, ' ').trim();
-  const lower = candidate.toLowerCase();
-  const firstWord = lower.split(' ')[0];
-  if (
-    !candidate ||
-    [
-      'about', 'at', 'for', 'from', 'in', 'located', 'live', 'lives', 'looking',
-      'need', 'needs', 'interested', 'seeking', 'trying', 'want', 'wants', 'with',
-    ].includes(firstWord) ||
-    /^(a|an|the|quote|service|pest|rodent|lawn|customer|homeowner|property)$/i.test(lower)
-  ) {
-    return '';
-  }
-  return properCase(candidate.split(' ').slice(0, 3).join(' '));
-}
-
-function extractContactNameFromSms(body) {
-  const text = String(body || '').replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-
-  const patterns = [
-    /\bmy\s+name\s+is\s+(.{1,80})/i,
-    /\bthis\s+is\s+(.{1,80})/i,
-    /\bi['’]?m\s+(.{1,80})/i,
-    /\bi\s+am\s+(.{1,80})/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    const fullName = cleanIntroNameSegment(match?.[1]);
-    if (!fullName) continue;
-    const parts = fullName.split(/\s+/);
-    return {
-      fullName,
-      firstName: parts[0] || '',
-      lastName: parts.slice(1).join(' '),
-    };
-  }
-
   return null;
 }
 
@@ -813,78 +757,40 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
-    // DOMAIN TRACKING — new lead from a domain-specific number
-    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
-      const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
-      const { CREATED_VIA } = require('../services/customer-stages');
-      const { resolveLocation } = require('../config/locations');
-      const loc = resolveLocation(numberConfig.area || leadSource.area || '');
-      const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-      const inboundContactName = extractContactNameFromSms(Body);
-
+    // DOMAIN / VAN TRACKING — first text from an unknown number to a
+    // domain-specific or van-wrap line. This branch used to mint a customer
+    // row for the sender (created_via twilio_tracking_shell) and guess a
+    // name from the body, turning ordinary message prose into a customer
+    // identity. Owner ruling
+    // 2026-09-08: a text is not an identified person. Nothing is created;
+    // the thread sits in the inbox under the sender's phone number (the
+    // "Unknown" chip) until staff link or create the record, like every
+    // other unknown-sender thread. The admin bell still fires — it replaces
+    // the owner SMS forward for tracking lines (isTrackingLeadInbound
+    // below) — and links to the inbox instead of a lead record.
+    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !smsReaction && !courtesyOnly && (Body || inboundMedia.length)) {
       try {
-        // Account layer: attach-or-create so the new lead profile is
-        // login-complete (portal refresh sessions FK customer_accounts).
-        // Lazy require: admin-customers is a route module (load-cycle risk).
-        const { ensureCustomerAccount } = require('./admin-customers');
-        const account = await ensureCustomerAccount(db, {
-          firstName: inboundContactName?.firstName || 'Unknown',
-          lastName: inboundContactName?.lastName || '',
+        const { triggerNotification } = require('../services/notification-triggers');
+        const source = numberConfig.domain || 'van wrap';
+        await triggerNotification('new_lead', {
+          title: `New text from ${source}`,
+          name: 'Unknown sender',
+          twilioSid: MessageSid,
           phone: From,
-          email: null,
+          message: Body || 'Photo',
+          source,
+          area: numberConfig.area || 'Unknown',
+          link: '/admin/communications',
         });
-        const [newCust] = await db('customers').insert(applyContactNormalization({
-          account_id: account.accountId,
-          is_primary_profile: !account.existingCustomer,
-          profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-          first_name: inboundContactName?.firstName || 'Unknown',
-          last_name: inboundContactName?.lastName || '',
-          phone: From, address_line1: '', city: numberConfig.area || '', state: 'FL', zip: '',
-          referral_code: code, lead_source: leadSource.source,
-          lead_source_detail: numberConfig.domain || leadSource.domain || 'Van wrap',
-          lead_source_area: numberConfig.area || '', lead_source_channel: 'organic',
-          nearest_location_id: numberConfig.location || loc.id,
-          pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
-          // PROVENANCE stamp — this row is a placeholder minted for a number
-          // nobody has identified yet. Consumers (estimator SMS context)
-          // must be able to tell it from a genuine fresh lead, and row
-          // shape cannot do that: a form submitted without an address
-          // produces the same blank street/ZIP new_lead row.
-          created_via: CREATED_VIA.TWILIO_TRACKING_SHELL,
-          last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
-          member_since: etDateString(),
-          crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
-        })).returning('*');
-
-        await createDefaultCustomerRows(db, newCust.id);
-
-        try {
-          const { triggerNotification } = require('../services/notification-triggers');
-          const source = numberConfig.domain || 'van wrap';
-          await triggerNotification('new_lead', {
-            title: `New lead from ${source}`,
-            name: inboundContactName?.fullName || 'Unknown prospect',
-            phone: From,
-            message: Body || 'Phone call',
-            source,
-            area: numberConfig.area || 'Unknown',
-            leadId: newCust.id,
-          });
-        } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
-
-        await db('activity_log').insert({
-          customer_id: newCust.id, action: 'customer_created',
-          description: `New lead from ${numberConfig.domain || 'van wrap'}: ${From}`,
-        });
-      } catch (e) { logger.error(`Domain lead creation failed: ${e.message}`); }
+      } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
     }
 
     // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
     // quote-flavored inbound text runs the estimator engine against the
-    // thread — priced DRAFT + one phone-scoped bell, never a send. Runs
-    // AFTER the domain/van tracking branch so a first-contact text to a
-    // tracking number has its customer row before the context builds (an
-    // earlier placement drafted unlinked). The AWAITED part is cheap and
+    // thread — priced DRAFT + one phone-scoped bell, never a send. A
+    // first-contact text from an unknown number drafts unlinked (no
+    // customer row is minted for it; see the tracking branch above) and
+    // the context builder grounds it by address. The AWAITED part is cheap and
     // bounded (regex prefilter → FAST classifier with a webhook-safe
     // timeout → one durable owed-quote bell); the DEEP composer detaches
     // inside startSmsThreadDraft AFTER that bell exists, so a restart
@@ -1904,7 +1810,6 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 }
 
 router._internals = {
-  extractContactNameFromSms,
   intakeOutcome,
   shouldReserveCorrectionJob,
 };
