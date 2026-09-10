@@ -66,7 +66,7 @@ test.each(['/rules', '/levels', '/allocations', '/service-evidence', '/new-busin
   expect((await call(path, 'technician', {})).status).toBe(403);
   for (const [key, fn] of Object.entries(program)) if (key.startsWith('save')) expect(fn).not.toHaveBeenCalled();
 });
-test.each(['?month=2026-13', '?technicianId=invalid', '?month[]=2026-09', '?status=paid'])('rejects malformed or unrecognized selectors %s', async query => {
+test.each(['?month=2026-13', '?month=0000-01', '?technicianId=invalid', '?month[]=2026-09', '?status=paid'])('rejects malformed or unrecognized selectors %s', async query => {
   expect((await call(query)).status).toBe(400);
   expect(program.overview).not.toHaveBeenCalled();
 });

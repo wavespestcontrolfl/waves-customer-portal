@@ -213,7 +213,9 @@ function resolveExclusion(visit, record, requested) {
 
 async function qualifyingReturn(conn, id, visit) {
   const returned = await visitFacts(conn, id, true);
-  const sameScope = !!visit.service_key && ['customer_id', 'property_id', 'service_key'].every(key => returned[key] === visit[key]);
+  const properties = await equivalentProperties(conn, await allocationCustomers(conn, visit.customer_id), visit.property_id);
+  const sameProperty = properties.length ? properties.includes(returned.property_id) : returned.property_id == null;
+  const sameScope = !!visit.service_key && sameProperty && ['customer_id', 'service_key'].every(key => returned[key] === visit[key]);
   if ([returned.id === visit.id, !sameScope, returned.status !== 'completed'].some(Boolean)) reject('The qualifying return must be a completed later service for the same property and service key.');
   if (!returnedAfter(returned, visit)) reject([returned, visit].some(row => row.backfilled) ? 'A backdated closeout records only its service day, so it cannot order a same-day return.' : 'The qualifying return must be completed after the original service. Same-day services need recorded completion times that establish the order.');
   return returned;
@@ -459,7 +461,8 @@ async function evidenceDetail(serviceId) {
       .where(q => properties.length ? q.whereIn('property_id', properties) : q.whereNull('property_id'))
       .orderBy('coverage_start', 'desc').then(rows => rows.map(row => calendarRow(row, ['coverage_start', 'coverage_end']))),
     db('scheduled_services as ss').leftJoin('services as s', 's.id', 'ss.service_id')
-      .where({ 'ss.customer_id': visit.customer_id, 'ss.property_id': visit.property_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
+      .where({ 'ss.customer_id': visit.customer_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
+      .where(q => properties.length ? q.whereIn('ss.property_id', properties) : q.whereNull('ss.property_id'))
       .where('ss.scheduled_date', '>=', visit.service_date).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
       .select('ss.id', 'ss.service_type', 'ss.scheduled_date').orderBy('ss.scheduled_date', 'desc').limit(200).then(rows => rows.map(row => calendarRow(row, ['scheduled_date']))),
   ]);
