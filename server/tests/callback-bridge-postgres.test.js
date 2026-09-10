@@ -245,6 +245,23 @@ run('callback bridge on PostgreSQL', () => {
     }
   });
 
+  test('after rollback, a sibling promise without its own attempt is not refreshable through the other card’s attempt', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed();
+    const sibling = await ledger.addHumanCommitment(conn, row.call_log_id, { party: 'waves', kind: 'callback', description: 'Call back about the fence quote', reviewedBy: staffId });
+    commitmentIds.push(sibling.id);
+    // The card attempt for `row` (both keys), unanswered; then the gate is rolled back.
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone, status: 'no-answer',
+      created_at: new Date(Date.now() + 1000), metadata: { relatedCommitmentId: row.id, relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } } });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    // An ordinary returned call afterwards: legacy proof for a refreshable row only.
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone, status: 'completed',
+      duration_seconds: 120, created_at: new Date(Date.now() + 2000) });
+    await ledger.refreshFulfillment(conn, row.call_log_id);
+    // The human-added sibling has no attempt of its own: human-touched, left to the human after rollback.
+    expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('open');
+  });
+
   test.each(require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS)('accepts the original caller in the selected customer’s %s field', async (column) => {
     const contact = '+15555550175';
     await conn('customers').where({ id: customerId }).update({ [column]: contact });
