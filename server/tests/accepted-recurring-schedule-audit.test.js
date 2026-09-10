@@ -32,6 +32,29 @@ test('finds a completed initial reservation that never became recurring', () => 
   expect(gap.issues).toEqual(expect.arrayContaining(['missing_recurrence', 'missing_applications']));
 });
 
+test('a paid booster off a complete series is not audited as a missing-recurrence plan visit', () => {
+  const rows = series('monthly', 12);
+  const booster = { ...rows[1], id: 'booster-1', is_recurring: false, recurring_pattern: null,
+    recurring_parent_id: 'visit-1', scheduled_date: '2040-01-20' };
+  expect(check(estimate(), [...rows, booster])).toEqual([]);
+});
+
+test('a booster cannot stand in for the recurring applications it rides alongside', () => {
+  const rows = series('monthly', 12);
+  const booster = { ...rows[1], id: 'booster-1', is_recurring: false, recurring_pattern: null,
+    recurring_parent_id: 'visit-1', scheduled_date: '2040-01-20' };
+  const [gap] = check(estimate(), [...rows.slice(0, 11), booster]);
+  expect(gap.issues).toEqual(['missing_applications']);
+  expect(gap.appointmentIds).not.toContain('booster-1');
+});
+
+test('a child whose is_recurring is NULL is a plan visit, not a booster — its missing recurrence is still reported', () => {
+  const rows = series('monthly', 12).map((row, index) => (index === 0 ? row : { ...row, is_recurring: null }));
+  const [gap] = check(estimate(), rows);
+  expect(gap.issues).toContain('missing_recurrence');
+  expect(gap.appointmentIds).toEqual(expect.arrayContaining(['child-0']));
+});
+
 test('accepted pest selection outranks the stale quarterly engine line', () => {
   const [gap] = check(estimate(), series('quarterly', 4));
   expect(gap).toMatchObject({ pattern: 'monthly', expectedVisits: 12, recordedVisits: 4 });

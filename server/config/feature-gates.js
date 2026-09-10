@@ -121,6 +121,14 @@ const gates = {
   // ignores propertyId — tonight's behavior exactly. Registered for
   // logGateStatus; consumers read it at CALL time (gateEnvValue).
   appPropertyScope: gateEnvValue('GATE_APP_PROPERTY_SCOPE'),
+  // GATE_APP_PROPERTY_TEXTS: appointment texts for a NON-primary saved
+  // property follow that property's own toggles (property_notification_prefs,
+  // ruling-R1 defaults). Off (ruling R5): the sender seams resolve the
+  // property decision and record it in property_text_decisions next to the
+  // customer-row decision — the shadow log — with zero change to sends. Only
+  // meaningful with GATE_APP_PROPERTY_SCOPE on. Consumers read it at CALL
+  // time (gateEnvValue).
+  appPropertyTexts: gateEnvValue('GATE_APP_PROPERTY_TEXTS'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
