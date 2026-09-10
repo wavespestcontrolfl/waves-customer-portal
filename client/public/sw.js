@@ -47,6 +47,31 @@ function shellAssetUrls(html) {
   return [...urls];
 }
 
+// Every cached /assets/* entry carries the build it belongs to, so pruning
+// can keep whole generations — the shell's direct assets AND the page chunks
+// it lazy-loads later — without a dependency manifest. The id is the shell's
+// asset set; hashed chunk names carry no build id of their own.
+const BUILD_HEADER = 'x-waves-build';
+function buildIdOf(assets) {
+  return [...assets].sort().join('|');
+}
+
+function tagWithBuild(response, buildId) {
+  const headers = new Headers(response.headers);
+  headers.set(BUILD_HEADER, buildId);
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+// The build the cached shell currently describes — what a lazily loaded
+// chunk fetched right now belongs to. Worker globals do not survive
+// termination, so read it from the cache each time (one small parse, and
+// only on an /assets/ cache miss).
+async function currentBuildId(cache) {
+  const shell = await cache.match(OFFLINE_URL);
+  if (!shell) return null;
+  return buildIdOf(shellAssetUrls(await shell.text()));
+}
+
 // Every navigation kicks off a background shell refresh, so two can overlap
 // across a deploy (old shell A and new shell B in flight together). Each
 // refresh reads the previous shell, writes, then prunes — interleaved, A's
@@ -68,6 +93,7 @@ async function replaceCompleteShell(shellResponse) {
   const html = await shellResponse.clone().text();
   const assets = shellAssetUrls(html);
   if (!assets.length) throw new Error('Shell contains no build assets');
+  const buildId = buildIdOf(assets);
 
   // Fetch every hashed dependency before storing the new HTML. If any fetch
   // fails, installation rejects and the previous worker/cache remains active;
@@ -77,39 +103,30 @@ async function replaceCompleteShell(shellResponse) {
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
     return [assetUrl, response];
   }));
-  // Read the previous shell's asset set BEFORE overwriting it: a changed set
-  // means a new build shipped and every hashed file outside it is dead weight.
-  const previousShell = await cache.match(OFFLINE_URL);
-  const previousAssets = previousShell ? shellAssetUrls(await previousShell.text()) : [];
-  await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, response)));
+  // Read the previous build BEFORE overwriting its shell: a different id
+  // means a deploy shipped, and everything older than that build is dead weight.
+  const previousBuildId = await currentBuildId(cache);
+  await Promise.all(assetResponses.map(([assetUrl, response]) => cache.put(assetUrl, tagWithBuild(response, buildId))));
   await cache.put(OFFLINE_URL, shellResponse);
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
   // navigation may read the old shell moments before its replacement. Two
-  // generations bound the cache; the one before them is dead weight.
-  if (!sameAssetSet(previousAssets, assets)) await pruneStaleAssets(cache, [...assets, ...previousAssets]);
+  // generations bound the cache.
+  if (previousBuildId !== buildId) await pruneStaleAssets(cache, [buildId, previousBuildId]);
 }
 
-function sameAssetSet(a, b) {
-  if (a.length !== b.length) return false;
-  const set = new Set(a);
-  return b.every(url => set.has(url));
-}
-
-// Drop every cached /assets/* entry neither the current nor the previous
-// shell references. Runs only when the shell's asset set changed (a deploy),
-// never on a plain navigation, so lazily loaded page chunks of the live
-// build stay cached between deploys and each build's chunks are re-fetched
-// at most once after it is two deploys old. Hashed names carry no build id,
-// so "referenced by a retained shell" is the only signal that survives SW
-// termination.
-async function pruneStaleAssets(cache, keepUrls) {
-  const keep = new Set(keepUrls);
+// Drop every cached /assets/* entry tagged with neither retained build (or
+// with no tag at all). Runs only when the shell's build changed (a deploy),
+// never on a plain navigation, so page chunks cached on use stay with their
+// build until it is two deploys old.
+async function pruneStaleAssets(cache, retainedBuildIds) {
+  const retained = new Set(retainedBuildIds.filter(Boolean));
   const requests = await cache.keys();
-  await Promise.all(requests.map(request => {
-    const pathname = new URL(request.url).pathname;
-    if (pathname.startsWith('/assets/') && !keep.has(pathname)) return cache.delete(request);
-    return undefined;
+  await Promise.all(requests.map(async request => {
+    if (!new URL(request.url).pathname.startsWith('/assets/')) return;
+    const cached = await cache.match(request);
+    const tag = cached && cached.headers.get(BUILD_HEADER);
+    if (!retained.has(tag)) await cache.delete(request);
   }));
 }
 
@@ -171,16 +188,24 @@ self.addEventListener('fetch', event => {
   // use; pruneStaleAssets evicts them once the shell moves to a newer build.
   if (url.pathname.startsWith('/assets/')) {
     event.respondWith(
-      caches.open(CACHE_NAME).then(cache => cache.match(event.request)).then(cached => {
+      caches.open(CACHE_NAME).then(cache => cache.match(event.request).then(cached => {
         if (cached) return cached;
         return fetch(event.request).then(response => {
           if (response.ok) {
             const clone = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+            // Tag the chunk with the build it was loaded for, so the prune
+            // keeps it with that build's shell instead of guessing from HTML.
+            const store = currentBuildId(cache)
+              .then(buildId => cache.put(event.request, tagWithBuild(clone, buildId || 'untagged')))
+              .catch(() => {});
+            // The respondWith promise is still pending here, so the event
+            // can still be extended; if a browser disagrees, fall back to
+            // fire-and-forget rather than failing the asset load.
+            try { event.waitUntil(store); } catch { /* fire and forget */ }
           }
           return response;
         });
-      })
+      }))
     );
     return;
   }
