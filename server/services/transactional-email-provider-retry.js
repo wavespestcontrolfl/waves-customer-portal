@@ -190,7 +190,15 @@ async function markRetryFailure(message, err, now = new Date()) {
       updated_at: now,
     })
     .returning('*');
-  if (updated && exhausted) await alertExhausted(updated, reason);
+  if (updated && exhausted) {
+    await alertExhausted(updated, reason);
+    // A summary whose provider block never cleared is a terminal failure
+    // for the office, exactly like a hard bounce.
+    if (updated.template_key === 'service.visit_summary') {
+      await require('./visit-completion-summary').reconcileSummaryEmailBounce(updated)
+        .catch((err) => logger.warn(`[email-provider-retry] visit summary bounce not reconciled for ${updated.id}: ${err.message}`));
+    }
+  }
   return updated || null;
 }
 

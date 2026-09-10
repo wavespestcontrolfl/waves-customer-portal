@@ -790,7 +790,10 @@ async function handleEmailMessageEvent(ev, message, client = db) {
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
-  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event)) {
+  // A provider block is retryable and stays with the retry rail (which
+  // reconciles the summary when its retries terminate); only a terminal
+  // bounce reopens the summary for office review here.
+  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerRetry.isProviderBlockedEvent(ev)) {
     await require('../services/visit-completion-summary').reconcileSummaryEmailBounce(message, client);
   }
   // A delivery event after a provider-retry resend is the durable retry for

@@ -146,8 +146,11 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
   // An unreadable account primary is a failed read (the registry keeps the
   // replay retryable), never a recipient that changed.
-  const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
-    { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
+  // An archived visit customer is never reauthorized (the archive keeps the
+  // contact columns, so the recipient comparison alone would pass).
+  const row = heldCustomer || await database('customers').where({ id: meta.customer_id }).whereNull('deleted_at').first();
+  if (!row) return { eligible: false, reason: 'visit_summary_unavailable' };
+  const customer = heldCustomer || await withAccountPrimaryContact(row, { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
   const recipient = getServiceContactSmsRecipient(customer);
   // Contact saves keep their formatting and the canonical sender normalizes
   // before Twilio, so the frozen number and the live one are compared by
@@ -225,8 +228,9 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // A secondary profile's blank contact fields fall back to the account
     // primary: that row is held too, and an unreadable primary is a failed
     // claim read, not a silently different recipient.
-    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
-      { db: trx, forShare: true, rethrow: true });
+    const liveCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();
+    if (!liveCustomer) return false;
+    const customer = await withAccountPrimaryContact(liveCustomer, { db: trx, forShare: true, rethrow: true });
     // The visit row is held too: a revocation or status change after the
     // mark committed serializes behind the provider request instead of
     // racing it.
@@ -567,7 +571,7 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
     .whereIn('status', ['closing', 'closed']).modify((query) => { if (held) query.forShare(); }).first('id', 'customer_id');
   if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
   const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database, forShare: held, rethrow: held },
+    await database('customers').where({ id: visit.customer_id }).whereNull('deleted_at').first(), { db: database, forShare: held, rethrow: held },
   );
   if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
@@ -690,7 +694,7 @@ async function retrySummaryThroughHandoff(message, dispatch, { destination = nul
   return database.transaction(async (trx) => {
     const visit = await trx('service_visits').where({ id: match[1] }).forShare().first('customer_id');
     if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
-    const customer = await trx('customers').where({ id: visit.customer_id }).forShare().first();
+    const customer = await trx('customers').where({ id: visit.customer_id }).whereNull('deleted_at').forShare().first();
     if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
     await createDefaultCustomerRows(trx, visit.customer_id);
     await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
@@ -771,9 +775,10 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   // An unreadable account primary is a failed read the coordinator retries,
   // never a secondary profile with no recipient.
-  const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database, rethrow: true },
-  );
+  const row = await database('customers').where({ id: visit.customer_id }).first();
+  // An archived customer receives nothing: both legs settle as suppressed.
+  const archived = !row || Boolean(row.deleted_at);
+  const customer = await withAccountPrimaryContact(row, { db: database, rethrow: true });
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   // A recorded member owns the effects; retained history never qualifies.
   const member = await VisitGroups.recordedPacketMember(packet.id, database);
@@ -781,9 +786,9 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
-  const context = { visit, member, customer, prefs, database, visible: Boolean(summary),
+  const context = { visit, member, customer, prefs, database, visible: !archived && Boolean(summary),
     summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
-    requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
+    requested: !archived && payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
   await sendSummarySms(context);
   await sendSummaryEmail(context);
   const effects = await database('visit_effects').where({ visit_id: visit.id })

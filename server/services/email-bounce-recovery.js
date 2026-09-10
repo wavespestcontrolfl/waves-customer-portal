@@ -813,10 +813,14 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     } else if (rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail) {
       // The bounce was to the customer's notification_prefs.billing_email — fix it
       // there (separate table) so future invoice/balance emails stop bouncing.
-      const affected = await db('notification_prefs')
-        .where({ customer_id: rec.customer_id })
-        .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
-        .update({ billing_email: correctedEmail, updated_at: new Date() })
+      const affected = await db.transaction(async (trx) => {
+        await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, correctedEmail);
+        return trx('notification_prefs')
+          .where({ customer_id: rec.customer_id })
+          .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
+          .update({ billing_email: correctedEmail, updated_at: new Date() });
+      })
         .catch((err) => {
           logger.warn(`[bounce-recovery] billing_email overwrite failed: ${err.message}`);
           return 0;
