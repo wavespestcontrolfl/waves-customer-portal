@@ -46,7 +46,10 @@ function scopeAdminFeedToRole(query, role) {
   );
 }
 
-async function customerPreferenceEnabled(customerId, preferenceKey) {
+// `scheduledServiceId` (app property scope, PR 3): the five appointment keys
+// follow the visit's NON-primary saved property (enforced under
+// GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
+async function customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId = null } = {}) {
   if (!preferenceKey) return true;
   if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
     logger.error(`[notifications] Unknown customer preference key: ${preferenceKey}`);
@@ -54,9 +57,16 @@ async function customerPreferenceEnabled(customerId, preferenceKey) {
   }
 
   try {
-    const prefs = await db('notification_prefs')
+    const PropertyTexts = require('./property-notification-prefs');
+    // Only the five appointment keys are property-owned; the resolver needs
+    // the whole toggle set of the customer row to compare against.
+    const propertyOwned = !!scheduledServiceId && PropertyTexts.APPOINTMENT_TOGGLES.includes(preferenceKey);
+    let prefs = await db('notification_prefs')
       .where({ customer_id: customerId })
-      .first(preferenceKey);
+      .first(...(propertyOwned ? [...new Set([...PropertyTexts.PROPERTY_PREF_COLUMNS, preferenceKey])] : [preferenceKey]));
+    if (propertyOwned) {
+      prefs = await PropertyTexts.prefsForVisit(prefs, customerId, scheduledServiceId, 'bell');
+    }
     return !prefs || prefs[preferenceKey] !== false;
   } catch (err) {
     // Preference lookup uncertainty must not become an unwanted native push.
@@ -292,7 +302,13 @@ const NotificationService = {
   async notifyCustomer(customerId, category, title, body, opts = {}) {
     const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOptsRaw } = opts;
 
-    if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
+    // The visit this notification is about (same sources as the deep-link
+    // qualifier below): its saved property may own the toggle.
+    const preferenceVisitId = createOptsRaw.appointmentId
+      || (createOptsRaw.metadata && typeof createOptsRaw.metadata === 'object'
+        ? (createOptsRaw.metadata.appointmentId || createOptsRaw.metadata.scheduledServiceId) : null)
+      || null;
+    if (!(await customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId: preferenceVisitId }))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
     }
 

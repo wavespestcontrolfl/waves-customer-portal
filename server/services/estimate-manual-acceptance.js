@@ -320,6 +320,8 @@ async function markEstimateManuallyAccepted({
   // estimate yet at downstream time, so the program-agreement start date
   // must be handed in rather than looked up. Null = lookup/fallback.
   agreementStartDate = null,
+  // Accept-on-book links these same-customer rows after conversion commits.
+  bookedAppointmentIds = [],
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -679,6 +681,7 @@ async function markEstimateManuallyAccepted({
         const convertOptions = {
           database: trx,
           skipAutoSchedule: true,
+          bookedAppointmentIds,
           skipMembershipEmail: true,
           skipSetupInvoice: !annualPrepaySelected,
           // The commercial-schedule admin notification writes through the

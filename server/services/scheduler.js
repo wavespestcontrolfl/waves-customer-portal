@@ -2482,6 +2482,19 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Stripe webhook events purge failed: ${err.message}`);
     }
+    // Same 90-day sweep for property_text_decisions (the ruling-R5 shadow
+    // log for appointment texts by saved property): the review window is a
+    // week; 90 days keeps the flip's evidence around.
+    try {
+      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const db = require('../models/db');
+      if (await db.schema.hasTable('property_text_decisions')) {
+        const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
+        if (purged > 0) logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
+      }
+    } catch (err) {
+      logger.error(`property_text_decisions purge failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3725,6 +3738,10 @@ function initScheduledJobs() {
               ? claimMeta.stamp_receipt_invoice_id
               : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
+            // The visit a deferred appointment notice is about: the consent
+            // validator resolves the per-property toggles from it (app
+            // property scope, PR 3) exactly like the immediate send did.
+            ...(claimMeta.scheduled_service_id ? { appointmentId: claimMeta.scheduled_service_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
             // re-queues here minutes later — still an answer to the
@@ -3910,8 +3927,12 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
+          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+            // MOVE_HOLD: the replay now names its visit (appointmentId, app
+            // property scope PR 3), so a grouped-move hold stamped on that
+            // visit — or its fail-closed read — answers the send exactly like
+            // the immediate path: a deferral, never a terminal block.
             // Transient provider failure (Twilio 429/5xx/timeout) or a DB
             // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
             // no retry metadata but is retry-advised by contract): re-queue

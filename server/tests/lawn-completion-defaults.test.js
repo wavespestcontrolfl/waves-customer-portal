@@ -93,6 +93,48 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
 });
 
+test('every option carries the protocol row\'s application mode, so an added herbicide records the prescribed broadcast, not the catalog\'s spot default', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push(
+    { productId: 'speedzone', defaultInPlan: false, gates: { weeds_present: true }, applicationMode: 'broadcast' },
+    { productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+  );
+  plan.mixCalculator.conditionalOptions = [
+    // The line parse tags every SpeedZone line SPOT_ALLOWANCE; the protocol row's explicit broadcast mode wins (Codex r13 P1).
+    { role: 'conditional', selected: false, scope: 'SPOT_ALLOWANCE', product: { id: 'speedzone', name: 'SpeedZone', category: 'herbicide', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', category: 'herbicide', formulation: 'Water-dispersible granule (WG)', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'unlisted', name: 'Not in this protocol', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options).toEqual([
+    { product: { id: 'product', name: 'Fixture product' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'speedzone', name: 'SpeedZone' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' },
+  ]);
+});
+
+test('a protocol row without an explicit mode still lets the parsed spot scope decide', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'celsius', defaultInPlan: false, gates: {} });
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, scope: 'SPOT_ALLOWANCE', product: { id: 'celsius', name: 'Celsius WG', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options.at(-1)).toEqual({ product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' });
+});
+
+test('a deactivated catalog product is offered neither as a default nor under "Additional work"', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'retired', defaultInPlan: false, gates: {}, applicationMode: 'broadcast' });
+  plan.mixCalculator.items[0].product.active = false;
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, product: { id: 'retired', name: 'Retired herbicide', active: false } },
+  ];
+  const result = buildLawnCompletionDefaults(plan, context);
+  // The completion writer rejects an inactive product row, so the option would
+  // be an action that cannot be completed (Codex r12 P2).
+  expect(result.items).toEqual([]);
+  expect(result.options).toEqual([]);
+});
+
 test('a nonmember can use an explicitly assigned window; a spot default stays spot work', () => {
   const { plan, context } = fixture();
   plan.propertyGate.serviceTier = null;

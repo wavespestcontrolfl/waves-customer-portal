@@ -1196,7 +1196,16 @@ router.post('/call', async (req, res, next) => {
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
     const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
+    // A callback attempt placed while the card policy is on is stamped so
+    // rollback keeps its strict customer-leg proof and completion action,
+    // whether the UI linked the commitment (card) or the source call (the
+    // existing Call Log action). Pre-policy attempts keep the legacy proof.
     const metadata = relatedCommitmentId ? { relatedCommitmentId } : relatedCallId ? { relatedCallId } : null;
+    const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
+    if (cardPolicy) metadata.callback_policy = 'card';
+    // The dial target is persisted canonical so the live-call interlock can
+    // match it exactly.
+    const dialTo = normalizePhone(to) || to;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
     const toLast10 = normalizePhoneLast10(to);
@@ -1246,23 +1255,27 @@ router.post('/call', async (req, res, next) => {
       : '';
 
     let bridgeClaimId = null;
-    if (relatedCommitmentId) bridgeClaimId = await db.transaction(async (trx) => {
-      if (!require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
+    // Every callback attempt under the card policy takes the customer claim
+    // and live-call interlock — the card AND the existing Call Log action —
+    // so two surfaces cannot ring one customer twice.
+    if (relatedCommitmentId || cardPolicy) bridgeClaimId = await db.transaction(async (trx) => {
+      if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
-      // before call_log is inserted, keyed to the CUSTOMER being called
-      // (the linked customer, else the dialed number): every card dials
-      // from the shared main line, so a line-wide key would let one ringing
-      // callback block every other customer's card, while a per-commitment
-      // key would let two promises to one customer ring them twice at once.
+      // before call_log is inserted, keyed to the NUMBER being called: every
+      // card dials from the shared main line, so a line-wide key would let
+      // one ringing callback block every other customer's card; a
+      // per-commitment or per-customer key would let a linked and an
+      // unlinked attempt ring the same phone twice at once.
       const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
         ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${customer?.id || normalizePhone(to)}`]);
+        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${dialTo}`]);
       if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
-      // The live-call interlock is customer-specific: the linked customer,
-      // or the dialed number when the source call never linked one.
+      // The live-call interlock covers the linked customer AND the dialed
+      // number, so a linked and an unlinked attempt to one phone collide.
       const active = await require('../services/call-bridge').activeBridgeCall(
-        { source, customerId: customer?.id || null, toPhone: customer ? null : normalizePhone(to) }, trx);
+        { source, customerId: customer?.id || null, toPhone: dialTo }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
+      if (!relatedCommitmentId) return claim.rows[0].id;
       const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
         .where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' })).forUpdate('cl').first('cl.*');
       const promise = original ? await trx('call_commitments as cc').where({ 'cc.id': relatedCommitmentId })
@@ -1294,7 +1307,7 @@ router.post('/call', async (req, res, next) => {
         throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       }
       bridged = await placeBridgeCall({
-        to, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+        to: dialTo, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
       });
     } catch (err) {
       // An ambiguous create can already be ringing. Its claim and initiated

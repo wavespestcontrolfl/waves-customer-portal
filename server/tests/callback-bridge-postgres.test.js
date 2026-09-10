@@ -19,7 +19,7 @@ run('callback bridge on PostgreSQL', () => {
   const gates = require('../config/feature-gates').gates;
   const phone = '+15555550176', cell = '+15555550177';
   const from = `+1555555${randomInt(1000, 10000)}`;
-  const claimKey = () => `callback-card-bridge:${customerId}`;
+  const claimKey = () => `callback-card-bridge:${phone}`;
   const callIds = [], commitmentIds = [];
   let conn, handler, customerId, staffId, originalGates, originalFrom;
 
@@ -53,7 +53,7 @@ run('callback bridge on PostgreSQL', () => {
     callIds.push(...await conn('call_log').where({ from_phone: from, direction: 'outbound' }).pluck('id'));
     await conn('call_commitments').whereIn('id', commitmentIds).del();
     await conn('call_log').whereIn('id', callIds).del();
-    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), `callback-card-bridge:${phone}`]).del();
+    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), 'callback-card-bridge:+15555550178', 'callback-card-bridge:+15555550175']).del();
     await conn('customers').where({ id: customerId }).del();
     await conn('technicians').where({ id: staffId }).del();
     callIds.length = commitmentIds.length = 0;
@@ -136,9 +136,35 @@ run('callback bridge on PostgreSQL', () => {
     } finally {
       callIds.push(...await conn('call_log').where({ customer_id: otherCustomer }).pluck('id'));
       await conn('call_log').whereIn('id', callIds).del();
-      await conn('sms_send_claims').where({ claim_key: `callback-card-bridge:${otherCustomer}` }).del();
       await conn('customers').where({ id: otherCustomer }).del();
     }
+  });
+
+  test('the existing Call Log callback action takes the same customer interlock as the card', async () => {
+    const row = await seed();
+    expect((await invoke(row)).status).toBe(200);
+    const legacy = await invoke(row, { relatedCommitmentId: undefined, source: 'call-log-callback', relatedCallId: row.call_log_id });
+    expect(legacy.status).toBe(409);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const placed = await conn('call_log').where({ from_phone: from, direction: 'outbound' }).first();
+    expect(placed.metadata).toMatchObject({ relatedCommitmentId: row.id, callback_policy: 'card' });
+  });
+
+  test('an unlinked card bridge and the Call Log action for the same number share one interlock', async () => {
+    const row = await seed({ linked: false });
+    expect((await invoke(row, { customerId: undefined })).status).toBe(200);
+    const legacy = await invoke(row, { relatedCommitmentId: undefined, source: 'call-log-callback', relatedCallId: row.call_log_id });
+    expect(legacy.status).toBe(409);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  test('an unlinked callback persists its canonical dial target so the live-call interlock matches it', async () => {
+    const row = await seed({ linked: false });
+    const result = await invoke(row, { customerId: undefined, to: '(555) 555-0176' });
+    expect(result.status).toBe(200);
+    const placed = await conn('call_log').where({ id: result.json.callLogId }).first();
+    expect(placed.to_phone).toBe(phone);
+    expect(await require('../services/call-bridge').activeBridgeCall({ source: 'admin-callback', customerId: null, toPhone: phone }, conn)).toMatchObject({ id: placed.id });
   });
 
   test.each(['gate', 'version', 'extraction', 'staff_phone'])('%s refusal cannot contact the provider', async (reason) => {
@@ -227,6 +253,37 @@ run('callback bridge on PostgreSQL', () => {
       // Kept when the customer leg ended, not when the staff leg was dialed.
       expect(new Date(proof.matched_at).toISOString()).toBe(legEnded);
     } else expect(proof).toBeNull();
+  });
+
+  test.each(['policy', 'legacy'])('gate rollback: a %s Call Log attempt with an unanswered customer leg is judged by its own contract', async (kind) => {
+    const row = await seed();
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      metadata: kind === 'policy'
+        ? { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } }
+        : { relatedCallId: row.call_log_id } });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    const source = await conn('call_log').where({ id: row.call_log_id }).first();
+    const proof = await require('../services/call-commitments').resolveFulfillment(conn, row, source);
+    // Under the card policy the unanswered leg is not proof; a pre-policy
+    // attempt keeps the legacy connected-call rule it was placed under.
+    if (kind === 'policy') expect(proof).toBeNull();
+    else expect(proof).toMatchObject({ basis: 'callback_returned_connected_outbound_call' });
+  });
+
+  test('gate rollback: a claimed callback still closes on a policy-stamped Call Log attempt through refresh', async () => {
+    const row = await seed();
+    const staff = await conn('technicians').where({ id: staffId }).first();
+    const claimed = await require('../services/callback-cards').actOnCallback(conn, row.id, { action: 'claim', actorId: staff.id, expectedAt: row.updated_at });
+    expect(claimed.human_state).toBe('confirmed');
+    const legEnded = new Date(Date.now() + 1000).toISOString();
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      created_at: new Date(Date.now() + 1000),
+      metadata: { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } });
+    process.env.GATE_CALLBACK_CARD = 'false';
+    expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
   });
 
   test.each(['conversation', 'unanswered', 'voicemail'])('gate rollback retains customer-leg proof: %s', async (evidence) => {
