@@ -65,15 +65,18 @@ async function lastManualAskAt(customerId, { since } = {}) {
     .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
     .orderBy('created_at', 'desc')
     .select('message_body', 'created_at', 'status', 'metadata');
-  // An unresolved provider attempt conservatively holds the same 72-hour
-  // window. These pre-send markers survive failed delivery-log writes.
-  const reservations = outbound.filter(row => row.metadata?.review_ask_reservation === true);
+  const metadata = row => {
+    try { return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}; }
+    catch { return {}; }
+  };
+  // Pre-send evidence survives provider-log and settlement failures.
+  const reservations = outbound.filter(row => metadata(row).review_ask_reservation === true);
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);
     return at >= sinceAt && (!latest || at > latest) ? at : latest;
   }, null);
   const candidates = outbound.filter(row => row.status !== 'sending'
-    && row.metadata?.review_ask_reservation !== true && looksLikeReviewAsk(row.message_body));
+    && metadata(row).review_ask_reservation !== true && looksLikeReviewAsk(row.message_body));
   if (!candidates.length) return reservedAt;
   const sends = await db('review_requests')
     .where({ customer_id: customerId })
