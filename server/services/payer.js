@@ -207,9 +207,17 @@ async function updatePayer(id, body) {
           await trx('invoices').whereIn('id', withdrawn.map((invoice) => invoice.id)).update({
             status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now(),
           });
-          await trx('service_visits').whereIn('id', trx('visit_completion_packets')
-            .whereIn('id', withdrawn.map((invoice) => invoice.visit_completion_packet_id)).select('visit_id'))
+          const packetIds = withdrawn.map((invoice) => invoice.visit_completion_packet_id);
+          await trx('service_visits').whereIn('id', trx('visit_completion_packets').whereIn('id', packetIds).select('visit_id'))
             .update({ billing_hold: false, updated_at: trx.fn.now() });
+          // The office-review state the withdrawal recorded is lifted with it.
+          await trx('visit_completion_packets').whereIn('id', packetIds).where({ status: 'done' })
+            .whereRaw("error::jsonb->>'reason' = 'payer_assigned'").whereRaw("error::jsonb->>'payerId' = ?", [String(pid)])
+            .update({ error: null, updated_at: trx.fn.now() });
+          const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+            .whereRaw("payload->>'reason' = 'payer_assigned'").whereRaw("payload->>'payerId' = ?", [String(pid)])
+            .whereIn(trx.raw("payload->>'packetId'"), packetIds).select('id');
+          for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
         }
       }
       return { payer: row };

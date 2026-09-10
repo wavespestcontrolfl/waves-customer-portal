@@ -899,6 +899,22 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
         await trx("invoices").where({ id: invoiceId }).whereIn("status", ["scheduled", "sending"])
           .update({ status: "draft", scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date() });
         await trx("service_visits").where({ id: visit.id }).update({ billing_hold: true, updated_at: new Date() });
+        // The same office-review state the coordinator records when it finds
+        // the payer itself: the closed packet carries the office_required
+        // error and the visit_closeout_review alert is raised once, so the
+        // withdrawn collection has an operator signal instead of a silent
+        // draft (a later deactivation of the payer resolves both, payer.js).
+        await trx("visit_completion_packets").where({ id: packetId, status: "done" })
+          .update({ error: JSON.stringify({ payment: "office_required", reason: "payer_assigned", payerId }), updated_at: new Date() });
+        const member = await trx("scheduled_services").where({ id: billed[0] }).first("id", "technician_id");
+        const open = await trx("dispatch_alerts").where({ type: "visit_closeout_review" }).whereNull("resolved_at")
+          .whereRaw("payload->>'packetId' = ?", [packetId]).whereRaw("payload->>'reason' = 'payer_assigned'").first("id");
+        if (member && !open) {
+          await require("./dispatch-alerts").createAlert({
+            type: "visit_closeout_review", severity: "warn", techId: member.technician_id, jobId: member.id, trx,
+            payload: { visitId: visit.id, packetId, payment: "office_required", reason: "payer_assigned", payerId },
+          });
+        }
         return { payerBilled: true, payerId };
       }
     }
