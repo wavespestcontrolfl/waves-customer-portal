@@ -22,6 +22,10 @@ jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) =>
 const mockSgConfigured = jest.fn(() => true);
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: (...a) => mockSgConfigured(...a) }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: () => false }));
+// Statement delivery closes out the open visits behind its linked child
+// invoices (GitHub r9 P1 #4127) — the closeout itself is covered by its own suites.
+const mockCloseOutVisitsForStatement = jest.fn(async () => ({ attempted: 0, closed: 0 }));
+jest.mock('../services/invoice-issued-closeout', () => ({ closeOutVisitsForStatement: (...a) => mockCloseOutVisitsForStatement(...a) }));
 
 const { sendStatementEmail } = require('../services/payer-statement-email');
 
@@ -88,6 +92,8 @@ test('sends via SendGrid + stamps finalized→sent', async () => {
   }));
   expect(updates).toHaveLength(1);
   expect(updates[0]).toMatchObject({ status: 'sent' });
+  // First delivery → the linked child invoices' open visits are closed out.
+  expect(mockCloseOutVisitsForStatement).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ trigger: 'sent' }));
 });
 
 test('an in-flight dedupe collision is reported as deduped (no false failure) and does not stamp', async () => {

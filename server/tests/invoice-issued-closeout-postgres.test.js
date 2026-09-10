@@ -109,8 +109,14 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   test('a linked open visit on or before today resolves; closed, future and cancelled visits do not', async () => {
     const open = await visit();
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id }), { today: TODAY })).svc.id).toBe(open.id);
-    const past = await visit({ date: '2040-02-20', status: 'on_site' });
+    const past = await visit({ date: '2040-02-20', status: 'pending' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY })).svc.id).toBe(past.id);
+    // In-progress visits stay with their technician (GitHub r9 P1): a running
+    // job timer and a completion of their own — the office closeout leaves them.
+    const onSite = await visit({ date: '2040-02-21', status: 'on_site' });
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: onSite.id, date: '2040-02-21' }), { today: TODAY })).toMatchObject({ svc: null, reason: 'visit_on_site' });
+    const enRoute = await visit({ date: '2040-02-22', status: 'en_route' });
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: enRoute.id, date: '2040-02-22' }), { today: TODAY })).toMatchObject({ svc: null, reason: 'visit_en_route' });
     const future = await visit({ date: '2040-03-05' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: future.id, date: '2040-03-05' }), { today: TODAY })).reason).toBe('visit_in_future');
     const done = await visit({ status: 'completed', date: '2040-02-01' });

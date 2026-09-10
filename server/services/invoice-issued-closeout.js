@@ -14,8 +14,14 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 
-// A visit that can still be closed out (job-status.js live vocabulary).
-const OPEN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+// A visit that can still be closed out by the OFFICE (job-status.js live
+// vocabulary, minus the in-progress states): a visit whose technician is
+// en route or on site has a running job timer and a completion of its own
+// coming — a quiet backfill closeout would complete it while its
+// time_entries stay open, inflating time-on-site and job cost (GitHub r9
+// P1 #4127). Those stay open for the technician; the invoice's delivery is
+// recorded either way.
+const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 
 function dateOnly(value) {
   if (!value) return null;
@@ -121,6 +127,28 @@ async function issuedCloseoutOwnsRecord(serviceRecordId, conn = db) {
     try { notes = JSON.parse(notes); } catch { return false; }
   }
   return Boolean(notes && typeof notes === 'object' && notes.issuedInvoiceCloseout);
+}
+
+// Payer-statement surfaces (GitHub r9 P1 #4127): a NET-terms statement
+// delivers and settles its accrued child invoices as one document, so the
+// individual-send hooks never see them. Statement delivery (markStatementSent)
+// and settlement (the reconcile route and the Stripe webhook, AFTER their
+// money transaction commits — the closeout takes its own row locks) run the
+// closeout for every linked child. Best-effort, sequential, never throws.
+async function closeOutVisitsForStatement(statementId, { trigger, actorTechnicianId = null, conn = db } = {}) {
+  let invoiceIds = [];
+  try {
+    invoiceIds = (await conn('invoices').where({ payer_statement_id: statementId }).whereNotNull('scheduled_service_id').select('id')).map((r) => r.id);
+  } catch (err) {
+    logger.error(`[invoice-issued-closeout] statement ${statementId}: child invoice lookup failed — no closeouts run: ${err.message}`);
+    return { attempted: 0, closed: 0 };
+  }
+  let closed = 0;
+  for (const invoiceId of invoiceIds) {
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId, conn });
+    if (out?.closed) closed += 1;
+  }
+  return { attempted: invoiceIds.length, closed };
 }
 
 // Entry point for the send and record-payment paths. Best-effort by
@@ -266,6 +294,7 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
 
 module.exports = {
   issuedCloseoutOwnsRecord,
+  closeOutVisitsForStatement,
   OPEN_VISIT_STATUSES,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,

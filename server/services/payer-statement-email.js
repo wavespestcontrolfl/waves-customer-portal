@@ -286,9 +286,16 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
 // SMS-delivered statement enters the viewed/dunning lifecycle exactly like
 // an emailed one (GH Codex #3844 r2 P1).
 async function markStatementSent(statementId, database = db) {
-  await database('payer_statements')
+  const updated = await database('payer_statements')
     .where({ id: statementId, status: 'finalized' })
     .update({ status: 'sent', sent_at: database.fn.now(), updated_at: database.fn.now() });
+  // First delivery only (the update matched): every linked child invoice is
+  // now delivered, so its open visit closes out like an individually sent
+  // invoice (GitHub r9 P1 #4127). Best-effort by contract.
+  if (Number(updated) > 0) {
+    const { closeOutVisitsForStatement } = require('./invoice-issued-closeout');
+    await closeOutVisitsForStatement(statementId, { trigger: 'sent', conn: database });
+  }
 }
 
 module.exports = { sendStatementEmail, resolveApRecipient, forcedRetryKey, markStatementSent };

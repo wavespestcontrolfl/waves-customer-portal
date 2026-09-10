@@ -126,6 +126,20 @@ describe('source contracts', () => {
     expect(retryAt).toBeGreaterThan(batch.indexOf("skipped.push({ invoiceId, reason: `status=${invoice.status}` })"));
     expect(retryAt).toBeLessThan(batch.indexOf('sendReceiptEmail(invoiceId)'));
   });
+  test('GitHub r9: statement delivery + settlement run the closeout for linked children AFTER commit; the locked recheck re-resolves project ownership', () => {
+    const email = fs.readFileSync(path.join(__dirname, '../services/payer-statement-email.js'), 'utf8');
+    expect(email).toMatch(/const updated = await database\('payer_statements'\)[\s\S]{0,300}?if \(Number\(updated\) > 0\) \{[\s\S]{0,200}?closeOutVisitsForStatement\(statementId, \{ trigger: 'sent', conn: database \}\)/);
+    const payers = fs.readFileSync(path.join(__dirname, '../routes/admin-payers.js'), 'utf8');
+    const settleAt = payers.indexOf("{ database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });");
+    const closeAt = payers.indexOf("closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null })");
+    expect(settleAt).toBeGreaterThan(-1);
+    expect(closeAt).toBeGreaterThan(settleAt);
+    const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+    expect(webhook).toMatch(/if \(settledNow\) \{[\s\S]{0,400}?closeOutVisitsForStatement\(statementId, \{ trigger: 'paid' \}\)/);
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,900}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
+    expect(completion).toMatch(/if \(err && err\.code === 'project_required_completion' && issuedInvoiceCloseout\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
+  });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const persistAt = source.indexOf('const persistRecord = async (trx) => {');

@@ -4918,6 +4918,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (!lockedDay || lockedDay !== serviceDateOnly(svc.scheduled_date) || lockedDay > etDateString()) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
+            // Project ownership re-resolved from the LOCKED row (GitHub r9 P2
+            // #4127): the wrapper's strict profile check and the unlocked
+            // project_required_completion guard above read the identity
+            // before this lock; a reclassification to a project-backed profile
+            // that committed in between must refuse here — a project-backed
+            // visit completes only through its project close, never through
+            // this form-less lane. Strict: an unresolvable identity refuses too.
+            const { resolveCompletionProfileForScheduledService: resolveLockedProfile } = require('../services/service-completion-profiles');
+            const lockedProfile = await resolveLockedProfile(lockedSvcRow, trx, { strict: true });
+            if (lockedProfile?.requiresProject || lockedProfile?.projectBacked) {
+              throw Object.assign(new Error('visit became project-backed during the issued-invoice closeout'), { code: 'project_required_completion' });
+            }
           }
           if (completionPricingPlan) {
             await require('../services/completion-pricing').commitCompletionPricingReview(trx, completionPricingPlan, {
@@ -6636,6 +6648,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was rescheduled while its invoice was being issued — the visit stays open on its new day.',
             code: 'issued_visit_rescheduled',
+          } });
+        }
+        if (err && err.code === 'project_required_completion' && issuedInvoiceCloseout) {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This service must be completed through a project.',
+            code: 'project_required_completion',
           } });
         }
         throw err;

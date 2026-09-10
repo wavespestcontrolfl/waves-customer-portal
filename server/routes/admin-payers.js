@@ -296,6 +296,10 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
       }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });
     });
 
+    // Settled → every linked child invoice is paid: close out their open
+    // visits, AFTER the money transaction committed (the closeout takes its
+    // own row locks; GitHub r9 P1 #4127). Best-effort by contract.
+    await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null });
     // Paid offline → stop dunning (best-effort, outside the settle txn; the
     // eligibility filter already excludes `paid`, so this is just hygiene).
     await StatementFollowups.stopOnStatementSettled(owned.id)
