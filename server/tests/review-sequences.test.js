@@ -921,6 +921,30 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       };
     }
 
+    test('an uncertain reservation spaces the cadence without permanently stopping it', async () => {
+      const rows = fixture('seq-reservation', { lastAskAgoMs: 73 * 3600000 });
+      rows.sms_log = [{ id: 'reserved-attempt', customer_id: 'seq-reservation-c', direction: 'outbound',
+        status: 'sending', message_body: 'Please leave a Google review.',
+        metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 3600000) }];
+      const mock = makeMock(rows);
+      db.mockImplementation(mock);
+
+      await ReviewService.processReviewSequences();
+
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(seq.current_step).toBe(1);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(seq.next_run_at.getTime()).toBeGreaterThanOrEqual(Date.now() + 71 * 3600000 - 1000);
+      jest.useFakeTimers().setSystemTime(new Date(seq.next_run_at.getTime() + 1000));
+      try {
+        expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     test('a follow-up due by the plan but under 72h after the last delivered ask is held to lastSent + 72h, nothing dropped', async () => {
       const lastAskAgoMs = 40 * 3600000;
       const mock = makeMock(fixture('seq-3d1', { lastAskAgoMs }));
@@ -1529,6 +1553,34 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(new Date(row.scheduled_for).getTime()).toBe(new Date(out.nextAllowedAt).getTime());
       expect(row.status).toBe('pending');
+    });
+
+    test('a transient accepted stamp failure is repaired without sending the queued request again', async () => {
+      let failStamp = true;
+      const mock = makeMock({
+        customers: [{ id: 'stamp-c', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'stamp-r', customer_id: 'stamp-c', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'stamp-token', location_id: 'venice', scheduled_for: new Date(Date.now() - 60000), created_at: new Date() }],
+      }, {
+        onUpdate(table, patch) {
+          if (table === 'review_requests' && patch.sms_sent_at && failStamp) {
+            failStamp = false;
+            throw new Error('transient stamp failure');
+          }
+        },
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.sendSMS('stamp-r');
+
+      expect(mock.__state.rows.review_requests[0]).toMatchObject({ status: 'sent', sms_sent_at: expect.any(Date) });
+      expect(mock.__state.rows.sms_log).toHaveLength(0);
+      jest.useFakeTimers().setSystemTime(new Date(Date.now() + 73 * 3600000));
+      try {
+        await ReviewService.processScheduled();
+        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
     });
 
     test('an uncertain shared-sender handoff retains its reservation and schedules no retry inside 72h', async () => {
@@ -3390,6 +3442,20 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences).toHaveLength(1);
   });
 
+  test('an expired uncertain reservation does not prevent a new cadence enrollment', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'reservation-c', first_name: 'Synthetic', phone: '+12025550101', nearest_location_id: 'bradenton' }],
+      sms_log: [{ id: 'reservation-sms', customer_id: 'reservation-c', direction: 'outbound', status: 'sending', message_body: 'Please leave a Google review.', metadata: { review_ask_reservation: true }, created_at: new Date(Date.now() - 4 * 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'reservation-c', completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
   test('a hand-sent review ask in the last 30 days stands the cadence down (manual_ask_recent)', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
@@ -4694,6 +4760,24 @@ test.each(['spacing', 'pin'])('a %s write that loses the pending row cannot revi
 });
 
 describe('direct outreach serialization', () => {
+  test('a transient accepted stamp failure records the send before allowing another outreach attempt', async () => {
+    const customer = { id: 'direct-stamp-retry', first_name: 'Synthetic', phone: '+12025550101' };
+    let failStamp = true;
+    const mock = makeMock({ customers: [customer] }, { onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.sms_sent_at && failStamp) {
+        failStamp = false;
+        throw new Error('transient delivery stamp failure');
+      }
+    } });
+    db.mockImplementation(mock);
+
+    expect(await ReviewService.sendOutreachTouch({ customer, channel: 'sms' })).toMatchObject({ ok: true, sent: true });
+    expect(mock.__state.rows.review_requests[0]).toMatchObject({ status: 'sent', sms_sent_at: expect.any(Date) });
+    expect(mock.__state.rows.sms_log).toHaveLength(0);
+    expect(await ReviewService.sendOutreachTouch({ customer, channel: 'sms' })).toMatchObject({ ok: false, deferred: true });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test.each(['sms', 'email'])('%s respects a delivered staff ask and retains truthful retry ownership', async channel => {
     const customer = { id: 'direct-spacing', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
     const deliveredAt = new Date();
