@@ -10756,6 +10756,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               selectedFrequency,
               estData: acceptedEstDataForPricing,
               rowServiceType: committedAppointment.service_type,
+              reservation: committedAppointment,
             });
             if (tierStamp) {
               await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
@@ -10814,6 +10815,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 selectedFrequency,
                 estData: acceptedEstDataForPricing,
                 rowServiceType: committedAppointment.service_type,
+                reservation: committedAppointment,
               });
               if (tierStamp) {
                 await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
@@ -20388,7 +20390,7 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
 // ALL THREE adoption paths must stamp: fresh slotId reservation, held
 // existing appointment, and the direct-update branch). Returns null for
 // non-T&S rows; seeded follow-ups copy service_id from the parent.
-async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estData = null, rowServiceType = '' } = {}) {
+async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estData = null, rowServiceType = '', reservation = null } = {}) {
   // Only a row that IS the T&S visit gets stamped — in a split bundle
   // (pest + T&S) the adopted slot can be the pest visit (codex P2 r5).
   if (recurringServiceKey({ name: rowServiceType, service_type: rowServiceType }) !== 'tree_shrub') return null;
@@ -20414,11 +20416,25 @@ async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estDat
   }
   if (!serviceKey) return null;
   const stamp = serviceName ? { service_type: serviceName } : {};
-  const catalogRow = await trx('services')
-    .where({ service_key: serviceKey })
-    .first('id', 'name')
-    .catch(() => null);
+  const capacity = require('../services/combined-visit-capacity').capacityFromReservation(reservation);
+  const preserveCapacity = reservation?.reservation_policy_version === 2 || capacity?.version === 2;
+  const query = trx('services').where({ service_key: serviceKey });
+  if (preserveCapacity) query.forShare();
+  const catalogRow = await query.first('id', 'name', ...(preserveCapacity
+    ? ['default_duration_minutes', 'scheduling_duration_policy'] : [])).catch((cause) => {
+    if (preserveCapacity) throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause });
+    return null;
+  });
   if (catalogRow) {
+    if (preserveCapacity) {
+      const allocatedMinutes = Number(capacity?.version === 2
+        ? capacity.durations[capacity.services.indexOf('tree_shrub')]
+        : reservation.estimated_duration_minutes);
+      if (!Number.isFinite(allocatedMinutes) || allocatedMinutes <= 0
+        || require('../services/service-library').serviceDurationMinutes(catalogRow, 60, { preserveCapacity: true }) > allocatedMinutes) {
+        throw require('../services/scheduling/arrival-route').capacityError('service_duration_changed');
+      }
+    }
     stamp.service_id = catalogRow.id;
     if (!stamp.service_type && catalogRow.name) stamp.service_type = catalogRow.name;
   }

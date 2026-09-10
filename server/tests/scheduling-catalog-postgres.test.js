@@ -148,4 +148,43 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
       if (!editor.isCompleted()) await editor.rollback();
     }
   });
+
+  test.each(strictBranches)('%s cannot stamp a newly matched identity into its fallback allowance', async (
+    _label, key, estimate, profileOptions,
+  ) => {
+    const original = await mockPg('services').where({ id: ids[key] }).first();
+    if (key === 'exact') await mockPg('services').where({ id: ids[key] }).del();
+    else if (key === 'cadence') await mockPg('services').where({ id: ids[key] }).update({ is_active: false });
+    else await mockPg('services').where({ id: ids[key] }).update({ engine_keys: JSON.stringify([]) });
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const scheduling = await mockPg.transaction();
+    try {
+      const profile = await resolveCatalogSlotProfile(estimate, { ...profileOptions, preserveCapacity: true }, scheduling);
+      expect(profile.durationMinutes).toBe(60);
+      // An unchanged missing identity still permits the intentional fallback.
+      expect(await catalogLinkForProfile(scheduling, profile, {
+        preserveCapacity: true, validateAllowance: true,
+      })).toBeNull();
+      // A separate connection commits activation/mapping/insertion AFTER the
+      // absent read; unlike a positive match, no row lock could block it.
+      const policy = { version: 1, default_duration_minutes: 90, min_duration_minutes: 30, max_duration_minutes: 120 };
+      if (key === 'exact') await mockPg('services').insert({ ...original, scheduling_duration_policy: policy });
+      else await mockPg('services').where({ id: ids[key] }).update({
+        is_active: true, engine_keys: JSON.stringify(original.engine_keys), scheduling_duration_policy: policy,
+      });
+      await expect(catalogLinkForProfile(scheduling, profile, {
+        preserveCapacity: true, validateAllowance: true,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed', status: 409 });
+      // A deliberately larger work allowance remains valid; never shrink it
+      // to the catalog default or compare a combined total to one member.
+      const larger = { ...profile, durationMinutes: 120,
+        services: profile.services.map(service => ({ ...service, durationMinutes: 120 })) };
+      expect(await catalogLinkForProfile(scheduling, larger, {
+        preserveCapacity: true, validateAllowance: true,
+      })).toMatchObject({ id: ids[key] });
+    } finally {
+      if (!scheduling.isCompleted()) await scheduling.rollback();
+    }
+  });
+
 });

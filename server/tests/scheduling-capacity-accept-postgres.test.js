@@ -69,10 +69,19 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
     const legacy = await reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0], 120, '09:00') });
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     const current = await reserveSlot({ estimateId: f.ids.estimates[1], slotId: f.signedSlot(f.ids.estimates[1], 30, '13:00') });
-    const booked = await commitReservation({ scheduledServiceId: legacy.scheduledServiceId, customerId: f.ids.customer });
-    expect(booked).toMatchObject({ estimated_duration_minutes: 120,
-      reservation_service_mix: { version: 1, durationMinutes: 120 }, window_end: '11:00:00' });
-    expect((await f.db('scheduled_services').where({ id: current.scheduledServiceId }).first()).estimated_duration_minutes).toBe(30);
+    const { scheduling_duration_policy: priorPolicy } = await f.db('services')
+      .where({ service_key: 'pest_general_quarterly' }).first('scheduling_duration_policy');
+    await f.db('services').where({ service_key: 'pest_general_quarterly' }).update({
+      scheduling_duration_policy: { version: 1, default_duration_minutes: 90, min_duration_minutes: 90, max_duration_minutes: 90 },
+    });
+    try {
+      const booked = await commitReservation({ scheduledServiceId: legacy.scheduledServiceId, customerId: f.ids.customer });
+      expect(booked).toMatchObject({ estimated_duration_minutes: 120,
+        reservation_service_mix: { version: 1, durationMinutes: 120 }, window_end: '11:00:00' });
+      expect((await f.db('scheduled_services').where({ id: current.scheduledServiceId }).first()).estimated_duration_minutes).toBe(30);
+    } finally {
+      await f.db('services').where({ service_key: 'pest_general_quarterly' }).update({ scheduling_duration_policy: priorPolicy });
+    }
   });
 
   test('acceptance refuses a changed single-service selection with a different allowance', async () => {
