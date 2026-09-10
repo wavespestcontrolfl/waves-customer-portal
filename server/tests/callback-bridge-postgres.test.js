@@ -221,6 +221,31 @@ run('callback bridge on PostgreSQL', () => {
     expect(call.status).toBe(ambiguous ? 'initiated' : 'failed');
   });
 
+  test('a card call for a sibling promise on the same source call is proof for that promise only', async () => {
+    const ledger = require('../services/call-commitments');
+    const row = await seed();
+    const sibling = await ledger.addHumanCommitment(conn, row.call_log_id, { party: 'waves', kind: 'callback', description: 'Call back about the fence quote', reviewedBy: staffId });
+    commitmentIds.push(sibling.id);
+    const legEnded = new Date(Date.now() + 1000).toISOString();
+    // The card call for `row` carries both keys, as the handler persists them.
+    await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
+      status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      created_at: new Date(Date.now() + 1000),
+      metadata: { relatedCommitmentId: row.id, relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } });
+    expect(await ledger.refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+    expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
+    expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('open');
+    // The sibling's text fallback is not suppressed by the other card's attempt either.
+    const [text] = await conn('sms_log').insert({ direction: 'outbound', message_type: 'manual', status: 'sent', customer_id: customerId, to_phone: phone, from_phone: from,
+      body: 'Following up on the fence quote', created_at: new Date(Date.now() + 2000) }).returning('id');
+    try {
+      expect(await ledger.refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
+      expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('fulfilled');
+    } finally {
+      await conn('sms_log').where({ id: text.id }).del();
+    }
+  });
+
   test.each(require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS)('accepts the original caller in the selected customer’s %s field', async (column) => {
     const contact = '+15555550175';
     await conn('customers').where({ id: customerId }).update({ [column]: contact });

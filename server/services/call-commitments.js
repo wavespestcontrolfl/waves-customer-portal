@@ -1178,7 +1178,11 @@ async function resolveFulfillment(conn, commitment, call) {
       // expression indexes on call_log.metadata (relatedCommitmentId;
       // relatedCallId under the card policy), so the watchdog's per-promise
       // probes are index lookups rather than sequential scans of call_log.
-      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
+      // The source-call arm covers the Call Log action only (no commitment
+      // link): a card call for a SIBLING promise on the same source call
+      // carries both keys and must never be this promise's proof or its
+      // text-fallback suppressor.
+      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
       const policyBindings = [commitment.id, commitment.call_log_id];
       const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
       const connected = await conn('call_log').where('direction', 'outbound')
