@@ -836,6 +836,10 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // orders the events even if a later save's insert lands first.
         lockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         lockedAt = new Date();
+        // The assigned addresses take the shared email key after the row
+        // lock, so a bounce recovery's ownership check cannot be overtaken
+        // by this save (utils/customer-comms-lock.js lockAssignedCustomerEmails).
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, slotUpdates);
         if (optinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           optinClaims = await claimRecipientOptins({ ...optinArgs, trx });
@@ -914,6 +918,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         // describe the actual DB transition, not a possibly-stale snapshot.
         legacyLockedBefore = await trx('customers').where({ id: req.params.customerId }).forUpdate().first() || beforeRow;
         legacyLockedAt = new Date();
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, legacySlot1Updates);
         if (legacyOptinArgs) {
           const { claimRecipientOptins } = require('../services/recipient-optin');
           legacyClaims = await claimRecipientOptins({ ...legacyOptinArgs, trx });

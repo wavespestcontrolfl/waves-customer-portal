@@ -408,6 +408,22 @@ postgres('visit summary recipient recovery', () => {
     expect(sendOne).toHaveBeenCalled();
   });
 
+  test('a service-contact save assigning the recovery destination waits for the held retry handoff', async () => {
+    const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
+    const destination = `${randomUUID()}@example.invalid`;
+    let blockedCode = null;
+    expect(await Summary.retrySummaryThroughHandoff(message, async () => {
+      // The contact-route save: customer row FOR UPDATE, then the key for every assigned address.
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { service_contact2_email: destination });
+      }).catch((err) => { blockedCode = err.code; });
+      return { ok: true };
+    }, { destination })).toEqual({ ok: true });
+    expect(blockedCode).toBe('55P03');
+  });
+
   test('the retry handoff takes the customer row before the address key, so a row-first writer never deadlocks it', async () => {
     const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
     const writer = rowThenKeyWriter(fixture.primaryEmail);
