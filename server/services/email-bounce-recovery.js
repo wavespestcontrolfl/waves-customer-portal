@@ -348,7 +348,10 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId, datab
     logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
     return true;
   }
-  return false;
+  // Gmail ignores local-part dots and everything after '+': a corrected
+  // dot/tag variant of a mailbox another account holds delivers to that
+  // account's inbox, so the exact check is completed by the inbox-identity one.
+  return gmailMailboxOwnedByOther(email, ownCustomerId, database);
 }
 
 /**
@@ -361,7 +364,7 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId, datab
  * fail-closed contract. Non-Google addresses return false — dots and tags
  * are significant everywhere else, so the exact check is the right one there.
  */
-async function gmailMailboxOwnedByOther(email, ownCustomerId) {
+async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
   const s = String(email || '').trim().toLowerCase();
   const [local, domain] = s.split('@');
   if (!local || !domain || !['gmail.com', 'googlemail.com'].includes(domain)) return false;
@@ -373,24 +376,24 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId) {
   const CANON = (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`;
   const GOOGLE = (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`;
   try {
-    const customerRows = await db('customers')
+    const customerRows = await database('customers')
       .where((q) => {
         for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`(${GOOGLE(f)} AND ${CANON(f)} = ?)`, [mailbox]);
       })
       .select('id');
     if (customerRows.some((r) => String(r.id) !== own)) return true;
 
-    const estRows = await db('estimates')
+    const estRows = await database('estimates')
       .whereRaw(`${GOOGLE('customer_email')} AND ${CANON('customer_email')} = ?`, [mailbox])
       .select('customer_id');
     if (estRows.some((r) => isOther(r.customer_id))) return true;
 
-    const leadRows = await db('leads')
+    const leadRows = await database('leads')
       .whereRaw(`${GOOGLE('email')} AND ${CANON('email')} = ?`, [mailbox])
       .select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
 
-    const prefRows = await db('notification_prefs')
+    const prefRows = await database('notification_prefs')
       .whereRaw(`${GOOGLE('billing_email')} AND ${CANON('billing_email')} = ?`, [mailbox])
       .select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;

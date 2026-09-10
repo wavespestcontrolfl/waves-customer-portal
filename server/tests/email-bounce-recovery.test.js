@@ -478,6 +478,23 @@ describe('correctedAddressOwnedByOther (codex P1 privacy guard)', () => {
     db.mockImplementation(ownerDb({}));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', 'c1')).resolves.toBe(false);
   });
+  test('true when another customer holds a Gmail dot/tag variant of the corrected address', async () => {
+    // Rows only answer the inbox-identity (SPLIT_PART/REPLACE) query, never the exact one.
+    db.mockImplementation((table) => {
+      const chain = {};
+      let canonical = false;
+      for (const m of ['where', 'whereRaw', 'orWhereRaw', 'select', 'modify']) {
+        chain[m] = jest.fn((arg) => { if (typeof arg === 'string' && arg.includes('SPLIT_PART')) canonical = true; if (typeof arg === 'function') arg(chain); return chain; });
+      }
+      const rows = () => (table === 'customers' && canonical ? [{ id: 'c2' }] : []);
+      chain.then = (res, rej) => Promise.resolve(rows()).then(res, rej);
+      chain.catch = (rej) => Promise.resolve(rows()).catch(rej);
+      chain.first = jest.fn(() => Promise.resolve(rows()[0] || null));
+      return chain;
+    });
+    await expect(recovery.correctedAddressOwnedByOther('john.doe@gmail.com', 'c1')).resolves.toBe(true);
+    await expect(recovery.correctedAddressOwnedByOther('john.doe@example.com', 'c1')).resolves.toBe(false);
+  });
   test('lead (no own customer): a matching customer blocks', async () => {
     db.mockImplementation(ownerDb({ customers: [{ id: 'c9' }] }));
     await expect(recovery.correctedAddressOwnedByOther('jane@gmail.com', null)).resolves.toBe(true);

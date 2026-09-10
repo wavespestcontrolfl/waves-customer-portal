@@ -211,6 +211,35 @@ describe('transactional email provider retry classification', () => {
     expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }));
   });
 
+  test('a failed uncertain settlement after an ambiguous provider throw is retried once and never requeued', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    let uncertainWrites = 0;
+    let failNextReturning = false;
+    chain.returning = jest.fn(async () => {
+      if (failNextReturning) { failNextReturning = false; throw new Error('pg blip on the uncertain settlement'); }
+      return [{ id: 'message-1', status: 'failed' }];
+    });
+    chain.update = jest.fn((data) => {
+      if (typeof data.error_message === 'string' && data.error_message.startsWith('Provider outcome unknown')) {
+        uncertainWrites += 1;
+        if (uncertainWrites === 1) failNextReturning = true;
+      }
+      return chain;
+    });
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    db.mockReturnValue(chain);
+    db.raw = jest.fn((sql) => ({ __raw: sql }));
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.sendOne.mockRejectedValue(new Error('socket hang up'));
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-9' });
+    expect(await retry.retryOne(stored)).toMatchObject({ sent: false, uncertain: true });
+    expect(uncertainWrites).toBe(2);
+    // No retry schedule was ever written for the row.
+    expect(chain.update.mock.calls.some(([data]) => data.provider_retry_next_at instanceof Date)).toBe(false);
+  });
+
   test('a visit summary retry marks the handoff as started before contacting SendGrid, and stale-claim recovery settles such a row as uncertain', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
