@@ -12956,7 +12956,7 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
-    setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? savedDraft.lawnRemovedDefaultIds : []);
+    setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
     // A draft restored while the plan request has already failed carries the

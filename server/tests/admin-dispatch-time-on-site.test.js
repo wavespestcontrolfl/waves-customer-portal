@@ -1078,6 +1078,12 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
   });
 
+  test('a ledgered visit whose in-transaction tier reread errors aborts retryably instead of freezing the handler-entry tier (codex #4113 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/\} catch \{ snapshotCustomer = null; \}\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(lawnLedgerVisit && waveguardPlan && !snapshotCustomer\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_TIER_UNVERIFIED';\s*throw err;\s*\}/);
+    expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan\s*&& String\(snapshotCustomer\.waveguard_tier \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.serviceTier \|\| ''\)\) \{/);
+  });
+
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
     // Lawn baseline serialization precedes estimate -> customer -> parent -> visit;
     // pricing reads retain their existing relative lock order,

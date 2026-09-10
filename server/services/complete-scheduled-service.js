@@ -2388,13 +2388,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // back the whole completion as a 500.
     // productId must be a UUID: it lands in lawn_protocol_product_actuals.product_id
     // (uuid), where a bad value would roll back the whole completion as a 500.
+    // Each product at most once: the ledger writer inserts one skipped
+    // actual per entry and Command Center counts actual rows, so a repeated
+    // id would inflate the compliance metric by the number of copies
+    // (Codex #4113 P2). Rejected, not deduplicated — strict validation.
     const { value: lawnSkippedProducts, error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
       productId: Joi.string().uuid().required(),
       productName: Joi.string().trim().max(180).required(),
       reason: Joi.string().trim().max(500).allow(null, ''),
-    })).allow(null).validate(lawnProtocolCompletion?.skippedProducts);
+    })).unique('productId').allow(null).validate(lawnProtocolCompletion?.skippedProducts);
     if (lawnSkippedProductsError) {
-      return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId (uuid), productName, reason? }.', code: 'lawn_skipped_products_invalid' } };
+      return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId (uuid), productName, reason? }, each product at most once.', code: 'lawn_skipped_products_invalid' } };
     }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
@@ -4801,24 +4805,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
             .where({ id: svc.customer_id })
             .forShare()
             .first('first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude');
-          // The ledger plan was built from the turf profile at handler entry:
-          // a PUT turf-profile that committed since would attribute the visit
-          // to the former grass track and protocol. Re-read the profile
-          // version under the customer lock and abort with the same retryable
-          // shape as the owner/property/service/tier changes (Codex #4113 P2).
-          if (lawnLedgerVisit && waveguardPlan?.propertyGate?.turfProfile) {
-            const planProfile = waveguardPlan.propertyGate.turfProfile;
-            const lockedProfile = await savepointRead(trx, (k) => k('customer_turf_profiles')
-              .where({ customer_id: svc.customer_id, active: true }).forShare().first('id', 'updated_at'));
-            const lockedUpdatedAt = lockedProfile?.updated_at ? new Date(lockedProfile.updated_at).toISOString() : null;
-            if (String(lockedProfile?.id || '') !== String(planProfile.id || '') || String(lockedUpdatedAt || '') !== String(planProfile.updatedAt || '')) {
-              const err = new Error('This customer\'s turf profile changed while completing — reload the job and complete it again.');
-              err.statusCode = 409;
-              err.isOperational = true;
-              err.code = 'VISIT_TURF_PROFILE_CHANGED';
-              throw err;
-            }
-          }
           if (completionPricingPlan) {
             await require('../services/completion-pricing').lockCompletionPricingParent(trx, completionPricingPlan);
           }
@@ -4901,6 +4887,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
               err.isOperational = true;
               err.code = 'VISIT_SERVICE_CHANGED';
               throw err;
+            }
+            // The ledger plan was built from the turf profile at handler entry:
+            // a PUT turf-profile that committed since would attribute the visit
+            // to the former grass track and protocol. Re-read the profile
+            // version under the customer and visit locks and abort with the same retryable
+            // shape as the owner/property/service/tier changes (Codex #4113 P2).
+            if (lawnLedgerVisit && waveguardPlan?.propertyGate?.turfProfile) {
+              const planProfile = waveguardPlan.propertyGate.turfProfile;
+              const lockedProfile = await savepointRead(trx, (k) => k('customer_turf_profiles')
+                .where({ customer_id: svc.customer_id, active: true }).forShare().first('id', 'updated_at'));
+              const lockedUpdatedAt = lockedProfile?.updated_at ? new Date(lockedProfile.updated_at).toISOString() : null;
+              if (String(lockedProfile?.id || '') !== String(planProfile.id || '') || String(lockedUpdatedAt || '') !== String(planProfile.updatedAt || '')) {
+                const err = new Error('This customer\'s turf profile changed while completing — reload the job and complete it again.');
+                err.statusCode = 409;
+                err.isOperational = true;
+                err.code = 'VISIT_TURF_PROFILE_CHANGED';
+                throw err;
+              }
             }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
@@ -5601,8 +5605,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // committed since would freeze attribution contradicting the tier
           // snapshot below — abort with the same retryable shape as the
           // owner/property/service-type changes; the retry rebuilds the plan
-          // from the current tier (Codex #4113 P2).
-          if (lawnLedgerVisit && waveguardPlan && snapshotCustomer
+          // from the current tier (Codex #4113 P2). FAIL CLOSED: the
+          // non-ledger fallback to the entry read is exactly the stale tier
+          // this recheck exists to catch, so a ledgered visit whose reread
+          // errored aborts instead of comparing nothing (Codex #4113 P2).
+          if (lawnLedgerVisit && waveguardPlan && !snapshotCustomer) {
+            const err = new Error('This customer\'s membership tier could not be verified while completing — reload the job and complete it again.');
+            err.statusCode = 409;
+            err.isOperational = true;
+            err.code = 'VISIT_TIER_UNVERIFIED';
+            throw err;
+          }
+          if (lawnLedgerVisit && waveguardPlan
             && String(snapshotCustomer.waveguard_tier || '') !== String(waveguardPlan.propertyGate?.serviceTier || '')) {
             const err = new Error('This customer\'s membership tier changed while completing — reload the job and complete it again.');
             err.statusCode = 409;
