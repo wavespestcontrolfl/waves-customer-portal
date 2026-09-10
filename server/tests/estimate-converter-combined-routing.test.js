@@ -90,6 +90,25 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(lawn.remaining).toEqual([]);
   });
 
+  test('a primary-only capacity reservation can separate retired two-program routes while the release gate is off', () => {
+    const previous = process.env.GATE_SEPARATE_COMBO_VISITS;
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'false';
+    try {
+      const result = combineRecurringServicesForScheduling([
+        { name: 'Quarterly Pest Control', service: 'pest_control', frequency: 'quarterly' },
+        { name: 'Termite Bait Station System', service: 'termite_bait', frequency: 'quarterly' },
+      ], { forceSeparateRetiredRoutes: true });
+      expect(result.combos).toEqual([]);
+      expect(result.remaining.map(recurringServiceKey)).toEqual(['pest_control']);
+      expect(result.standalone).toEqual([
+        expect.objectContaining({ catalogServiceKey: 'termite_bait' }),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = previous;
+    }
+  });
+
   test('mismatched cadences stay separate rows', () => {
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Monthly Pest Control', frequency: 'monthly' },

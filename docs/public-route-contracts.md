@@ -111,6 +111,8 @@ the primary appointment (pest when selected, otherwise the first program);
 independently scheduled companion programs do not enlarge its allowance.
 Those excluded companions are created unassigned and without a promised time
 until scheduled independently; they cannot inherit the certified primary trip.
+A version-2 primary-only hold preserves that program separation even when
+`GATE_SEPARATE_COMBO_VISITS` is off or scheduling capacity shuts down before acceptance.
 One-time paid add-ons retain their work on the same appointment. When the combined-capacity gate and its prerequisite
 below are also enabled, new combined allocations use version 2, per-service
 work allowances and one shared arrival anchor. Version-1 holds retain their

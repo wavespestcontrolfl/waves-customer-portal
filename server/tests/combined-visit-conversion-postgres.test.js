@@ -39,6 +39,10 @@ const lines = [
   { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 9, frequency: 'every_6_weeks', catalog: 'tree_shrub_6week', pattern: 'every_6_weeks' },
   { service: 'mosquito', name: 'Monthly Mosquito Control', visitsPerYear: 12, frequency: 'monthly', catalog: 'mosquito_monthly', pattern: 'monthly' },
 ];
+const termiteLine = {
+  service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4,
+  frequency: 'quarterly', catalog: 'termite_bait', pattern: 'quarterly',
+};
 
 async function fixture(trx, selected) {
   const customerId = randomUUID();
@@ -91,19 +95,33 @@ postgres('combined capacity conversion on the migrated application schema', () =
     if (mockPg) await mockPg.destroy();
   });
 
-  test('a primary-only capacity offer never assigns excluded companion work to its technician', async () => {
+  test.each([
+    {
+      name: 'lawn while capacity remains enabled', companionLine: lines[1],
+      disabledCategory: 'lawn', capacityAtConversion: 'true', expectedDuration: 40,
+    },
+    {
+      name: 'termite after capacity shuts down', companionLine: termiteLine,
+      disabledCategory: 'termite', capacityAtConversion: 'false', expectedDuration: 60,
+    },
+  ])('a primary-only pest offer keeps $name as an independent program', async ({
+    companionLine, disabledCategory, capacityAtConversion, expectedDuration,
+  }) => {
     const pool = mockPg;
     const trx = await pool.transaction();
     const gate = process.env.GATE_SCHEDULING_CAPACITY;
     const combinedGate = process.env.GATE_VISIT_COMBINED_CAPACITY;
+    const separateGate = process.env.GATE_SEPARATE_COMBO_VISITS;
     const availability = require('../services/estimate-slot-availability');
     const pin = require('../services/route-optimizer').HQ;
+    const selected = [lines[0], companionLine];
     mockPg = trx;
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'false';
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'false';
     availability.resolveEstimateCoords.mockResolvedValue(pin);
     try {
-      for (const [index, line] of lines.slice(0, 2).entries()) {
+      for (const [index, line] of selected.entries()) {
         let catalog = await trx('services').where({ service_key: line.catalog }).first('id');
         if (!catalog) {
           [catalog] = await trx('services').insert({ id: randomUUID(), service_key: line.catalog, name: line.name,
@@ -113,10 +131,14 @@ postgres('combined capacity conversion on the migrated application schema', () =
           version: 1, default_duration_minutes: index ? 40 : 30, min_duration_minutes: 30, max_duration_minutes: 40,
         } });
       }
-      const f = await fixture(trx, lines.slice(0, 2));
+      const f = await fixture(trx, selected);
       await trx('scheduled_services').where({ id: f.anchor.id }).del();
       await trx('estimates').where({ id: f.estimateId }).update({ status: 'sent' });
-      await trx('technician_capabilities').insert({ technician_id: f.anchor.technician_id, service_category: 'lawn', active: false });
+      await trx('technician_capabilities').insert({
+        technician_id: f.anchor.technician_id,
+        service_category: disabledCategory,
+        active: false,
+      });
       const estimate = await trx('estimates').where({ id: f.estimateId }).first();
       const profile = await availability.resolveCatalogSlotProfile(estimate, {}, trx);
       expect(profile.durationMinutes).toBe(30);
@@ -131,13 +153,27 @@ postgres('combined capacity conversion on the migrated application schema', () =
       const preparedCapacity = await require('../services/slot-reservation').prepareReservationCommit(held.scheduledServiceId);
       await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.customerId, preparedCapacity, trx });
       await trx('estimates').where({ id: f.estimateId }).update({ status: 'accepted' });
+      process.env.GATE_SCHEDULING_CAPACITY = capacityAtConversion;
       await converter.convertEstimate(f.estimateId, { ...options, database: trx });
       const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).whereNull('recurring_parent_id');
       expect(parents).toHaveLength(2);
       const primary = parents.find(row => row.id === held.scheduledServiceId);
-      expect(primary).toMatchObject({ technician_id: f.anchor.technician_id, window_start: '09:00:00', estimated_duration_minutes: 30 });
+      expect(primary).toMatchObject({
+        technician_id: f.anchor.technician_id,
+        window_start: '09:00:00',
+        estimated_duration_minutes: 30,
+        reservation_policy_version: 2,
+        service_key_snapshot: lines[0].catalog,
+      });
       const companion = parents.find(row => row.id !== primary.id);
-      expect(companion).toMatchObject({ technician_id: null, window_start: null, window_end: null, estimated_duration_minutes: 40 });
+      const companionCatalog = await trx('services').where({ service_key: companionLine.catalog }).first('id');
+      expect(companion).toMatchObject({
+        service_id: companionCatalog.id,
+        technician_id: null,
+        window_start: null,
+        window_end: null,
+        estimated_duration_minutes: expectedDuration,
+      });
       const children = await trx('scheduled_services').where({ recurring_parent_id: companion.id });
       expect(children.length).toBeGreaterThan(0);
       expect(children.every(row => row.technician_id == null && row.window_start == null && row.window_end == null)).toBe(true);
@@ -149,6 +185,8 @@ postgres('combined capacity conversion on the migrated application schema', () =
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
       if (combinedGate === undefined) delete process.env.GATE_VISIT_COMBINED_CAPACITY;
       else process.env.GATE_VISIT_COMBINED_CAPACITY = combinedGate;
+      if (separateGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = separateGate;
     }
   });
 
