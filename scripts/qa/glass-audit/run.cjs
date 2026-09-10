@@ -80,7 +80,9 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
   try {
     const target = baseUrl + (state.url || scenario.url);
     rec.url = state.url || scenario.url;
-    await page.goto(target, { waitUntil: 'domcontentloaded' });
+    const nav = await page.goto(target, { waitUntil: 'domcontentloaded' });
+    // Vite answers unknown paths with the SPA fallback or a 404 page; a bad status must not pass as evidence.
+    if (nav && nav.status() >= 400) throw new Error(`navigation returned HTTP ${nav.status()} for ${rec.url}`);
     const ready = state.ready || scenario.ready;
     if (ready) {
       if (typeof ready === 'function') await ready(page);
@@ -90,7 +92,7 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
     // server-html scenarios (email chrome, newsletter landing) use a system font stack and never load the SPA webfonts.
     if (scenario.fonts !== false) await waitForFonts(page);
     if (state.setup) await state.setup(page, rec);
-    await page.waitForTimeout(state.settle || 700);
+    await page.waitForTimeout(state.settle ?? scenario.settle ?? 700);
     // Let scroll-reveal observers fire on everything before the full-page shot.
     rec.revealPending = await page.evaluate(async (hide) => {
       // Dev-only preview chrome (scenario switcher bars) is not part of the product surface.
@@ -160,11 +162,17 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
           const els = Array.from(document.querySelectorAll('a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])')).filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !el.disabled; }).slice(0, 25);
           const out = [];
           for (const el of els) {
+            // Snapshot the resting styles first: glass controls carry decorative elevation shadows, so a
+            // box-shadow only counts as a focus ring when it CHANGES on focus (outline is checked directly).
+            const before = getComputedStyle(el);
+            const restingShadow = before.boxShadow; const restingOutline = `${before.outlineStyle} ${before.outlineWidth}`;
             el.focus({ preventScroll: true });
             if (document.activeElement !== el) { out.push({ sel: el.tagName.toLowerCase(), focusable: false }); continue; }
             const cs = getComputedStyle(el);
-            const ring = (cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0) || /rgba?\(/.test(cs.boxShadow) && cs.boxShadow !== 'none';
-            out.push({ sel: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), name: (el.getAttribute('aria-label') || el.innerText || el.placeholder || '').trim().slice(0, 30), outline: `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`, shadow: cs.boxShadow.slice(0, 60), ring });
+            const outlineVisible = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0;
+            const shadowChanged = cs.boxShadow !== restingShadow && cs.boxShadow !== 'none';
+            const ring = outlineVisible || shadowChanged;
+            out.push({ sel: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), name: (el.getAttribute('aria-label') || el.innerText || el.placeholder || '').trim().slice(0, 30), outline: `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`, restingOutline, shadow: cs.boxShadow.slice(0, 60), restingShadow: restingShadow.slice(0, 60), shadowChanged, ring });
           }
           if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
           return out;
@@ -184,11 +192,25 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
   fs.writeFileSync(path.join(dir, `${state.name}-${width}.json`), JSON.stringify(rec, null, 2));
 }
 
+// Server-rendered scenarios read static files from client/glass-audit-html/ (gitignored). Render them on
+// demand so a fresh checkout never captures Vite's fallback document in their place.
+function ensureServerHtml(scenarios) {
+  const needed = scenarios.filter((s) => s.surface === 'server-html');
+  if (!needed.length) return;
+  const missing = needed.filter((s) => !fs.existsSync(path.join(root, 'client', s.url.replace(/^\//, ''))));
+  if (!missing.length) return;
+  console.log(`glass-audit: rendering server HTML (${missing.length} file(s) missing)`);
+  require('node:child_process').execFileSync(process.execPath, [path.join(__dirname, 'render-server-html.cjs')], { stdio: 'inherit' });
+  const still = missing.filter((s) => !fs.existsSync(path.join(root, 'client', s.url.replace(/^\//, ''))));
+  if (still.length) throw new Error(`server HTML not rendered for: ${still.map((s) => s.id).join(', ')}`);
+}
+
 async function main() {
   fs.mkdirSync(outRoot, { recursive: true });
   const report = { ...evidence(root), engine: engineName, widths: widths.concat(extraWidths), started: new Date().toISOString(), results: [] };
   const scenarios = loadScenarios().filter((s) => (!only || only.includes(s.id)) && (!family || s.family === family));
   console.log(`glass-audit: ${scenarios.length} scenarios → ${path.relative(root, outRoot)}`);
+  ensureServerHtml(scenarios);
   let server; let browser;
   try {
     server = await previewServer(root, opt('url', null));
@@ -202,7 +224,10 @@ async function main() {
     }
     report.finished = new Date().toISOString();
     fs.writeFileSync(path.join(outRoot, 'summary.json'), JSON.stringify(report, null, 2));
-    console.log(`done: ${report.results.length} captures, summary → ${path.relative(root, path.join(outRoot, 'summary.json'))}`);
+    const failed = report.results.filter((r) => r.failure);
+    console.log(`done: ${report.results.length} captures (${failed.length} failed), summary → ${path.relative(root, path.join(outRoot, 'summary.json'))}`);
+    // A capture that could not produce evidence must fail the command (CI / scripted regression use).
+    if (failed.length) process.exitCode = 1;
   } finally {
     if (browser) await browser.close();
     if (server) await server.close();

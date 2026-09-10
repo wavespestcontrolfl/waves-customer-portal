@@ -10,7 +10,7 @@ external origin is blocked.
 
 ```sh
 export PATH=/opt/homebrew/opt/node@20/bin:$PATH        # repo pins Node 20
-node scripts/qa/glass-audit/render-server-html.cjs   # once per checkout: writes client/glass-audit-html/ (gitignored) for the server-html scenarios
+node scripts/qa/glass-audit/render-server-html.cjs   # optional: run.cjs renders client/glass-audit-html/ (gitignored) on demand
 npm run qa:glass -- --only <id>[,<id>] --run <name>  # alias for the line below
 node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http://127.0.0.1:23817] [--extra] [--engine webkit]
 ```
@@ -21,6 +21,20 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
   scenarios flagged `extraWidths: true`.
 - Output: `.tmp/glass-audit/<run>/<scenario>/<state>-<width>.png|json` and
   `summary.json`.
+- Exit status is non-zero when any capture failed (readiness timeout, HTTP >= 400
+  on navigation, screenshot or metrics error); the remaining captures still run.
+- `server-html` scenarios are rendered on demand: if any file under
+  `client/glass-audit-html/` is missing the runner invokes `render-server-html.cjs`
+  first. Their `ready` text is page-specific copy so Vite's fallback document
+  can never be captured in their place.
+- Metrics notes: `controls[].inFooter` marks universal-footer controls (they are
+  counted, not hidden); `contrast` composites translucent text over the sampled
+  background; `layout.footer.top` is in document space, `belowFold` = outside the
+  initial viewport, `beyondDocument` = pushed past the document end; the focus
+  probe treats a `box-shadow` as a ring only when it differs from the resting
+  shadow. `analyze.cjs` lets the LAST run in argument order supersede earlier
+  captures of the same scenario/state/width; `matrix.cjs` derives expected states
+  from the scenario declaration (honouring a state's `widths`).
 
 ## Scenario contract (`scenarios/NN-<family>.cjs`)
 

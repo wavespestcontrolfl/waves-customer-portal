@@ -176,6 +176,30 @@ function renderNewsletterLanding() {
         `));
   write('newsletter-confirmed', renderConfirmPage("You're in.", `<p>${emailSpan} is confirmed. The next Waves Newsletter lands in your inbox this week.</p><p style="margin-bottom:0">Until then, browse recent issues at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
   write('newsletter-unsubscribed', renderConfirmPage("You're unsubscribed.", `<p>No more newsletters will be sent to ${emailSpan}.</p><p style="margin-bottom:0">Changed your mind? Sign up again at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
+  // Quiz + feedback landings (GET confirm form, POST result) — mirrors public-newsletter.js quiz/feedback routes.
+  const fine = 'margin-bottom:0; font-size:14px; color:#4F5B70;';
+  write('newsletter-quiz-confirm', renderConfirmPage('One tap to confirm.', `
+          <p>You picked <strong>Brown patches</strong>. Tap confirm and we'll take it from here.</p>
+          <form method="POST" action="#"><button type="submit" class="btn">Confirm — Brown patches</button></form>
+          <p style="${fine}">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`));
+  write('newsletter-quiz-thanks', renderConfirmPage("Thanks — we've got you.", `
+          <p>We'll bring a free lawn check on your next visit.</p>
+          <p style="margin-bottom:6px;">Want it sooner?</p>
+          <p style="margin:0 0 10px;"><a href="https://example.invalid/book" class="btn">Book a lawn check</a></p>
+          <p style="margin-bottom:0; font-size:14px;">or call us at <a href="tel:+19415550100">(941) 555-0100</a>.</p>`));
+  const missing = ['Closer events', 'More local news', 'Restaurant openings', 'Family activities', 'Home tips']
+    .map((l) => `<label style="display:block;margin:0 0 10px;font-size:16px;color:#3F4A65;cursor:pointer;"><input type="checkbox" name="missing" value="x" style="margin-right:8px;vertical-align:middle;" />${l}</label>`).join('');
+  write('newsletter-feedback-needs-work', renderConfirmPage('Ouch — help us fix it.', `
+          <p>You picked <strong>👎 Needs work</strong>. What was missing?</p>
+          <form method="POST" action="#">${missing}<button type="submit" class="btn" style="margin-top:6px;">Send feedback</button></form>
+          <p style="${fine}">Nothing is recorded until you tap the button — check any that apply (or none).</p>`));
+  write('newsletter-feedback-confirm', renderConfirmPage('One tap to confirm.', `
+          <p>You picked <strong>🔥 Loved it</strong>. Tap confirm and it's counted.</p>
+          <form method="POST" action="#"><button type="submit" class="btn">Confirm — Loved it</button></form>
+          <p style="${fine}">If you didn't tap this, just close this tab — nothing changes until you click the button.</p>`));
+  write('newsletter-feedback-thanks', renderConfirmPage('Got it — thanks for the straight talk.', `
+          <p>Noted: <strong>Closer events, Home tips</strong>. Next issues will lean that way.</p>
+          <p style="margin-bottom:0;">— The Waves Team 🌊</p>`));
   write('newsletter-invalid-link', renderConfirmPage('Link expired or invalid.', `<p>This confirmation link doesn't match a pending subscription. The link may have already been used or it may have expired.</p><p style="margin-bottom:0">Sign up again at <a href="https://example.invalid/newsletter/">/newsletter</a>.</p>`));
 }
 

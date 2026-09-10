@@ -91,8 +91,8 @@ const PREP_PAYLOAD = {
     { type: 'details', rows: [
       { label: 'Service', value: 'German Cockroach Treatment' },
       { label: 'Time on site', value: 'About 60–90 minutes' },
-      { label: 'Re-entry', value: 'After 2 hours, once surfaces are dry' },
-      { label: 'Pets', value: 'Out of treated rooms for 2 hours' },
+      { label: 'Re-entry', value: 'Once treated surfaces are dry — your technician confirms timing' },
+      { label: 'Pets', value: 'Out of treated rooms until surfaces are dry, as your technician advises' },
     ] },
     { type: 'heading', content: 'Before we arrive' },
     { type: 'paragraph', content: 'Empty the cabinets under the kitchen and bathroom sinks and wipe the shelves. Pull the stove and refrigerator a few inches from the wall if you can do so safely.' },
@@ -109,7 +109,7 @@ const PREP_PAYLOAD = {
     { type: 'heading', content: 'Bathrooms and laundry' },
     { type: 'paragraph', content: 'Clear the floor and the cabinet under the sink. Move towels and toiletries into a drawer or another room for the day.' },
     { type: 'heading', content: 'During and after the visit' },
-    { type: 'paragraph', content: 'Plan to be out of the treated rooms for about two hours. Leave the gel bait and stations in place — they keep working for weeks after we leave.' },
+    { type: 'paragraph', content: 'Plan to stay out of the treated rooms until surfaces are dry — your technician will confirm timing before leaving. Leave the gel bait and stations in place — they keep working for weeks after we leave.' },
     { type: 'details', variant: 'faq', rows: [
       { label: 'Will I still see roaches after treatment?', value: 'Yes, for a week or two. Bait works by being carried back to the nest, so activity climbs briefly before it drops off. The follow-up visit finishes the job.' },
       { label: 'Can I clean after the visit?', value: 'Light cleaning is fine after 24 hours. Avoid scrubbing the cabinet edges and hinges where the gel bait was placed.' },

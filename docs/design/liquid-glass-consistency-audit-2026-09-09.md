@@ -124,7 +124,7 @@ Routes discovered: **41 customer-facing render routes / tab states + 6 redirects
 
 ### 2.2 Routes in scope and inspected
 
-Every customer glass route above is in scope, plus every server HTML family, plus the admin/tech shells for scoping evidence. The coverage matrix lists 110 scenarios (147 scenario-states), all of which are `inspected` at 390 and 1440 in headless Chrome; 11 also in WebKit at 390; 22 at 320/375/430/768/1024; emails at 640. Totals: 437 captures (429 usable, 8 superseded failures from a first attempt that was re-run), 115 interaction captures (hover, focus, sheet / menu / dialog open, slot pick, confirm, rate, booking steps 2–4, contract focus, quote request), 2 reduced-motion states, 2 forced-colours probes, 3 keyboard-Tab focus probes.
+Every customer glass route above is in scope, plus every server HTML family, plus the admin/tech shells for scoping evidence. The coverage matrix lists 113 scenarios (151 scenario-states), all of which are `inspected` at 390 and 1440 in headless Chrome; 11 also in WebKit at 390; 22 at 320/375/430/768/1024; emails at 640. The server-rendered family covers every `renderConfirmPage` branch: confirm pending / confirmed / unsubscribed / invalid link, plus the quiz confirm form and thank-you (book CTA) and the feedback confirm form, needs-work checkbox form and result (the last five were added after review; run `codex-r1`). Totals: 473 captures (465 usable, 8 superseded failures from a first attempt that was re-run), 121 interaction captures (hover, focus, sheet / menu / dialog open, slot pick, confirm, rate, booking steps 2–4, contract focus, quote request), 2 reduced-motion states, 2 forced-colours probes, 3 keyboard-Tab focus probes.
 
 Not inspected (recorded, not passed): see section 7.
 
@@ -134,7 +134,9 @@ Each capture stores a full-page PNG plus a JSON of computed styles: theme mount 
 
 Two method limitations matter when reading the tables:
 - **Contrast sampling is a screening tool.** It samples six pixels around each text box on the composited page; pills, avatars and text over gradients produce false lows. Every contrast finding below was re-checked by computing the ratio from the authored colours, or is marked "candidate".
-- **The programmatic focus probe under-reports rings** because Chromium does not apply `:focus-visible` to scripted focus after pointer input. A separate keyboard-Tab probe on the estimate, portal and reschedule pages confirmed the sheet's ring (`2px rgba(10,126,194,.9)`, 2px offset) on all 42 tabbed controls, so no focus finding is raised from the programmatic probe.
+- **Footer controls are in the census** (rows carry `inFooter: true`), so `controls.small` counts include the universal footer's badges and links on every shell page; page-local figures in G-13 exclude them by that flag.
+- **Translucent text is composited** over each sampled background before the ratio is computed (`contrast.cjs composite`), so `rgba(255,255,255,.6)` on `CardPage` is measured as the dimmer paint it produces, not as opaque white.
+- **The programmatic focus probe under-reports rings** because Chromium does not apply `:focus-visible` to scripted focus after pointer input, and a `box-shadow` only counts as a ring when it changes from the control's resting shadow (glass controls carry decorative elevation shadows). A separate keyboard-Tab probe on the estimate, portal and reschedule pages confirmed the sheet's ring (`2px rgba(10,126,194,.9)`, 2px offset) on all 42 tabbed controls, so no focus finding is raised from the programmatic probe.
 
 ---
 
@@ -211,9 +213,9 @@ Severity: **P1** = breaks a documented rule on a primary surface or blocks the "
 
 ### G-11 · P2 · Server twins drift from the sheet (email + newsletter landing)
 
-- **Measured.** Gold CTA ink `#1B2C5B` on every email and landing CTA (C2); landing `h1` **30px** (sheet 32–40); email `h2` **22px** (sheet 26); landing frosted `.box` uses `blur(14px)` with no `data-glass` attributes and its own fallback; footer social icons 28×28 and store badges 38–40px with empty accessible names in `universalWavesFooterHtml`.
+- **Measured.** Gold CTA ink `#1B2C5B` on every email and landing CTA (C2); landing `h1` **30px** (sheet 32–40) on all nine landing branches including the quiz and feedback pages; email `h2` **22px** (sheet 26); the feedback needs-work form renders five native `<input type="checkbox">` at **13×13** with no styled hit area (touch floor 44); landing frosted `.box` uses `blur(14px)` with no `data-glass` attributes and its own fallback; footer social icons 28×28 and store badges 38–40px with empty accessible names in `universalWavesFooterHtml`.
 - **Root cause (shared).** `email-template.js GLASS_THEME` and `public-newsletter.js renderConfirmPage` are hand-maintained copies of the tokens.
-- **Correction.** Generate `GLASS_THEME` from one token module shared with `theme-doc.js` (ink, accent, radii, type scale), or at minimum fix the two comments/values so the twin matches (`ctaText` → `#04395E`, landing h1 32, email h2 26) and give the footer icons `aria-label`s. Emails stay opaque by ruling.
+- **Correction.** Generate `GLASS_THEME` from one token module shared with `theme-doc.js` (ink, accent, radii, type scale), or at minimum fix the two comments/values so the twin matches (`ctaText` → `#04395E`, landing h1 32, email h2 26), give the footer icons `aria-label`s, and wrap the feedback checkboxes in a 44px `<label>` hit area. Emails stay opaque by ruling.
 
 ### G-12 · P2 · The estimate's `.gc-*` recipes keep blur under forced colours and duplicate the tiers
 
@@ -325,7 +327,7 @@ Not recommended: any global `!important` override on top of the sheet, shrinking
 
 - **Routes discovered:** 41 customer render routes / tab states, 6 redirects, 4 server-HTML families, 48 admin routes, 7 tech routes.
 - **Routes in scope:** every customer glass route and server-HTML family (glass); admin and tech shells for scope leakage.
-- **Routes actually inspected:** all of them — 110 scenarios / 147 scenario-states; no scenario is `NOT VERIFIED` or `BLOCKED` in the matrix.
+- **Routes actually inspected:** all of them — 113 scenarios / 151 scenario-states; no scenario is `NOT VERIFIED` or `BLOCKED` in the matrix.
 - **Desktop / mobile coverage:** 100% of scenarios at 390 and 1440 (headless Chrome); 11 in WebKit at 390; 22 at 320 / 375 / 430 / 768 / 1024; emails at 640. 437 captures, 115 interaction captures.
 - **States and overlays verified:** populated, loading (auth check, estimate skeleton), empty (cancelled account, no visits), error (500), not-found (404), expired, paid / unpaid / covered-by-credit, unsigned / signed / autopay, upcoming / confirmed / cancelled, four tracker states, booking steps 1–4, reduced motion, forced colours; More sheet, account menu, Waves Assistant dialog, slot pick, confirm, rate, quote request, hover and keyboard focus.
 - **Confirmed findings:** P1 × 4 (G-01 columns / gutters, G-02 error cards, G-03 primary button height, G-04 weights via shared tokens), P2 × 10 (G-05 … G-14), P3 × 1 group (G-15), plus 4 content observations and 9 standards conflicts (C1–C9) needing rulings.

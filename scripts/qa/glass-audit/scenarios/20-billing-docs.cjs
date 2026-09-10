@@ -68,7 +68,7 @@ const payInvoice = (overrides = {}) => ({
   cardBrand: null,
   cardLastFour: null,
   receiptUrl: null,
-  notes: 'Gate code is on file. Please keep pets inside for 30 minutes after the exterior application dries.',
+  notes: 'Gate code is on file. Please keep pets inside until the exterior application is dry — your technician will confirm timing.',
   annualPrepay: null,
   attachments: [
     { id: 91, fileName: 'Service-photos-September.pdf', mimeType: 'application/pdf', fileSizeBytes: 482113, createdAt: '2026-09-08T18:20:00.000Z' },

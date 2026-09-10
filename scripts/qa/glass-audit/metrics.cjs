@@ -131,14 +131,17 @@ function collectMetrics(opts) {
 
   // ---- controls ----
   const controlSel = 'button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="switch"], [role="checkbox"]';
-  const controls = Array.from(document.querySelectorAll(controlSel)).filter(visible).filter((c) => !c.closest('footer'));
+  // Footer controls stay in the census (G-11/G-13 measure the universal footer); rows carry `inFooter`
+  // so a consumer can allowlist them explicitly instead of the census hiding them.
+  const controls = Array.from(document.querySelectorAll(controlSel)).filter(visible);
   const controlRows = controls.map((c) => {
     const cs = getComputedStyle(c);
     const r = c.getBoundingClientRect();
     const kind = c.hasAttribute('data-glass-accent') ? 'accent' : c.getAttribute('data-glass') === 'chip' ? 'chip' : c.tagName.toLowerCase() === 'a' ? 'link' : c.tagName.toLowerCase();
     const inline = kind === 'link' && cs.display === 'inline';
     const name = c.getAttribute('aria-label') || snippet(c) || c.getAttribute('title') || c.getAttribute('placeholder') || '';
-    return { sel: sel(c), kind, inline, h: round(r.height), w: round(r.width), size: parseFloat(cs.fontSize), weight: parseInt(cs.fontWeight, 10), radius: cs.borderTopLeftRadius, color: cs.color, bg: cs.backgroundColor, name: name.slice(0, 40), outline: cs.outlineStyle, tt: cs.textTransform, box: box(c) };
+    const inFooter = !!c.closest('footer, [role="contentinfo"]');
+    return { sel: sel(c), kind, inline, inFooter, h: round(r.height), w: round(r.width), size: parseFloat(cs.fontSize), weight: parseInt(cs.fontWeight, 10), radius: cs.borderTopLeftRadius, color: cs.color, bg: cs.backgroundColor, name: name.slice(0, 40), outline: cs.outlineStyle, tt: cs.textTransform, box: box(c) };
   });
   const smallControls = controlRows.filter((c) => !c.inline && c.h < 44 && c.h > 0);
   const inputs = Array.from(document.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), select, textarea')).filter(visible).map((i) => {
@@ -173,7 +176,10 @@ function collectMetrics(opts) {
     mainWidth: main ? round(main.getBoundingClientRect().width) : null,
     mainCount: document.querySelectorAll('main').length,
     h1Count: h1s.length,
-    footer: footer ? { present: true, role: footer.getAttribute('role'), h: round(footer.getBoundingClientRect().height), top: round(footer.getBoundingClientRect().top), belowFold: footer.getBoundingClientRect().top > html.scrollHeight - 1 } : { present: false },
+    // Footer geometry in DOCUMENT space (rect.top is viewport-relative; add the scroll offset before
+    // comparing with vh / scrollHeight). belowFold = not inside the initial viewport; beyondDocument =
+    // pushed past the document end (the placement regression the error-state assertions look for).
+    footer: footer ? (() => { const fr = footer.getBoundingClientRect(); const docTop = fr.top + window.scrollY; return { present: true, role: footer.getAttribute('role'), h: round(fr.height), top: round(docTop), belowFold: docTop >= vh, beyondDocument: docTop > html.scrollHeight - 1 }; })() : { present: false },
     contentinfoCount: document.querySelectorAll('[role="contentinfo"], footer').length,
     header: header ? { sel: sel(header), h: round(header.getBoundingClientRect().height), position: getComputedStyle(header).position, pt: getComputedStyle(header).paddingTop } : null,
     stickyTop, fixedBottom,

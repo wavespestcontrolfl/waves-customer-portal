@@ -29,7 +29,8 @@ lines.push(`# glass-audit digest — runs: ${runs.join(', ')}`, '', `Captures: $
 
 // 1. Per-scenario summary table (390 + 1440)
 lines.push('## Per-scenario summary (390 / 1440)', '', '| scenario/state | glass | h1 | <14px | >700 | off-scale | ctrl<44 | nested blur | inline blur | pills | heading≠sheet | contrast<AA | overflow-x | main | footer | unmatched | errors |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
-const pick = (rs, w) => rs.find((r) => r.width === w);
+// Runs are read in argument order, so the LAST match is the corrective rerun (e.g. `previews previews-fix`).
+const pick = (rs, w) => rs.filter((r) => r.width === w).pop();
 const fmt2 = (a, b, f) => `${a ? f(a) : '–'} / ${b ? f(b) : '–'}`;
 for (const [k, rs] of Object.entries(byScenario)) {
   const a = pick(rs, 390); const b = pick(rs, 1440);

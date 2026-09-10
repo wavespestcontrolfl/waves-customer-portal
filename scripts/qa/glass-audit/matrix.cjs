@@ -30,14 +30,21 @@ const lines = [];
 lines.push('| Surface | Route / pattern | Role | Family | Scenario | States captured | Overlays / interactions | 390 | 1440 | Other widths | Engines | Evidence (run) | Findings (ids) | Blockers / exclusions |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 // A state counts as inspected at a width when at least one capture of it succeeded
 // (earlier failed attempts that were re-run are superseded, not double-counted).
-const status = (list, w) => {
+// Expected states at a width come from the scenario DECLARATION (honouring a state's own `widths`
+// restriction), never from whichever captures happen to exist, so a state that was never captured
+// at that width shows as `partial` instead of silently passing as `inspected`.
+const DEFAULT_WIDTHS = [390, 1440];
+const declaredAt = (s, w) => (s.states && s.states.length ? s.states : [{ name: 'default' }])
+  .filter((st) => (st.widths || s.widths || DEFAULT_WIDTHS).includes(w)).map((st) => st.name);
+const status = (s, list, w) => {
   const rs = list.filter((c) => c.width === w);
-  if (!rs.length) return 'NOT VERIFIED';
-  const states = [...new Set(rs.map((c) => c.state))];
+  const states = declaredAt(s, w);
+  if (!rs.length) return states.length ? 'NOT VERIFIED' : 'n/a';
   const okStates = states.filter((st) => rs.some((c) => c.state === st && !c.failure && c.metrics));
   if (!okStates.length) return `BLOCKED (${rs[0].failure ? rs[0].failure.slice(0, 40) : 'no metrics'})`;
   return okStates.length === states.length ? 'inspected' : `partial (${okStates.length}/${states.length} states)`;
 };
+const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|');
 for (const s of scenarios) {
   const list = byId[s.id] || [];
   const states = [...new Set(list.map((c) => c.state))];
@@ -53,6 +60,6 @@ for (const s of scenarios) {
   if (s.notes) blockers.push(s.notes);
   const unmatched = [...new Set(list.flatMap((c) => c.unmatched))];
   if (unmatched.length) blockers.push(`unmocked: ${unmatched.slice(0, 2).join(', ')}${unmatched.length > 2 ? ` +${unmatched.length - 2}` : ''}`);
-  lines.push(`| ${s.surface} | \`${s.route}\` | ${s.role} | ${s.family} | ${s.id} | ${states.join(', ') || '—'} | ${ix.join(', ') || '—'} | ${status(list, 390)} | ${status(list, 1440)} | ${other.join('/') || '—'} | ${engines.join('+') || '—'} | ${runsUsed.join(', ') || '—'} | ${s.findings || ''} | ${blockers.join('; ').replace(/\|/g, '/') || '—'} |`);
+  lines.push(['', s.surface, `\`${s.route}\``, s.role, s.family, s.id, states.join(', ') || '—', ix.join(', ') || '—', status(s, list, 390), status(s, list, 1440), other.join('/') || '—', engines.join('+') || '—', runsUsed.join(', ') || '—', s.findings || '', blockers.join('; ') || '—', ''].map(cell).join(' | ').trim());
 }
 process.stdout.write(lines.join('\n') + '\n');
