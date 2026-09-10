@@ -146,6 +146,23 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect(active[0].metadata.overdue_commitment_ids).toEqual(expect.arrayContaining(first.metadata.overdue_commitment_ids));
   });
 
+  test('a retired reminder is not prior evidence while proof is failing; the bell returns once proof recovers', async () => {
+    const row = await seed();
+    await runSweep(); expect(await unread()).toHaveLength(1);
+    // Snoozed past now: no longer overdue, its bell is retired.
+    await trx('call_commitments').where({ id: row.id }).update({ snoozed_until: new Date(now.getTime() + 3600000) });
+    await runSweep(); expect(await unread()).toHaveLength(0);
+    // Due again while fulfillment verification fails for its call.
+    await trx('call_commitments').where({ id: row.id }).update({ snoozed_until: null });
+    const refresh = ledger.refreshFulfillment;
+    const spy = jest.spyOn(ledger, 'refreshFulfillment').mockImplementation((c, id) => id === row.call_log_id ? Promise.resolve({ failed: 1 }) : refresh(c, id));
+    expect(await runSweep()).toMatchObject({ overdue: 0, unverified: 1 });
+    expect(await unread()).toHaveLength(0);
+    spy.mockRestore();
+    expect(await runSweep()).toMatchObject({ overdue: 1, alerted: 1 });
+    expect(await unread()).toHaveLength(1);
+  });
+
   test.each([false, true])('failed proof does not suppress verified work (previous reminder: %s)', async (previous) => {
     const failed = await seed();
     if (previous) { await runSweep(); await unread().update({ read_at: now }); }

@@ -139,8 +139,12 @@ async function runInner({ now = new Date() } = {}) {
         // Never create a first alert from unverified evidence, but retain
         // previously announced work and its acknowledgment version.
         const inAggregate = !aggregateMeta?.retired && aggregateMeta?.overdue_commitment_ids?.includes(row.id);
+        // A retired row (the callback stopped being overdue meanwhile) is
+        // not prior evidence: copying its literal 'retired' version would
+        // dedupe onto a read bell and leave nothing unread.
         const prior = !inAggregate && await noticeRows().whereRaw("metadata->>'commitment_id' = ?", [row.id])
-          .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'").orderBy('created_at', 'desc').first('metadata');
+          .whereRaw("metadata->>'dedupeKey' LIKE 'call-commitment-overdue:%'")
+          .whereRaw("metadata->>'dedupeVersion' IS DISTINCT FROM 'retired'").orderBy('created_at', 'desc').first('metadata');
         if (!inAggregate && !prior) continue;
         const meta = typeof prior?.metadata === 'string' ? JSON.parse(prior.metadata) : prior?.metadata;
         version = (inAggregate ? aggregateMeta.overdue_versions?.[row.id] : meta?.dedupeVersion) || version;
