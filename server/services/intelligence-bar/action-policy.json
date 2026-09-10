@@ -1525,7 +1525,7 @@
     "kind": "read",
     "role": "technician_or_admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "search_messages": {
     "module": "comms-tools.js",

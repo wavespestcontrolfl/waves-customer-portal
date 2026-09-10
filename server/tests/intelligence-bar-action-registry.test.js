@@ -210,7 +210,7 @@ const SCOPE_SNAPSHOT = {
     // Operator free text passed through verbatim (a name or address can be
     // typed into any of these): technician notes and call snippets, restock
     // reasons, the pricing changelog, estimate service_interest, lost reasons.
-    'get_estimate_funnel', 'get_lost_analysis', 'get_restock_queue', 'recent_pricing_changes', 'search_field_intelligence',
+    'get_estimate_funnel', 'get_lost_analysis', 'get_restock_queue', 'recent_pricing_changes', 'search_field_intelligence', 'search_knowledge_base',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],
