@@ -70,21 +70,20 @@ function buildIdOf(assets) {
 // retained build must not lose its claim because a newer page also used the
 // chunk (a navigation whose shell refresh failed is live but never cached, so
 // its build is never retained). The header lists the builds that used the
-// entry, newest first, capped so repeated never-cached builds cannot grow
-// it without bound. The cap must never drop the cached shell's build: it is
-// the "previous" generation the next prune retains, however many failed
-// refreshes came between (`pinnedBuildId`, read by the caller).
+// entry, newest claims first, capped so repeated never-cached builds cannot
+// grow it without bound. The worker cannot tell which tab made a request,
+// so every use claims BOTH the live build and the cached shell's build (the
+// "previous" generation the next prune retains); the claims lead the list,
+// so the cap only ever sheds older, unretained builds.
 const BUILD_TAGS_KEPT = 3;
 function buildTagsOf(response) {
   const raw = response && response.headers.get(BUILD_HEADER);
   return raw ? raw.split(',').map(t => t.trim()).filter(Boolean) : [];
 }
 
-function tagWithBuild(response, buildIds, pinnedBuildId = null) {
+function tagWithBuild(response, buildIds) {
   const headers = new Headers(response.headers);
-  const existing = buildTagsOf(response);
-  const pinned = pinnedBuildId && existing.includes(pinnedBuildId) ? [pinnedBuildId] : [];
-  const tags = [...new Set([].concat(buildIds).filter(Boolean).concat(pinned, existing))].slice(0, BUILD_TAGS_KEPT);
+  const tags = [...new Set([].concat(buildIds).filter(Boolean).concat(buildTagsOf(response)))].slice(0, BUILD_TAGS_KEPT);
   headers.set(BUILD_HEADER, tags.join(','));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
@@ -93,10 +92,14 @@ function tagWithBuild(response, buildIds, pinnedBuildId = null) {
 // chunk fetched right now belongs to. Worker globals do not survive
 // termination, so read it from the cache each time (one small parse, and
 // only on an /assets/ cache miss).
+// `knownCachedBuild` mirrors the last value read or written, so the asset
+// hit fast path can check a chunk's claims without touching the cache.
+let knownCachedBuild = null;
 async function cachedBuildId(cache) {
   const shell = await cache.match(OFFLINE_URL);
   if (!shell) return null;
-  return buildIdOf(shellAssetUrls(await shell.text()));
+  knownCachedBuild = buildIdOf(shellAssetUrls(await shell.text()));
+  return knownCachedBuild;
 }
 
 // The build pages are running right now. A navigation hands the page build
@@ -143,10 +146,10 @@ function withAssetWrites(fn) {
 // into whatever the cache holds NOW — a queued write must not carry an
 // older copy's tags over an entry a shell refresh re-wrote meanwhile.
 // `fallback` is stored when the entry is gone (pruned in between).
-function claimBuilds(cache, request, fallback, claims, pinnedBuildId = null) {
+function claimBuilds(cache, request, fallback, claims) {
   return withAssetWrites(async () => {
     const latest = (await cache.match(request)) || fallback;
-    return cache.put(request, tagWithBuild(latest, claims, pinnedBuildId));
+    return cache.put(request, tagWithBuild(latest, claims));
   });
 }
 
@@ -190,6 +193,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq) {
     await cache.put(assetUrl, tagWithBuild(response, [buildId, ...buildTagsOf(existing)]));
   })));
   await cache.put(OFFLINE_URL, shellResponse);
+  knownCachedBuild = buildId;
   // Refreshes are queued, so an older one can finish after a newer
   // navigation already advanced the live build — writing its own build back
   // would mis-tag the newer page's chunks. Only claim the memo if no
@@ -292,22 +296,20 @@ self.addEventListener('fetch', event => {
     event.respondWith(
       caches.open(CACHE_NAME).then(cache => cache.match(event.request).then(cached => {
         if (cached) {
-          // A chunk unchanged between builds keeps its hash, so a hit under
-          // the live build may not carry its tag yet; add it (keeping the
-          // older builds' claims) so the prune sees it as the live build's
-          // when those older ones age out.
+          // A chunk unchanged between builds keeps its hash, so a hit may
+          // not carry the live build's tag (or the cached shell's) yet; add
+          // them, keeping older claims, so the prune sees the chunk as the
+          // retained builds' when the ones that first stored it age out.
           const tags = buildTagsOf(cached);
-          if (liveBuildId && tags.includes(liveBuildId)) return cached;
+          if (liveBuildId && knownCachedBuild && tags.includes(liveBuildId) && tags.includes(knownCachedBuild)) return cached;
           // Clone before handing `cached` to respondWith: on a cold worker the
           // build lookup awaits the cached shell, and the page can lock the
           // body in that window, making a later clone() throw.
           const copy = cached.clone();
-          const touch = currentBuildId(cache).then(async buildId => {
-            if (!buildId || tags.includes(buildId)) return undefined;
-            // The cached shell's build is retained by the next prune; pin it
-            // so the tag cap cannot shed it behind a run of live-only builds.
-            const pinned = await cachedBuildId(cache);
-            return claimBuilds(cache, event.request, copy, [buildId], pinned);
+          const touch = Promise.all([currentBuildId(cache), cachedBuildId(cache)]).then(([buildId, cachedId]) => {
+            const claims = [buildId, cachedId].filter(Boolean);
+            if (!claims.length || claims.every(c => tags.includes(c))) return undefined;
+            return claimBuilds(cache, event.request, copy, claims);
           }).catch(() => {});
           try { event.waitUntil(touch); } catch { /* fire and forget */ }
           return cached;

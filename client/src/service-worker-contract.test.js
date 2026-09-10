@@ -562,6 +562,31 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
   });
 
+  it('lets a hit claim the cached build for a chunk stored two builds ago', async () => {
+    // Pre-push Codex P1: Shared-XYZ.js was stored under Z; the refresh to A
+    // never referenced it, so it carries no A tag. B then goes live with a
+    // failed refresh, and an A tab hits the chunk: the hit must claim A
+    // (not just B), or C's prune — retaining C and A — deletes it under A.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-ZZZ.js'])));
+    await dispatchFetch('/assets/Shared-XYZ.js'); // tagged Z
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' }); // B live, never cached
+    await dispatchFetch('/assets/Shared-XYZ.js'); // hit from the A tab
+    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+      .toContain(buildIdOf(['/assets/index-AAA.js']));
+
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
+  });
+
   it('merges a queued re-tag into the entry a refresh re-wrote meanwhile', async () => {
     // Pre-push Codex P1: shell A cached, B live after a failed refresh. A hit
     // on Shared-XYZ.js is parked while it reads the cached shell; refresh C,
