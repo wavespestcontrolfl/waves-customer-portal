@@ -110,6 +110,72 @@ describe("KnowledgePage embedded navigation", () => {
       .toHaveAttribute("aria-current", "page");
   });
 
+  it.each(["compile", "add"])(
+    "guards duplicate source %s requests and retries only a failed refresh",
+    async (mutation) => {
+      const pending = deferred();
+      let getCount = 0;
+      fetch.mockImplementation((url, options) => {
+        if (options?.method === "POST") return pending.promise;
+        getCount += 1;
+        if (getCount === 2) {
+          return Promise.resolve(response(
+            { error: "Refresh unavailable" },
+            { ok: false, status: 503 },
+          ));
+        }
+        const sources = mutation === "compile" && getCount === 1
+          ? [{ id: "source-1", filename: "rates.csv", file_type: "csv", processed: false }]
+          : [];
+        return Promise.resolve(response({ sources }));
+      });
+      localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+      renderWiki("/admin/knowledge?wikiTab=sources");
+      expect(document.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
+
+      if (mutation === "compile") {
+        const compile = await screen.findByRole("button", { name: "Compile" });
+        fireEvent.click(compile);
+        fireEvent.click(compile);
+      } else {
+        fireEvent.click(await screen.findByRole("button", { name: "Add source" }));
+        const filename = screen.getByRole("textbox", { name: "Filename" });
+        fireEvent.change(filename, { target: { value: "rates.csv" } });
+        fireEvent.submit(filename.closest("form"));
+        fireEvent.submit(filename.closest("form"));
+      }
+
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
+        .toHaveLength(1);
+      pending.resolve(response({}));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Changes saved, but the source list could not be refreshed.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(getCount).toBe(3));
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
+        .toHaveLength(1);
+    },
+  );
+
+  it("retains the source draft across cancel and a rejected add", async () => {
+    fetch.mockImplementation(async (url, options) => options?.method === "POST"
+      ? response({ error: "Invalid wiki path" }, { ok: false, status: 400 })
+      : response({ sources: [] }));
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderWiki("/admin/knowledge?wikiTab=sources");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add source" }));
+    const filename = screen.getByRole("textbox", { name: "Filename" });
+    fireEvent.change(filename, { target: { value: "rates.csv" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    expect(screen.getByRole("textbox", { name: "Filename" })).toHaveValue("rates.csv");
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid wiki path");
+    expect(screen.getByRole("textbox", { name: "Filename" })).toHaveValue("rates.csv");
+  });
+
   it("retains a failed question and restores opener focus on close", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url, options) => options?.method === "POST"
