@@ -297,16 +297,27 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   // encryption key is not a prerequisite for closing it.
   const token = await Summary.packetHasPublishableSummary(packet.id, database)
     ? await Summary.ensureVisitSummaryToken(packet.id, database) : null;
-  const payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
+  let payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
   // Unpaid invoices use the existing scheduled invoice sender and its
   // durable send claim. Billing contacts receive their financial document;
   // service contacts' summary token never grants access to billing details.
   if (['payment_needed', 'payment_failed'].includes(payment.state)) {
-    await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
-      .whereNull('payer_id').whereNull('payer_statement_id').update({
-        status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
-        updated_at: database.fn.now(),
-      });
+    // The invoice was minted self-pay. If a third-party payer has since been
+    // assigned to the customer or a billed member, the homeowner must not
+    // receive a pay link for debt that now belongs to AP: the visit goes on
+    // billing hold for the office instead. A lookup failure rethrows so the
+    // recovery sweep retries rather than assuming self-pay.
+    const owner = await liveThirdPartyPayer(packet, database);
+    if (owner) {
+      await database('service_visits').where({ id: packet.visit_id }).update({ billing_hold: true, updated_at: database.fn.now() });
+      payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
+    } else {
+      await database('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
+        .whereNull('payer_id').whereNull('payer_statement_id').update({
+          status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
+          updated_at: database.fn.now(),
+        });
+    }
   }
   const delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
   // Canonical completion gives these two effects different eligibility: a
@@ -346,6 +357,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
   const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
   const state = pending ? 'effects_pending' : review ? 'office_required' : 'done';
+  let recovered = false;
   if (!pending) await database.transaction(async (trx) => {
     const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
     await trx('customers').where({ id: visit.customer_id }).forNoKeyUpdate().first('id');
@@ -353,6 +365,17 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     await trx('service_visits').where({ id: visit.id }).forUpdate().first('id');
     const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
     if (locked.status !== 'done') {
+      // A recovery that settled the uncertain summary between the delivery
+      // read and this lock must not be closed over with the stale result:
+      // the packet stays on the recovery queue so the next pass re-observes
+      // the settled summary and enrolls the review it still owes.
+      if (delivery.state === 'delivery_review' && !(await trx('visit_effects').where({ visit_id: packet.visit_id })
+        .whereIn('effect_type', ['completion_sms', 'completion_email']).where({ status: 'unknown_delivery' }).first('id'))) {
+        recovered = true;
+        await trx('visit_completion_packets').where({ id: packet.id })
+          .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+        return;
+      }
       if (review) {
         const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
         await require('./dispatch-alerts').createAlert({
@@ -364,14 +387,31 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
         status: 'done', error: review ? JSON.stringify({ payment: payment.state, delivery: delivery.state }) : null,
         updated_at: trx.fn.now(),
       });
+      // A recovery reopens only the packet: a visit that already closed keeps
+      // its original closure time and reason.
       await trx('service_visits').where({ id: packet.visit_id }).update({
-        status: 'closed', closed_at: trx.fn.now(), close_reason: review ? 'office_review' : 'completed', updated_at: trx.fn.now(),
+        status: 'closed', closed_at: trx.raw('COALESCE(closed_at, NOW())'),
+        close_reason: trx.raw('COALESCE(close_reason, ?)', [review ? 'office_review' : 'completed']), updated_at: trx.fn.now(),
       });
     }
   });
-  return { status: pending ? 202 : 200, body: {
-    visitId: packet.visit_id, packetId: packet.id, state, payment, delivery, summaryUrl: token ? `/visit/${token}` : null,
+  return { status: pending || recovered ? 202 : 200, body: {
+    visitId: packet.visit_id, packetId: packet.id, state: recovered ? 'effects_pending' : state, payment, delivery,
+    summaryUrl: token ? `/visit/${token}` : null,
   } };
+}
+
+// The active third-party payer that now owns a billed member or the customer,
+// resolved live through the canonical Bill-To resolver. null = self-pay.
+async function liveThirdPartyPayer(packet, database = db) {
+  const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
+  const memberIds = await database('visit_completion_packet_items').where({ packet_id: packet.id }).pluck('scheduled_service_id');
+  const Payer = require('./payer');
+  for (const scheduledServiceId of [...memberIds, null]) {
+    const resolved = await Payer.resolveForInvoice({ database, customerId: visit.customer_id, scheduledServiceId, throwOnError: true });
+    if (resolved.payerId) return resolved.payerId;
+  }
+  return null;
 }
 
 /** Completion and a later paid webhook share the same representative record. */
