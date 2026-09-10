@@ -6165,6 +6165,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
         const acceptResult = await markEstimateManuallyAccepted({
           estimateId: linkedEstimateId,
+          bookedAppointmentIds: createdAppointments.map((appointment) => appointment.id),
           adminUserId: req.technicianId || null,
           source: bookingBillingTermEffective === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
           billingTerm: bookingBillingTermEffective,
@@ -6226,6 +6227,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
             const retryResult = await markEstimateManuallyAccepted({
               estimateId: linkedEstimateId,
+              bookedAppointmentIds: createdAppointments.map((appointment) => appointment.id),
               adminUserId: req.technicianId || null,
               source: 'verbal_yes_booking',
               billingTerm: 'standard',

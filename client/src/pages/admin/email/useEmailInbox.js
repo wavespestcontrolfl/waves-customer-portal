@@ -50,11 +50,14 @@ export default function useEmailInbox(active, clearDraftResult) {
     if (location.pathname.replace(/\/+$/, "") !== "/admin/communications")
       return;
     const next = new URLSearchParams(location.search);
+    const entry = window.history.state;
+    // Keep the original inbox entry across message selection and reloads.
+    const inboxIndex = next.get("id") ? entry?.usr?.emailInboxIndex : entry?.idx;
     if (id) next.set("id", id);
     else next.delete("id");
     navigate(
       { pathname: location.pathname, search: `?${next}`, hash: location.hash },
-      { replace },
+      { replace, state: { emailInboxIndex: id ? inboxIndex : null } },
     );
   };
 
@@ -206,12 +209,17 @@ export default function useEmailInbox(active, clearDraftResult) {
     }
   };
 
-  const closeEmail = (emailId) => {
+  const closeEmail = (emailId, returnToInbox = false) => {
+    const selectedInUrl = new URLSearchParams(window.location.search).get("id") === emailId;
+    const entry = window.history.state, inboxIndex = entry?.usr?.emailInboxIndex;
+    if (returnToInbox && selectedInUrl && Number.isInteger(inboxIndex) && Number.isInteger(entry?.idx) && inboxIndex < entry.idx) {
+      navigate(inboxIndex - entry.idx);
+      return;
+    }
     selectedIdRef.current = null;
     setSelectedEmail(null);
     setThread([]);
-    if (new URLSearchParams(window.location.search).get("id") === emailId)
-      selectMessageId(null, true);
+    if (selectedInUrl) selectMessageId(null, true);
   };
 
   const handleStar = async (event, email) => {
@@ -349,6 +357,7 @@ export default function useEmailInbox(active, clearDraftResult) {
     selectedEmail,
     thread,
     openEmail,
+    closeEmail,
     handleStar,
     removeEmail,
     handleReclassify,
