@@ -12,6 +12,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
+const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
@@ -560,7 +561,7 @@ function supplementalCompanionLines(estimateData = {}) {
 }
 
 function combineRecurringServicesForScheduling(recurringServices = [], opts = {}) {
-  const { acceptFrequency = null, supplementalCompanions = [] } = opts;
+  const { acceptFrequency = null, supplementalCompanions = [], forceSeparateRetiredRoutes = false } = opts;
   const remaining = Array.isArray(recurringServices) ? recurringServices.slice() : [];
   const supplements = Array.isArray(supplementalCompanions) ? supplementalCompanions : [];
   const acceptPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(acceptFrequency);
@@ -576,7 +577,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
   // rides as a supplement (supplementalCompanionLines emits rodent bait
   // only), so nothing is orphaned by skipping. The bait+BOND routes are a
   // rider on one visit, not two programs, and keep combining either way.
-  const separateComboVisits = process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
+  const separateComboVisits = forceSeparateRetiredRoutes || process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
   for (const route of COMBINED_SERVICE_ROUTES) {
     if (route.retiredBySeparateVisits && separateComboVisits) continue;
     const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
@@ -938,7 +939,7 @@ function combinedRewriteUpdate(combo, catalogRow) {
     // standalone (codex #3485 r6 P2).
     update.service_key_snapshot = combo.route.catalogServiceKey;
     if (catalogRow.default_duration_minutes) {
-      update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+      update.estimated_duration_minutes = serviceDurationMinutes(catalogRow);
     }
   }
   return update;
@@ -3173,11 +3174,18 @@ function visitsPerYearForRecurringService(svc = {}) {
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
+  // A certified version-2 parent retains its accepted allowance even after
+  // gate shutdown; companion parents carry their own allocated duration.
+  if (parentRow.reservation_policy_version === 2) return firstPositiveNumber(parentRow.estimated_duration_minutes);
   // Combined synthetic lines carry the catalog row's duration explicitly
   // (e.g. Pest + Termite Bait at 75min) — that beats the pest-quarterly
   // default so combined follow-ups inherit the right visit length.
   const explicit = firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes);
   if (explicit) return explicit;
+  // The new policy resolves defaults from the catalog at the booking
+  // boundary. Follow-ups inherit that reserved allowance, including custom
+  // longer estimates, instead of reinstating the retired family-wide hour.
+  if (require('./scheduling/policy').capacityEnabled()) return firstPositiveNumber(parentRow.estimated_duration_minutes);
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
@@ -3267,6 +3275,7 @@ const IDENTITY_ONLY_CATALOG_KEYS = new Set([
 // byte-identical.
 const TREE_SHRUB_IDENTITY_ONLY_KEYS = new Set(Object.values(TREE_SHRUB_CADENCE_CATALOG_KEYS));
 function identityOnlyCatalogKey(catalogServiceKey) {
+  if (require('./scheduling/policy').capacityEnabled()) return false;
   return IDENTITY_ONLY_CATALOG_KEYS.has(catalogServiceKey)
     || (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
       && TREE_SHRUB_IDENTITY_ONLY_KEYS.has(catalogServiceKey));
@@ -4291,17 +4300,22 @@ const EstimateConverter = {
     // downstream) guarantees no partial rows are created; all three convertEstimate
     // entrypoints run inside a transaction, so a throw rolls back cleanly.
     const supplementalCompanions = supplementalCompanionLines(estimateData);
-    // ONE scheduling decision for the whole accept (Codex r2 on the
+    // ONE initial scheduling decision for the whole accept (Codex r2 on the
     // pest+rodent removal): the auto-schedule loop, the reservation branch,
     // unit counting, and prepay coverage all read this same result, so the
     // count can never disagree with what actually schedules. Only
     // fromSupplement standalone units add to the count — a line-sourced
     // standalone unit was already counted among the recurring lines, and
-    // the combine dedupes a line + duplicate scalar to one unit.
-    const combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+    // the combine dedupes a line + duplicate scalar to one unit. A stamped
+    // primary-only reservation can separate retired routes after its hold is
+    // loaded below; that changes placement only, not the accepted program count.
+    const combinedSchedulingOptions = {
       acceptFrequency: estimateData.customerSelection?.frequency || null,
       supplementalCompanions,
-    });
+    };
+    let combinedScheduling = combineRecurringServicesForScheduling(
+      recurringServicesForConversion, combinedSchedulingOptions,
+    );
     const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
     // Termite bond lines are RIDERS, not units (owner 2026-07-20): the bond
     // folds into the bait visit via its combined route, so counting it would
@@ -5059,6 +5073,19 @@ const EstimateConverter = {
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
     const combinedCapacity = capacitySnapshot && !capacitySnapshot.allocatedServiceIds ? capacitySnapshot : null;
     if (combinedCapacity && !database.isTransaction) throw VisitCapacity.capacityUnavailable();
+    // A version-2 reservation without a combined allocation certified only
+    // its primary program. Retire true two-program routes for this conversion
+    // even while the broader separate-visits gate is off, so a companion is
+    // created independently instead of being added to the certified visit.
+    const primaryOnlyCapacityReservation = reservedRows[0]?.reservation_policy_version === 2 && !combinedCapacity;
+    const separateReservedPrograms = primaryOnlyCapacityReservation
+      || process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
+    if (primaryOnlyCapacityReservation) {
+      combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+        ...combinedSchedulingOptions,
+        forceSeparateRetiredRoutes: true,
+      });
+    }
 
     // ——— Multi-unit lock-order pre-pass (P1: cross-conversion deadlock) ———
     // Only the CALLER-TRANSACTION path needs it: with a caller-provided trx
@@ -5133,7 +5160,7 @@ const EstimateConverter = {
             // family lock order and deadlock (codex r17 P2: one reserves
             // termite and promotes mosquito while the other does the
             // reverse). Mirrors the loop's own name/key derivations.
-            const prePassRetiredPestPair = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+            const prePassRetiredPestPair = separateReservedPrograms
               && (standalone.some((unit) => unit.catalogServiceKey === 'termite_bait')
                 || combos.some((combo) => combo.route.primaryKey === 'termite_bait'));
             for (const svc of remaining) {
@@ -5181,7 +5208,7 @@ const EstimateConverter = {
               // own name/pattern/key derivations exactly.
               const fam = seedingFamilyKey(svc);
               const treeShrubPromotable = fam === 'tree_shrub'
-                && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+                && separateReservedPrograms
                 && (() => {
                   if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)) return false;
                   if (combinedCapacity) return true;
@@ -5407,7 +5434,7 @@ const EstimateConverter = {
         // pre-rewrite combined identity. Under the gate the pairing uses
         // the same identity-aware classification as the zero-match
         // promotion; pre-gate keeps label-only reservedRowComboRewrites.
-        const comboRewritePairs = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+        const comboRewritePairs = separateReservedPrograms
           ? (combos || []).flatMap((combo) => {
             const matching = identityAwareComboMatches(reservedRows, combo, reservedServiceKeyById);
             return matching.length === 1 ? [{ row: matching[0], combo }] : [];
@@ -5425,7 +5452,7 @@ const EstimateConverter = {
         // both-halves-reserved combo is already covered by its two reserved
         // rows (reservedRowComboRewrites' exactly-one-match contract), and
         // a one-match combo rewrites the reserved row below as always.
-        const promotedComboUnits = process.env.GATE_SEPARATE_COMBO_VISITS !== 'true' ? [] : (combos || [])
+        const promotedComboUnits = !separateReservedPrograms ? [] : (combos || [])
           .filter((combo) => identityAwareComboMatches(reservedRows, combo, reservedServiceKeyById).length === 0)
           .map((combo) => ({
             service: combo.service,
@@ -5441,7 +5468,7 @@ const EstimateConverter = {
         // suppresses the bait insert and nothing else would schedule the
         // billed pest program (audit P0). A pest-owned reservation dedups
         // via alreadyReserved exactly like every other promotion.
-        const retiredPestPairPresent = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+        const retiredPestPairPresent = separateReservedPrograms
           && ((reservedStandalone || []).some((unit) => unit.catalogServiceKey === 'termite_bait')
             || (combos || []).some((combo) => combo.route.primaryKey === 'termite_bait'));
         const promotedRetiredPestUnits = !retiredPestPairPresent && !combinedCapacity ? [] : (remaining || [])
@@ -5466,7 +5493,7 @@ const EstimateConverter = {
         // same pattern gate applies, so a legacy line that would not seed
         // does not promote either.
         const promotableFamilies = ['lawn_care', 'palm_injection',
-          ...(process.env.GATE_SEPARATE_COMBO_VISITS === 'true' ? ['tree_shrub'] : [])];
+          ...(separateReservedPrograms ? ['tree_shrub'] : [])];
         const promotedLawnPalmUnits = (remaining || [])
           .filter((line) => {
             const fam = seedingFamilyKey(line);
@@ -5530,7 +5557,7 @@ const EstimateConverter = {
           return reservedRows.some((row) => {
             // POST-rewrite identity under the gate: a row the rider route
             // is about to rewrite covers what it will BECOME (audit P0).
-            const reservedKey = (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+            const reservedKey = (separateReservedPrograms
               && pendingRewriteKeyByRowId.get(row.id))
               || reservedServiceKeyById.get(row.service_id)
               || String(row.service_key_snapshot || '')
@@ -5547,7 +5574,7 @@ const EstimateConverter = {
             // cadence-specific identity (pest_general_monthly on a
             // quarterly accept) must not suppress the correctly-cadenced
             // promoted unit — those rows need exact identity or a relink.
-            const retiredComboCover = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+            const retiredComboCover = separateReservedPrograms
               && !!unit.catalogServiceKey && !!reservedKey
               && RETIRED_COMBINED_CATALOG_KEYS.has(reservedKey)
               && comboRouteFamiliesFromCatalogKey(reservedKey)
@@ -5586,7 +5613,7 @@ const EstimateConverter = {
             // for lawn/T&S). The label stays the fallback for
             // identity-less legacy rows; pre-gate keeps the r20
             // label-or-identity contract byte-for-byte.
-            if (process.env.GATE_SEPARATE_COMBO_VISITS === 'true' && reservedKey) {
+            if (separateReservedPrograms && reservedKey) {
               return identityMatch;
             }
             return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
@@ -5609,7 +5636,7 @@ const EstimateConverter = {
             : [recurringServiceForScheduledRow(
               recurringServicesForConversion,
               reservedStart,
-              process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+              separateReservedPrograms
                 ? seedFamilyForReservedIdentity(
                   reservedServiceKeyById.get(reservedStart.service_id)
                     || String(reservedStart.service_key_snapshot || '') || null,
@@ -5655,7 +5682,13 @@ const EstimateConverter = {
             const unitDate = unit.seasonalMosquito
               ? await rolledSeasonalFirstDate(scheduledDateOnly(reservedStart.scheduled_date))
               : scheduledDateOnly(reservedStart.scheduled_date);
-            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date);
+            // A primary-only capacity hold certifies no companion work.
+            // Keep those programs unassigned and without a promised window
+            // until an independent scheduling writer certifies their route.
+            const capacityReservation = reservedStart.reservation_policy_version === 2
+              || require('./scheduling/policy').capacityEnabled();
+            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date)
+              && (!!combinedCapacity || !capacityReservation);
             // Row notes are customer-visible — a seasonal line's raw
             // every_6_weeks frequency must not leak into them.
             const unitFrequencyLabel = unit.seasonalMosquito
@@ -5680,14 +5713,16 @@ const EstimateConverter = {
             try {
               const catalogRow = await database('services')
                 .where({ service_key: unit.catalogServiceKey })
-                .first('id', 'name', 'default_duration_minutes');
+                .first('id', 'name', 'default_duration_minutes', 'scheduling_duration_policy');
               if (catalogRow) {
                 standaloneRow.service_id = catalogRow.id;
                 standaloneRow.service_type = Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)
                   ? (catalogRow.name || standaloneRow.service_type) : standaloneRow.service_type;
                 unit.service.name = standaloneRow.service_type;
                 if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                  standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                  standaloneRow.estimated_duration_minutes = Math.max(serviceDurationMinutes(catalogRow),
+                    require('./scheduling/policy').capacityEnabled()
+                      ? firstPositiveNumber(unit.service.estimatedDurationMinutes, unit.service.estimated_duration_minutes) || 0 : 0);
                 }
               }
             } catch (lookupErr) {
@@ -5730,6 +5765,7 @@ const EstimateConverter = {
             if (combinedCapacity && sameTrip) {
               Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length, unit.catalogServiceKey));
               standaloneRow.service_key_snapshot = unit.catalogServiceKey;
+              if (combinedCapacity.version === 2) standaloneRow.reservation_policy_version = 2;
             }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already
@@ -5870,7 +5906,7 @@ const EstimateConverter = {
           try {
             catalogRow = await database('services')
               .where({ service_key: combo.route.catalogServiceKey })
-              .first('id', 'default_duration_minutes');
+              .first('id', 'default_duration_minutes', 'scheduling_duration_policy');
           } catch (lookupErr) {
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
           }
@@ -5929,10 +5965,13 @@ const EstimateConverter = {
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
-          .update({ reservation_service_mix: allocation.reservation_service_mix });
+          .update({ reservation_service_mix: allocation.reservation_service_mix,
+            ...(combinedCapacity.version === 2 ? { reservation_policy_version: 2 } : {}) });
         await database('scheduled_services').where({ id: reservedStart.id }).update(
           VisitCapacity.windowForCapacityService(reservedStart, 0, reservedStart.service_key_snapshot),
         );
+        if (combinedCapacity.version === 2) await require('./scheduling/arrival-route').persistCapacityAllocation(
+          database, reservedStart, allocation.reservation_service_mix.allocatedServiceIds);
         Object.assign(reservedStart, allocation);
       }
 
@@ -5954,7 +5993,7 @@ const EstimateConverter = {
         // THAT family's line, not its stale label — a pest-identified row
         // labeled bait would otherwise bind the bait line, termite seeding
         // declines, and the sold pest series stops after one visit.
-        const reservedIdentityFamily = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+        const reservedIdentityFamily = separateReservedPrograms
           ? seedFamilyForReservedIdentity(
             reservedServiceKeyById.get(reservedStart.service_id)
               || String(reservedStart.service_key_snapshot || '') || null,
@@ -6191,14 +6230,16 @@ const EstimateConverter = {
             // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
-              .first('id', 'name', 'default_duration_minutes');
+              .first('id', 'name', 'default_duration_minutes', 'scheduling_duration_policy');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
               if (Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)) {
                 acceptedPestServiceName = catalogRow.name;
               }
               if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+                svc.estimatedDurationMinutes = Math.max(serviceDurationMinutes(catalogRow),
+                  require('./scheduling/policy').capacityEnabled()
+                    ? firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes) || 0 : 0);
               }
             } else {
               logger.warn(`[estimate-converter] catalog row ${unit.catalogServiceKey} absent — scheduling by name only`);
