@@ -405,7 +405,16 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
       audit(templateKey, 'missing_table', 'sms_templates table missing', context);
       return null;
     }
-    const t = await db('sms_templates').where({ template_key: templateKey }).first();
+    // opts.templateBody: render THIS snapshot of the row's body instead of
+    // re-reading the row — a flow that measured a body before acting
+    // (rain-out's pre-move segment cap) must send from the copy it
+    // measured, not a copy an admin edit could have grown in between. The
+    // caller read the row (and its active flag) when it took the
+    // snapshot; a snapshot is the base row, so variants are skipped.
+    const snapshot = opts.templateBody != null;
+    const t = snapshot
+      ? { body: String(opts.templateBody), is_active: true }
+      : await db('sms_templates').where({ template_key: templateKey }).first();
     if (!t) {
       audit(templateKey, 'missing_template', 'template row missing', context);
       return null;
@@ -421,7 +430,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     // rain-out custom rung pre-renders for a segment cap and mirrors a
     // client counter) pin the base row — a weighted random variant can't be
     // predicted by a pre-check or a preview.
-    const variant = opts.noVariants
+    const variant = (opts.noVariants || snapshot)
       ? null
       : await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
     let body = variant?.body || t.body;

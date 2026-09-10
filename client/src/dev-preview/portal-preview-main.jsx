@@ -458,7 +458,21 @@ Object.assign(api, {
   getCustomerPushStatus: async () => ({ available: !!APP_NOTIFICATIONS, enabled: NOTIFICATION_PREFS.pushEnabled !== false,
     registered: APP_NOTIFICATIONS !== 'missing', fresh: APP_NOTIFICATIONS === 'ready' }),
   updateAccountCreditPreference: async (on) => { CUSTOMER.autoApplyAccountCredit = !!on; return { autoApplyAccountCredit: !!on }; },
-  getPropertyNotificationPrefs: async () => ({
+  // Under ?properties=saved the card lists one entry per SAVED property
+  // (app property scope, PR 3): the primary answers the profile row, the
+  // family home inherits it, the rental starts quiet (ruling R1).
+  getPropertyNotificationPrefs: async () => (SAVED_PROPERTIES ? { properties: SAVED_ENTRIES.map((e) => ({
+    id: e.key, key: e.key, customerId: e.customerId, propertyId: e.propertyId,
+    isPrimaryProfile: true, isPrimaryProperty: e.isPrimaryProperty, profileLabel: e.profileLabel, label: e.label,
+    relationship: e.relationship, quietByDefault: e.relationship === 'rental_owned' || e.relationship === 'managed_for_client',
+    address: e.address,
+    preferences: {
+      appointmentConfirmation: !(e.relationship === 'rental_owned'), serviceReminder72h: !(e.relationship === 'rental_owned'),
+      serviceReminder24h: !(e.relationship === 'rental_owned'), techEnRoute: !(e.relationship === 'rental_owned'),
+      techArrived: !(e.relationship === 'rental_owned'), appointmentNotifyPrimary: true,
+    },
+    contactsShared: true, serviceContact: null, serviceContacts: [], maxServiceContacts: 3,
+  })) } : {
     properties: [{
       id: 'cust-demo-1',
       profileLabel: 'Home',
@@ -475,7 +489,7 @@ Object.assign(api, {
       maxServiceContacts: 3,
     }],
   }),
-  updatePropertyNotificationPrefs: async () => ({ success: true }),
+  updatePropertyNotificationPrefs: async (_customerId, updates) => ({ success: true, preferences: Object.fromEntries(Object.entries(updates).filter(([k]) => k !== 'propertyId')) }),
 
   // referrals
   getReferrals: async () => ({
