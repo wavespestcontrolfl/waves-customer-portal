@@ -174,6 +174,29 @@ async function recordCancellationCase({ customerId, requestId, value = {}, famil
   }
 }
 
+// A cleanly processed portal cancellation leaves nothing for the office to
+// do, so the ticket closes itself — the same close the admin Cancel plan
+// commit already makes on its own row. Without it the row sat 'new' forever
+// and the end-of-day digest listed a handled cancel as a rotting ticket
+// (2026-09-10: a cancel the processor finished in seconds showed as 19d
+// unworked). A partial or errored run stays 'new' on purpose: that is the
+// repairable row the dedupe/inactive retry paths and the office review need.
+// Best-effort: a lost close only costs a stale digest line, never the cancel.
+// Guarded on status='new' so a staff transition that already happened wins.
+async function closeProcessedCancellation(requestId, result, processed) {
+  if (!processed || !result || !result.ok || (result.errors && result.errors.length)) return false;
+  try {
+    const now = new Date();
+    const closed = await db('service_requests').where({ id: requestId, status: 'new' })
+      .update({ status: 'resolved', resolved_at: now, updated_at: now });
+    if (!closed) logger.warn(`Processed cancellation ${requestId} was not 'new' at close — left as is`);
+    return !!closed;
+  } catch (closeErr) {
+    logger.warn(`Processed cancellation close failed for request ${requestId}: ${closeErr.message}`);
+    return false;
+  }
+}
+
 // =========================================================================
 // POST /api/requests — Create a new service request
 // =========================================================================
@@ -340,6 +363,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
           snapshot: { written_on_retry: true, degraded: true },
           processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
         });
+        // A retry that completed a partial first run closes the ticket too.
+        if (await closeProcessedCancellation(dupe.id, retryOutcome, !!(retryOutcome && retryOutcome.churned))) {
+          dupe.status = 'resolved';
+        }
       }
       return res.status(200).json({
         success: true,
@@ -429,6 +456,9 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         snapshot: { written_on_retry: true, degraded: true },
         processed: !!(retryOutcome && retryOutcome.ok && retryOutcome.churned),
       });
+      if (await closeProcessedCancellation(priorCancellation.id, retryOutcome, !!(retryOutcome && retryOutcome.churned))) {
+        priorCancellation.status = 'resolved';
+      }
       return res.status(200).json({
         success: true,
         deduped: true,
@@ -635,6 +665,10 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
       // remaining plan repriced — not a churn.
       cancellationProcessed = !!(cancellationResult && cancellationResult.ok
         && (cancellationResult.churned || cancellationResult.scopedWoundDown));
+      if (await closeProcessedCancellation(request.id, cancellationResult, cancellationProcessed)) {
+        // The response and the confirmations read this row — reflect the close.
+        request.status = 'resolved';
+      }
 
       // Moving branch: the paid Google validation runs ONLY NOW — after
       // the billing wind-down — and only refines the audit verdict (an
