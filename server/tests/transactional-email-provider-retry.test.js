@@ -187,6 +187,22 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
   });
 
+  test('a visit summary retry stopped by the suppression ledger settles its summary aggregate', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked', template_key: 'service.visit_summary' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue({ suppression_type: 'do_not_email' });
+    const summary = require('../services/visit-completion-summary');
+    summary.reconcileSummaryEmailRecovery.mockClear();
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-7' });
+    expect(await retry.retryOne(stored)).toMatchObject({ sent: false, stopped: true });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }));
+  });
+
   test('other templates never consult the visit summary fence', async () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
