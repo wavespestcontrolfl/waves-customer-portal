@@ -867,6 +867,23 @@ test('an explicitly addressed unlinked sender can be drafted a reply by email id
   expect((await Context.prepareReadInput({ phone: '5550001234' }, addressed, { toolName: 'match_existing_customer', schema: { properties: { phone: { type: 'string' } } } })).code).toBe('customer_scope_required');
 });
 
+test('an unlinked review is drafted only when the current request named it and no customer target is set', async () => {
+  const unlinked = '20000000-0000-4000-8000-000000000002';
+  rows.google_reviews.push({ id: unlinked, customer_id: null, reviewer_name: 'Synthetic Unlinked' });
+  const schema = { properties: { review_id: { type: 'string' } } };
+  const read = (params, ctx) => Context.prepareReadInput(params, ctx, { toolName: 'draft_review_reply', schema });
+  // A customer-scoped task never binds an unlinked review, named or not.
+  expect((await read({ review_id: unlinked }, context(A))).code).toBe('target_clarification_required');
+  expect((await read({ review_id: unlinked }, { ...context(A), reviewReference: unlinked })).code).toBe('target_clarification_required');
+  // Without a target the review must be the one the current request named.
+  expect(await read({ review_id: unlinked }, { targets: [], reviewReference: unlinked, page: { ids: {} } })).toEqual({ input: { review_id: unlinked } });
+  expect((await read({ review_id: unlinked }, { targets: [], page: { ids: {} } })).code).toBe('target_clarification_required');
+  expect((await read({ review_id: unlinked }, { targets: [], reviewReference: REVIEW, page: { ids: {} } })).code).toBe('target_clarification_required');
+  // A review linked to the task customer binds through its customer.
+  expect(await read({ review_id: REVIEW }, context(A))).toEqual({ input: { review_id: REVIEW } });
+  expect((await read({ review_id: REVIEW }, context(B))).code).toBe('target_clarification_required');
+});
+
 test('compute_estimate binds its lead to the task customer', async () => {
   const lead = '60000000-0000-4000-8000-000000000001';
   rows.leads = [{ id: lead, customer_id: B, first_name: 'Synthetic', last_name: 'Lead' }];

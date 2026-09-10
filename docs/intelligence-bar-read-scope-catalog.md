@@ -117,6 +117,11 @@ old list).
   customer-identifying rows and stays open for a resolved, unnamed or
   unresolved task ("gaps for Labor Day" reads "Labor" as a name;
   `SELECTOR_FREE_READS_NO_CUSTOMER_ROWS` in task-context.js).
+- `get_expenses` and `get_vendor_invoices` are `broad`: job-expense descriptions
+  are operator free text that can name a customer or address (expense rows
+  can be tied to a customer), and vendor-invoice rows carry sender names,
+  addresses and subjects like the other email readers. Mileage and activity
+  readers return aggregates only and stay `none`.
 - `get_truck_status` is `broad`: the live last position of a truck during
   service hours is a customer's property, so it is refused inside a
   customer-scoped task like `get_truck_trips`.

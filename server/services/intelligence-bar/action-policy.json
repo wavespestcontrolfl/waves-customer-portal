@@ -549,7 +549,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_fee_analysis": {
     "module": "banking-tools.js",
@@ -1197,7 +1197,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_waveguard_tiers": {
     "module": "estimate-tools.js",
