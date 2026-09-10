@@ -103,6 +103,11 @@ async function claimDueRetries(limit = CLAIM_LIMIT, now = new Date()) {
 // so stale-claim recovery settles such a row as uncertain instead of
 // scheduling another attempt (a bearer link is never sent twice on a guess).
 const HANDOFF_STARTED = 'provider_handoff_started';
+// Written before the held handoff (locks, re-authorization, the provider
+// block clear): a worker lost while it still carries this marker provably
+// made no request, so stale-claim recovery requeues the row. The marker
+// becomes HANDOFF_STARTED at the Mail Send boundary itself.
+const HANDOFF_PENDING = 'provider_handoff_pending';
 
 async function recoverStaleClaims(now = new Date()) {
   const staleBefore = new Date(now.getTime() - STALE_CLAIM_MS);
@@ -224,12 +229,14 @@ async function stopRetry(message, { status, reason, exhaustedAlert = false }) {
 // (or something unknowable) reached the provider.
 async function retrySummaryThroughHandoff(message, dispatchToProvider, state) {
   // Durable before the held handoff and on this worker's own connection
-  // (never a second slot inside the held transaction): an interrupted
-  // worker leaves a row stale-claim recovery settles as uncertain. The
-  // update must own the queued row, or the claim has moved on.
+  // (never a second slot inside the held transaction): a reclaimable
+  // pre-provider marker, so a worker lost while acquiring locks,
+  // re-authorizing or clearing the provider block is requeued by stale-claim
+  // recovery, not exhausted. The update must own the queued row, or the
+  // claim has moved on.
   const marked = await db('email_messages')
     .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-    .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
+    .update({ error_message: HANDOFF_PENDING, updated_at: new Date() });
   if (Number(marked) !== 1) return { outcome: { sent: false, stopped: true, reason: 'claim_lost' } };
   let fence;
   try {
@@ -306,6 +313,18 @@ async function retryOne(message) {
     // Blocks are a provider-specific suppression distinct from hard bounces.
     // If it remains, SendGrid will drop the retry before attempting delivery.
     await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
+    // The Mail Send boundary: the pre-provider marker becomes the started
+    // marker durably (dedicated marker connection, never a second root-pool
+    // slot inside the held handoff) before the request, so a worker lost
+    // after this point settles as uncertain and one lost before it requeues.
+    // Zero rows means stale-claim recovery already reclaimed the row: nothing
+    // may reach the provider.
+    if (message.template_key === 'service.visit_summary') {
+      const started = await require('../models/marker-db')()('email_messages')
+        .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued', error_message: HANDOFF_PENDING })
+        .update({ error_message: HANDOFF_STARTED, updated_at: new Date() });
+      if (Number(started) !== 1) throw new Error('Visit summary retry claim was reclaimed before the provider request');
+    }
     state.dispatchStarted = true;
     state.result = await sendgrid.sendOne({
       to: message.recipient_email_snapshot,
@@ -364,6 +383,7 @@ async function runDueRetries({ limit = CLAIM_LIMIT } = {}) {
 
 module.exports = {
   HANDOFF_STARTED,
+  HANDOFF_PENDING,
   RETRY_DELAYS_MS,
   MAX_RETRIES,
   asArray,

@@ -1559,11 +1559,12 @@ async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey 
 }
 
 // The durable "a provider request follows" transition: the pre-provider
-// marker is cleared on its own connection and awaited before the request,
+// marker is cleared on the dedicated marker connection (never a second
+// root-pool slot inside the held handoff) and awaited before the request,
 // so a crash after it leaves an uncertain effect and a crash before it a
 // reclaimable one. Zero rows means recovery already reclaimed the effect
 // (or its state changed): nothing may reach the provider.
-async function markVisitNotificationProviderStart(visitId, kind, token, database = db) {
+async function markVisitNotificationProviderStart(visitId, kind, token, database = require('../models/marker-db')()) {
   const rows = await database('visit_effects').where({ visit_id: visitId, effect_type: effectTypeForKind(kind), claim_token: token,
     status: 'unknown_delivery' }).where('last_error', 'like', `${HANDOFF_PENDING}%`)
     .update({ last_error: null, updated_at: database.fn.now() }).returning('id');
