@@ -4717,6 +4717,27 @@ function resolveTermiteInstallBasis(sys, selectedSystem, knobs) {
   };
 }
 
+// Steady-state annual program cost for a termite line that persisted only
+// its station count (the Admin V1 CLIENT_FALLBACK envelope carries no costs
+// block) — the same model priceTermiteBait emits, on the LIVE basis, for
+// the production pricing audit's COGS view (codex #4313 r8 P1). Report only.
+function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultSystem) {
+  const n = Number(stations);
+  if (!(n > 0)) return null;
+  const selected = TERMITE.systems[system] ? system : TERMITE.defaultSystem;
+  const sys = TERMITE.systems[selected];
+  const stationCost = Number(sys?.stationCost) || 0;
+  const model = termiteProgramCostModel({
+    stations: n,
+    installMaterialCost: n * (stationCost + (Number(sys?.laborMaterial) || 0) + (Number(sys?.misc) || 0)),
+    installLabor: n * 0.083 * GLOBAL.LABOR_RATE,
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    stationCost,
+    system: selected,
+  });
+  return model.annualTotal;
+}
+
 const TERMITE_SERVICE_MINUTES_PER_STATION = 5;
 function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, stationCost, system }) {
   // TERMITE.cartridges describes Trelona ATBS (two cartridges per station,
@@ -9097,7 +9118,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,

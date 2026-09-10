@@ -301,6 +301,22 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.proposal).toEqual(proposal);
   });
 
+  test('a mapped / CLIENT_FALLBACK termite row derives its per-station COGS from results.tmBait.sta', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-termite-fallback', status: 'sent', monthly_total: '24.00', annual_total: '288.00', onetime_total: '653.00',
+      estimate_data: {
+        result: {
+          recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 24, perTreatment: 72, visitsPerYear: 4 }] },
+          results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 653 } },
+        },
+      },
+    });
+    const tb = audit.lines.find((l) => l.serviceKey === 'termite_bait');
+    expect(tb.cogs.status).toBe('explicit');
+    // 15 stations on the live basis: 4 × $55.42 labor + $67.62 cartridges + $13.85 reserve.
+    expect(tb.cogs.estimatedCost).toBeCloseTo(303.14, 1);
+  });
+
   test('an enabled-but-empty proposal falls through to the engine lines', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-empty-prop', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,

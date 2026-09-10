@@ -355,7 +355,7 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       // margin report AND disables the catalog link (the sanity band anchors
       // on it). The reserve is a fraction of a visit's labor per year — a
       // deliberate 0 is fine, "25" typed for 0.25 is not (codex #4313 r4 P2).
-      || check(['cartridge_cost', 'cartridgeCost'], isPositive, 'a positive $/cartridge cost')
+      || check(['cartridge_cost', 'cartridgeCost'], (v) => isPositive(v) && num(v) <= 100, 'a positive $/cartridge cost no greater than 100')
       || check(['follow_up_visit_reserve', 'followUpVisitReserve'], (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) <= 4, 'a number of extra visits per year between 0 and 4')
       || check(['min_stations', 'minStations'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 50, 'a whole number of stations between 1 and 50')
       || check(['cartridges_per_station', 'cartridgesPerStation'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 4, 'a whole number between 1 and 4')

@@ -176,6 +176,7 @@ describe('termite_install admin validation', () => {
     [{ multiplier: 0 }, 'multiplier'],
     [{ cartridge_cost: 'free' }, 'cartridge_cost'],
     [{ cartridge_cost: 0 }, 'cartridge_cost'],
+    [{ cartridge_cost: 6830 }, 'cartridge_cost'],
     [{ follow_up_visit_reserve: 25 }, 'follow_up_visit_reserve'],
     [{ cartridges_per_station: 2.5 }, 'cartridges_per_station'],
     [{ cartridge_replacement_rate: 1.5 }, 'cartridge_replacement_rate'],
