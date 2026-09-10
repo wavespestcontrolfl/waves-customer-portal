@@ -2291,6 +2291,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
   let completionAttempt = null;
   let legacyVisitToDissolve = null;
   let markedSucceeded = false;
+  // The completion's own delivery claim on a REUSED pre-minted invoice
+  // (Codex P1 #4131 r4): { invoiceId, previousStatus, claimed } while the
+  // completion holds the 'sending' claim; released at the end unless a
+  // pay-link text actually went out under it (completionInvoiceLinkDelivered).
+  let completionInvoiceSendClaim = null;
+  let completionInvoiceLinkDelivered = false;
   let durableCompletionCommitted = false;
   try {
     const {
@@ -10897,21 +10903,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // SMS body only; the mobile in-person payment sheet
         // (invoicePaymentActionRequired) is intentionally left untouched so an
         // unpaid invoice always keeps a collection path.
-        // A REUSED pre-minted invoice: its delivery state is re-read NOW, at
-        // the link decision (Codex P1 #4131 r4) — an admin "send now" from the
-        // Invoices page may have claimed ('sending', sendViaSMSAndEmail's own
-        // claim) or delivered it after the pre-completion snapshot was read.
-        // That claim is honored here, so the completion text goes report-only
-        // instead of carrying the same pay link a second time. Unreadable =
-        // fail closed (no link).
+        // A REUSED pre-minted invoice is delivered under the ONE send claim
+        // (Codex P1 #4131 r4): the completion takes claimInvoiceForSend — the
+        // same atomic draft/scheduled/… → 'sending' flip sendViaSMSAndEmail
+        // takes — before it may text the pay link. An admin "send now" that
+        // claimed first (or already delivered) makes the claim fail, and the
+        // completion text goes report-only; a completion that claimed first
+        // makes the admin send fail its own claim. The claim is released at
+        // the end unless the link actually went out (markDeliverySent then
+        // finalizes 'sending' → 'sent'). A failed claim read fails closed.
         let reusedInvoiceClaimedElsewhere = false;
-        if (preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
+        if (!suppressCompletionInvoiceLink && preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
           try {
-            const live = await db('invoices').where({ id: invoice.id }).first('status', 'sent_at');
-            reusedInvoiceClaimedElsewhere = !!live && (String(live.status) === 'sending'
-              || require('../services/invoice-helpers').completionInvoiceAlreadyDelivered(live));
-          } catch (liveErr) {
-            logger.warn(`[dispatch] invoice ${invoice.id} delivery re-read failed — completion text goes report-only: ${liveErr.message}`);
+            const claim = await require('../services/invoice').claimInvoiceForSend(invoice.id);
+            completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
+          } catch (claimErr) {
+            logger.info(`[dispatch] invoice ${invoice.id} delivery claimed elsewhere — completion text goes report-only: ${claimErr.message}`);
             reusedInvoiceClaimedElsewhere = true;
           }
         }
@@ -11501,6 +11508,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   source: sentSmsType || 'completion_sms_with_invoice',
                   payUrl,
                 });
+                completionInvoiceLinkDelivered = true;
               } catch (statusErr) {
                 logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
               }
@@ -11566,6 +11574,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 source: snap.type || 'completion_sms_with_invoice',
                 payUrl,
               });
+              completionInvoiceLinkDelivered = true;
             } catch (statusErr) {
               logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id} after an accepted send: ${statusErr.message}`);
             }
@@ -12026,6 +12035,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // Release the completion's send claim when no pay link went out under it
+    // (report-only text, no phone, SMS failure) — the invoice returns to the
+    // status it had, sendable again by the office.
+    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
+      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
+      completionInvoiceSendClaim = null;
+    }
     const responsePayload = {
       success: true,
       serviceRecordId: record.id,
@@ -12079,6 +12095,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     markedSucceeded = true;
     return ({ status: 200, body: responsePayload });
   } catch (err) {
+    // A thrown completion releases its send claim too — never a stranded
+    // 'sending' row the office can no longer send.
+    if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
+      await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
+      completionInvoiceSendClaim = null;
+    }
     // Only mark failed if we haven't already marked succeeded. After the
     // durable trx commits and the attempt is succeeded, an unhandled throw
     // in a recoverable side effect must NOT flip it back — that would

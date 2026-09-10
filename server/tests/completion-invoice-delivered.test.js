@@ -9,6 +9,50 @@ const fs = require('fs');
 const path = require('path');
 const { completionInvoiceAlreadyDelivered } = require('../services/invoice-helpers');
 
+// The claim itself, interleaved: two deliverers read the same draft; the
+// second UPDATE … WHERE status = 'draft' matches nothing once the first
+// flipped it to 'sending', and the loser is refused — so an admin "send
+// now" and the completion can never both text the pay link.
+jest.mock('../models/db', () => {
+  const state = { status: 'draft' };
+  const chain = () => {
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.first = jest.fn(async () => ({ id: 'inv-1', status: state.status }));
+    q.update = jest.fn((values) => ({
+      returning: jest.fn(async () => {
+        const expected = q.where.mock.calls[q.where.mock.calls.length - 1][0].status;
+        if (state.status !== expected) return [];
+        state.status = values.status;
+        return [{ id: 'inv-1', status: state.status }];
+      }),
+      catch: jest.fn(async () => { state.status = values.status; }),
+    }));
+    return q;
+  };
+  const db = jest.fn(() => chain());
+  db.__state = state;
+  db.fn = { now: () => new Date() };
+  db.raw = jest.fn();
+  db.transaction = jest.fn();
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+describe('the shared send claim (claimInvoiceForSend) under interleaving', () => {
+  test('the first deliverer wins the claim; a second is refused; releasing restores the row', async () => {
+    const db = require('../models/db');
+    const { claimInvoiceForSend, restoreSendClaim } = require('../services/invoice');
+    db.__state.status = 'draft';
+    const first = await claimInvoiceForSend('inv-1');
+    expect(first).toMatchObject({ previousStatus: 'draft', claimed: true });
+    expect(db.__state.status).toBe('sending');
+    await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/already in progress|not sendable/i);
+    await restoreSendClaim('inv-1', first.previousStatus, first.claimed);
+    expect(db.__state.status).toBe('draft');
+  });
+});
+
 describe('completionInvoiceAlreadyDelivered', () => {
   test('delivered = sent_at stamped, or a sent / paid / prepaid status', () => {
     expect(completionInvoiceAlreadyDelivered({ status: 'draft', sent_at: new Date() })).toBe(true);
@@ -31,8 +75,11 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(dispatch).toContain(".first('id', 'status', 'total', 'token', 'sent_at')");
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(completion).toMatch(/const suppressCompletionInvoiceLink = !!invoiceAlreadySent\s*\|\| !!\(preMintedInvoice && require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(preMintedInvoice\)\);/);
-    // …and re-reads the reused invoice's LIVE state at the link decision, honoring the send's own 'sending' claim (Codex P1 r4).
-    expect(completion).toMatch(/const live = await db\('invoices'\)\.where\(\{ id: invoice\.id \}\)\.first\('status', 'sent_at'\);\s*reusedInvoiceClaimedElsewhere = !!live && \(String\(live\.status\) === 'sending'\s*\|\| require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(live\)\);/);
+    // …and takes the ONE send claim before texting a link for a reused invoice (Codex P1 r4):
+    // claim at the decision, finalize via markDeliverySent when the link went out, release otherwise (normal end and thrown path).
+    expect(completion).toMatch(/const claim = await require\('\.\.\/services\/invoice'\)\.claimInvoiceForSend\(invoice\.id\);\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
     expect(completion).toMatch(/const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink\s*&& !reusedInvoiceClaimedElsewhere/);
+    expect(completion.match(/completionInvoiceLinkDelivered = true;/g)).toHaveLength(2);
+    expect(completion.match(/if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);/g)).toHaveLength(2);
   });
 });

@@ -6589,5 +6589,10 @@ module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_
 // The statuses sendViaSMS/claimInvoiceForSend will claim — the ONE
 // sendability authority (the collections pay-link anchor reads it).
 module.exports.SEND_CLAIMABLE_STATUSES = SEND_CLAIMABLE_STATUSES;
+// The ONE delivery claim (Codex P1 #4131 r4): the completion takes it too
+// before texting a pay link for a reused pre-minted invoice, so an admin
+// "send now" and the completion can never both deliver the same link.
+module.exports.claimInvoiceForSend = claimInvoiceForSend;
+module.exports.restoreSendClaim = restoreSendClaim;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
