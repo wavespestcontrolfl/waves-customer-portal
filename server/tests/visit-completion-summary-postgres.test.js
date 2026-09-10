@@ -63,7 +63,10 @@ function handoffSender(provider = async () => ({ sent: true })) {
     let dispatched = false;
     let verdict;
     try {
-      verdict = await withSmsHandoff(async () => { dispatched = true; outcome = await provider(); return { ok: true }; });
+      verdict = await withSmsHandoff(async (_trx, onProviderStart) => {
+        if (typeof onProviderStart === 'function') onProviderStart();
+        dispatched = true; outcome = await provider(); return { ok: true };
+      });
     } catch (err) {
       if (dispatched) return { sent: false, retryable: true, code: 'PROVIDER_UNAVAILABLE', providerHttpStatus: err.providerHttpStatus };
       verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED', reason: err.message, retryable: true };
@@ -572,7 +575,7 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
     sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
-      await withSmsHandoff(async () => { throw new Error('provider response unavailable'); });
+      await withSmsHandoff(async (_trx, onProviderStart) => { onProviderStart(); throw new Error('provider response unavailable'); });
     });
     expect(await deliver()).toEqual({ state: 'delivery_review' });
     expect(sendCustomerMessage.mock.calls[0][0].to).toBe('+12025550123');
@@ -769,9 +772,10 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     let markDuringRequest;
     sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
-      await withSmsHandoff(async () => {
+      await withSmsHandoff(async (_trx, onProviderStart) => {
         // Read on another connection while the handoff transaction is open.
         markDuringRequest = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first('status');
+        onProviderStart();
         throw Object.assign(new Error('process lost mid-request'), { providerHttpStatus: undefined });
       });
     });
@@ -989,6 +993,32 @@ postgres('visit summary recipient recovery', () => {
     } finally {
       await mockPg('email_suppressions').where({ email: fixture.serviceEmail }).del();
     }
+  });
+
+  test.each(['immediate', 'scheduled'])('a sender recheck failure inside the %s handoff, before the provider request, restores the claim', async (rail) => {
+    const queued = rail === 'scheduled' ? await heldSummary() : null;
+    if (rail === 'immediate') {
+      fixture.payload.items[0].body.sendCompletionSms = true;
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    }
+    let providerCalls = 0;
+    // The canonical sender's consent recheck throws on the held connection before onProviderStart.
+    const failingRecheck = async () => { throw new Error('consent recheck outage'); };
+    if (rail === 'scheduled') {
+      await expect(deferredHandoff(queued.metadata, failingRecheck)).rejects.toThrow('consent recheck outage');
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'pending' });
+      expect(await deferredHandoff(queued.metadata, async (_trx, onProviderStart) => { onProviderStart(); providerCalls += 1; return { ok: true }; })).toMatchObject({ ok: true });
+    } else {
+      sendCustomerMessage.mockImplementationOnce(async ({ withSmsHandoff }) => {
+        try { await withSmsHandoff(failingRecheck); } catch (err) { return { sent: false, blocked: true, code: 'SMS_HANDOFF_CHECK_FAILED', retryable: true, reason: err.message }; }
+        return { sent: true };
+      });
+      expect(await deliver()).toEqual({ state: 'delivery_pending' });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'failed' });
+      sendCustomerMessage.mockImplementation(handoffSender(async () => { providerCalls += 1; return { sent: true }; }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+    }
+    expect(providerCalls).toBe(1);
   });
 
   test('the email retry rail holds the recipient rows through its provider request', async () => {
