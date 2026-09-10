@@ -1764,7 +1764,14 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     // defers only on an existing service record. The ask is dropped here
     // (the quiet closeout never sends one either); the form disables the
     // toggle for linked open visits.
-    const linkage = await db('invoices').where({ id }).first('scheduled_service_id', 'service_record_id');
+    let linkage = null;
+    try {
+      linkage = await db('invoices').where({ id }).first('scheduled_service_id', 'service_record_id');
+    } catch (err) {
+      // Lookup outage: keep the legacy behaviour (the operator's ask stands)
+      // rather than fail the send — sendViaSMSAndEmail re-reads the row anyway.
+      logger.warn(`[admin-invoices] linkage read failed before send for ${id}: ${err.message}`);
+    }
     const preCompletionLinked = !!(linkage?.scheduled_service_id && !linkage?.service_record_id);
     if (preCompletionLinked && requestReview) {
       logger.info(`[admin-invoices] review ask dropped for invoice ${id}: linked to open visit ${linkage.scheduled_service_id}, sent before completion`);
