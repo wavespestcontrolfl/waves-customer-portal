@@ -1165,14 +1165,15 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
-      // Rollback must not weaken proof for an attempt placed by a callback card.
-      // A persisted attempt made under the card policy: the card's own
-      // commitment link, or the Call Log action's source-call link stamped
-      // with the policy at placement.
-      const cardAttempt = !require('./callback-cards').enabled() && await conn('call_log')
+      // The strict customer-leg proof applies once THIS promise has an
+      // attempt placed under the card policy (the card's commitment link, or
+      // the Call Log action's policy-stamped source-call link) — gate on or
+      // off, so rollback cannot weaken it and enabling the gate cannot strip
+      // pre-policy attempts of the legacy rule they were placed under.
+      const cardAttempt = await conn('call_log')
         .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))",
           [commitment.id, commitment.call_log_id]).first('id');
-      if (require('./callback-cards').enabled() || cardAttempt) {
+      if (cardAttempt) {
         if (!phone) return null;
         // A child-leg connection plus reviewed extraction of a real
         // conversation is proof. Ringing the staff phone, voicemail, and

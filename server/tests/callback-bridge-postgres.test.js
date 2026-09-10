@@ -53,7 +53,7 @@ run('callback bridge on PostgreSQL', () => {
     callIds.push(...await conn('call_log').where({ from_phone: from, direction: 'outbound' }).pluck('id'));
     await conn('call_commitments').whereIn('id', commitmentIds).del();
     await conn('call_log').whereIn('id', callIds).del();
-    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), 'callback-card-bridge:+15555550178', 'callback-card-bridge:+15555550175']).del();
+    await conn('sms_send_claims').whereIn('claim_key', [claimKey(), 'callback-card-bridge:+15555550178', 'callback-card-bridge:+15555550175', `callback-card-bridge:customer:${customerId}`]).del();
     await conn('customers').where({ id: customerId }).del();
     await conn('technicians').where({ id: staffId }).del();
     callIds.length = commitmentIds.length = 0;
@@ -100,6 +100,15 @@ run('callback bridge on PostgreSQL', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 
+  test('two promises to one customer at two of their numbers place one bridge at a time', async () => {
+    const contact = '+15555550175';
+    await conn('customers').where({ id: customerId }).update({ secondary_phone: contact });
+    const [first, second] = [await seed(), await seed({ sourcePhone: contact })];
+    const attempts = await Promise.all([invoke(first), invoke(second, { to: contact })]);
+    expect(attempts.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
   test('two promises to one customer from different calls place one bridge at a time', async () => {
     const [first, second] = [await seed(), await seed()];
     const attempts = await Promise.all([invoke(first), invoke(second)]);
@@ -134,7 +143,7 @@ run('callback bridge on PostgreSQL', () => {
       expect((await invoke(await conn('call_commitments').where({ id: first.id }).first())).status).toBe(409);
       expect(mockCreate).toHaveBeenCalledTimes(2);
     } finally {
-      callIds.push(...await conn('call_log').where({ customer_id: otherCustomer }).pluck('id'));
+      callIds.push(...await conn('call_log').where({ customer_id: otherCustomer }).pluck('id')); await conn('sms_send_claims').where({ claim_key: `callback-card-bridge:customer:${otherCustomer}` }).del();
       await conn('call_log').whereIn('id', callIds).del();
       await conn('customers').where({ id: otherCustomer }).del();
     }
@@ -232,7 +241,7 @@ run('callback bridge on PostgreSQL', () => {
     const legEnded = new Date().toISOString();
     const [outbound] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
       status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
-      metadata: { relatedCallId: row.call_log_id, customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } }).returning('id');
+      metadata: { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } }).returning('id');
     expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
     const kept = await conn('call_commitments').where({ id: row.id }).first();
     expect(kept.fulfillment).toMatchObject({ record_id: outbound.id, basis: 'callback_customer_conversation' });
