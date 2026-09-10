@@ -280,6 +280,15 @@ postgres('visit summary recipient recovery', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('a formatting-only edit of the queued recipient number keeps the deferred summary eligible', async () => {
+    const queued = await heldSummary();
+    await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '(202) 555-0124' });
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: true });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '+12025550199' });
+    expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: false, reason: 'visit_summary_recipient_changed' });
+  });
+
   test('a queued summary carries its recorded member so the replay applies the same per-property toggles', async () => {
     const queued = await heldSummary();
     expect(fixture.serviceIds).toContain(queued.metadata.scheduled_service_id);
@@ -399,6 +408,22 @@ postgres('visit summary recipient recovery', () => {
     await expect(writer).resolves.toBe('committed');
     expect(await delivery).toEqual({ state: 'delivered' });
     expect(sendOne).toHaveBeenCalled();
+  });
+
+  test('a save assigning a Gmail dot/tag variant of the recovery destination waits for the held retry handoff', async () => {
+    const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
+    const destination = `john.doe.${randomUUID().slice(0, 8)}@gmail.com`;
+    const alias = `${destination.split('@')[0].replace(/\./g, '')}+billing@googlemail.com`;
+    let blockedCode = null;
+    expect(await Summary.retrySummaryThroughHandoff(message, async () => {
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '200ms'");
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { email: alias });
+      }).catch((err) => { blockedCode = err.code; });
+      return { ok: true };
+    }, { destination })).toEqual({ ok: true });
+    expect(blockedCode).toBe('55P03');
   });
 
   test('a service-contact save assigning the recovery destination waits for the held retry handoff', async () => {

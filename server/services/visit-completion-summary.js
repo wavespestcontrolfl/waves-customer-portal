@@ -141,7 +141,12 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
   const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
     { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
   const recipient = getServiceContactSmsRecipient(customer);
-  if (!recipient.phone || recipient.phone !== meta.to_phone) return { eligible: false, reason: 'visit_summary_recipient_changed' };
+  // Contact saves keep their formatting and the canonical sender normalizes
+  // before Twilio, so the frozen number and the live one are compared by
+  // destination identity, not by string.
+  const { toE164 } = require('../utils/phone');
+  const sameNumber = recipient.phone && toE164(recipient.phone) && toE164(recipient.phone) === toE164(meta.to_phone);
+  if (!sameNumber) return { eligible: false, reason: 'visit_summary_recipient_changed' };
   return { eligible: true, visit };
 }
 

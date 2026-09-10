@@ -1602,7 +1602,7 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
         if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
         return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
       }
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
       // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
       // ruling every other claimant site adopted): customers.email is
       // deliberately non-unique, so a spouse/tenant/shared-household
