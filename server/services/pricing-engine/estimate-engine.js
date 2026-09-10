@@ -1066,6 +1066,12 @@ function generateEstimate(input) {
         monitoringTier: termiteOptions.monitoringTier || 'basic',
         ownership: wantsRental ? 'rent' : 'own',
         modifiers,
+        // Quote-time station-cost snapshot replayed from a stored estimate
+        // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, set
+        // by both authoritative replay paths). Server-derived only — a
+        // service-line `knobs` value from a stored/browser input is ignored,
+        // exactly like `modifiers` above. Absent on fresh quotes.
+        knobs: input.termitePricingKnobs && typeof input.termitePricingKnobs === 'object' ? input.termitePricingKnobs : null,
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
