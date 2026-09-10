@@ -591,7 +591,9 @@ async function visitSummaryUncertainForRecord(serviceRecordId, database = db) {
 // Parks the cadence sequences enrolled for this packet's recorded service
 // records (stopped with a reason of their own and their schedule kept, so
 // the recovery can resume them without a fresh enrollment that the cadence
-// cooldown might refuse) and removes the pending legacy asks.
+// cooldown might refuse) and removes the pending legacy asks. An ask whose
+// provider handoff has started is `sending` (see reviewSendThroughSummaryHandoff)
+// and is kept: its delivery is recorded by its own sender.
 async function parkVisitReviewOutreach(packetId, database = db) {
   const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
     .whereNotNull('service_record_id').pluck('service_record_id');
@@ -624,7 +626,13 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
 // takes that row FOR UPDATE before parking outreach) serializes with the
 // send: the ask goes out before the bounce lands, or is parked before it
 // could go out. Records outside a combined visit dispatch unfenced.
-async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db) {
+// `requestId` names the legacy/touch row the send belongs to: it becomes
+// `sending` in this same transaction immediately before the request, so a
+// bounce reconciliation that waits on the packet row and then parks the
+// outreach removes only asks that have not reached a provider, never one
+// whose delivery is about to be recorded (a throw from the request rolls
+// the mark back with the transaction).
+async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db, { requestId = null } = {}) {
   return database.transaction(async (trx) => {
     const item = serviceRecordId
       ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
@@ -634,6 +642,7 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
         .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
       if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
     }
+    if (requestId) await trx('review_requests').where({ id: requestId, status: 'pending' }).update({ status: 'sending' });
     return dispatch(trx);
   });
 }
@@ -734,7 +743,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   // A recorded member owns the effects; retained history never qualifies.
   const member = await VisitGroups.recordedPacketMember(packet.id, database);
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = require('./visit-completion-packets').packetPayload(packet);
   const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');

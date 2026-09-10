@@ -18,6 +18,12 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
+// A packet's stored payload, parsed once: pg returns json columns as
+// objects and the fixtures/older rows as strings.
+function packetPayload(packet) {
+  return typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+}
+
 function failure(status, code, error) {
   return { status, body: { code, error } };
 }
@@ -247,7 +253,7 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
   if (packet.status === 'failed') return { status: 200, body: {
     visitId: packet.visit_id, packetId: packet.id, state: 'office_required', code: 'member_effects_rejected',
   } };
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = packetPayload(packet);
   const items = await database('visit_completion_packet_items').where({ packet_id: packet.id }).orderBy('scheduled_service_id');
   if (!items.length || items.some((item) => !item.service_record_id)) {
     return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
@@ -398,7 +404,6 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     : { enrolled: false, reason: delivery.state };
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
-  const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
   let recovered = false;
   if (!pending) await database.transaction(async (trx) => {
     const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
@@ -445,9 +450,12 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
       });
     }
   });
-  const finalState = recovered ? 'effects_pending' : pending ? 'effects_pending'
-    : (payment.state === 'office_required' || delivery.state === 'delivery_review') ? 'office_required' : 'done';
-  return { status: pending || recovered ? 202 : 200, body: {
+  // Judged after the close: the locked re-read above may have moved the
+  // delivery state to office review.
+  const stalled = pending || recovered;
+  const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
+  const finalState = stalled ? 'effects_pending' : review ? 'office_required' : 'done';
+  return { status: stalled ? 202 : 200, body: {
     visitId: packet.visit_id, packetId: packet.id, state: finalState, payment, delivery,
     summaryUrl: token ? `/visit/${token}` : null,
   } };
@@ -488,7 +496,7 @@ async function lockPacketPayerRows(packetId, trx) {
   const packet = await trx('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
   if (!packet) return [];
   const visit = await trx('service_visits').where({ id: packet.visit_id }).first('customer_id');
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = packetPayload(packet);
   const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
     : await trx('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
   const ids = new Set();
@@ -512,7 +520,7 @@ async function liveThirdPartyPayerForPacket(packetId, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
   if (!packet) return null;
   const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = packetPayload(packet);
   const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
     : await database('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
   const Payer = require('./payer');
@@ -581,7 +589,7 @@ async function enrollVisitCompletionReview(packetId, database = db, options = {}
 async function enrollVisitCompletionReviewOnce(packetId, database = db, { deliverySettled = false } = {}) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
-  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const payload = packetPayload(packet);
   const requested = payload.items.every(({ body }) => body.requestReview !== false
     && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created'));
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
@@ -634,7 +642,7 @@ async function enrollVisitCompletionReviewOnce(packetId, database = db, { delive
     completedAt: visit.completion_submitted_at, triggeredBy: 'auto',
     delayMinutes: require('./review-request').completionReviewDelay(first.structured_notes), legacyDelayMinutes: 120,
   }).catch(() => ({ started: false, reason: 'error' }));
-  if (result?.started === false && ['plan_resolution_failed', 'error'].includes(result.reason)) {
+  if (result.started === false && ['plan_resolution_failed', 'error'].includes(result.reason)) {
     // A paid webhook can reach a packet already closed while awaiting
     // payment. Put it back on the existing recovery worker's queue too.
     await database('visit_completion_packets').where({ id: packet.id }).update({
@@ -660,4 +668,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { memberInTechnicianScope, liveThirdPartyPayerForPacket, lockPacketPayerRows, visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, packetInvoiceSendInFlight };
+module.exports = { memberInTechnicianScope, liveThirdPartyPayerForPacket, lockPacketPayerRows, visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, packetInvoiceSendInFlight, packetPayload };

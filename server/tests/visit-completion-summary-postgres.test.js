@@ -1817,6 +1817,34 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a reschedule that lands between the worker\'s due read and its claim keeps the invoice queued for later', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, visit_completion_packet_id: fixture.packetId,
+      scheduled_send_at: new Date(Date.now() - 60000) });
+    const later = new Date(Date.now() + 6 * 60 * 60 * 1000);
+    const execute = mockPg.client.constructor.prototype._query;
+    let rescheduled = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function rescheduleAfterDueRead(connection, query) {
+      if (!rescheduled && query.sql.startsWith('select "visit_id", "payload" from "visit_completion_packets"')) {
+        rescheduled = true;
+        await mockPg('invoices').where({ id: invoiceId, status: 'scheduled' }).update({ scheduled_send_at: later, scheduled_send_attempts: 0 });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await require('../services/invoice').claimPacketInvoiceForSend(invoiceId, fixture.packetId, { requireDue: true }))
+        .toMatchObject({ payerBilled: false, claim: null });
+      expect(rescheduled).toBe(true);
+      const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(invoice.status).toBe('scheduled');
+      expect(new Date(invoice.scheduled_send_at).getTime()).toBe(later.getTime());
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('payer writers see an in-flight combined-visit send for the customer and for a billed service', async () => {
     const { packetInvoiceSendInFlight } = require('../services/visit-completion-packets');
     const invoiceId = randomUUID();
@@ -1854,6 +1882,13 @@ postgres('visit summary recipient recovery', () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
     const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
     let blockedCode = null;
+    // The legacy ask this send belongs to, and one that has not reached a provider.
+    const inFlightAsk = randomUUID();
+    const idleAsk = randomUUID();
+    await mockPg('review_requests').insert([
+      { id: inFlightAsk, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', token: randomUUID().replace(/-/g, '') },
+      { id: idleAsk, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', token: randomUUID().replace(/-/g, '') },
+    ]);
     expect(await Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => {
       await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'bounced' });
       await mockPg.transaction(async (trx) => {
@@ -1861,10 +1896,14 @@ postgres('visit summary recipient recovery', () => {
         await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx);
       }).catch((err) => { blockedCode = err.code; });
       return { ok: true };
-    })).toEqual({ ok: true });
+    }, undefined, { requestId: inFlightAsk })).toEqual({ ok: true });
     expect(blockedCode).toBe('55P03');
-    // Once the bounce lands, the next review handoff is refused.
+    // Once the bounce lands, the ask whose handoff started is kept for its own sender's bookkeeping; the idle ask is parked away.
     await mockPg.transaction(async (trx) => { await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx); });
+    expect(await mockPg('review_requests').where({ id: inFlightAsk }).first()).toMatchObject({ status: 'sending' });
+    expect(await mockPg('review_requests').where({ id: idleAsk }).first()).toBeUndefined();
+    await mockPg('review_requests').where({ customer_id: fixture.customerId }).del();
+    // The next review handoff is refused.
     expect(await Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => ({ ok: true }))).toMatchObject({ ok: false, code: 'VISIT_SUMMARY_UNCERTAIN' });
     expect(await Summary.reviewSendThroughSummaryHandoff(randomUUID(), async () => ({ ok: true }))).toEqual({ ok: true });
   });

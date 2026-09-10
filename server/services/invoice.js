@@ -883,7 +883,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
     const visit = packet && await trx("service_visits").where({ id: packet.visit_id }).first("id", "customer_id");
     if (visit) {
       await trx("customers").where({ id: visit.customer_id }).forShare().first("id");
-      const payload = typeof packet.payload === "string" ? JSON.parse(packet.payload) : packet.payload;
+      const payload = Packets.packetPayload(packet);
       const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
         : await trx("visit_completion_packet_items").where({ packet_id: packetId }).pluck("scheduled_service_id");
       if (billed.length) await trx("scheduled_services").whereIn("id", billed).forShare().select("id");
@@ -898,6 +898,16 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
         await trx("service_visits").where({ id: visit.id }).update({ billing_hold: true, updated_at: new Date() });
         return { payerBilled: true, payerId };
       }
+    }
+    if (requireDue) {
+      // The status transition carries the queue predicates: a reschedule
+      // that committed between the due read and this claim leaves the row
+      // scheduled for later, and it must stay there.
+      const [invoice] = await trx("invoices").where({ id: invoiceId, status: "scheduled" })
+        .whereNotNull("scheduled_send_at").where("scheduled_send_at", "<=", new Date())
+        .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
+        .update({ status: "sending", updated_at: new Date() }).returning("*");
+      return { payerBilled: false, claim: invoice ? { invoice, previousStatus: "scheduled", claimed: true } : null };
     }
     return { payerBilled: false, claim: await claimInvoiceForSend(invoiceId, { allowClaimed, database: trx }) };
   });
