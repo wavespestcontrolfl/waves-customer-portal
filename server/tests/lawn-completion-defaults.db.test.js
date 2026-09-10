@@ -273,8 +273,9 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
       };
       const completion = await recordLawnProtocolCompletion(knex, args);
       expect(completion).toMatchObject({ property_id: visit.property_id, customer_id: f.customerId, protocol_key: null, window_key: null, treated_sqft: null, total_carrier_gal: null });
+      // The applied product is never also a skip (it drops out of both lists);
+      // the retired default stays on the metadata as unlisted.
       expect(completion.metadata).toMatchObject({ attribution: 'none', treatedSqftSource: 'missing', incompleteVisit: true, unlistedSkippedProducts: [
-        { productId: product.id, productName: 'Fixture removed default' },
         { productId: '00000000-0000-4000-8000-00000000dead', productName: 'Fixture retired default' },
       ] });
       const actuals = () => knex('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).orderBy('status').orderBy('product_name');
