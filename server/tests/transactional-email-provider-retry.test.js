@@ -120,6 +120,7 @@ describe('transactional email provider retry classification', () => {
     chain.where = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked' }]);
     db.mockReturnValue(chain);
     emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
     emailTemplates.activeSuppressionFor.mockResolvedValue(null);
