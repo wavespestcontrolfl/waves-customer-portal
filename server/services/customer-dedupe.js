@@ -630,6 +630,9 @@ async function repointCustomerProperties(trx, table, column, winnerId, loserId) 
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId, ...demote });
+        // Per-property appointment toggles follow the property to its new
+        // owner (app property scope, PR 3).
+        if (table === 'customer_properties') await require('./property-notification-prefs').repointPropertyPrefs(id, winnerId, sp);
       });
       moved += 1;
     } catch (e) {
