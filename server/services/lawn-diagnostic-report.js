@@ -596,7 +596,7 @@ let freeDifferential = null;
 function freeDifferentialRe() {
   if (!freeDifferential) {
     const cause = SUMMARY_CAUSE_RE.source.slice(2, -2);
-    freeDifferential = new RegExp(`\\bfree\\s+(?:of|from)\\s+\\w+(?:\\s+\\w+){0,2}|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
+    freeDifferential = new RegExp(`\\bfree\\s+(?:of|from)\\b.*$|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
   }
   freeDifferential.lastIndex = 0;
   return freeDifferential;
@@ -703,7 +703,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // is governed only as the hyphenated shorthand or the full "take all root rot" — the
 // ordinary phrase "may take all season" is not a disease — and the full phrase is
 // consumed whole so a predicate after it ("… is confirmed") is still scrubbed.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|disease[sd]?|leaf[\s‐‑‒–—-]*spots?|mold(?:s|y)?|mildew(?:s|ed|y)?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf(?:[\s‐‑‒–—-]*spots?)?|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|disease[sd]?|leaf[\s‐‑‒–—-]*spots?|mold(?:s|y)?|mildew(?:s|ed|y)?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -714,11 +714,20 @@ const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an
 // that still asserts a governed cause as confirmed / definite / certain after
 // the downgrade passes (an auxiliary chain or subject noun the grammar did not
 // anticipate) is never published as-is. Shared with the copy module.
+// A definitive predicate: confirmed / definite / certain, or a copula-plus-
+// "active" claim whatever the subject noun ("Chinch bug colonies are active"),
+// so the backstop does not depend on the grammar's finite suffix list.
+// A modal-hedged form ("may have been active", "might still be active") is the
+// downgrade's own output, not a definitive claim, so it is excluded here.
+const DEFINITIVE_PREDICATE = /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!\b(?:may|might|could)\s)(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\s+(?:\w+\s+){0,6}?active)\b/i;
 function residualDefinitiveClaim(text) {
   // Clause-level, so "The schedule was confirmed with the customer, while large
-  // patch remains only a possibility" is not read as a confirmed cause.
-  return String(text || '').split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).some((clause) => (
-    /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b/i.test(clause) && SUMMARY_CAUSE_RE.test(clause)
+  // patch remains only a possibility" is not read as a confirmed cause. A comma
+  // pair is a parenthetical, not a clause break: "Large patch, in the shaded
+  // area, is confirmed" keeps its subject with its predicate.
+  const flattened = String(text || '').replace(/,\s[^,.!?;:]{1,80},\s/g, ' ');
+  return flattened.split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).some((clause) => (
+    DEFINITIVE_PREDICATE.test(clause) && SUMMARY_CAUSE_RE.test(clause)
   ));
 }
 

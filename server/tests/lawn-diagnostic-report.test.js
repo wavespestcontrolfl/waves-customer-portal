@@ -556,6 +556,15 @@ describe('lawn diagnostic auto-release ladder', () => {
     const unrelated = 'The watering schedule was confirmed with the customer, while large patch remains only a possibility.';
     expect(residualDefinitiveClaim(unrelated)).toBe(false);
     expect(safeCustomerSummary(unrelated, 'high')).toMatch(/large patch remains only a possibility/);
+    // A comma pair is a parenthetical, not a clause break.
+    expect(residualDefinitiveClaim('Large patch, in the shaded area, is confirmed.')).toBe(true);
+    expect(safeCustomerSummary('Large patch, in the shaded area, is confirmed.', 'high')).not.toMatch(/confirmed|large patch/i);
+    // An activity claim with a subject noun the grammar does not know is still caught.
+    expect(residualDefinitiveClaim('Chinch bug colonies are active along the edge.')).toBe(true);
+    expect(safeCustomerSummary('Chinch bug colonies are active along the edge.', 'moderate')).not.toMatch(/active|chinch/i);
+    // Downgraded forms and non-cause subjects are not residual claims.
+    expect(residualDefinitiveClaim('Chinch bugs may be active along the edge.')).toBe(false);
+    expect(residualDefinitiveClaim('The sprinkler zone is active on Tuesdays.')).toBe(false);
   });
 
   test('scrubCustomerText keeps a historical qualifier when downgrading a confirmed claim', () => {
@@ -624,6 +633,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Healthy overall, nothing concerning', 'Nothing concerning',
     // A non prefix joined directly to the cause.
     'Nonfungal stress', 'Nonchinch damage',
+    // "free of" keeps its scope across a coordinated list.
+    'Free of chinch bugs and weeds', 'Free of chinch bugs, weeds, or grubs',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -663,6 +674,11 @@ describe('lawn diagnostic auto-release ladder', () => {
   test('safeConditionLabel keeps a health-led name clean when no positive clause follows', () => {
     expect(safeConditionLabel('Healthy, dense turf', 'high')).toBe('no major visible stress');
     expect(safeConditionLabel('Looks good overall', 'high')).toBe('no major visible stress');
+  });
+
+  test('safeCustomerSummary governs the fully joined gray-leaf-spot spelling', () => {
+    expect(safeCustomerSummary('Grayleafspot lesions are visible.', 'low')).not.toMatch(/leaf/i);
+    expect(safeConditionLabel('Grayleafspot lesions', 'moderate')).toBe('gray leaf spot');
   });
 
   test.each(['Moldy growth', 'Mildewed turf', 'Diseased turf', 'Mildewy patches'])('safeCustomerSummary replaces a low-confidence summary using the adjectival form %s with the generic line', (cause) => {

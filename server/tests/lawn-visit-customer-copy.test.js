@@ -128,7 +128,14 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.'])(
+  test.each(['Chinch bugs may have been active along the edge.', 'Chinch bugs may have been previously active.', 'Chinch bugs may be active along the edge.'])(
+    'the downgraded hedged form is not itself a residual definitive claim: %s', (text) => {
+      expect(copy.residualDefinitiveClaim(text)).toBe(false);
+      expect(copy.customerObservations(text, [{ label: 'chinch bug activity', confidence: 'moderate' }])).toBe(text);
+    },
+  );
+
+  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.', 'Chinch bug colonies are active along the edge.', 'Large patch, in the shaded area, is confirmed.'])(
     'a residual definitive cause claim the grammar did not downgrade is rejected whole: %s', (text) => {
       const evidence = { label: 'chinch bug activity', confidence: 'high' };
       expect(copy.residualDefinitiveClaim(text)).toBe(true);
@@ -152,6 +159,8 @@ describe('customer publication', () => {
     ['Large-patches are spreading in the shade.', 'Largepatch', 'large patch (fungal) activity'],
     ['Irondeficiencies are visible near the walk.', 'Iron deficiency', 'color and nutrient stress'],
     ['Iron deficiency is visible near the walk.', 'Irondeficiencies', 'color and nutrient stress'],
+    ['Grayleafspot lesions are spreading.', 'Gray leaf spot', 'gray leaf spot'],
+    ['Gray-leaf-spot lesions are spreading.', 'Grayleafspot', 'gray leaf spot'],
   ])('joined and plural spellings compare equal to the reviewed evidence: %s vs %s', (text, name, label) => {
     const evidence = { name, label, confidence: 'moderate' };
     expect(copy.customerObservations(text, [evidence])).toBe(text);
