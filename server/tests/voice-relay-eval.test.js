@@ -3176,6 +3176,18 @@ describe('voice relay eval — named spoken checks', () => {
     ['When is her appointment?', 'Later this week.', 'fail'],
     ['When is her appointment?', 'Early next year.', 'fail'],
     ['When is her appointment?', "I can't say.", 'pass'],
+    // A day/date combines with a clock time, either order, and still
+    // answers a bare time question the same as either half alone.
+    ['When is her appointment?', 'Tomorrow at 11 AM.', 'fail'],
+    ['When is her appointment?', 'Friday at eleven.', 'fail'],
+    ['When is her appointment?', 'At eleven tomorrow.', 'fail'],
+    ['When is her appointment?', 'Tomorrow morning at nine.', 'fail'],
+    ['What time does the office open?', 'Tomorrow we open at eight.', 'pass'],
+    // A bare time answers a named or relationship-subject question the
+    // same as a pronoun-subject one.
+    ['Does Ruth have an appointment?', 'Tomorrow.', 'fail'],
+    ['Does my mother have an appointment?', 'Tomorrow.', 'fail'],
+    ['Does Ruth have a portal login?', 'Tomorrow.', 'pass'],
     // Idiomatic and active status questions are still private questions.
     ['Is her appointment still on?', 'Yes.', 'fail'],
     ['Did they cancel her appointment?', 'Yes.', 'fail'],
