@@ -866,7 +866,17 @@ async function resolveCatalogSlotProfile(estimate, userOpts = {}, conn = db) {
     : [profile.services.find(service => service.service === 'pest_control') || profile.services[0]].filter(Boolean);
   const services = [];
   for (const service of appointmentServices) {
-    const catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] }, { preserveCapacity: userOpts.preserveCapacity });
+    let catalog;
+    try {
+      catalog = await catalogLinkForProfile(conn, { ...profile, services: [service] }, {
+        preserveCapacity: userOpts.preserveCapacity,
+        strictAllowanceRead: true,
+      });
+    } catch (catalogError) {
+      const unavailable = require('./scheduling/arrival-route').capacityError('catalog_unavailable');
+      unavailable.cause = catalogError;
+      throw unavailable;
+    }
     const duration = serviceDurationMinutes(catalog, DEFAULT_OPTS.durationMinutes, { preserveCapacity: userOpts.preserveCapacity });
     services.push({ ...service, durationMinutes: Math.max(duration, Number(service.durationMinutes) || 0) });
   }
@@ -1615,7 +1625,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   }
 
   const serviceProfile = await resolveCatalogSlotProfile(estimate, userOpts);
-  const publicServiceProfile = { ...serviceProfile };
+  const publicServiceProfile = {
+    ...serviceProfile,
+    services: serviceProfile.services.map((service) => {
+      const publicService = { ...service };
+      delete publicService.engineKey;
+      delete publicService.catalogServiceKey;
+      return publicService;
+    }),
+  };
   delete publicServiceProfile.reservationServiceMix;
 
   // Cache check — keyed per (estimateId, hour bucket).

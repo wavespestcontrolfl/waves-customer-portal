@@ -338,7 +338,7 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   return null;
 }
 
-async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false } = {}) {
+async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false } = {}) {
   const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
@@ -394,6 +394,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
       });
     } catch (err) {
       logger.warn(`[slot-reservation] catalog lookup failed for catalog key "${catalogKey}": ${err.message}`);
+      if (strictAllowanceRead) throw err;
     }
     return byKey;
   }
@@ -452,11 +453,11 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
       }
     });
   } catch (err) {
-    // The savepoint rolled back; the caller's transaction is still healthy and
-    // the accept MUST still commit. An unresolved link is recoverable (the
-    // visit books, completion falls back to the generic profile exactly as it
-    // did before this change); a broken accept is not.
+    // The savepoint rolled back, so the caller's transaction is still healthy.
+    // Identity-only callers retain the legacy fail-open behavior; duration
+    // authorities opt into a strict read so a stale allowance cannot book.
     logger.warn(`[slot-reservation] catalog lookup failed for engine key "${engineKey}": ${err.message}`);
+    if (strictAllowanceRead) throw err;
     return null;
   }
   return resolved;
