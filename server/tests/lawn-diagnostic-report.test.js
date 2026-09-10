@@ -552,6 +552,10 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(residualDefinitiveClaim('Chinch bugs appear most consistent with the visible pattern.')).toBe(false);
     // No governed term in the sentence: not a cause claim.
     expect(residualDefinitiveClaim('The watering schedule is confirmed for Tuesday.')).toBe(false);
+    // The definitive word must share the cause's clause, not merely its sentence.
+    const unrelated = 'The watering schedule was confirmed with the customer, while large patch remains only a possibility.';
+    expect(residualDefinitiveClaim(unrelated)).toBe(false);
+    expect(safeCustomerSummary(unrelated, 'high')).toMatch(/large patch remains only a possibility/);
   });
 
   test('scrubCustomerText keeps a historical qualifier when downgrading a confirmed claim', () => {
@@ -618,6 +622,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Chinch bug-free turf', 'Gray leaf spot-free turf', 'Iron deficiency-free turf', 'Free of gray leaf spot',
     // "nothing" must not match the thinning alias inside it.
     'Healthy overall, nothing concerning', 'Nothing concerning',
+    // A non prefix joined directly to the cause.
+    'Nonfungal stress', 'Nonchinch damage',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -637,6 +643,11 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Large patch in otherwise weed-free turf', 'large patch (fungal) activity'],
     ['Chinch bug damage, disease free', 'chinch bug activity'],
     ['Grub damage free of fungal signs', 'grub activity'],
+    // A postpositive marker negates only its own comma-separated segment.
+    ['Large patch present, weeds absent', 'large patch (fungal) activity'],
+    ['Chinch bugs not present, drought stress visible', 'drought stress'],
+    ['Chinch bugs not a factor, drought stress visible', 'drought stress'],
+    ['Nonirrigated strip, chinch bug damage', 'chinch bug activity'],
     ['Healthy overall, some yellowing', 'color and nutrient stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);

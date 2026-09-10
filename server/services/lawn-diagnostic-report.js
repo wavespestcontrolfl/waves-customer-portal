@@ -585,6 +585,13 @@ const FORWARD_NEGATION = /\b(no|not|never|without|non|neither)\b/;
 // (plus an optional spot/activity/… suffix word) is consumed with "free", so
 // "Chinch bug-free turf", "Gray leaf spot-free turf" and "Iron deficiency-free
 // turf" leave no positive fragment behind.
+// "Nonfungal" / "non‑fungal": a non prefix attached directly to a governed cause
+// is spaced out so the ordinary non handling applies. Shared with the copy module.
+let joinedNon = null;
+function spaceJoinedNon(text) {
+  if (!joinedNon) joinedNon = new RegExp(`\\bnon(?=[‐‑‒–—-]?(?:${SUMMARY_CAUSE_RE.source.slice(2, -2)}))`, 'gi');
+  return String(text || '').replace(joinedNon, 'non ');
+}
 let freeDifferential = null;
 function freeDifferentialRe() {
   if (!freeDifferential) {
@@ -599,7 +606,7 @@ function positiveClauses(lower) {
   let negated = false;
   const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
   const FREE_DIFFERENTIAL = freeDifferentialRe();
-  for (const clause of lower.split(CLAUSE_SPLIT)) {
+  for (const clause of spaceJoinedNon(lower).split(CLAUSE_SPLIT)) {
     let text = clause.trim();
     if (!text) continue;
     if (FREE_DIFFERENTIAL.test(text)) {
@@ -613,13 +620,22 @@ function positiveClauses(lower) {
     if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
     negated = true;
     const forward = FORWARD_NEGATION.exec(text);
-    if (!forward) continue;
-    const head = text.slice(0, forward.index).trim();
-    const rest = text.slice(forward.index + forward[0].length);
-    const scopesForward = !/^(?:not|never)$/.test(forward[1]) || causeAhead.test(rest);
-    // A whole-clause marker anywhere else in the clause still negates all of it.
-    const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
-    if (scopesForward && head && !wholeClauseMarker) positive.push(head);
+    const rest = forward ? text.slice(forward.index + forward[0].length) : '';
+    const scopesForward = !!forward && (!/^(?:not|never)$/.test(forward[1]) || causeAhead.test(rest));
+    if (scopesForward) {
+      const head = text.slice(0, forward.index).trim();
+      // A whole-clause marker anywhere else in the clause still negates all of it.
+      const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
+      if (head && !wholeClauseMarker) positive.push(head);
+      continue;
+    }
+    // A postpositive marker ("weeds absent", "not present", "ruled out") negates
+    // the comma-separated segment that carries it, not its siblings: "Large patch
+    // present, weeds absent" keeps large patch.
+    for (const segment of text.split(/[,:]/)) {
+      const part = segment.trim();
+      if (part && !CLEAN_CLAUSE_LEAD.test(part) && !NEGATION_MARKER.test(part)) positive.push(part);
+    }
   }
   return { positive, negated };
 }
@@ -699,8 +715,10 @@ const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an
 // the downgrade passes (an auxiliary chain or subject noun the grammar did not
 // anticipate) is never published as-is. Shared with the copy module.
 function residualDefinitiveClaim(text) {
-  return String(text || '').split(/(?<=[.!?])\s+/).some((sentence) => (
-    /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b/i.test(sentence) && SUMMARY_CAUSE_RE.test(sentence)
+  // Clause-level, so "The schedule was confirmed with the customer, while large
+  // patch remains only a possibility" is not read as a confirmed cause.
+  return String(text || '').split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).some((clause) => (
+    /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b/i.test(clause) && SUMMARY_CAUSE_RE.test(clause)
   ));
 }
 
@@ -960,6 +978,7 @@ module.exports = {
   scrubCustomerText,
   safeConditionLabel,
   residualDefinitiveClaim,
+  spaceJoinedNon,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
   lowerConfidence,
