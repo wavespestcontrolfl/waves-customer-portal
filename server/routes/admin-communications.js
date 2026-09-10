@@ -1254,11 +1254,11 @@ router.post('/call', async (req, res, next) => {
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
 
-    let bridgeClaimId = null;
+    let bridgeClaimIds = [];
     // Every callback attempt under the card policy takes the customer claim
     // and live-call interlock — the card AND the existing Call Log action —
     // so two surfaces cannot ring one customer twice.
-    if (relatedCommitmentId || cardPolicy) bridgeClaimId = await db.transaction(async (trx) => {
+    if (relatedCommitmentId || cardPolicy) bridgeClaimIds = await db.transaction(async (trx) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       // The same durable claim the tech-line bridge uses covers the gap
       // before call_log is inserted, keyed to the NUMBER being called: every
@@ -1266,16 +1266,22 @@ router.post('/call', async (req, res, next) => {
       // one ringing callback block every other customer's card; a
       // per-commitment or per-customer key would let a linked and an
       // unlinked attempt ring the same phone twice at once.
-      const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
-        ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-        WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [`callback-card-bridge:${dialTo}`]);
-      if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
+      // …and, when a customer is linked, to that CUSTOMER as well: two of
+      // their known numbers must not ring at once either.
+      const claimIds = [];
+      for (const key of [`callback-card-bridge:${dialTo}`, ...(customer ? [`callback-card-bridge:customer:${customer.id}`] : [])]) {
+        const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
+          ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+          WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [key]);
+        if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
+        claimIds.push(claim.rows[0].id);
+      }
       // The live-call interlock covers the linked customer AND the dialed
       // number, so a linked and an unlinked attempt to one phone collide.
       const active = await require('../services/call-bridge').activeBridgeCall(
         { source, customerId: customer?.id || null, toPhone: dialTo }, trx);
       if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
-      if (!relatedCommitmentId) return claim.rows[0].id;
+      if (!relatedCommitmentId) return claimIds;
       const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
         .where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' })).forUpdate('cl').first('cl.*');
       const promise = original ? await trx('call_commitments as cc').where({ 'cc.id': relatedCommitmentId })
@@ -1298,8 +1304,8 @@ router.post('/call', async (req, res, next) => {
       await trx('call_commitments').where({ id: promise.id }).update({ assigned_to: req.technicianId, updated_at: new Date() });
       await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
         action: 'callback_call_claimed', resource_type: 'call_commitment', resource_id: promise.id,
-        metadata: { claim_id: claim.rows[0].id }, critical: true, trx });
-      return claim.rows[0].id;
+        metadata: { claim_id: claimIds[0] }, critical: true, trx });
+      return claimIds;
     });
     let bridged;
     try {
@@ -1312,7 +1318,7 @@ router.post('/call', async (req, res, next) => {
     } catch (err) {
       // An ambiguous create can already be ringing. Its claim and initiated
       // row survive, just as they do for calls from the technician's line.
-      if (bridgeClaimId && !err.bridgeAmbiguous) await db('sms_send_claims').where({ id: bridgeClaimId }).del();
+      if (bridgeClaimIds.length && !err.bridgeAmbiguous) await db('sms_send_claims').whereIn('id', bridgeClaimIds).del();
       throw err;
     }
     if (relatedCommitmentId) await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,

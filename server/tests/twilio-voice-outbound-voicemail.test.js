@@ -145,11 +145,21 @@ describe('POST /outbound-connect', () => {
   test.each([false, true])('callback completion shares the action when voicemail is %s', async (voicemail) => {
     callbackCards.enabled.mockReturnValue(true);
     isEnabled.mockImplementation((g) => g === 'callCommitments' || (g === 'outboundVoicemailSms' && voicemail));
+    installDb({ call_log: { metadata: { relatedCommitmentId: 'callback-1' } } });
     const res = mockRes();
     await connect()(req(), res);
     expect(res.body.match(/ action=/g)).toHaveLength(1);
     expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
     expect(res.body.includes('machineDetection="Enable"')).toBe(voicemail);
+  });
+
+  test('an ordinary admin bridge gets no completion action even with the card gates on', async () => {
+    callbackCards.enabled.mockReturnValue(true);
+    isEnabled.mockImplementation((g) => g === 'callCommitments');
+    installDb({ call_log: { metadata: { relatedCallId: 'call-1' } } });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).not.toContain('outbound-dial-complete');
   });
 
   test('a persisted callback bridge keeps completion when both gates roll back before press 1', async () => {

@@ -3158,13 +3158,16 @@ router.post('/outbound-connect', async (req, res) => {
     const voicemailText = outboundVoicemailTextDialOptions({
       callLogId: rawCallLogId, customerNumber, callerIdNumber,
     });
-    // A bridge already placed by a card keeps its completion evidence after rollback.
-    const callbackRow = CALL_LOG_ID_SHAPE.test(String(rawCallLogId || '')) && !require('../services/callback-cards').enabled()
+    // The completion action rides only an actual callback attempt — a
+    // bridge linked to a commitment or stamped with the card policy — read
+    // from the persisted row whatever the gate says, so ordinary admin
+    // bridges keep the pre-lane shape and a card bridge keeps its evidence
+    // after rollback. On a read failure, keep dialing with the harmless
+    // completion action.
+    const callbackRow = CALL_LOG_ID_SHAPE.test(String(rawCallLogId || ''))
       ? await db('call_log').where({ id: rawCallLogId }).first('metadata').catch(() => null) : undefined;
-    // On a read failure, keep dialing and retain the harmless completion action.
     const persistedAttempt = foldVoiceMetadata(callbackRow?.metadata, {});
-    const callbackCompletion = require('../services/callback-cards').enabled()
-      || callbackRow === null || !!persistedAttempt.relatedCommitmentId || persistedAttempt.callback_policy === 'card';
+    const callbackCompletion = callbackRow === null || !!persistedAttempt.relatedCommitmentId || persistedAttempt.callback_policy === 'card';
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',

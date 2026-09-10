@@ -1073,13 +1073,15 @@ function whereEstimateCustomerOwnership(query, customerId) {
 
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
-  // Evidence counts from the end of the call — or, for a callback card the
-  // office has reviewed (claimed, snoozed, called, or REOPENED), from that
-  // review: the record that kept the promise before staff reopened it is
-  // not proof it was kept again.
-  const reviewed = commitment?.human_state === 'confirmed' && commitment?.reviewed_at ? new Date(commitment.reviewed_at) : null;
+  // Evidence counts from the end of the call — or, for a callback card whose
+  // obligation was RENEWED (reopened by staff, or edited into a new
+  // promise), from that renewal: the record that kept the promise before
+  // is not proof it was kept again. Claiming, snoozing or confirming does
+  // not move the boundary, so a call returned before that action still
+  // counts.
   const ended = callEndedAt(call);
-  const after = ended && reviewed && reviewed.getTime() > ended.getTime() ? reviewed : ended;
+  const renewed = ended ? await obligationRenewedAt(conn, commitment) : null;
+  const after = renewed && renewed.getTime() > ended.getTime() ? renewed : ended;
   if (!started || Number.isNaN(started.getTime()) || !after) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
@@ -1163,38 +1165,34 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
-      // Rollback must not weaken proof for an attempt placed by a callback card.
-      // A persisted attempt made under the card policy: the card's own
-      // commitment link, or the Call Log action's source-call link stamped
-      // with the policy at placement.
-      const cardAttempt = !require('./callback-cards').enabled() && await conn('call_log')
-        .whereRaw("(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))",
-          [commitment.id, commitment.call_log_id]).first('id');
-      if (require('./callback-cards').enabled() || cardAttempt) {
-        if (!phone) return null;
-        // A child-leg connection plus reviewed extraction of a real
-        // conversation is proof. Ringing the staff phone, voicemail, and
-        // an unrelated/queued text are not fulfillment of this promise.
-        const connected = await conn('call_log').where('direction', 'outbound')
-          .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
-          .where('created_at', '>', after).where('v2_extraction_status', 'valid')
-          // Placed from the card (commitment link) or from the existing
-          // call-log callback action (source-call link): both are this
-          // promise's own attempts, and only their customer leg counts.
-          .whereRaw("(metadata->>'relatedCommitmentId' = ? OR metadata->>'relatedCallId' = ?)", [commitment.id, commitment.call_log_id])
-          .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
-          .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
-          .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
-          .modify((b) => {
-            phoneWhere(b, 'to_phone', phone);
-            if (customerId) b.where('customer_id', customerId);
-          }).orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+      if (!phone) return null;
+      // Each attempt is judged under the policy it was placed under. An
+      // attempt under the CARD policy — the card's commitment link, or the
+      // Call Log action's policy-stamped source-call link — needs a
+      // completed customer leg plus a reviewed extraction of a real
+      // conversation; ringing the staff phone or voicemail is not proof. A
+      // pre-policy call keeps the legacy connected-call rule below. The gate
+      // plays no part, so rollback cannot weaken a card attempt and enabling
+      // the gate cannot strip an earlier attempt of its rule.
+      const policyLink = "COALESCE(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'), FALSE)";
+      const policyBindings = [commitment.id, commitment.call_log_id];
+      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      const connected = await conn('call_log').where('direction', 'outbound')
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+        .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+        .whereRaw(policyLink, policyBindings)
+        .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+        .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+        .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+        .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
+        .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+      if (connected) {
         // The proof is the completed customer leg, so the promise is kept
         // when that leg ended, not when the staff leg was dialed.
-        const legEnded = Date.parse(connected?.metadata?.customer_leg?.ended_at || '');
-        return connected ? { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+        const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
+        return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
           matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
-          strength: 'direct', basis: 'callback_customer_conversation' } : null;
+          strength: 'direct', basis: 'callback_customer_conversation' };
       }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
@@ -1206,18 +1204,23 @@ async function resolveFulfillment(conn, commitment, call) {
       // with no inbound anchor). A LINKED call is returned only by a
       // record linked to the same customer (shared household numbers);
       // an unlinked call keeps the phone-level match. No outer window: a
-      // callback returned late was still returned.
-      if (!phone) return null;
-      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      // callback returned late was still returned. No card-policy attempt
+      // — this promise's or any other's, whose parent-leg duration says
+      // nothing about the customer leg — is ever judged by this rule, and
+      // once one exists for this promise a text no longer stands in for the
+      // conversation it promised.
       const outbound = await conn("call_log")
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .where("direction", "outbound")
         .where("created_at", ">", after)
+        .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
         .whereRaw("COALESCE(duration_seconds, 0) >= 60")
         .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomer(b, "customer_id"); })
         .orderBy("created_at", "asc")
         .first("id", "created_at");
       if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
+      const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
+      if (cardAttempt) return null;
       const text = await conn("sms_log as os")
         .where("os.direction", "outbound")
         .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
@@ -1344,12 +1347,28 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
+// When a callback card's obligation was last (re)stated: a human-recorded
+// promise exists from the moment it was typed, and the card's audited
+// callback_edit / callback_reopen events restate it (the row's reviewed_at
+// is overwritten by every later action, so it cannot carry that history).
+// Null for anything that is not a reviewed callback card.
+async function obligationRenewedAt(conn, commitment) {
+  if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
+  if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
+  const restated = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['callback_edit', 'callback_reopen']).orderBy('created_at', 'desc').first('created_at');
+  const times = [commitment.source === 'human' ? commitment.created_at : null, restated?.created_at]
+    .filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)) : null;
+}
+
 // The rows fulfillment refresh may still write: no human verdict, or a
-// callback card's confirm while the card policy is on or the card already
-// placed a call (a persisted attempt keeps its proof path after rollback).
+// callback card's confirm / edit while the card policy is on or the card
+// already placed a call (a persisted attempt keeps its proof path after
+// rollback).
 function refreshableVerdictSql() {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
-  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state = 'confirmed' AND (? OR EXISTS ("
+  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state IN ('confirmed', 'edited') AND (? OR EXISTS ("
     + "SELECT 1 FROM call_log attempt WHERE (attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
     + " OR (attempt.metadata->>'relatedCallId' = call_commitments.call_log_id::text AND attempt.metadata->>'callback_policy' = 'card'))"
     + " AND COALESCE(attempt.source, '') <> ?))))",

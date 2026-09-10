@@ -154,11 +154,12 @@ governs redelivery),
 callbacks under the existing Twilio-signature-validated mount. The shared
 press-1 `/outbound-connect` bridge adds `<Number machineDetection="Enable">`
 with `GATE_OUTBOUND_VOICEMAIL_SMS=true`, excluding technician caller-ID lines.
-The `<Dial action>` is also added for callback cards when `GATE_CALLBACK_CARD`
-and `GATE_CALL_COMMITMENTS` are enabled, or the persisted bridge already links
-to a callback commitment or was placed under the card policy
-(`metadata.callback_policy = card`, stamped on the existing Call Log callback
-action too), including rollback before staff press 1. Both lanes use this one completion
+The `<Dial action>` is also added only for an actual callback attempt: the
+persisted bridge row links a callback commitment or was placed under the card
+policy (`metadata.callback_policy = card`, stamped on the existing Call Log
+callback action too), read whatever the gate says, so ordinary admin bridges
+keep the pre-lane shape and a card bridge keeps its evidence after rollback
+before staff press 1. Both lanes use this one completion
 route. Signed terminal child-leg results with a valid duration and SID record
 the first `metadata.customer_leg` on an outbound row matching the call-log UUID,
 parent CallSid and a validated callback link (the card's commitment link, or
