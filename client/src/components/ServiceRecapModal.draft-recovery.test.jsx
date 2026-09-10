@@ -180,9 +180,9 @@ describe('recap interruption recovery', () => {
     expect(noteInput()).toHaveValue('Treatment.');
   });
 
-  it('asserts only the identity keys the context reported and keeps that draft restorable once newer keys arrive', async () => {
+  it('asserts only the identity keys the context reported and blocks that draft once newer keys arrive', async () => {
     const older = { ...context.service, customerId: 'customer-a', serviceType: 'Pest Control', scheduledDate: '2026-01-01' };
-    const newer = { ...older, propertyId: 'property-a', catalogServiceId: 'catalog-a', address: { line1: '100 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };
+    const newer = { ...older, propertyId: 'property-b', catalogServiceId: 'catalog-a', address: { line1: '200 Example Court', line2: null, city: 'Example City', state: 'FL', zip: '34201' } };
     let current = older;
     const request = vi.fn(async (path, options) => {
       if (path.endsWith('/context')) return { ...structuredClone(context), service: structuredClone(current) };
@@ -200,12 +200,15 @@ describe('recap interruption recovery', () => {
     expect(Object.keys(payload.expectedVisit)).not.toContain('propertyId');
     first.unmount();
 
+    // The draft never observed propertyId or address, so it cannot prove the
+    // visit was not reassigned to property-b in the meantime: no restore.
     current = newer;
     open();
-    const restore = await screen.findByRole('button', { name: 'Restore draft', exact: true });
-    expect(restore).toBeEnabled();
-    fireEvent.click(restore);
-    expect(noteInput()).toHaveValue('Treatment during the deploy.');
+    expect(await screen.findByRole('button', { name: 'Restore draft', exact: true })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Complete Service', exact: true })).toBeDisabled();
+    expect(screen.getByText(/Could not verify this draft/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard draft', exact: true }));
+    expect(noteInput()).toHaveValue('');
   });
 
   it('re-checks a restored rate against the current label ceiling instead of the one saved with the draft', async () => {

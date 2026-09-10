@@ -13,7 +13,9 @@ const RESTORE_ERROR = 'Could not verify this draft against the current visit. Cl
 // Absence is preserved rather than normalized to null: during a rolling
 // deploy an older pod serves a context without the newer keys, and a
 // null asserted for one of those would make a newer pod reject the
-// completion as visit_identity_changed (codex P1 r4).
+// completion as visit_identity_changed (codex P1 r4). Restoring a draft
+// across that key gap is a separate question, answered by
+// recapDraftCompatible below.
 const IDENTITY_KEYS = ['customerId', 'propertyId', 'catalogServiceId', 'serviceType', 'scheduledDate', 'address'];
 export function recapVisitIdentity(service) {
   const s = service || {};
@@ -44,19 +46,17 @@ export function recapContextIdentity(ctx, authoritative, unrepresented = []) {
   return JSON.stringify({ visit: recapVisitIdentity(ctx.service), record: recordIdentity(ctx.existingRecord), unrepresented: [...unrepresented].sort() });
 }
 
-const sameJson = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-
-// A saved draft is restorable when the record and unrepresented products
-// match exactly and the live visit agrees on every identity key BOTH
-// contexts report. A key only one side reports (older pod during a
-// rolling deploy) cannot have changed underneath the technician, so it
-// is not a reason to discard the treatment details.
+// A saved draft is restorable only when its identity equals the live one
+// exactly, key set included. A key the live context reports but the draft
+// never recorded (draft saved from an older pod during a rolling deploy)
+// is treated as incompatible: the draft cannot prove the visit was not
+// reassigned to another property for the same customer, service and day
+// while that key was unobserved, and a restore would then submit the old
+// property's treatment under the new identity (codex P1 r5). The cost is
+// that a draft that straddles a deploy must be discarded, which the
+// verification message already explains.
 export function recapDraftCompatible(savedIdentity, liveIdentity) {
-  let saved; let live;
-  try { saved = JSON.parse(savedIdentity); live = JSON.parse(liveIdentity); } catch { return false; }
-  if (!saved?.visit || !live?.visit) return false;
-  return IDENTITY_KEYS.filter((key) => key in saved.visit && key in live.visit).every((key) => sameJson(saved.visit[key], live.visit[key]))
-    && sameJson(saved.record, live.record) && sameJson(saved.unrepresented, live.unrepresented);
+  return typeof savedIdentity === 'string' && savedIdentity.length > 0 && savedIdentity === liveIdentity;
 }
 
 // Rates travel only for selected products: deselecting leaves the typed
