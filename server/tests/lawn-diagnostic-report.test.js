@@ -639,6 +639,17 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
 
+  test('the "free of" list matcher stays linear when a state word ends the list', () => {
+    const inputs = [
+      'Free of significant discoloration present',
+      `Free of ${'a'.repeat(40)} present`,
+      `Free of ${Array(60).fill('word').join(' ')} present`,
+    ];
+    const started = Date.now();
+    for (const input of inputs) safeConditionLabel(input, 'high');
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+
   test.each([
     ['Chinch bugs not present, but drought stress visible', 'drought stress'],
     ['Rhizoctonia ruled out; dollar spot lesions', 'dollar spot'],

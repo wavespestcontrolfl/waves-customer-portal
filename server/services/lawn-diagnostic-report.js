@@ -602,8 +602,11 @@ function freeDifferentialRe() {
     // weeds, large patch present" keeps large patch.
     const state = '(?:present|visible|spreading|active|observed|seen|noted|confirmed|is|are|was|were)';
     // An item runs to a comma, a conjunction or the clause end; a state word
-    // inside it means it is a new statement, not a list item.
-    const item = `(?:(?!\\b(?:and|or|nor|but|with)\\b|\\b${state}\\b)[\\w‐‑‒–—-]+\\s*)+(?=$|[,.;!?]|(?:and|or|nor|&|\\/)\\b)`;
+    // inside it means it is a new statement, not a list item. Words are joined
+    // by mandatory whitespace so the repetition has one parse (no backtracking
+    // blow-up when a state word makes the match fail).
+    const word = `(?!\\b(?:and|or|nor|but|with)\\b|\\b${state}\\b)[\\w‐‑‒–—-]+`;
+    const item = `${word}(?:\\s+${word})*\\s*(?=$|[,.;!?]|(?:and|or|nor|&|\\/)\\b)`;
     // Comma items, then at most one conjunction item, which closes the list.
     const freeList = `\\bfree\\s+(?:of|from)\\s+${item}(?:,\\s*${item})*(?:,?\\s*(?:and|or|nor|&|\\/)\\s*${item})?`;
     freeDifferential = new RegExp(`${freeList}|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
