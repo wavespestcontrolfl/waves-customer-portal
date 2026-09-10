@@ -128,6 +128,25 @@ describe('customer publication', () => {
     },
   );
 
+  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.'])(
+    'a residual definitive cause claim the grammar did not downgrade is rejected whole: %s', (text) => {
+      const evidence = { label: 'chinch bug activity', confidence: 'high' };
+      expect(copy.residualDefinitiveClaim(text)).toBe(true);
+      expect(copy.customerObservations(text, [evidence])).toBe(copy.NO_OBSERVATIONS);
+      expect(copy.safeConfirmationStep(text, evidence)).toBe('');
+    },
+  );
+
+  test.each([['Moldy growth is spreading in the shade.', 'Mold activity'], ['Mildewed turf near the fence.', 'Mildew activity'], ['Diseased turf near the fence.', 'Fungal activity']])(
+    'an adjectival cause form %s is governed and folds to its label %s', (text, label) => {
+      expect(copy.governedTerms(text).size).toBe(1);
+      expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
+      const published = copy.customerObservations(text, [{ label, confidence: 'moderate' }]);
+      if (label === 'Fungal activity') expect(published).toBe(copy.NO_OBSERVATIONS); // "diseased" is a class word, never authorized by prose
+      else expect(published).toMatch(/mold|mildew/i);
+    },
+  );
+
   test('a finding marked keep: false is never evidence on any publication path', () => {
     const removed = { name: 'Nutsedge', label: 'weed pressure', confidence: 'moderate', keep: false };
     expect(copy.customerObservations('Nutsedge is spreading along the walk.', [removed])).toBe(copy.NO_OBSERVATIONS);

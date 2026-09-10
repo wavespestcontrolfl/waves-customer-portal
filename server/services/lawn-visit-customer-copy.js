@@ -22,7 +22,7 @@ function withoutNoteInfluencedProse(analysis, notes) {
 function customerObservations(text, findings = []) {
   if (unpublishableCustomerCopy(text)) return NO_OBSERVATIONS;
   const scrubbed = scrubCustomerText(text || '');
-  if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return NO_OBSERVATIONS;
+  if (!scrubbed || unpublishableCustomerCopy(scrubbed) || residualDefinitiveClaim(scrubbed)) return NO_OBSERVATIONS;
   if (namesUnpublishedCause(scrubbed, findings)) return NO_OBSERVATIONS;
   return publishableSlice(scrubbed, 600, findings) ?? NO_OBSERVATIONS;
 }
@@ -40,8 +40,19 @@ function publishableSlice(text, limit, findings) {
   if (sentence > 0) cut = cut.slice(0, sentence + 1);
   else if (cut.lastIndexOf(' ') > 0) cut = cut.slice(0, cut.lastIndexOf(' '));
   cut = cut.trim();
-  if (!cut || unpublishableCustomerCopy(cut) || namesUnpublishedCause(cut, findings)) return null;
+  if (!cut || unpublishableCustomerCopy(cut) || residualDefinitiveClaim(cut) || namesUnpublishedCause(cut, findings)) return null;
   return cut;
+}
+
+// Structural backstop behind the scrubber's predicate grammar: a sentence that
+// still asserts a governed cause as confirmed / definite / certain after the
+// downgrade passes ("Chinch bug colonies are confirmed") is rejected whole
+// rather than published, whatever subject noun the grammar did not anticipate
+// (Codex #4328 r6). Deterministic copy never says these words.
+function residualDefinitiveClaim(text) {
+  return String(text || '').split(/(?<=[.!?])\s+/).some((sentence) => (
+    /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b/i.test(sentence) && governedTerms(sentence).size > 0
+  ));
 }
 
 // True when the text names a governed cause (the report lane's
@@ -86,7 +97,7 @@ function distinctCauseCount(name) {
 }
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/deficiencies\b/, 'deficiency').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\bpatches\b/g, 'patch').replace(/deficiencies\b/, 'deficiency').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bmoldy\b/, 'mold').replace(/\bmildew(?:ed|y)\b/, 'mildew').replace(/\bdiseased\b/, 'disease').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   // Singularize before the synonym lookup so "molds" folds like "mold".
   const singular = /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
   return CAUSE_TERM_SYNONYMS[singular] || CAUSE_TERM_SYNONYMS[base] || singular;
@@ -146,7 +157,7 @@ function unpublishableCustomerCopy(text) {
 function safeConfirmationStep(text, finding = null) {
   if (unpublishableCustomerCopy(text)) return '';
   const scrubbed = scrubCustomerText(text || '');
-  if (!scrubbed || unpublishableCustomerCopy(scrubbed)) return '';
+  if (!scrubbed || unpublishableCustomerCopy(scrubbed) || residualDefinitiveClaim(scrubbed)) return '';
   if (namesUnpublishedCause(scrubbed, [finding])) return '';
   return publishableSlice(scrubbed, 200, [finding]) ?? '';
 }
@@ -170,4 +181,5 @@ module.exports = {
   unpublishableCustomerCopy,
   safeConfirmationStep,
   reviewedObservations,
+  residualDefinitiveClaim,
 };

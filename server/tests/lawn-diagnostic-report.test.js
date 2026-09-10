@@ -532,6 +532,9 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Chinch bugs are confirmed.', 'Chinch bugs appear most consistent with the visible pattern.'],
     ['Large patch (Rhizoctonia) is confirmed.', 'Large patch (Rhizoctonia) appears most consistent with the visible pattern.'],
     ['Chinch bug activity has been confirmed.', 'Chinch bug activity appears most consistent with the visible pattern.'],
+    ['Chinch bug presence is confirmed.', 'Chinch bug presence appears most consistent with the visible pattern.'],
+    ['Chinch bug signs are confirmed along the edge.', 'Chinch bug signs appear most consistent with the visible pattern along the edge.'],
+    ['Grub feeding is confirmed.', 'Grub feeding appears most consistent with the visible pattern.'],
   ])('scrubCustomerText keeps the subject noun phrase and a copula when downgrading %s', (text, expected) => {
     expect(scrubCustomerText(text)).toBe(expected);
   });
@@ -623,6 +626,10 @@ describe('lawn diagnostic auto-release ladder', () => {
   test('safeConditionLabel keeps a health-led name clean when no positive clause follows', () => {
     expect(safeConditionLabel('Healthy, dense turf', 'high')).toBe('no major visible stress');
     expect(safeConditionLabel('Looks good overall', 'high')).toBe('no major visible stress');
+  });
+
+  test.each(['Moldy growth', 'Mildewed turf', 'Diseased turf', 'Mildewy patches'])('safeCustomerSummary replaces a low-confidence summary using the adjectival form %s with the generic line', (cause) => {
+    expect(safeCustomerSummary(`${cause} across the shaded strip.`, 'low')).not.toMatch(/moldy|mildew|diseased/i);
   });
 
   test.each(['Sod--webworm damage', 'Sod - webworm damage', 'Chinch  bug damage', 'Army--worm feeding'])('safeCustomerSummary replaces a low-confidence summary naming %s with the generic line', (cause) => {

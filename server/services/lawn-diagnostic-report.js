@@ -674,7 +674,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // is governed only as the hyphenated shorthand or the full "take all root rot" — the
 // ordinary phrase "may take all season" is not a disease — and the full phrase is
 // consumed whole so a predicate after it ("… is confirmed") is still scrubbed.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|diseases?|leaf[\s‐‑‒–—-]*spots?|molds?|mildews?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|disease[sd]?|leaf[\s‐‑‒–—-]*spots?|mold(?:s|y)?|mildew(?:s|ed|y)?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -762,7 +762,7 @@ const PLURAL_LINKER = /^(?:are|have|remain|stay|continue|keep)\b/i;
 // suffix) is kept in the rewrite so the published sentence keeps its subject:
 // "Fungal activity is confirmed in the shade" → "Fungal activity appears most
 // consistent with the visible pattern in the shade".
-const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?<phrase>(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|disease|infestation|stress|spots?))*)\\s+${PREDICATE_LINKER}`;
+const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?<phrase>(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|presence|signs?|evidence|symptoms?|feeding|population|outbreak|disease|infestation|stress|spots?))*)\\s+${PREDICATE_LINKER}`;
 const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|\\w+ly)){0,3})\\s+confirmed\\b`, 'gi');
 const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|\\w+ly)){0,3})\\s+active\\b`, 'gi');
 // Named groups survive SUMMARY_CAUSE_RE's own groups; the cause is always $1.
