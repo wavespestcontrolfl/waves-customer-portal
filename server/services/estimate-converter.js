@@ -3827,6 +3827,77 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
   }
 }
 
+// Acceptance is successful only when the sold recurring cadence has a
+// complete persisted series. Keep this as an admin-facing audit signal: a
+// missing child must never be hidden by a successful invoice/acceptance.
+async function verifyAcceptedRecurringSchedule(database, { estimateId, customerId, bookedAppointmentIds = [] }) {
+  const estimate = await database('estimates').where({ id: estimateId, customer_id: customerId })
+    .select('id', 'customer_id', 'property_id', 'estimate_data', 'accepted_at', 'accepted_service_mode', 'monthly_total', 'annual_total', 'onetime_total')
+    .first();
+  if (!estimate) return { ok: true, gaps: [] };
+  const retainedEvents = await database('activity_log')
+    .where({ customer_id: customerId, action: 'recurring_series_skipped' })
+    .select('metadata');
+  const retained = retainedEvents.map((event) => {
+    try { return typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata; } catch { return null; }
+  }).filter((metadata) => String(metadata?.estimateId) === String(estimateId) && metadata?.existingParentId);
+  const retainedParentIds = retained.map((metadata) => metadata.existingParentId);
+  const rows = await database('scheduled_services as s')
+    .leftJoin('services as catalog', 'catalog.id', 's.service_id')
+    .where({ 's.customer_id': customerId })
+    .where(function linkedToEstimate() {
+      this.where('s.source_estimate_id', estimateId).orWhereIn('s.recurring_parent_id', function linkedParents() {
+        this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
+      }).orWhereIn('s.id', retainedParentIds).orWhereIn('s.recurring_parent_id', retainedParentIds)
+        .orWhereIn('s.id', bookedAppointmentIds);
+    })
+    .select('s.id', 's.customer_id', 's.property_id', 's.source_estimate_id', 's.recurring_parent_id',
+      's.service_type', 's.service_key_snapshot', 's.is_callback', 's.followup_included', 's.status', 's.scheduled_date',
+      's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing', 's.recurring_interval_days',
+      's.recurring_nth', 's.recurring_weekday', 's.skip_weekends', 's.weekend_shift', 's.date_exception',
+      's.date_exception_cadence_date', 's.property_id',
+      'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type');
+  const { acceptedScheduleFindings, formatDateOnly, isStandaloneReservation, readActiveFamilyHolds, readStoppedRecurringRoots } = require('./recurring-schedule-audit');
+  const todayET = etDateString();
+  const holds = await readActiveFamilyHolds(database, [customerId], todayET);
+  const stoppedRoots = await readStoppedRecurringRoots(database, [customerId]);
+  const reservedServiceIds = new Set(retained.map((metadata) => metadata.reservedServiceId).filter(Boolean));
+  const acceptedDay = estimate.accepted_at ? etDateString(estimate.accepted_at) : null;
+  const retainedRootSet = new Set(retainedParentIds);
+  // Property linkage runs after the caller commits this transaction. Avoid
+  // reporting that known post-commit invariant in the immediate check.
+  const auditRows = rows.filter((row) => {
+    // Same predicate as the scheduled reader: an adopted appointment that is
+    // already recurring is a plan visit, not a standalone reservation.
+    if (isStandaloneReservation(row, reservedServiceIds)) return false;
+    // Keep stopped roots as evidence for the classifier's explicit exemption,
+    // even when all their visits precede this acceptance.
+    if (stoppedRoots.has(row.recurring_parent_id || row.id)) return true;
+    const isRetained = row.source_estimate_id !== estimateId
+      && (retainedRootSet.has(row.id) || retainedRootSet.has(row.recurring_parent_id));
+    return !isRetained || !acceptedDay || formatDateOnly(row.scheduled_date) >= acceptedDay;
+  });
+  const gaps = acceptedScheduleFindings({ ...estimate, property_id: null }, auditRows, stoppedRoots, {
+    todayET,
+    heldFamilies: new Set(holds.map((hold) => hold.family_key)),
+  }).map((finding) => ({
+    ...finding,
+    estimateId,
+    customerId,
+  }));
+  if (!gaps.length) return { ok: true, gaps: [] };
+  const metadata = { estimateId, customerId, gaps };
+  await database('activity_log').insert({
+    customer_id: customerId,
+    estimate_id: estimateId,
+    action: 'recurring_schedule_missing_followups',
+    description: `Accepted estimate #${estimateId} has an incomplete recurring schedule (${gaps.map((gap) => `${gap.pattern || gap.serviceFamily}: ${gap.recordedVisits ?? 0}/${gap.expectedVisits ?? '?'}`).join(', ')}). Review before dispatch.`,
+    metadata: JSON.stringify(metadata),
+  });
+  logger.error(`[estimate-converter] accepted estimate ${estimateId} has incomplete recurring schedule: ${JSON.stringify(metadata)}`);
+  return { ok: false, gaps };
+}
+
 // The pattern seedRecurringFollowUpsForParent would actually seed for this
 // service/parent pair, or null when seeding would no-op. The guarded seeding
 // paths use it to decide whether the duplicate-series lock + re-check is
@@ -7031,7 +7102,17 @@ const EstimateConverter = {
       logger.error(`[estimate-converter] Draft invoice creation failed for estimate ${estimateId}: ${err.message}`);
     }
 
-    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
+    let recurringScheduleCheck = { ok: true, gaps: [] };
+    try {
+      // A nested Knex transaction uses a savepoint when acceptance owns the
+      // transaction, so an audit SQL error cannot poison later acceptance writes.
+      recurringScheduleCheck = await database.transaction((auditTrx) =>
+        verifyAcceptedRecurringSchedule(auditTrx, { estimateId, customerId, bookedAppointmentIds: opts.bookedAppointmentIds }));
+    } catch (err) {
+      recurringScheduleCheck = { ok: false, gaps: [], error: 'verification_failed' };
+      logger.warn(`[estimate-converter] recurring schedule verification failed for estimate ${estimateId}: ${err.message}`);
+    }
+    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, recurringScheduleOk=${recurringScheduleCheck.ok}, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
 
     const membershipEmail = {
       customerId,
@@ -7409,6 +7490,7 @@ const EstimateConverter = {
       estimateMonthlyRate: monthlyRate,
       serviceCount,
       scheduledCount,
+      recurringScheduleCheck,
       requiresManualRecurringScheduling: hasCommercialRecurring,
       firstScheduledServiceId,
       billingTerm,

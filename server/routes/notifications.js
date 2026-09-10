@@ -3,7 +3,8 @@ const express = require('express');
 const router = express.Router();
 const Joi = require('joi');
 const db = require('../models/db');
-const { accountPropertyIds, resolvePrimaryProfileId } = require('../services/account-properties');
+const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled, accountSavedProperties } = require('../services/account-properties');
+const PropertyTexts = require('../services/property-notification-prefs');
 const { gateEnvValue } = require('../config/feature-gates');
 const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
@@ -490,8 +491,86 @@ router.get('/preferences', async (req, res, next) => {
   }
 });
 
+// App property scope (PR 3): under GATE_APP_PROPERTY_SCOPE the card lists
+// every SAVED property (the same entries as GET /auth/properties?scope=saved,
+// `id` = the entry key so the page's selection matches). A primary property
+// answers its profile's notification_prefs row — byte-for-byte today's
+// payload; a NON-primary one answers its own toggles (property_notification_
+// prefs where chosen, the ruling-R1 default otherwise). On-location contacts
+// stay per PROFILE (ruling R2 pending) and are repeated on every entry with
+// `contactsShared: true`.
+async function savedPropertyPreferences(req) {
+  const { properties: entries } = await accountSavedProperties(req);
+  if (!entries.some((e) => e.propertyId)) return null; // profile-shaped: today's list
+  const profileIds = [...new Set(entries.map((e) => String(e.customerId)))];
+  const profiles = await db('customers').whereIn('id', profileIds).select('id', ...SERVICE_CONTACT_COLUMNS);
+  const profileById = new Map(profiles.map((p) => [String(p.id), p]));
+  const prefsRows = await db('notification_prefs').whereIn('customer_id', profileIds).select('customer_id', ...PREF_SELECT);
+  const prefsByProfile = new Map(prefsRows.map((row) => [String(row.customer_id), row]));
+  for (const id of profileIds) {
+    if (!prefsByProfile.has(id)) prefsByProfile.set(id, await ensurePrefs(id));
+  }
+  const propertyIds = entries.map((e) => e.propertyId).filter(Boolean);
+  const propertyRows = propertyIds.length
+    ? await db('property_notification_prefs').whereIn('property_id', propertyIds).select('property_id', ...PropertyTexts.PROPERTY_PREF_COLUMNS)
+    : [];
+  const rowByProperty = new Map(propertyRows.map((row) => [String(row.property_id), row]));
+  return entries.map((entry) => {
+    const profile = profileById.get(String(entry.customerId)) || {};
+    const customerPrefs = prefsByProfile.get(String(entry.customerId)) || {};
+    const secondary = !!entry.propertyId && entry.isPrimaryProperty !== true;
+    const row = secondary ? rowByProperty.get(String(entry.propertyId)) || null : null;
+    const prefsRow = secondary
+      ? { ...customerPrefs, ...PropertyTexts.effectivePropertyToggles(entry, row, customerPrefs) }
+      : customerPrefs;
+    const chosen = {};
+    if (secondary) {
+      for (const col of PropertyTexts.PROPERTY_PREF_COLUMNS) chosen[PREF_COLUMN_TO_KEY[col]] = !!(row && typeof row[col] === 'boolean');
+    }
+    return {
+      id: entry.key,
+      key: entry.key,
+      customerId: entry.customerId,
+      propertyId: entry.propertyId,
+      isPrimaryProfile: entry.isPrimaryProfile,
+      isPrimaryProperty: entry.isPrimaryProperty,
+      profileLabel: entry.profileLabel,
+      label: entry.label,
+      relationship: entry.relationship,
+      quietByDefault: secondary && PropertyTexts.isQuietRelationship(entry.relationship),
+      address: entry.address,
+      preferences: preferencePayload(prefsRow, { includeChannels: false }),
+      // Which toggles this property has CHOSEN (vs inheriting the default).
+      ...(secondary ? { chosen } : {}),
+      contactsShared: true,
+      serviceContact: serviceContactPayload({
+        name: profile.service_contact_name,
+        phone: profile.service_contact_phone,
+        email: profile.service_contact_email,
+      }),
+      serviceContacts: serviceContactsPayload(profile),
+      maxServiceContacts: MAX_SERVICE_CONTACTS,
+    };
+  });
+}
+
+// The six property-owned columns, keyed both ways from the one field map the
+// profile path already uses (DB_FIELD_BY_PREF) — no second spelling.
+const PREF_KEY_TO_COLUMN = Object.fromEntries(
+  Object.entries(DB_FIELD_BY_PREF).filter(([, col]) => PropertyTexts.PROPERTY_PREF_COLUMNS.includes(col)),
+);
+const PREF_COLUMN_TO_KEY = Object.fromEntries(Object.entries(PREF_KEY_TO_COLUMN).map(([key, col]) => [col, key]));
+
 router.get('/property-preferences', async (req, res, next) => {
   try {
+    // Shadow mode (GATE_APP_PROPERTY_TEXTS off): the sends still follow the
+    // customer row, so the card must keep showing — and editing — that row
+    // (today's per-profile card). Per-property controls appear only once
+    // they are enforced (GitHub codex #4299 r1 P1).
+    if (PropertyTexts.propertyTextsEnforced()) {
+      const saved = await savedPropertyPreferences(req);
+      if (saved) return res.json({ properties: saved });
+    }
     const ids = await accountPropertyIds(req);
     const properties = await db('customers')
       .whereIn('id', ids)
@@ -671,6 +750,9 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     }
 
     const schema = Joi.object({
+      // App property scope (PR 3): the SAVED property these toggles are for.
+      // Omitted, or the profile's primary property = the profile row below.
+      propertyId: Joi.string().guid({ version: 'uuidv4' }).allow(null),
       appointmentConfirmation: Joi.boolean(),
       serviceReminder72h: Joi.boolean(),
       serviceReminder24h: Joi.boolean(),
@@ -696,6 +778,11 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       serviceContactsConsent: Joi.boolean(),
     }).min(1);
     const updates = await schema.validateAsync(req.body);
+    if (updates.propertyId) {
+      const handled = await savePropertyToggles(req, res, updates);
+      if (handled) return undefined;
+    }
+    delete updates.propertyId;
     const targetCustomer = await db('customers')
       .where({ id: req.params.customerId })
       .first('id', 'profile_label', 'address_line1', 'city');
@@ -881,6 +968,75 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
     next(err);
   }
 });
+
+// The per-property write (app property scope, PR 3). Returns true when the
+// response was sent; false hands the request to the profile path (the
+// property is the profile's PRIMARY — it has no row of its own by design).
+async function savePropertyToggles(req, res, updates) {
+  if (!PropertyTexts.propertyTextsEnforced()) {
+    res.status(404).json({ error: 'Per-property notification settings are not available.' });
+    return true;
+  }
+  const property = await db('customer_properties')
+    .where({ id: updates.propertyId, customer_id: req.params.customerId })
+    .first('id', 'customer_id', 'is_primary', 'active', 'relationship', 'label', 'address_line1', 'city');
+  if (!property || property.active === false) {
+    res.status(404).json({ error: 'Property is not available for this account' });
+    return true;
+  }
+  if (property.is_primary === true) return false;
+  const contactFields = ['serviceContact', 'serviceContacts', 'serviceContactsConsent'].filter((k) => updates[k] !== undefined);
+  if (contactFields.length) {
+    // Ruling R2 pending: on-location contacts stay per PROFILE. Refuse rather
+    // than silently write house B's tenant onto every house.
+    res.status(400).json({ error: 'On-location contacts are shared across this profile\'s properties. Edit them under the primary property.' });
+    return true;
+  }
+  const dbUpdates = { updated_at: new Date() };
+  for (const [key, col] of Object.entries(PREF_KEY_TO_COLUMN)) {
+    if (updates[key] !== undefined) dbUpdates[col] = updates[key];
+  }
+  if (Object.keys(dbUpdates).length === 1) {
+    res.status(400).json({ error: 'No notification setting to save.' });
+    return true;
+  }
+  // One statement, serialized like the profile write: two quick taps on a
+  // fresh house race the read-then-insert (property_id is UNIQUE), and an
+  // in-flight send must not read a half-committed toggle.
+  const existing = await db('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
+  // Re-read the property row UNDER the lock: a primary flip landing between
+  // the unlocked read above and this write would otherwise leave a dormant
+  // row on the new primary that resurfaces as a stale override on a later
+  // demotion (GitHub codex r4 P2).
+  const stillSecondary = await withCustomerCommsLock(db, property.customer_id, async (trx) => {
+    const live = await trx('customer_properties').where({ id: property.id, customer_id: property.customer_id }).forUpdate().first('is_primary', 'active');
+    if (!live || live.active === false || live.is_primary === true) return false;
+    await trx('property_notification_prefs')
+      .insert({ property_id: property.id, customer_id: property.customer_id, ...dbUpdates })
+      .onConflict('property_id')
+      .merge(dbUpdates);
+    return true;
+  });
+  if (!stillSecondary) {
+    res.status(409).json({ error: 'This property just changed. Refresh and try again.' });
+    return true;
+  }
+  const row = await db('property_notification_prefs').where({ property_id: property.id }).first(...PropertyTexts.PROPERTY_PREF_COLUMNS);
+  const customerPrefs = await ensurePrefs(req.params.customerId);
+  const effective = PropertyTexts.effectivePropertyToggles(property, row, customerPrefs);
+  const payload = preferencePayload({ ...customerPrefs, ...effective }, { includeChannels: false });
+  // DB-shaped (preferenceChangeItems reads the column names from `before`).
+  const before = { ...customerPrefs, ...PropertyTexts.effectivePropertyToggles(property, existing, customerPrefs) };
+  sendAccountUpdatedForPrefs({
+    req,
+    targetCustomerId: req.params.customerId,
+    propertyLabel: property.label || property.address_line1 || property.city || 'Service property',
+    items: preferenceChangeItems(updates, before, payload, { scope: 'Property' }),
+    section: 'Property notifications',
+  });
+  res.json({ success: true, propertyId: property.id, preferences: payload });
+  return true;
+}
 
 router._private = {
   comparableEmail,
