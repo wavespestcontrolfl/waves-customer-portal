@@ -29,6 +29,15 @@ const branches = [
     engineKey: 'fixture_specialty' }] }],
 ];
 
+const strictBranches = [
+  ['exact catalog key', 'exact', { estimate_data: { result: { oneTime: { items: [{ service: 'unmapped_exact',
+    label: 'Exact fixture', price: 100, catalogServiceKey: 'fixture_catalog_exact' }] } } } }, { serviceMode: 'one_time' }],
+  ['cadence key', 'cadence', { estimate_data: { result: { recurring: { services:
+    [{ service: 'pest_control', name: 'Pest control', visitsPerYear: 4 }] } } } }, {}],
+  ['engine containment', 'containment', { estimate_data: { result: { oneTime: { items: [{ service: 'fixture_specialty',
+    label: 'Containment fixture', price: 100 }] } } } }, { serviceMode: 'one_time' }],
+];
+
 describeDb('scheduling catalog locks on PostgreSQL', () => {
   beforeAll(async () => {
     const target = new URL(connection);
@@ -115,6 +124,28 @@ describeDb('scheduling catalog locks on PostgreSQL', () => {
     } finally {
       if (!editor.isCompleted()) await editor.rollback();
       if (resolving) await resolving.catch(() => {});
+    }
+  });
+
+  test.each(strictBranches)('%s strict allowance timeout is recoverable and preserves the outer transaction', async (
+    _label, key, estimate, profileOptions,
+  ) => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const editor = await mockPg.transaction();
+    const scheduling = await mockPg.transaction();
+    try {
+      await editor('services').where({ id: ids[key] }).forUpdate().first();
+      await scheduling.raw("SET LOCAL lock_timeout = '100ms'");
+
+      await expect(resolveCatalogSlotProfile(
+        estimate, { ...profileOptions, preserveCapacity: true }, scheduling,
+      )).rejects.toMatchObject({
+        code: 'SLOT_UNAVAILABLE', reason: 'catalog_unavailable', status: 409, statusCode: 409, isOperational: true,
+      });
+      await expect(scheduling.raw('SELECT 1 AS healthy')).resolves.toMatchObject({ rows: [{ healthy: 1 }] });
+    } finally {
+      if (!scheduling.isCompleted()) await scheduling.rollback();
+      if (!editor.isCompleted()) await editor.rollback();
     }
   });
 });
