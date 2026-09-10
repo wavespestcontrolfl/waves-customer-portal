@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const Joi = require('joi');
 const db = require('../models/db');
-const { savepointRead, failSoftRead } = require('../utils/savepoint-read');
+const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepoint-read');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
@@ -4176,8 +4176,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // the error below could not restore it — the later unattributed
         // ledger writes would fail with "current transaction is aborted" and
         // roll back the whole grouped closeout. The savepoint makes the
-        // fail-soft path real (Codex #4113 P1).
-        waveguardPlan = await savepointRead(db, (database) => buildPlanForService(svc.id, {
+        // fail-soft path real (Codex #4113 P1). savepointScope, not
+        // savepointRead: the planner performs its own fail-soft reads on this
+        // transaction, and the queued variant would wait on itself.
+        waveguardPlan = await savepointScope(db, (database) => buildPlanForService(svc.id, {
           db: database,
           equipmentSystemId: waveguardEquipmentSystemId || null,
           calibrationId: waveguardCalibrationId || null,
