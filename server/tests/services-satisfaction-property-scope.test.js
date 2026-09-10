@@ -157,7 +157,7 @@ describe('GET /satisfaction/pending — the prompt follows the selected house', 
 
 
 describe('POST /satisfaction — review hold fallbacks', () => {
-  test.each(['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'])('%s preserves the rating without returning a review CTA', async (code) => {
+  test.each(['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY', 'SMS_DELIVERY_UNCERTAIN'])('%s preserves the rating without returning a review CTA', async (code) => {
     global.__SCOPE__ = OFF;
     const review = require('../services/review-request');
     review.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', code });
