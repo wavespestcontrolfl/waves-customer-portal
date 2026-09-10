@@ -2027,6 +2027,76 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a withdrawal stamp follows the payer that still owns the packet, and the last removal requeues', async () => {
+    const invoiceId = randomUUID();
+    const [payerA] = await mockPg('payers').insert({ display_name: 'Fixture Payer A', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    const [payerB] = await mockPg('payers').insert({ display_name: 'Fixture Payer B', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId, scheduled_send_error: `payer_billed:${payerA.id}` });
+    // The customer default is payer B; the stamp names A (a job payer since removed).
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payerB.id });
+    try {
+      await mockPg.transaction(async (trx) => {
+        expect(await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { payerId: payerA.id })).toBe(0);
+      });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payerB.id}` });
+      const Payer = require('../services/payer');
+      expect(await Payer.updatePayer(payerB.id, { active: false })).toMatchObject({ payer: { active: false } });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').whereIn('id', [payerA.id, payerB.id]).del();
+    }
+  });
+
+  test('lifting the payer portion of an office review keeps an uncertain summary delivery on review', async () => {
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId, scheduled_send_error: `payer_billed:${payer.id}` });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done',
+      error: JSON.stringify({ payment: 'office_required', delivery: 'delivery_review', reason: 'payer_assigned', payerId: payer.id }) });
+    const member = await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first();
+    await require('../services/dispatch-alerts').createAlert({ type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id,
+      payload: { visitId: fixture.visitId, packetId: fixture.packetId, payment: 'office_required', delivery: 'delivery_review', reason: 'payer_assigned', payerId: payer.id } });
+    try {
+      await mockPg.transaction(async (trx) => {
+        expect(await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { payerId: payer.id })).toBe(1);
+      });
+      const packet = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first();
+      expect(JSON.parse(packet.error)).toEqual({ payment: 'payment_needed', delivery: 'delivery_review' });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a draft voided before the coordinator schedules it closes for office review, not cleanly', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const execute = mockPg.client.constructor.prototype._query;
+    let voided = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function voidBeforeScheduling(connection, query) {
+      if (!voided && query.sql.startsWith('update "invoices"') && query.bindings.includes('scheduled')) {
+        voided = true;
+        await mockPg('invoices').where({ id: invoiceId, status: 'draft' }).update({ status: 'void' });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required', payment: { state: 'office_required' } } });
+      expect(voided).toBe(true);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'void' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+    } finally {
+      jest.restoreAllMocks();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('payer writers see an in-flight combined-visit send for the customer and for a billed service', async () => {
     const { packetInvoiceSendInFlight } = require('../services/visit-completion-packets');
     const invoiceId = randomUUID();
@@ -2037,6 +2107,14 @@ postgres('visit summary recipient recovery', () => {
       expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(true);
       expect(await packetInvoiceSendInFlight({ scheduledServiceId: fixture.serviceIds[0] })).toBe(true);
       expect(await packetInvoiceSendInFlight({ scheduledServiceId: randomUUID() })).toBe(false);
+      // An automatic collection in flight (the coordinator's live visit_payment claim) is the same window.
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'draft' });
+      expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(false);
+      await mockPg('visit_effects').insert({ visit_id: fixture.visitId, effect_type: 'visit_payment', dedupe_key: `${fixture.visitId}:visit_payment`,
+        status: 'claimed', attempts: 0, claimed_at: new Date(), claim_token: randomUUID().replace(/-/g, '') });
+      expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(true);
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).del();
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending' });
       // The activation writer sees the send through the customer default and through a billed member's per-job payer.
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
       expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(true);
