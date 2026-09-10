@@ -1025,6 +1025,9 @@ async function reserveSlot({
         && String(hold.window_start).slice(0, 5) === String(windowStart).slice(0, 5)
         && (hold.technician_id || null) === (techId || null)
         && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes
+        // Reselection under capacity must create a versioned promise even
+        // when a legacy hold happened to reserve the same number of minutes.
+        && (!capacityEnabled() || hold.reservation_policy_version === 2)
         && require('node:util').isDeepStrictEqual(hold.reservation_service_mix || null,
           serviceProfile?.reservationServiceMix || null));
       if (sameSlotHold) {

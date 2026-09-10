@@ -11,6 +11,9 @@
  * hit it with the built-in fetch (same pattern as public-ui-flags.test.js).
  */
 jest.mock('../models/db', () => jest.fn());
+// These cases exercise exposure gates and response privacy. Keep their
+// request count independent of the production middleware's rate budget.
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -63,6 +66,7 @@ const express = require('express');
 const db = require('../models/db');
 const { getAvailableSlots, findEstimateSlots, MAX_SLOT_HORIZON_DAYS } = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
+const { capacityError } = require('../services/scheduling/arrival-route');
 // Real ET helpers (not mocked) — the route compares the explicit ?date against
 // the horizon in ET, exactly like slot-reservation.js does at reserve time.
 const { addETDays, etDateString } = require('../utils/datetime-et');
@@ -112,8 +116,7 @@ const NON_VIEWABLE = [
   ['archived', { id: 'est-1', status: 'sent', expires_at: null, archived_at: '2026-07-01T00:00:00Z' }],
   // Archived + TERMINAL: the viewability 404 must win over the terminal 409 —
   // a 409 here would make archived tokens distinguishable from missing ones.
-  // (One representative status; declined/void ride the same archived_at branch.
-  // Case count is budgeted against the router's 30-req/min shared limiter.)
+  // One representative status; declined/void ride the same archived_at branch.
   ['archived accepted', { id: 'est-1', status: 'accepted', expires_at: null, archived_at: '2026-07-01T00:00:00Z' }],
   // expired is non-viewable on /data, so the slot endpoints 404 it too (it
   // used to leak a 409 through the terminal branch running first).
@@ -206,6 +209,28 @@ describe('specific-date browse horizon (parity with reserveSlot)', () => {
 });
 
 describe('slot endpoints privacy/cache headers (parity with /:token/data)', () => {
+  test.each(['available-slots', 'find-slots'])('%s returns a safe recoverable conflict for catalog failures', async endpoint => {
+    currentEstimate = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
+    const lookup = endpoint === 'available-slots' ? getAvailableSlots : findEstimateSlots;
+    lookup.mockRejectedValueOnce(Object.assign(capacityError('catalog_unavailable'), {
+      message: 'private catalog query failed', catalogId: 'private-catalog-id',
+      provider: 'private-provider', cause: new Error('SELECT private_catalog_column'),
+    }));
+    const response = await fetch(`${base}/${TOKEN}/${endpoint}`, endpoint === 'find-slots' ? {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: 'next week mornings' }),
+    } : undefined);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: 'This time is no longer available. Please choose another appointment.',
+      code: 'SLOT_UNAVAILABLE', retry: true,
+    });
+    expect(response.headers.get('cache-control')).toBe('no-cache, no-store, must-revalidate');
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(slotReservation.reserveSlot).not.toHaveBeenCalled();
+  });
+
   test('available-slots stamps no-store caching + no-referrer on success and 404 alike', async () => {
     currentEstimate = { id: 'est-1', status: 'sent', expires_at: null, archived_at: null };
     getAvailableSlots.mockResolvedValue({ primary: [], expander: [], metadata: {} });
