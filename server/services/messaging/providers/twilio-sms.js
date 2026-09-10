@@ -10,6 +10,12 @@
 
 const TwilioService = require('../../twilio');
 
+const DELIVERY_OUTCOMES = new Set(['accepted', 'not_sent', 'uncertain']);
+
+function explicitDeliveryOutcome(value) {
+  return DELIVERY_OUTCOMES.has(value) ? value : null;
+}
+
 function sanitizeProviderError(value) {
   if (!value) return '';
   return String(value)
@@ -151,7 +157,7 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
     });
 
     if (!result) {
-      return { sent: false, provider: 'twilio', error: 'twilio.sendSMS returned undefined' };
+      return { sent: false, provider: 'twilio', deliveryOutcome: 'uncertain', error: 'twilio.sendSMS returned undefined' };
     }
     // sendSMS's own coded refusals are BLOCKS, not provider failures:
     //  - preSendBlocked: the caller's preSendCheck refused at the provider
@@ -167,26 +173,27 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
     // send. Normalize suppression before any review caller can stamp success.
     if ((input.channel === 'push' && (suppressed || result.guardBlocked))
       || (input.purpose === 'review_request' && suppressed)) {
-      return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
+      return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
-      return { sent: false, provider: 'push', appUnavailable: true, error: result.error || 'push_unavailable' };
+      return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable' };
     }
     if (result.appPending) {
-      return { sent: false, blocked: true, provider: 'push', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: 'uncertain', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
     }
     if (result.appRetryable) {
       if (Number.isFinite(result.retryAfterMs)) {
         const retryAfterMs = Math.max(60000, result.retryAfterMs);
-        return { sent: false, provider: 'push', code: 'APP_PROVIDER_RETRY', error: result.error,
+        return { sent: false, provider: 'push', deliveryOutcome: 'uncertain', code: 'APP_PROVIDER_RETRY', error: result.error,
           retryable: true, deferred: true, retryAfterMs, nextAllowedAt: new Date(Date.now() + retryAfterMs).toISOString() };
       }
-      return { sent: false, blocked: true, provider: 'push', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: 'uncertain', code: 'APP_DELIVERY_HOLD', error: result.error, retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
     }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {
         sent: false,
         provider: 'twilio',
+        deliveryOutcome: 'not_sent',
         blocked: true,
         code: result.code,
         error: result.error,
@@ -202,6 +209,11 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       return {
         sent: false,
         provider: 'twilio',
+        // A returned refusal with no lower-layer provenance is conservative:
+        // a legacy/mock result might have lost an SDK response. Current
+        // sendSMS tags every thrown SDK outcome at the messages.create seam.
+        deliveryOutcome: explicitDeliveryOutcome(result.deliveryOutcome)
+          || (result.guardBlocked || result.gateBlocked || result.templateDisabled ? 'not_sent' : 'uncertain'),
         error: failure.error,
         retryable: failure.retryable,
         terminal: failure.terminal,
@@ -217,6 +229,7 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       return {
         sent: true,
         provider: 'twilio',
+        deliveryOutcome: 'not_sent',
         providerMessageId: 'owner-silence',
         sentAt: new Date().toISOString(),
         raw: result,
@@ -229,6 +242,7 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
       return {
         sent: true,
         provider: 'push',
+        deliveryOutcome: 'accepted',
         providerMessageId: result.sid || 'push:delivered',
         sentAt: new Date().toISOString(),
         raw: result,
@@ -237,17 +251,34 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
     return {
       sent: true,
       provider: 'twilio',
+      deliveryOutcome: result.suppressed || result.gateBlocked || result.templateDisabled
+        ? 'not_sent'
+        : (explicitDeliveryOutcome(result.deliveryOutcome) || 'uncertain'),
       providerMessageId: result.sid || null,
       sentAt: new Date().toISOString(),
       raw: result,
     };
   } catch (err) {
     const failure = classifyProviderFailure(err);
+    const serviceOutcome = err?.providerOutcome || {};
+    const deliveryOutcome = explicitDeliveryOutcome(serviceOutcome.deliveryOutcome) || 'uncertain';
+    if (deliveryOutcome === 'accepted') {
+      return {
+        sent: true,
+        provider: 'twilio',
+        deliveryOutcome,
+        providerMessageId: serviceOutcome.providerMessageId || null,
+        sentAt: serviceOutcome.sentAt || new Date().toISOString(),
+        error: failure.error,
+        providerAlerted: true,
+      };
+    }
     // A synchronous 21610 is recorded inside TwilioService.sendSMS (the
     // choke point every sender passes through) — see messaging/sync-optout.js.
     return {
       sent: false,
       provider: 'twilio',
+      deliveryOutcome,
       error: failure.error,
       retryable: failure.retryable,
       terminal: failure.terminal,
@@ -314,5 +345,6 @@ module.exports = {
     providerFailureStatus,
     providerMediaUrls,
     sanitizeProviderError,
+    explicitDeliveryOutcome,
   },
 };
