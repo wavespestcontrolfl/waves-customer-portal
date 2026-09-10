@@ -514,9 +514,8 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
     // TOCTOU fix needs is intact.
     await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
-    const behaviorVersion = require('../config/feature-gates').isEnabled('visitCloseout')
-      && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
-    if (behaviorVersion === 1 && await customerExcludedByAutopay(stopCustomerId, t)) {
+    const behaviorVersion = combinedCloseoutBehaviorVersion();
+    if (await groupingRefusedByAutopay(stopCustomerId, t)) {
       throw new Error('rows not mutually groupable: autopay_enrolled');
     }
     await lockStop(t, baseKeyFor(peek[0]));
@@ -1147,6 +1146,19 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * the enrollment-time refuse/dissolve seam belongs to that lane
  * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
  */
+// Version 2 (combined closeout live with its encryption key) bills a grouped
+// visit through one packet, so Auto Pay customers may be grouped; version 1
+// keeps the Phase-1 exclusion. One decision for automatic stamping and the
+// staff grouping route alike.
+function combinedCloseoutBehaviorVersion() {
+  return require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
+}
+
+async function groupingRefusedByAutopay(customerId, database = db) {
+  if (combinedCloseoutBehaviorVersion() === 2) return false;
+  return customerExcludedByAutopay(customerId, database);
+}
+
 async function customerExcludedByAutopay(customerId, database = db) {
   try {
     const customer = await database('customers').where({ id: customerId })
@@ -3261,6 +3273,8 @@ module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
   customerExcludedByAutopay,
+  combinedCloseoutBehaviorVersion,
+  groupingRefusedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,

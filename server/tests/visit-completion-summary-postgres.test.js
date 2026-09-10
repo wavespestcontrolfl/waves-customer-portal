@@ -896,6 +896,101 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ summary_token_revoked_at: null });
   });
 
+  test('an email suppression added after queuing is rechecked at the held handoff', async () => {
+    const execute = mockPg.client.constructor.prototype._query;
+    let locks = 0;
+    let suppressed = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function suppressAfterMark(connection, query) {
+      if (!suppressed && query.sql.includes('from "customers"') && query.sql.includes('for share') && query.sql.includes('"id"')) {
+        locks += 1;
+        if (locks === 2) {
+          suppressed = true;
+          await mockPg('email_suppressions').insert({ email: fixture.serviceEmail, status: 'active', suppression_type: 'do_not_email' });
+        }
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      // The suppressed recipient is refused at the handoff; the other recipient still sends.
+      expect(await deliver()).toEqual({ state: 'delivery_pending' });
+      expect(suppressed).toBe(true);
+      expect(sendOne.mock.calls.map((call) => call[0].to)).not.toContain(fixture.serviceEmail);
+      jest.restoreAllMocks();
+      sendOne.mockImplementation(async () => ({ messageId: randomUUID() }));
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(sendOne.mock.calls.map((call) => call[0].to)).not.toContain(fixture.serviceEmail);
+    } finally {
+      await mockPg('email_suppressions').where({ email: fixture.serviceEmail }).del();
+    }
+  });
+
+  test('a suppressed retry settles a summary whose ledger has no remaining provider work', async () => {
+    await priorClaim('completion_email', { status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    await priorEmail(fixture.primaryEmail, { status: 'sent', provider_message_id: 'fixture-provider-id', sent_at: new Date() });
+    await priorEmail(fixture.serviceEmail, { status: 'blocked', error_message: 'Suppressed before retry: visit_summary_recipient_changed' });
+    const blocked = await mockPg('email_messages').where({ idempotency_key: emailKey(fixture.serviceEmail) }).first();
+    expect(await Summary.reconcileSummaryEmailRecovery(blocked)).toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' })
+      .update({ status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    await mockPg('email_messages').where({ idempotency_key: emailKey(fixture.primaryEmail) }).update({ status: 'blocked', sent_at: null, provider_message_id: null });
+    expect(await Summary.reconcileSummaryEmailRecovery(blocked)).toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'suppressed', last_error: null });
+  });
+
+  test('a queued replay whose account-primary read fails stays retryable instead of discarding the summary', async () => {
+    const primaryId = randomUUID();
+    const accountId = randomUUID();
+    await mockPg('customer_accounts').insert({ id: accountId, first_name: 'Primary' });
+    await mockPg('customers').insert({ id: primaryId, first_name: 'Primary', phone: '+12025550124',
+      email: `${primaryId}@example.invalid`, account_id: accountId, is_primary_profile: true });
+    const queued = await heldSummary();
+    await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: accountId, is_primary_profile: false,
+      phone: '', service_contact_phone: null, service_contacts_consent_at: null });
+    const execute = mockPg.client.constructor.prototype._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failPrimaryRead(connection, query) {
+      if (!interrupted && query.sql.includes('"is_primary_profile" = ')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic account primary outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      const replay = require('../services/messaging/deferred-replay-registry');
+      const verdict = await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata);
+      expect(interrupted).toBe(true);
+      expect(verdict.reason).not.toBe('visit_summary_recipient_changed');
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'pending' });
+      jest.restoreAllMocks();
+      expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: true });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: null });
+      await mockPg('customers').where({ id: primaryId }).del();
+      await mockPg('customer_accounts').where({ id: accountId }).del();
+    }
+  });
+
+  test('a corrected-address recovery judges suppression on its destination, not the bounced original', async () => {
+    const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_email_snapshot: fixture.serviceEmail };
+    await mockPg('email_suppressions').insert({ email: fixture.serviceEmail, status: 'active', suppression_type: 'bounce' });
+    try {
+      let dispatched = 0;
+      expect(await Summary.retrySummaryThroughHandoff(stored, async () => { dispatched += 1; }, { destination: 'corrected@example.invalid' }))
+        .toEqual({ ok: true });
+      expect(dispatched).toBe(1);
+      // The same-address retry rail is still refused by the bounce suppression.
+      expect(await Summary.retrySummaryThroughHandoff(stored, async () => { dispatched += 1; }))
+        .toEqual({ ok: false, reason: 'visit_summary_recipient_suppressed' });
+      expect(dispatched).toBe(1);
+    } finally {
+      await mockPg('email_suppressions').where({ email: fixture.serviceEmail }).del();
+    }
+  });
+
   test('the email retry rail holds the recipient rows through its provider request', async () => {
     const stored = { template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
       recipient_email_snapshot: fixture.serviceEmail };
@@ -1356,6 +1451,95 @@ postgres('visit summary recipient recovery', () => {
       await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ payer_id: null });
       await mockPg('payers').where({ id: payer.id }).del();
     }
+  });
+
+  test('a payer assigned between scheduling and delivery suppresses the homeowner send at delivery', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { payment: { state: 'payment_needed' } } });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled' });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      expect(await require('../services/invoice').sendViaSMSAndEmail(invoiceId)).toMatchObject({ ok: false, code: 'payer_billed' });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_at: null });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      expect(sendCustomerMessage.mock.calls.every((call) => call[0].purpose !== 'payment_link')).toBe(true);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test.each(['excluded member', 'self-pay override'])('the live Bill-To check honors per-job precedence: %s', async (scenario) => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    fixture.payload.billingSnapshot = { billedServiceIds: [fixture.serviceIds[0]] };
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    if (scenario === 'excluded member') {
+      // The unbilled member carries a per-job payer the invoice never consulted.
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ payer_id: payer.id });
+    } else {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ self_pay_override: true });
+    }
+    try {
+      expect(await require('../services/visit-completion-packets').liveThirdPartyPayerForPacket(fixture.packetId)).toBeNull();
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payment_needed' } } });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled' });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ payer_id: null, self_pay_override: false });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('an unrelated uncertain tracker effect does not keep a recovered summary from reopening the review', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    await mockPg('visit_effects').insert({ visit_id: fixture.visitId, effect_type: 'tracker_en_route', dedupe_key: `${fixture.visitId}:tracker_en_route`,
+      status: 'unknown_delivery', last_error: 'provider_outcome_unknown', claim_token: 'old-tracker', claimed_at: new Date(0) });
+    sendOne.mockImplementationOnce(async () => { throw new Error('provider response unavailable'); });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    const uncertain = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}`, status: 'failed' }).first();
+    await mockPg('email_messages').where({ id: uncertain.id }).update({ status: 'sent', sent_at: new Date(), provider_message_id: 'recovered', error_message: null });
+    expect(await Summary.reconcileSummaryEmailRecovery({ ...uncertain, status: 'sent' })).toEqual({ reconciled: true });
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+  });
+
+  test('a summary that bounces after the review was enrolled parks the outreach until the recovery settles it', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', delivery: { state: 'delivered' } } });
+    expect(reviews).toHaveBeenCalledTimes(1);
+    // The cadence enrolled a sequence and the legacy path a pending ask for the recorded record.
+    await mockPg('review_sequences').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'active', plan: JSON.stringify({ touches: [] }) });
+    await mockPg('review_requests').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'pending', token: randomUUID().replace(/-/g, '') });
+    expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId, status: 'active' })).toHaveLength(1);
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    await mockPg('email_messages').where({ id: delivered.id }).update({ status: 'bounced' });
+    await mockPg.transaction(async (trx) => {
+      expect(await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx)).toEqual({ reconciled: true });
+    });
+    expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId, status: 'active' })).toHaveLength(0);
+    expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId }).first()).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
+    expect(await mockPg('review_requests').where({ customer_id: fixture.customerId, status: 'pending' })).toHaveLength(0);
+    await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
+    await mockPg('review_requests').where({ customer_id: fixture.customerId }).del();
   });
 
   test('a recovery that settles the summary before the packet closes keeps the packet on recovery', async () => {

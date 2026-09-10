@@ -145,6 +145,12 @@ async function saveVisitCompletionPacket(input, database = db) {
         role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
       })).find(Boolean);
       if (ownership) return { status: ownership.status, body: ownership.payload };
+      // The route's current-assignment scope is re-applied on the locked rows:
+      // a whole-visit reschedule that committed after the preflight read must
+      // not let a technician close a visit outside their current window.
+      if (members.filter((member) => !retainedIds.has(member.id)).some((member) => !memberInTechnicianScope(member, actor))) {
+        return failure(409, 'visit_out_of_scope', 'This visit is no longer in your current schedule. Refresh the schedule.');
+      }
       // Frozen visits retain terminal children as history. Only live children
       // need forms on the first submit. Replays use saved form membership,
       // since recording those services has already made them terminal too.
@@ -308,6 +314,16 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
   return { status: 202, body: { visitId: packet.visit_id, packetId: packet.id, state: 'member_effects_ready' } };
 }
 
+// The same predicate technicianCurrentVisitFilter applies to reads, judged
+// on a locked member row for a technician actor; administrators are unscoped.
+function memberInTechnicianScope(member, actor) {
+  const scope = require('./technician-visit-scope');
+  if (!scope.isTechnicianRequest(actor)) return true;
+  return String(member.technician_id || '') === String(actor.technicianId || '')
+    && !scope.TECH_DEAD_ASSIGNMENT_STATUSES.includes(String(member.status || ''))
+    && dateOnly(member.scheduled_date) >= scope.techAccessCutoff();
+}
+
 /** Run summary and financial effects only after every member is ready. */
 async function runVisitCompletionPacketEffects(packetId, database = db) {
   const members = await runVisitCompletionPacketMemberEffects(packetId, database);
@@ -330,7 +346,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     // receive a pay link for debt that now belongs to AP: the visit goes on
     // billing hold for the office instead. A lookup failure rethrows so the
     // recovery sweep retries rather than assuming self-pay.
-    const owner = await liveThirdPartyPayer(packet, database);
+    const owner = await liveThirdPartyPayerForPacket(packet.id, database);
     if (owner) {
       await database('service_visits').where({ id: packet.visit_id }).update({ billing_hold: true, updated_at: database.fn.now() });
       payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
@@ -424,13 +440,21 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   } };
 }
 
-// The active third-party payer that now owns a billed member or the customer,
-// resolved live through the canonical Bill-To resolver. null = self-pay.
-async function liveThirdPartyPayer(packet, database = db) {
+// The active third-party payer that now owns a BILLED member, resolved live
+// through the canonical Bill-To resolver with its per-job precedence (a
+// per-job payer wins, a per-job self-pay override blocks the customer default,
+// otherwise the customer default applies). Members the invoice excluded
+// (inspection-only, declined, incomplete, recap-only) are not consulted, so an
+// unrelated per-job payer cannot hold a valid homeowner invoice. null = self-pay.
+async function liveThirdPartyPayerForPacket(packetId, database = db) {
+  const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
+  if (!packet) return null;
   const visit = await database('service_visits').where({ id: packet.visit_id }).first('customer_id');
-  const memberIds = await database('visit_completion_packet_items').where({ packet_id: packet.id }).pluck('scheduled_service_id');
+  const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
+  const billed = Array.isArray(payload?.billingSnapshot?.billedServiceIds) ? payload.billingSnapshot.billedServiceIds
+    : await database('visit_completion_packet_items').where({ packet_id: packetId }).pluck('scheduled_service_id');
   const Payer = require('./payer');
-  for (const scheduledServiceId of [...memberIds, null]) {
+  for (const scheduledServiceId of billed) {
     const resolved = await Payer.resolveForInvoice({ database, customerId: visit.customer_id, scheduledServiceId, throwOnError: true });
     if (resolved.payerId) return resolved.payerId;
   }
@@ -554,4 +578,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { memberInTechnicianScope, liveThirdPartyPayerForPacket, visitCloseoutMemberQuery, retainedCloseoutMembers, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };

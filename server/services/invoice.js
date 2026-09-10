@@ -2770,9 +2770,26 @@ const InvoiceService = {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "status");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
+    }
+    // A combined-visit invoice minted self-pay is re-checked against live
+    // Bill-To ownership at delivery time, not only when it was scheduled: a
+    // third-party payer assigned since then owns the debt, so the homeowner
+    // never receives the pay link. The invoice leaves the scheduled-send
+    // queue and the visit goes on billing hold for the office.
+    if (accrualPre?.visit_completion_packet_id && !accrualPre.payer_id) {
+      const Packets = require("./visit-completion-packets");
+      const payerId = await Packets.liveThirdPartyPayerForPacket(accrualPre.visit_completion_packet_id);
+      if (payerId) {
+        await db("invoices").where({ id: invoiceId, status: "scheduled" })
+          .update({ status: "draft", scheduled_send_at: null, updated_at: new Date() });
+        await db("service_visits").whereIn("id", db("visit_completion_packets").where({ id: accrualPre.visit_completion_packet_id }).select("visit_id"))
+          .update({ billing_hold: true, updated_at: new Date() });
+        return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
+          sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
+      }
     }
     // Claim FIRST, then apply credit. Applying before the claim strands credit when
     // two sends race: the loser draws down the balance, but the winner already owns

@@ -50,7 +50,9 @@ router.get('/:visitId', async (req, res, next) => {
       visitId: visit.id, serviceDate: dateOnly(visit.scheduled_date),
       members: members.map((member) => ({ id: member.id, serviceType: member.service_type, status: member.status,
         requiresForm: !retainedIds.has(member.id) })),
-      packet: packet ? { id: packet.id, status: packet.status, officeReview: Boolean(packet.error) } : null,
+      // Office review is a terminal state: a processing packet's error is the
+      // recovery worker's retry marker, not an intervention request.
+      packet: packet ? { id: packet.id, status: packet.status, officeReview: packet.status === 'done' && Boolean(packet.error) } : null,
       invoice: invoice ? { id: invoice.id, status: invoice.status, total: Number(invoice.total) } : null,
       canRevokeSummary: req.techRole === 'admin' && Boolean(visit.summary_token_issued_at) && !visit.summary_token_revoked_at,
       summaryRevoked: Boolean(visit.summary_token_revoked_at),
