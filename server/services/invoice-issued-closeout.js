@@ -153,9 +153,20 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
   };
   try {
     invoice = await conn('invoices').where({ id: invoiceId }).first();
-    if (!invoice || String(invoice.status) === 'void') return { closed: false, reason: 'no_invoice' };
+    if (!invoice) return { closed: false, reason: 'no_invoice' };
     const label = `invoice ${invoice.invoice_number || invoice.id} ${trigger}`;
     const idempotencyKey = `invoice-issued:${invoice.id}`;
+    // A voided invoice closes nothing — UNLESS this closeout already
+    // committed on it and still owes side effects (pre-push P1 r7): the
+    // canonical completion lets that committed attempt resume past the void
+    // (its posture is frozen, nothing can be minted), so the wrapper must
+    // reach the resume too instead of stranding the tracker / snapshot work
+    // behind 'no_invoice' on every later send or payment.
+    if (String(invoice.status) === 'void') {
+      const ownCommitted = invoice.scheduled_service_id
+        && await resumableIssuedCloseoutAttempt(conn, { serviceId: invoice.scheduled_service_id, idempotencyKey });
+      if (!ownCommitted) return { closed: false, reason: 'no_invoice' };
+    }
     const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today });
     linkedVisitId = resolved.visit?.id || null;
     let svc = resolved.svc;

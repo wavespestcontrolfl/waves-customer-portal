@@ -301,22 +301,26 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
   });
 
-  test('a COMMITTED closeout whose invoice is voided after the commit is not refused as not-reusable — the resume can finish (pre-push P1 r7)', async () => {
+  test('a COMMITTED closeout whose invoice is voided after the commit still reaches its resume through the wrapper — never no_invoice / not-reusable (pre-push P1 r7)', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
-    const { completeScheduledService } = require('../services/complete-scheduled-service');
-    const idempotencyKey = randomUUID();
+    const idempotencyKey = `invoice-issued:${f.invoiceId}`;
     // The completion committed (record + status) and still owes side effects.
     await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed' });
     await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: f.serviceId, idempotency_key: idempotencyKey, status: 'side_effects_pending', request_hash: 'x' });
     await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
-    const result = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
-      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey },
-      actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
-    // Whatever the resume claim decides, the pre-claim invoice check no
-    // longer stands in its way — and no replacement invoice is minted.
-    expect(result?.body?.code).not.toBe('issued_invoice_not_reusable');
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
+    // The wrapper recognised its own committed attempt and handed it to the
+    // canonical completion's resume; the pre-claim invoice check no longer
+    // stands in the way. Whatever the resume claim then decides, no
+    // replacement invoice is minted.
+    expect(out).toMatchObject({ visitId: f.serviceId, resumed: true });
+    expect(out.reason).not.toBe('no_invoice');
+    expect(out.reason).not.toBe('issued_invoice_not_reusable');
     expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
+    // A void with NO committed attempt of its own still closes nothing.
     await mockPg('service_completion_attempts').where({ service_id: f.serviceId }).del();
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'confirmed' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg })).toMatchObject({ closed: false, reason: 'no_invoice' });
   });
 
   test('a reschedule that lands between the unlocked read and the record transaction refuses the closeout — the locked day decides (GitHub r6 P2)', async () => {
