@@ -23,10 +23,10 @@ async function main() {
   let server, browser, safari;
   let stage = 'startup';
   const states = [];
-  async function openPage(width, { engine = browser, role = 'admin', coarse = width < 1100 } = {}) {
+  async function openPage(width, { engine = browser, role = 'admin', coarse = width < 1100, timezone = 'America/New_York' } = {}) {
     const state = { emails: structuredClone(fixtureMail), role, connected: true, fail: new Set(), sends: [], blocked: [{ id: 'fixture-block', domain: 'unwanted.example.invalid', reason: 'Manual block from admin portal', blocked_count: 3, created_at: stamp(200) }] };
     states.push(state);
-    const page = await engine.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: coarse, timezoneId: 'America/New_York', serviceWorkers: 'block' });
+    const page = await engine.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: coarse, timezoneId: timezone, serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
     page.setDefaultNavigationTimeout(60000);
     await page.addInitScript(() => {
@@ -127,6 +127,29 @@ async function main() {
         await page.close();
       });
     }
+    if (!baseline) await scenario('Retry a retained conversation after a channel refresh failure', async () => {
+      const { page, state } = await openPage(390);
+      await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
+      await page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject }).click();
+      await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Retain this reactivation draft');
+      await channel(page, 'SMS').click();
+      state.fail.add(`/admin/email/message/${a.id}`);
+      await channel(page, 'Email').click();
+      await page.getByText('The linked email is unavailable.', { exact: true }).waitFor();
+      state.fail.delete(`/admin/email/message/${a.id}`);
+      await page.getByRole('button', { name: 'Try again', exact: true }).click();
+      await page.getByText(a.body_text, { exact: true }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retain this reactivation draft');
+      await shot(page, 'reactivation-retry-390');
+      await page.close();
+    });
+    if (!baseline) await scenario('Older email dates stay Eastern in a UTC browser', async () => {
+      const { page, state } = await openPage(1440, { timezone: 'UTC' });
+      state.emails[0].received_at = '2020-07-02T02:30:00.000Z';
+      await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
+      await page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject }).getByText('Jul 1', { exact: true }).waitFor();
+      await page.close();
+    });
     if (!baseline) await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
       const { page } = await openPage(390);
       await page.goto(`${server.baseUrl}/admin/communications#tab=email`);

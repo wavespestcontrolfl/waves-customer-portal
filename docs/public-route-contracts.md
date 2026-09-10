@@ -77,6 +77,19 @@ Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
+With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
+use whole-route feasibility, technician eligibility, existing arrival promises,
+blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
+through 16:00 ET are offered; estimate ASAP and booking open-day expansion
+cannot create additional starts. The estimate cache separates capacity mode
+from legacy mode. Assigned technicians have independent route capacity;
+unassigned work remains a fixed blocker. Public responses expose no full route,
+provider legs or exact route coordinates. Scheduling traffic lookups share a
+40-request/800-element allowance per application process per 15 minutes across
+HTTP requests and fall back to the conservative model when exhausted; response
+data remains request-local. Gate-off availability is unchanged.
+Transactional reservation and route-order persistence belong to the following
+writer stage; this gate remains off until those writers are integrated.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
@@ -144,6 +157,10 @@ operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+unknown domain/van-tracking SMS stays unlinked in the inbox and does not
+create customer/account rows or guess a customer name from message prose.
+Substantive messages ring a per-message `new_lead` bell/push linking to the
+inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
 including replies that return early. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
@@ -1171,6 +1188,16 @@ mosquito-, tree-shrub-only and one-time customers get no lane), the
 per-lane open-callback dedupe (an existing open re-service answers with
 that visit's /reschedule link instead of a second booking), and open
 slots from the /book availability engine around the token row's address.
+GET accepts optional `lane=pest|lawn`; find-slots accepts the same optional
+`lane` body field. Both validate it against currently bookable lanes and
+use that lane's duration and technician capability. A single bookable lane
+is implicit. With route capacity enabled, multiple bookable lanes require
+selection: GET returns eligibility with null availability until selected,
+and find-slots returns 400. The page refreshes times and clears the previous
+slot when the selected lane changes. With capacity off, requests omitting
+lane retain the shared longest-duration browse behavior. A recognized selected
+lane that becomes unavailable refreshes eligibility with null availability,
+allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, lunch reserve, day caps — the anti-forgery model
