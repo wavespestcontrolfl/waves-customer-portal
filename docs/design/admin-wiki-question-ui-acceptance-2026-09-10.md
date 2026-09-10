@@ -2,7 +2,7 @@
 
 First focused Wiki migration: `/admin/knowledge` → Ask a question. The directory, source management, article reader, Health, recent queries, and separate Knowledge Base retain their current presentation in this PR.
 
-The question flow now uses the shared comfortable Dialog, Field/Input, Button, and ActionFeedback components. It retains bearer authentication, `VITE_API_URL`, `POST /admin/knowledge/query` with `{question}`, and conditional `POST /admin/knowledge/file-back` with `{queryId}`. Closing resets the mounted dialog's question/result as before. Escape and close restore focus to the opener.
+The question flow now uses the shared comfortable Dialog, Field/Input, Button, and ActionFeedback components. Its requests use the canonical admin-fetch helper, including standard 401 redirect and 429 retry handling, while retaining bearer authentication, `VITE_API_URL`, `POST /admin/knowledge/query` with `{question}`, and conditional `POST /admin/knowledge/file-back` with `{queryId}`. Closing resets the mounted dialog's question/result as before. Escape and close restore focus to the opener.
 
 Failed questions and filing attempts show an error and permit retry; pending requests are guarded against duplicate submission. A filing response only marks the answer associated with the submitted query ID. No server contract, permission, model, provider, or persisted data changes.
 

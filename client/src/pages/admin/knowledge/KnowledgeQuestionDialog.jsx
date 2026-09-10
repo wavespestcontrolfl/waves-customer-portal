@@ -10,7 +10,7 @@ import {
   Input,
   UiSurface,
 } from "../../../components/ui";
-import { adminPost, errorMessage } from "./api";
+import { adminFetch } from "../../../utils/admin-fetch";
 
 export default function KnowledgeQuestionDialog({ open, onClose }) {
   const [question, setQuestion] = useState("");
@@ -30,9 +30,12 @@ export default function KnowledgeQuestionDialog({ open, onClose }) {
     setResult(null);
     setError("");
     try {
-      setResult(await adminPost("/admin/knowledge/query", { question }));
+      setResult(await adminFetch("/admin/knowledge/query", {
+        method: "POST",
+        body: JSON.stringify({ question }),
+      }));
     } catch (requestError) {
-      setError(errorMessage(requestError, "Could not answer the question."));
+      setError(requestError?.message || "Could not answer the question.");
     } finally {
       askingRef.current = false;
       setAsking(false);
@@ -47,12 +50,15 @@ export default function KnowledgeQuestionDialog({ open, onClose }) {
     setFilingBack(true);
     setError("");
     try {
-      await adminPost("/admin/knowledge/file-back", { queryId });
+      await adminFetch("/admin/knowledge/file-back", {
+        method: "POST",
+        body: JSON.stringify({ queryId }),
+      });
       setResult((previous) => previous?.queryId === queryId
         ? { ...previous, filedBack: true }
         : previous);
     } catch (requestError) {
-      setError(errorMessage(requestError, "Could not file this answer into the wiki."));
+      setError(requestError?.message || "Could not file this answer into the wiki.");
     } finally {
       filingBackRef.current = false;
       setFilingBack(false);

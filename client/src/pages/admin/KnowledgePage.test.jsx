@@ -32,7 +32,15 @@ vi.mock("../../components/admin/AdminCommandHeader", () => ({
 import KnowledgePage from "./KnowledgePage";
 
 function response(data, { ok = true, status = 200 } = {}) {
-  return { ok, status, json: vi.fn(async () => data) };
+  const json = vi.fn(async () => data);
+  return {
+    ok,
+    status,
+    statusText: "",
+    headers: { get: vi.fn(() => null) },
+    json,
+    clone: vi.fn(() => ({ json })),
+  };
 }
 
 function deferred() {
