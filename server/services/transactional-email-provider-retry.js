@@ -356,6 +356,14 @@ async function retryOne(message) {
     }
     return await recordRetrySend(message, state.result);
   } catch (err) {
+    // A bearer-link summary whose provider request began is never requeued:
+    // if the uncertain settlement itself failed above, it is attempted once
+    // more here, and a row it still cannot settle keeps its started marker
+    // for stale-claim recovery to settle as uncertain.
+    if (message.template_key === 'service.visit_summary' && state.dispatchStarted) {
+      await markRetryUncertain(message, err).catch((again) => logger.error(`[email-provider-retry] uncertain settlement failed twice for ${message.id}: ${again.message}`));
+      return { sent: false, uncertain: true, error: err };
+    }
     await markRetryFailure(message, err);
     return { sent: false, error: err };
   }
