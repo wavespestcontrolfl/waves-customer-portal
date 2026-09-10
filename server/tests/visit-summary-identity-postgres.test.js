@@ -91,6 +91,33 @@ jest.setTimeout(90000);
       .toBe(createHash('sha256').update(token).digest('hex'));
   });
 
+  test('a revocation attempted while a read is projecting waits for that read, and the next read refuses', async () => {
+    const token = await Summary.ensureVisitSummaryToken(fixture.packetId);
+    const execute = mockPg.client.constructor.prototype._query;
+    let blockedCode = null;
+    let raced = false;
+    jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(async function revokeDuringProjection(connection, query) {
+      if (!raced && query.sql.startsWith('select "id" from "visit_completion_packets"')) {
+        raced = true;
+        // The admin revoke: an UPDATE of the held visit row.
+        await mockPg.transaction(async (trx) => {
+          await trx.raw("SET LOCAL lock_timeout = '200ms'");
+          await trx('service_visits').where({ id: fixture.visitId }).whereNull('summary_token_revoked_at').update({ summary_token_revoked_at: trx.fn.now() });
+        }).catch((err) => { blockedCode = err.code; });
+      }
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await Summary.getVisitCompletionSummary(token)).toMatchObject({ services: [expect.objectContaining({ outcome: 'completed' })] });
+      expect(raced).toBe(true);
+      expect(blockedCode).toBe('55P03');
+    } finally {
+      jest.restoreAllMocks();
+    }
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: mockPg.fn.now() });
+    expect(await Summary.getVisitCompletionSummary(token)).toBeNull();
+  });
+
   test('unfinished reports cannot mint a token and preparation errors stay generic', async () => {
     await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId }).update({ status: 'processing' });
     await expect(Summary.ensureVisitSummaryToken(fixture.packetId)).rejects.toThrow('Visit summary link could not be prepared');
