@@ -647,6 +647,8 @@ async function openVisitPickerRow(visit, customerId) {
 
 // GET /service-records/:customerId — the visit picker's feed: recent
 // completed visits (service records) AND the customer's open visits.
+const PICKER_OPEN_VISIT_LIMIT = 20;
+const PICKER_CANDIDATE_BATCH = 40;
 router.get('/service-records/:customerId', async (req, res, next) => {
   try {
     const records = await db('service_records')
@@ -667,7 +669,12 @@ router.get('/service-records/:customerId', async (req, res, next) => {
     // visit_already_invoiced on every retry, and such rows would eat the
     // limit and hide eligible visits. Excluded in SQL, before the limit.
     const { scopeAdoptableScheduledInvoices } = require('../services/scheduled-invoice-mint');
-    const candidates = await db('scheduled_services')
+    // Prepaid / unverifiable eligibility is decided per row (payer, ledger,
+    // annual term), so the SQL limit is a BATCH size, not the picker limit:
+    // successive batches are read until 20 eligible visits are collected or
+    // the candidates are exhausted (pre-push P1 r3) — 40 prepaid visits up
+    // front must not hide the eligible ones behind them.
+    const candidateBatch = (offset) => db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.params.customerId })
       .where((qb) => qb.whereNull('scheduled_services.status').orWhereIn('scheduled_services.status', OPEN_VISIT_STATUSES))
       .whereNotExists(function adoptableInvoice() {
@@ -684,12 +691,18 @@ router.get('/service-records/:customerId', async (req, res, next) => {
         'scheduled_services.annual_prepay_term_id', 'scheduled_services.customer_id',
         'technicians.name as tech_name')
       .orderBy('scheduled_services.scheduled_date', 'asc')
-      .limit(40);
+      .orderBy('scheduled_services.id', 'asc')
+      .offset(offset)
+      .limit(PICKER_CANDIDATE_BATCH);
     const openVisits = [];
-    for (const visit of candidates) {
-      const feedRow = await openVisitPickerRow(visit, req.params.customerId);
-      if (feedRow) openVisits.push(feedRow);
-      if (openVisits.length >= 20) break;
+    for (let offset = 0; openVisits.length < PICKER_OPEN_VISIT_LIMIT; offset += PICKER_CANDIDATE_BATCH) {
+      const candidates = await candidateBatch(offset);
+      for (const visit of candidates) {
+        const feedRow = await openVisitPickerRow(visit, req.params.customerId);
+        if (feedRow) openVisits.push(feedRow);
+        if (openVisits.length >= PICKER_OPEN_VISIT_LIMIT) break;
+      }
+      if (candidates.length < PICKER_CANDIDATE_BATCH) break;
     }
     res.json({ records, openVisits });
   } catch (err) { next(err); }

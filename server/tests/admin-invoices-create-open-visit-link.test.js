@@ -74,7 +74,7 @@ const PAYER_VISIT = '55555555-5555-4555-8555-555555555555';
 
 function qb(overrides = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'leftJoin', 'select', 'orderBy', 'limit', 'whereNull', 'whereNot', 'whereNotExists', 'modify']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereIn', 'leftJoin', 'select', 'orderBy', 'offset', 'limit', 'whereNull', 'whereNot', 'whereNotExists', 'modify']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => null);
   q.then = undefined;
   Object.assign(q, overrides);
@@ -516,6 +516,34 @@ describe('GET /admin/invoices/service-records/:customerId', () => {
   // Codex P1 r3 — a failed deposit (or payer) lookup must not surface the
   // visit with deposit_credit 0: the form would submit an expected credit of
   // 0 and a full-balance invoice could go out over a paid deposit.
+  // Pre-push P1 r3 — the SQL limit is a batch size: when a whole first batch
+  // is ineligible (prepaid), the next batch is read, so eligible visits
+  // behind 40 prepaid ones still reach the picker.
+  test('reads successive candidate batches until 20 eligible visits are collected or the candidates run out', async () => {
+    const prepaid = (i) => ({ id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, scheduled_date: '2040-03-04', service_type: 'Quarterly Pest Control Service', status: 'confirmed', tech_name: 'Adam', source_estimate_id: null, prepaid_amount: 117, prepaid_method: 'cash', customer_id: CUSTOMER });
+    const firstBatch = Array.from({ length: 40 }, (_, i) => prepaid(i));
+    const secondBatch = [
+      { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, source_estimate_id: null, prepaid_amount: null, prepaid_method: null, customer_id: CUSTOMER },
+    ];
+    const limit = jest.fn().mockResolvedValueOnce(firstBatch).mockResolvedValueOnce(secondBatch);
+    const offsets = [];
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return qb({ limit: jest.fn(async () => []) });
+      if (table === 'scheduled_services') { const q = qb({ limit }); q.offset = jest.fn((o) => { offsets.push(o); return q; }); return q; }
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/service-records/${CUSTOMER}`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).openVisits).toEqual([
+        { id: OTHER, scheduled_date: '2040-03-11', service_type: 'Mosquito Barrier Treatment', status: 'pending', tech_name: null, deposit_credit: 0 },
+      ]);
+      // Two batches: offsets 0 and 40; the second was short, so no third read.
+      expect(offsets).toEqual([0, 40]);
+      expect(limit).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test('a visit whose deposit lookup fails is not offered at all (never deposit_credit 0)', async () => {
     const { pendingDepositCredit } = require('../services/estimate-deposits');
     pendingDepositCredit.mockRejectedValueOnce(new Error('deposit ledger unavailable'));
