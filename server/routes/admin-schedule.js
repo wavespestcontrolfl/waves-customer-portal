@@ -9246,6 +9246,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           }
         }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // A job Bill-To edit (payer cleared, self-pay override set) that makes a
+        // withdrawn combined-visit invoice self-pay again requeues it here.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { scheduledServiceId: req.params.id });
+        }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call
         // pipeline inserts single visits only) or any other one-off being

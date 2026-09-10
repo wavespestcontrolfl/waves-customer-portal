@@ -201,24 +201,7 @@ async function updatePayer(id, body) {
       // invoice returns to its queue (the worker re-judges ownership on its
       // claim) and the hold the withdrawal set is lifted.
       if (dbUpdates.active === false && current.active !== false) {
-        const withdrawn = await trx('invoices').where({ status: 'draft', scheduled_send_error: `payer_billed:${pid}` })
-          .whereNull('payer_id').whereNotNull('visit_completion_packet_id').select('id', 'visit_completion_packet_id');
-        if (withdrawn.length) {
-          await trx('invoices').whereIn('id', withdrawn.map((invoice) => invoice.id)).update({
-            status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now(),
-          });
-          const packetIds = withdrawn.map((invoice) => invoice.visit_completion_packet_id);
-          await trx('service_visits').whereIn('id', trx('visit_completion_packets').whereIn('id', packetIds).select('visit_id'))
-            .update({ billing_hold: false, updated_at: trx.fn.now() });
-          // The office-review state the withdrawal recorded is lifted with it.
-          await trx('visit_completion_packets').whereIn('id', packetIds).where({ status: 'done' })
-            .whereRaw("error::jsonb->>'reason' = 'payer_assigned'").whereRaw("error::jsonb->>'payerId' = ?", [String(pid)])
-            .update({ error: null, updated_at: trx.fn.now() });
-          const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-            .whereRaw("payload->>'reason' = 'payer_assigned'").whereRaw("payload->>'payerId' = ?", [String(pid)])
-            .whereIn(trx.raw("payload->>'packetId'"), packetIds).select('id');
-          for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
-        }
+        await require('./visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { payerId: pid });
       }
       return { payer: row };
     });

@@ -1939,6 +1939,52 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a payer the coordinator finds records the shared office-review state, which a Bill-To change lifts through the same reconciliation', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required', payment: { state: 'office_required', reason: 'payer_assigned' } } });
+      const closed = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first();
+      expect(JSON.parse(closed.error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned', payerId: payer.id });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}` });
+      const alerts = await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0].payload).toMatchObject({ reason: 'payer_assigned', payerId: payer.id });
+      // The customer's payer link is cleared (the Customer-360 writer's transition): self-pay again.
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        expect(await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId })).toBe(1);
+      });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+      expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'done', error: null });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a withdrawn draft that was voided in the meantime is never requeued', async () => {
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'void', total: 120, visit_completion_packet_id: fixture.packetId, scheduled_send_error: `payer_billed:${payer.id}` });
+    try {
+      await mockPg.transaction(async (trx) => {
+        expect(await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { payerId: payer.id })).toBe(0);
+      });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'void' });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('payer writers see an in-flight combined-visit send for the customer and for a billed service', async () => {
     const { packetInvoiceSendInFlight } = require('../services/visit-completion-packets');
     const invoiceId = randomUUID();
