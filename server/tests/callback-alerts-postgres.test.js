@@ -227,6 +227,21 @@ run('callback reminder transitions on PostgreSQL', () => {
     await trx('call_commitments').where({ id: sibling.id }).del();
   });
 
+  test('a callback card the coach’s call_back task already carries is not counted again by the digest', async () => {
+    const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;
+    const carried = await seed();
+    const before = Number((await load()).find((r) => r.callback_card_summary)?.total_count || 0);
+    const call = await trx('call_log').where({ id: carried.call_log_id }).first();
+    const [task] = await trx('ai_follow_up_tasks').insert({ task_type: 'call_back', customer_id: customerId, status: 'pending',
+      created_at: new Date(new Date(call.created_at).getTime() + 60000), deadline: new Date(now.getTime() + 86400000) }).returning('id');
+    try {
+      const after = Number((await load()).find((r) => r.callback_card_summary)?.total_count || 0);
+      expect(after).toBe(before - 1);
+    } finally {
+      await trx('ai_follow_up_tasks').where({ id: task.id }).del();
+    }
+  });
+
   test('the digest card count leaves out internal-test customers', async () => {
     const { INTERNAL_TEST_CUSTOMER_IDS } = require('../services/internal-test-customers');
     const load = require('../services/unworked-comms-watcher')._private.loadCallbackCalls;

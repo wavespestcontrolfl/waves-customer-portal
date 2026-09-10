@@ -123,7 +123,11 @@ async function runInner({ now = new Date() } = {}) {
     // Fence the notification version against a concurrent staff action.
     const live = await trx('call_commitments as cc').whereIn('cc.id', [...liveIds]).where('cc.status', 'open')
       .whereRaw(`NOT ${require('./call-commitments').staleAiRowSql('cc')}`).orderBy('cc.id').forUpdate('cc').select('cc.*');
-    const current = live.map((r) => ({ ...candidates.find((c) => c.id === r.id), ...r }));
+    // Locked in id order; restored to the candidate order (effective due
+    // time, then call age) so "Oldest" in the aggregate is the longest overdue.
+    const rank = new Map(candidates.map((c, i) => [c.id, i]));
+    const current = live.map((r) => ({ ...candidates.find((c) => c.id === r.id), ...r }))
+      .sort((a, b) => rank.get(a.id) - rank.get(b.id));
     const noticeRows = () => trx('notifications').where({ recipient_type: 'admin' });
     const priorAggregate = await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")
       .orderBy('created_at', 'desc').first('id', 'metadata', 'read_at');

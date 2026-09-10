@@ -88,6 +88,35 @@ function etTime(value) {
   }
 }
 
+// One obligation, one lane: a source call whose callback the coach's
+// call_back task already carries (SID provenance, or the customer within
+// the call's 45-minute window; the task must still be visible somewhere).
+// Shared by the legacy callback query and the card summary so the digest
+// never shows the same callback as both a card and a follow-up.
+function taskLaneCarriesCallbackSql(alias) {
+  return `NOT EXISTS (
+        SELECT 1 FROM ai_follow_up_tasks dt
+        WHERE dt.task_type = 'call_back'
+          -- Exact SID provenance dedupes UNCONDITIONALLY (codex r34):
+          -- late recording processing can mint the task hours after the
+          -- call. The 45-minute end-of-call window (codex r26) remains
+          -- only for the legacy customer-matched fallback.
+          -- The task must still be VISIBLE somewhere (codex r41): a task
+          -- that aged past the follow-up lane's 30-day deadline horizon
+          -- (and wasn't completed) no longer suppresses the callback row,
+          -- or the obligation would appear in neither section.
+          AND (dt.deadline > now() - interval '30 days' OR dt.status = 'completed')
+          AND (EXISTS (
+              SELECT 1 FROM csr_call_scores dcs
+              WHERE dcs.id = dt.call_score_id
+                AND dcs.metadata->>'callSid' = ${alias}.twilio_call_sid
+                AND COALESCE(${alias}.twilio_call_sid, '') <> ''
+            )
+            OR (dt.customer_id IS NOT NULL AND dt.customer_id = ${alias}.customer_id
+              AND dt.created_at BETWEEN ${alias}.created_at AND CASE WHEN ${alias}.bridged_at IS NOT NULL THEN ${alias}.bridged_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) WHEN ${alias}.direction = 'inbound' THEN ${alias}.created_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) ELSE ${alias}.created_at END + interval '45 minutes'))
+      )`;
+}
+
 // Lane 1: callback-requested calls from today with nothing behind them.
 async function loadCallbackCalls(cutoff = new Date()) {
   const cardsEnabled = require('./callback-cards').enabled();
@@ -102,6 +131,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
       .where({ 'cc.kind': 'callback', 'cc.party': 'waves', 'cc.status': 'open' })
       .whereRaw(`NOT ${staleAiRowSql('cc')}`)
       .where((b) => b.whereNull('cl.customer_id').orWhereNotIn('cl.customer_id', INTERNAL_TEST_CUSTOMER_IDS))
+      .whereRaw(taskLaneCarriesCallbackSql('cl'))
       .whereRaw('COALESCE(cc.due_at, cc.callback_due_at) <= NOW()')
       .whereRaw('(cc.snoozed_until IS NULL OR cc.snoozed_until <= NOW())')
       .select('cc.id', db.raw('COUNT(*) OVER () AS total_count')).limit(1);
@@ -172,27 +202,7 @@ async function loadCallbackCalls(cutoff = new Date()) {
       -- One obligation, one lane (codex r22): when the coach minted a
       -- call_back task for the same customer around this call, the task
       -- lane carries it (with the richer recommended action).
-      AND NOT EXISTS (
-        SELECT 1 FROM ai_follow_up_tasks dt
-        WHERE dt.task_type = 'call_back'
-          -- Exact SID provenance dedupes UNCONDITIONALLY (codex r34):
-          -- late recording processing can mint the task hours after the
-          -- call. The 45-minute end-of-call window (codex r26) remains
-          -- only for the legacy customer-matched fallback.
-          -- The task must still be VISIBLE somewhere (codex r41): a task
-          -- that aged past the follow-up lane's 30-day deadline horizon
-          -- (and wasn't completed) no longer suppresses the callback row,
-          -- or the obligation would appear in neither section.
-          AND (dt.deadline > now() - interval '30 days' OR dt.status = 'completed')
-          AND (EXISTS (
-              SELECT 1 FROM csr_call_scores dcs
-              WHERE dcs.id = dt.call_score_id
-                AND dcs.metadata->>'callSid' = c.twilio_call_sid
-                AND COALESCE(c.twilio_call_sid, '') <> ''
-            )
-            OR (dt.customer_id IS NOT NULL AND dt.customer_id = c.customer_id
-              AND dt.created_at BETWEEN c.created_at AND CASE WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END + interval '45 minutes'))
-      )
+      AND ${taskLaneCarriesCallbackSql('c')}
       -- Already returned: a later outbound CALL to the same number, or a
       -- later human-typed text, clears the item (codex #3232 r1).
       -- Cleared only by a CONNECTED callback: the admin callback route
