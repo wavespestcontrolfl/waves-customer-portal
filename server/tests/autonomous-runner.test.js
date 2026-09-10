@@ -1500,6 +1500,84 @@ describe('runDaily batching', () => {
       failures: 1,
     });
   });
+
+  test('narrows to the blog lane when non-blog failures hit the cap before any blog attempt', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn()
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', failure_message: 'streaming_failed: deadline', opportunity_id: 'city_1' })
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', failure_message: 'streaming_failed: deadline', opportunity_id: 'city_2' })
+      .mockResolvedValueOnce({ outcome: 'completed_published', action_type: 'new_supporting_blog', opportunity_id: 'blog_1' })
+      .mockResolvedValueOnce({ outcome: 'skipped_no_opportunity' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+
+    const result = await runner.runDaily({ limit: 5 });
+
+    // The 9am batch used to halt here (2 consecutive failures) with zero blog
+    // attempts; now the remaining slots claim blog-only, failed rows still excluded.
+    expect(runner.runNext).toHaveBeenCalledTimes(4);
+    expect(runner.runNext).toHaveBeenNthCalledWith(1, { excludeIds: [] });
+    expect(runner.runNext).toHaveBeenNthCalledWith(2, { excludeIds: ['city_1'] });
+    expect(runner.runNext).toHaveBeenNthCalledWith(3, { excludeIds: ['city_1', 'city_2'], actionType: 'new_supporting_blog' });
+    expect(runner.runNext).toHaveBeenNthCalledWith(4, { excludeIds: ['city_1', 'city_2'], actionType: 'new_supporting_blog' });
+    expect(result).toMatchObject({ outcome: 'skipped_no_opportunity', count: 4, failures: 2 });
+  });
+
+  test('the blog fallback fires once: blog-lane failures after narrowing halt for real', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const runner = new AutonomousRunner();
+    runner.runNext = jest.fn()
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', opportunity_id: 'city_1' })
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', opportunity_id: 'city_2' })
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'new_supporting_blog', opportunity_id: 'blog_1' })
+      .mockResolvedValueOnce({ outcome: 'failed_agent', action_type: 'new_supporting_blog', opportunity_id: 'blog_2' })
+      .mockResolvedValueOnce({ outcome: 'completed_published', action_type: 'new_supporting_blog' });
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+
+    const result = await runner.runDaily({ limit: 10 });
+
+    expect(runner.runNext).toHaveBeenCalledTimes(4);
+    expect(result).toMatchObject({ count: 4, failures: 4 });
+  });
+
+  test('no fallback once a blog was already attempted, on a scoped pass, or when killed', async () => {
+    const { AutonomousRunner } = require('../services/content/autonomous-runner');
+    const cityFail = (id) => ({ outcome: 'failed_agent', action_type: 'create_or_refresh_city_service_page', opportunity_id: id });
+
+    // Blog already attempted earlier in the batch → plain halt.
+    let runner = new AutonomousRunner();
+    runner.runNext = jest.fn()
+      .mockResolvedValueOnce({ outcome: 'completed_pending_review', action_type: 'new_supporting_blog', skip_reason: 'astro_pr_pending_merge' })
+      .mockResolvedValueOnce(cityFail('c1'))
+      .mockResolvedValueOnce(cityFail('c2'));
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+    await runner.runDaily({ limit: 10 });
+    expect(runner.runNext).toHaveBeenCalledTimes(3);
+
+    // Scoped (catch-up style) pass → plain halt.
+    runner = new AutonomousRunner();
+    runner.runNext = jest.fn().mockResolvedValue(cityFail('c1'));
+    runner._appendToDailyDigest = jest.fn(async () => {});
+    runner._withEngineLock = (label, fn) => fn();
+    await runner._runDailyInner({ limit: 10, actionType: 'create_or_refresh_city_service_page' });
+    expect(runner.runNext).toHaveBeenCalledTimes(2);
+
+    // Kill switch → plain halt.
+    process.env.AUTONOMOUS_CONTENT_BLOG_FALLBACK = 'false';
+    try {
+      runner = new AutonomousRunner();
+      runner.runNext = jest.fn().mockResolvedValue(cityFail('c1'));
+      runner._appendToDailyDigest = jest.fn(async () => {});
+      runner._withEngineLock = (label, fn) => fn();
+      await runner.runDaily({ limit: 10 });
+      expect(runner.runNext).toHaveBeenCalledTimes(2);
+    } finally {
+      delete process.env.AUTONOMOUS_CONTENT_BLOG_FALLBACK;
+    }
+  });
 });
 
 // ── engine publishing lock ──────────────────────────────────────────

@@ -519,7 +519,7 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed', failure_message: 'agent-dispatcher unavailable' });
     }
     const t3 = Date.now();
-    const dispatchResult = await dispatcher.runWithBrief(brief, {
+    const dispatchOptions = {
       dryRun,
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
       // W1 in-loop self-lint options — the SAME sync derivation gate 3c
@@ -534,9 +534,24 @@ class AutonomousRunner {
       selfLintOptions: (brief.action_type === 'refresh_existing_page' || !envBool('AUTONOMOUS_WRITER_SELF_LINT', true))
         ? null
         : deriveSyncGuardrailOptions(opp, brief),
-    }).catch((err) => ({
+    };
+    const dispatchOnce = () => dispatcher.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
+    let dispatchResult = await dispatchOnce();
+    // Provider-side stream EOF (session_stream_eof: the stream closed before
+    // any terminal event, no draft captured) is a transport hiccup, not a
+    // verdict on the brief — prod 2026-09-10 lost two of three catch-up blog
+    // runs to it and halted the batch. Re-dispatch the same brief up to
+    // AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES more times (default 1) before
+    // filing failed_agent. Our own deadline (session_timeout) and session
+    // error events are NOT retried: they cost a full timeout each and
+    // usually mean the brief itself is too heavy. dryRun never retries.
+    const eofRetries = dryRun ? 0 : envInt('AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES', 1);
+    for (let attempt = 1; attempt <= eofRetries && !dispatchResult.ok && dispatchResult.code === 'session_stream_eof'; attempt += 1) {
+      logger.warn(`[autonomous-runner] run ${run.id}: agent stream ended without a terminal event (session ${dispatchResult.session_id || 'unknown'}); re-dispatching (${attempt}/${eofRetries})`);
+      dispatchResult = await dispatchOnce();
+    }
     // The dispatcher's own duration excludes its session-ledger GET; the
     // local clock is the fallback for the exits that return none.
     run.agent_ms = Number.isFinite(dispatchResult.duration_ms) ? dispatchResult.duration_ms : Date.now() - t3;
@@ -1527,19 +1542,44 @@ class AutonomousRunner {
     // poison row can't starve the lower-scored queue (it's still eligible on
     // the next cron, where its claim was released to pending).
     const failedOppIds = [];
+    // The unscoped 9am batch claims by score, so a lane other than the blog
+    // lane can burn the whole consecutive-failure budget before any blog is
+    // attempted (prod 2026-09-06→10: two create_or_refresh_city_service_page
+    // deadline timeouts every morning, batch halted, zero blog runs, and the
+    // drought SMS blamed the miner). The operator's target is a blog post
+    // every day, so when the cap is hit by NON-blog failures and no blog has
+    // been attempted yet, the batch narrows to the blog lane for its
+    // remaining slots instead of halting — the same scoped claim the 1pm
+    // catch-up uses. The failed rows stay excluded; a second cap hit (blog
+    // failures) halts for real. Only for the unscoped batch: a scoped pass
+    // has nothing to narrow to. Kill: AUTONOMOUS_CONTENT_BLOG_FALLBACK=false.
+    const blogFallbackEnabled = !actionType && envBool('AUTONOMOUS_CONTENT_BLOG_FALLBACK', true);
+    let scopedActionType = actionType;
+    let blogFallbackUsed = false;
+    let blogAttempted = false;
+    let nonBlogFailureStreak = 0;
     for (let i = 0; i < batchLimit; i += 1) {
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
       // batch's claim args stay byte-identical.
-      const run = await this.runNext({ excludeIds: [...failedOppIds], ...(actionType ? { actionType } : {}) });
+      const run = await this.runNext({ excludeIds: [...failedOppIds], ...(scopedActionType ? { actionType: scopedActionType } : {}) });
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
+      if (run.action_type === 'new_supporting_blog') blogAttempted = true;
       if (String(run.outcome || '').startsWith('failed')) {
         consecutiveFailures += 1;
         failuresSeen += 1;
+        nonBlogFailureStreak = (run.action_type && run.action_type !== 'new_supporting_blog') ? nonBlogFailureStreak + 1 : 0;
         if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
         if (consecutiveFailures >= maxConsecutiveFailures) {
+          if (blogFallbackEnabled && !blogFallbackUsed && !blogAttempted && nonBlogFailureStreak >= maxConsecutiveFailures) {
+            blogFallbackUsed = true;
+            scopedActionType = 'new_supporting_blog';
+            consecutiveFailures = 0;
+            logger.warn(`[autonomous-runner] runDaily: ${nonBlogFailureStreak} consecutive ${run.action_type} failures before any blog attempt (last: ${run.failure_message || run.outcome}); narrowing the rest of the batch to new_supporting_blog`);
+            continue;
+          }
           logger.warn(`[autonomous-runner] runDaily halting batch after ${consecutiveFailures} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
           break;
         }
@@ -1547,6 +1587,7 @@ class AutonomousRunner {
         continue;
       }
       consecutiveFailures = 0;
+      nonBlogFailureStreak = 0;
     }
     if (failuresSeen > 0) {
       logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
@@ -1669,8 +1710,16 @@ class AutonomousRunner {
     }
 
     const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');
+    // Failures in OTHER lanes are the usual reason the unscoped batch never
+    // reached a blog (the consecutive-failure halt) — say so, rather than
+    // blaming the miner for a queue that still had claimable blog rows.
+    const nonBlogFailures = real.filter((r) => String(r.outcome || '').startsWith('failed')
+      && r.action_type && r.action_type !== 'new_supporting_blog');
     let why;
-    if (!blogAttempts.length) {
+    if (!blogAttempts.length && nonBlogFailures.length) {
+      const lanes = [...new Set(nonBlogFailures.map((r) => r.action_type))].join(', ');
+      why = `batch halted after ${nonBlogFailures.length} failed ${lanes} run(s) before any blog was attempted`;
+    } else if (!blogAttempts.length) {
       why = 'no blog opportunity cleared the score floor (miner found nothing actionable)';
     } else {
       const reasons = {};

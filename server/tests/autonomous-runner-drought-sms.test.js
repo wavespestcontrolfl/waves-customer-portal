@@ -41,6 +41,18 @@ test('no runs at all (skipped_no_opportunity day): drought SMS fires with the fl
   expect(opts).toMatchObject({ messageType: 'internal_alert' });
 });
 
+test('no blog attempt because other lanes burned the batch: SMS names the halt, not the miner', async () => {
+  await runner._sendBlogDroughtSms([
+    { action_type: 'create_or_refresh_city_service_page', outcome: 'failed_agent', failure_message: 'streaming_failed: deadline' },
+    { action_type: 'create_or_refresh_city_service_page', outcome: 'failed_agent', failure_message: 'streaming_failed: deadline' },
+  ]);
+
+  expect(twilio.sendSMS).toHaveBeenCalledTimes(1);
+  const [, body] = twilio.sendSMS.mock.calls[0];
+  expect(body).toMatch(/batch halted after 2 failed create_or_refresh_city_service_page run\(s\) before any blog was attempted/);
+  expect(body).not.toMatch(/miner found nothing actionable/);
+});
+
 test('a blog parked awaiting PR merge counts as started — no SMS', async () => {
   await runner._sendBlogDroughtSms([blogStarted]);
   expect(twilio.sendSMS).not.toHaveBeenCalled();
