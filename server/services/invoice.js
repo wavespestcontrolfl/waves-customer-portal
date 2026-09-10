@@ -3241,6 +3241,9 @@ const InvoiceService = {
         // payer-billed invoice is delivered email-only by design.
         "payer_id",
         "customer_id",
+        // A combined-visit invoice re-resolves live Bill-To under held rows
+        // before its queue claim.
+        "visit_completion_packet_id",
       );
 
     let sent = 0;
@@ -3332,6 +3335,8 @@ const InvoiceService = {
       // held rows before its queue claim; a payer means the homeowner send is
       // withdrawn for good, not retried.
       if (inv.visit_completion_packet_id && !inv.payer_id) {
+        // A failed fence leaves the invoice queued for the next pass; the
+        // batch never aborts on it.
         const fenced = await claimPacketInvoiceForSend(inv.id, inv.visit_completion_packet_id, { allowClaimed: false })
           .catch((err) => ({ payerBilled: false, error: err }));
         if (fenced.payerBilled) {
@@ -3339,7 +3344,11 @@ const InvoiceService = {
           logger.info(`[invoice] Scheduled send for ${inv.invoice_number} withdrawn — the visit is now billed to payer ${fenced.payerId}`);
           continue;
         }
-        if (fenced.error || !fenced.claim?.claimed) continue;
+        if (fenced.error) {
+          logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} left queued — Bill-To fence failed: ${fenced.error.message}`);
+          continue;
+        }
+        if (!fenced.claim?.claimed) continue;
       }
       const [claimed] = inv.visit_completion_packet_id && !inv.payer_id
         ? await db("invoices").where({ id: inv.id, status: "sending" }).select(["id", "scheduled_request_review", "scheduled_review_delay_minutes"])
