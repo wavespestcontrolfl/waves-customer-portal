@@ -1397,7 +1397,9 @@ function refreshableVerdictSql() {
   const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
   return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state IN ('confirmed', 'edited') AND (? OR EXISTS ("
     + "SELECT 1 FROM call_log attempt WHERE (attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
-    + " OR (attempt.metadata->>'relatedCallId' = call_commitments.call_log_id::text AND attempt.metadata->>'callback_policy' = 'card'))"
+    // The source-call arm covers the Call Log action only: a sibling
+    // promise's card attempt (both keys) must not make THIS row refreshable.
+    + " OR (attempt.metadata->>'relatedCommitmentId' IS NULL AND attempt.metadata->>'relatedCallId' = call_commitments.call_log_id::text AND attempt.metadata->>'callback_policy' = 'card'))"
     + " AND COALESCE(attempt.source, '') <> ?))))",
   [require('./callback-cards').enabled(), VOICE_RELAY_SANDBOX_SOURCE]];
 }
