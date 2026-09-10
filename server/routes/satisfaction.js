@@ -225,7 +225,8 @@ router.post('/', async (req, res, next) => {
       // text carries the link.
       const askQueued = ['deferred', 'already_queued', 'send_failed'].includes(asked.outcome);
       // A review-history/spacing refusal also withholds both link fallbacks.
-      const askHeld = asked.outcome === 'blocked' && String(asked.code || '').startsWith('REVIEW_');
+      const askHeld = asked.outcome === 'blocked'
+        && (String(asked.code || '').startsWith('REVIEW_') || asked.code === 'SMS_DELIVERY_UNCERTAIN');
       let reviewLink = asked.reviewUrl || null;
       if (!reviewLink && !askQueued && !askHeld && asked.outcome !== 'already_reviewed') {
         // BOTH fallbacks skip the queued window (codex #3285 r4): an older
