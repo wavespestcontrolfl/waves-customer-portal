@@ -53,6 +53,9 @@ mocked provider response is not evidence of end-to-end capability.
 - `action-registry.js` validates explicit role/side-effect/approval policy for the
   existing 209 definitions and dynamically loads authorized cross-module tools.
   Unknown classifications and injected top-level actor/approval fields fail closed.
+  Every entry also declares a data `scope` (see
+  `intelligence-bar-read-scope-catalog.md`); a missing or invalid scope keeps the
+  tool out of the registry and `task-context.js` refuses it as `scope_unclassified`.
 - `outcomes.js` recognizes blocked/failed/unknown/partial/provider-accepted results.
   Confirmation and recovered cards use stored outcomes; accepted SMS audit failures
   retain provider acceptance without implying delivery or permitting a repeat send.

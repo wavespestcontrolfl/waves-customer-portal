@@ -31,6 +31,7 @@ const db = require('../models/db');
 const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
+const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
@@ -1059,6 +1060,7 @@ function addMinutesToHHMM(hhmm, minutes) {
 function slotWindowFitsDay(windowStart, windowEnd) {
   const startMin = timeToMinutes(windowStart);
   const endMin = timeToMinutes(windowEnd);
+  if (capacityEnabled()) return placementFitsShift(startMin, endMin);
   if (startMin == null || endMin == null) return true;
   return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
 }
@@ -1178,6 +1180,8 @@ function buildAsapCapacitySlotsForTechs({
 }
 
 async function buildAsapCapacitySlots(options = {}) {
+  // Full-route capacity requires a verified location and route simulation.
+  if (capacityEnabled()) return [];
   // Same pool as find-time: assignable staff only, so an office-only or
   // prospective row never produces an offer that reserveSlot then rejects.
   const techs = await applyAssignable(db('technicians'))
@@ -1354,6 +1358,12 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     );
     inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
   }
+  if (capacityEnabled()) {
+    // The complete route already includes its technician's work and unassigned
+    // blockers. A global fixed-window pass would erase certified flexibility.
+    return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
+      && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
+  }
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
@@ -1521,7 +1531,9 @@ function signCustomerFacingSlots(slots, estimateId) {
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
     });
-    return { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
+    delete publicSlot.routeMode;
+    return publicSlot;
   });
 }
 
@@ -1540,6 +1552,7 @@ function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPT
     windowStart,
     windowEnd,
     durationMinutes,
+    ...(capacityEnabled() ? { routeMode: slot.route_mode } : {}),
     techFirstName: (slot.technician?.name || '').split(/\s+/)[0] || null,
     techId: slot.technician?.id || null,
     routeOptimal,
@@ -1579,6 +1592,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   cleanupCache(wrapperCache);
   const cacheKey = [
     estimateId,
+    capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     cacheHour(),
     opts.windowDays,
     opts.maxResults,
@@ -1767,6 +1781,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
+      serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
       dateFrom: segFrom,
@@ -1971,6 +1986,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     lat: coords.lat,
     lng: coords.lng,
     durationMinutes: serviceProfile.durationMinutes,
+    serviceTypes: serviceProfile.services.map(service => service.label || service.service),
     bufferMinutes: customerFacingBufferMinutes(),
     dateFrom,
     dateTo,

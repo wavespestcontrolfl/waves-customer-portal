@@ -1,949 +1,283 @@
+import { useEffect, useRef } from "react";
+import { Archive, ArrowLeft, Check, Mail, Paperclip, Sparkles, Star, Trash2 } from "lucide-react";
+import { Button, buttonStyles } from "../../../components/ui/Button";
+import { Field } from "../../../components/ui/Field";
+import { ActionFeedback } from "../../../components/ui/ActionFeedback";
+import { Input } from "../../../components/ui/Input";
+import { cn } from "../../../components/ui/cn";
 import EmailReply from "./EmailReply";
-import { D } from "./emailStyles";
 
 function buildSandboxedEmailHtml(html) {
   return `<!doctype html>
-<html> <head> <base target="_blank"> <meta charset="utf-8"> <style>body { margin: 0; padding: 0; color: #27272A; font: 13px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow-wrap: anywhere; }
-      img { max-width: 100%; height: auto; }
-      table { max-width: 100%; }
-      a { color: #18181B; }
-    </style> </head> <body>${html || ""}</body>
-</html>`;
+<html><head><base target="_blank"><meta charset="utf-8"><style>
+body { margin: 0; padding: 0; color: #27272A; font: 14px/1.6 Roboto, system-ui, sans-serif; overflow-wrap: anywhere; }
+img { max-width: 100%; height: auto; } table { max-width: 100%; } a { color: #18181B; }
+</style></head><body>${html || ""}</body></html>`;
 }
 
 function EmailBody({ html, text }) {
-  if (html) {
-    return (
-      <iframe
-        title="Email body"
-        sandbox="allow-popups allow-popups-to-escape-sandbox"
-        srcDoc={buildSandboxedEmailHtml(html)}
-        style={{
-          width: "100%",
-          height: 360,
-          border: "none",
-          background: "transparent",
-        }}
-      />
-    );
-  }
-
-  return (
-    <div
-      style={{
-        fontSize: 13,
-        color: D.text,
-        lineHeight: 1.6,
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-      }}
-    >
-      {text || ""}
-    </div>
-  );
+  if (html) return <iframe title="Email body" sandbox="allow-popups allow-popups-to-escape-sandbox"
+    srcDoc={buildSandboxedEmailHtml(html)} className="h-[360px] w-full border-0 bg-transparent" />;
+  return <div className="whitespace-pre-wrap break-words text-ui-body text-ink-primary">{text || ""}</div>;
 }
 
-const CATEGORY_COLORS = {
-  lead_inquiry: D.green,
-  customer_request: D.teal,
-  complaint: D.red,
-  vendor_invoice: D.purple,
-  vendor_communication: D.purple,
-  scheduling: D.amber,
-  review_notification: D.amber,
-  regulatory: D.red,
-  marketing_newsletter: D.muted,
-  internal: D.teal,
-  spam: D.red,
-  other: D.muted,
-};
-
 const CATEGORY_LABELS = {
-  lead_inquiry: "Lead",
-  customer_request: "Customer",
-  complaint: "Complaint",
-  vendor_invoice: "Invoice",
-  vendor_communication: "Vendor",
-  scheduling: "Scheduling",
-  review_notification: "Review",
-  regulatory: "Regulatory",
-  marketing_newsletter: "Newsletter",
-  internal: "Internal",
-  spam: "Spam",
-  other: "Other",
+  lead_inquiry: "Lead", customer_request: "Customer", complaint: "Complaint", vendor_invoice: "Invoice",
+  vendor_communication: "Vendor", scheduling: "Scheduling", review_notification: "Review", regulatory: "Regulatory",
+  marketing_newsletter: "Newsletter", internal: "Internal", spam: "Spam", other: "Other",
 };
-
 const AUTO_ACTION_LABELS = {
-  lead_inquiry: "Lead created",
-  spam: "Blocked & trashed",
-  marketing_newsletter: "Unsubscribed",
-  vendor_invoice: "Expense logged",
-  complaint: "Flagged urgent",
+  lead_inquiry: "Lead created", spam: "Blocked & trashed", marketing_newsletter: "Unsubscribed",
+  vendor_invoice: "Expense logged", complaint: "Flagged urgent",
 };
 
 function timeAgo(dateStr) {
-  const d = new Date(dateStr);
-  const now = new Date();
-  const diff = (now - d) / 1000;
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  const date = new Date(dateStr), seconds = (Date.now() - date) / 1000;
+  if (seconds < 60) return "just now";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" });
 }
 
-export function EmailSummary({ stats, digest }) {
-  return (
-    <>
-      {/* Daily digest card */}
-      {digest && digest.total_received > 0 && (
-        <div
-          style={{
-            background: D.card,
-            borderRadius: 10,
-            padding: "14px 20px",
-            border: `1px solid ${D.border}`,
-            marginBottom: 16,
-            display: "flex",
-            gap: 24,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          {" "}
-          <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
-            Today
-          </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
-            {" "}
-            <span
-              style={{
-                color: D.text,
-                fontFamily: "'JetBrains Mono', monospace",
-              }}
-            >
-              {digest.total_received}
-            </span>{" "}
-            received
-          </div>
-          {[
-            {
-              label: "leads created",
-              value: digest.leads_created,
-              color: D.green,
-            },
-            {
-              label: "spam quarantined",
-              value: digest.spam_quarantined ?? digest.spam_blocked,
-              color: D.red,
-            },
-            {
-              label: "invoices",
-              value: digest.invoices_processed,
-              color: D.purple,
-            },
-            {
-              label: "domains blocked",
-              value: digest.domains_blocked_today,
-              color: D.amber,
-            },
-          ]
-            .filter((item) => item.value > 0)
-            .map((item) => (
-              <div key={item.label} style={{ fontSize: 12, color: item.color }}>
-                {" "}
-                <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                  {item.value}
-                </span>
-                {item.label}
-              </div>
-            ))}
-        </div>
-      )}
-      {/* Stats bar */}
-      {stats && (
-        <div style={{ display: "flex", gap: 16, marginBottom: 20 }}>
-          {[
-            {
-              label: "Unread",
-              value: stats.unread,
-              color: stats.unread > 0 ? D.red : D.muted,
-            },
-            { label: "Today", value: stats.today, color: D.teal },
-            { label: "Vendor", value: stats.vendor, color: D.purple },
-            { label: "Total", value: stats.total, color: D.muted },
-          ].map((s) => (
-            <div
-              key={s.label}
-              style={{
-                background: D.card,
-                borderRadius: 8,
-                padding: "12px 20px",
-                border: `1px solid ${D.border}`,
-                flex: 1,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontSize: 22,
-                  fontWeight: 700,
-                  color: s.color,
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-              >
-                {s.value}
-              </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                {s.label}
-              </div>{" "}
-            </div>
-          ))}
-        </div>
-      )}
-    </>
-  );
+export function EmailSummary({ mailbox }) {
+  const { stats, digest, statsState, digestState, loadStats, loadDigest } = mailbox;
+  return <div className="mb-5 space-y-3">
+    {digestState.error && <ActionFeedback error onRetry={loadDigest}>Today's email activity is unavailable.</ActionFeedback>}
+    {statsState.error && <ActionFeedback error onRetry={loadStats}>Email counts are unavailable.</ActionFeedback>}
+    {!digestState.error && digest && digest.total_received > 0 && <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border-hairline border-zinc-200 bg-white p-4 text-ui-body text-ink-secondary">
+      <span className="font-medium text-ink-primary">Today</span>
+      <span><span className="u-nums text-ink-primary">{digest.total_received}</span> received</span>
+      {[
+        { label: "leads created", value: digest.leads_created },
+        { label: "spam quarantined", value: digest.spam_quarantined ?? digest.spam_blocked },
+        { label: "invoices", value: digest.invoices_processed },
+        { label: "domains blocked", value: digest.domains_blocked_today },
+      ].filter((item) => item.value > 0).map((item) => <span key={item.label}><span className="u-nums text-ink-primary">{item.value}</span> {item.label}</span>)}
+    </div>}
+    <dl className="m-0 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {[
+        { label: "Unread", value: stats?.unread }, { label: "Today", value: stats?.today },
+        { label: "Vendor", value: stats?.vendor }, { label: "Total", value: stats?.total },
+      ].map((item) => <div key={item.label} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
+        <dt className="text-ui-caption text-ink-secondary">{item.label}</dt>
+        <dd className="u-nums m-0 mt-1 text-18 leading-[1.35] font-medium">{statsState.error ? "—" : item.value ?? "—"}</dd>
+      </div>)}
+    </dl>
+  </div>;
 }
 
 export function BlockedSenders({ mailbox }) {
-  const { blocked, blockInput, setBlockInput, handleBlock, handleUnblock } =
-    mailbox;
-  return (
-    <div>
-      {/* Block input */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        {" "}
-        <input
-          value={blockInput}
-          onChange={(e) => setBlockInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleBlock()}
-          placeholder="Block domain or email (e.g. spammer.com or bad@example.com)"
-          style={{
-            flex: 1,
-            padding: "10px 14px",
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            color: D.text,
-            fontSize: 13,
-            outline: "none",
-          }}
-        />{" "}
-        <button
-          onClick={handleBlock}
-          style={{
-            padding: "10px 20px",
-            background: D.red,
-            color: "#fff",
-            border: "none",
-            borderRadius: 8,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
-        >
-          Block
-        </button>{" "}
-      </div>
-      {/* Blocked list */}
-      <div
-        style={{
-          background: D.card,
-          borderRadius: 12,
-          border: `1px solid ${D.border}`,
-          overflow: "hidden",
-        }}
-      >
-        {blocked.length === 0 ? (
-          <div
-            style={{
-              padding: 40,
-              textAlign: "center",
-              color: D.muted,
-              fontSize: 14,
-            }}
-          >
-            No blocked senders
+  const { blocked, blockInput, setBlockInput, handleBlock, handleUnblock, blockedState, loadBlocked, pendingAction } = mailbox;
+  return <section aria-label="Blocked senders" className="space-y-4">
+    <div className="flex flex-wrap items-end gap-2 rounded-md border-hairline border-zinc-200 bg-white p-4">
+      <Input disabled={Boolean(pendingAction)} value={blockInput} onChange={(event) => setBlockInput(event.target.value)}
+        onKeyDown={(event) => event.key === "Enter" && handleBlock()}
+        aria-label="Domain or email to block" className="min-w-0 flex-1"
+        placeholder="Block domain or email (e.g. spammer.com or bad@example.com)" />
+      <Button variant="danger" onClick={handleBlock} loading={pendingAction === "block"} disabled={Boolean(pendingAction) || !blockInput.trim()}>Block</Button>
+    </div>
+    <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+      {blockedState.loading ? <p className="m-0 min-h-40 p-6 text-ink-secondary" role="status">Loading blocked senders…</p>
+        : blockedState.error ? <ActionFeedback error onRetry={loadBlocked} className="min-h-40 p-6">Blocked senders are unavailable.</ActionFeedback>
+        : blocked.length === 0 ? <p className="m-0 p-8 text-center text-ink-secondary">No blocked senders</p>
+        : <ul className="m-0 list-none p-0">{blocked.map((entry) => <li key={entry.id} className="flex items-start justify-between gap-3 border-b-hairline border-zinc-200 p-4 last:border-b-0">
+          <div className="min-w-0 break-words">
+            <p className="m-0 font-medium">{entry.domain || entry.email_address}</p>
+            <p className="m-0 mt-1 text-ui-caption text-ink-secondary">{entry.reason}{entry.blocked_count > 0 && ` — ${entry.blocked_count} emails caught`} <span className="u-nums">{timeAgo(entry.created_at)}</span></p>
           </div>
-        ) : (
-          blocked.map((b) => (
-            <div
-              key={b.id}
-              style={{
-                padding: "12px 20px",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                borderBottom: `1px solid ${D.border}`,
-              }}
-            >
-              {" "}
-              <div>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: D.heading,
-                    fontWeight: 500,
-                  }}
-                >
-                  {b.domain || b.email_address}
-                </div>{" "}
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                  {b.reason}{" "}
-                  {b.blocked_count > 0 &&
-                    `\u2014 ${b.blocked_count} emails caught`}
-                  <span style={{ marginLeft: 8 }}>
-                    {timeAgo(b.created_at)}
-                  </span>{" "}
-                </div>{" "}
-              </div>{" "}
-              <button
-                onClick={() => handleUnblock(b.id)}
-                style={{
-                  padding: "5px 14px",
-                  fontSize: 11,
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: "transparent",
-                  color: D.muted,
-                  cursor: "pointer",
-                }}
-              >
-                Unblock
-              </button>{" "}
-            </div>
-          ))
-        )}
-      </div>{" "}
+          <Button variant="secondary" onClick={() => handleUnblock(entry.id)} disabled={Boolean(pendingAction)} loading={pendingAction === `unblock:${entry.id}`} className="shrink-0">Unblock</Button>
+        </li>)}</ul>}
+    </div>
+  </section>;
+}
+
+function emailDetails(email) {
+  try { return typeof email.extracted_data === "string" ? JSON.parse(email.extracted_data) : email.extracted_data || null; }
+  catch { return null; }
+}
+
+function EmailMessageRow({ email, mailbox, editor, onOpen, conversationOpen }) {
+  const { selectedEmail, handleStar, pendingAction } = mailbox;
+  const isSelected = selectedEmail?.id === email.id;
+  // The row only "controls" a conversation that is actually rendered; a
+  // retained selection whose refresh failed shows the recovery panel instead.
+  const expanded = isSelected && conversationOpen;
+  const extractedData = emailDetails(email);
+  const categoryLabel = CATEGORY_LABELS[email.classification], autoActionLabel = AUTO_ACTION_LABELS[email.classification];
+  const sender = email.from_name || email.from_address;
+  return (
+    <div className={cn("flex border-b-hairline border-zinc-200 last:border-b-0", isSelected ? "bg-zinc-100" : "bg-white hover:bg-zinc-50")}>
+      <Button variant="ghost" onClick={(event) => handleStar(event, email)} disabled={Boolean(pendingAction)} loading={pendingAction === `star:${email.id}`} aria-label={`${email.is_starred ? "Unstar" : "Star"} ${email.subject || "email"}`} aria-pressed={Boolean(email.is_starred)} className="my-2 ml-1 shrink-0 self-start px-2">
+        <Star size={18} fill={email.is_starred ? "currentColor" : "none"} aria-hidden />
+      </Button>
+      <button type="button" onClick={(event) => onOpen(event, email)} aria-expanded={expanded} aria-controls={expanded ? `email-conversation-${email.id}` : undefined}
+        className="u-focus-ring min-w-0 flex-1 appearance-none border-0 bg-transparent px-3 py-4 text-left text-ui-body">
+        <span className="sr-only">Open email:</span>
+        <span className="flex flex-col items-start gap-1">
+          <span className={cn("min-w-0 truncate", !email.is_read && "font-medium")}>
+            {!email.is_read && <span className="mr-2 inline-block h-2 w-2 rounded-full bg-zinc-900" aria-label="Unread" />}{sender}
+            {editor.drafts.replies[email.id] && <span className="ml-2 text-ink-secondary">Draft</span>}
+          </span>
+          <span className="flex flex-wrap items-center gap-2 text-ui-caption text-ink-secondary">
+            {categoryLabel && <span className="rounded-sm border-hairline border-zinc-300 px-2">{categoryLabel}</span>}
+            <span className="u-nums">{timeAgo(email.received_at)}</span>
+          </span>
+        </span>
+        <span className={cn("mt-1 flex items-center gap-2", !email.is_read && "font-medium")}>
+          <span className="truncate">{email.subject || "(no subject)"}</span>{email.has_attachments && <Paperclip size={16} className="shrink-0" aria-label="Has attachments" />}
+        </span>
+        <span className="mt-1 flex min-w-0 flex-wrap items-center gap-2 text-ink-secondary">
+          <span className="min-w-0 flex-1 truncate">{email.snippet}</span>
+          {extractedData?.vendor_name && <span>{extractedData.vendor_name}</span>}
+        </span>
+        {autoActionLabel && <span className="mt-1 flex items-center gap-1 text-ui-caption text-ink-secondary"><Check size={14} aria-hidden />{autoActionLabel}</span>}
+      </button>
     </div>
   );
 }
 
-function EmailMessage({ active, email, mailbox, editor }) {
-  const {
-    selectedEmail,
-    thread,
-    openEmail,
-    handleStar,
-    removeEmail,
-    handleReclassify,
-    handleDownloadAttachment,
-  } = mailbox;
-  const { drafts } = editor;
-  const isSelected = selectedEmail?.id === email.id;
-  let extractedData = null;
-  try {
-    extractedData =
-      typeof email.extracted_data === "string"
-        ? JSON.parse(email.extracted_data)
-        : email.extracted_data || null;
-  } catch {
-    extractedData = null;
-  }
-  const category = email.classification;
-  const categoryColor = CATEGORY_COLORS[category];
-  const categoryLabel = CATEGORY_LABELS[category];
-  const autoActionLabel = AUTO_ACTION_LABELS[category];
+function EmailConversation({ active, mailbox, editor, onBack }) {
+  const { selectedEmail: email, thread, threadState, loadThread, removeEmail, handleReclassify, handleDownloadAttachment, pendingAction } = mailbox;
+  const headingRef = useRef(null), historyRef = useRef(null);
+  const previousThreadRef = useRef(null), followLatestRef = useRef(true);
+  useEffect(() => { headingRef.current?.focus({ preventScroll: true }); }, [email.id]);
+  useEffect(() => {
+    const history = historyRef.current;
+    if (!history) return;
+    if (previousThreadRef.current !== email.gmail_thread_id) followLatestRef.current = true;
+    if (followLatestRef.current) history.scrollTop = history.scrollHeight;
+    previousThreadRef.current = email.gmail_thread_id;
+  }, [email.gmail_thread_id, thread]);
+  const extractedData = emailDetails(email), category = email.classification, categoryLabel = CATEGORY_LABELS[category];
   const sender = email.from_name || email.from_address;
-  const vendorName = extractedData?.vendor_name;
-  const readStyle = email.is_read
-    ? {
-        senderWeight: 400,
-        subjectWeight: 400,
-        senderColor: D.muted,
-        subjectColor: D.muted,
-        background: "transparent",
-        dot: "transparent",
-      }
-    : {
-        senderWeight: 700,
-        subjectWeight: 600,
-        senderColor: D.heading,
-        subjectColor: D.text,
-        background: D.bg + "88",
-        dot: D.teal,
-      };
-
-  return (
-    <div key={email.id}>
-      {" "}
-      <div
-        onClick={() => openEmail(email)}
-        style={{
-          padding: "14px 20px",
-          cursor: "pointer",
-          display: "flex",
-          gap: 12,
-          alignItems: "flex-start",
-          borderBottom: `1px solid ${D.border}`,
-          background: isSelected ? D.teal + "11" : readStyle.background,
-        }}
-      >
-        {/* Star */}
-        <span
-          onClick={(e) => handleStar(e, email)}
-          style={{
-            cursor: "pointer",
-            fontSize: 16,
-            flexShrink: 0,
-            marginTop: 2,
-          }}
-        >
-          {email.is_starred ? "\u2B50" : "\u2606"}
-        </span>
-        {/* Unread dot */}
-        <div
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            background: readStyle.dot,
-            flexShrink: 0,
-            marginTop: 7,
-          }}
-        />
-        {/* Content */}
-        <div style={{ flex: 1, minWidth: 0 }}>
-          {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 2,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: readStyle.senderWeight,
-                color: readStyle.senderColor,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {sender}
-              {drafts.replies[email.id] && (
-                <span style={{ fontSize: 14, marginLeft: 8 }}>Draft</span>
-              )}
-            </div>{" "}
-            <div
-              style={{
-                display: "flex",
-                gap: 6,
-                alignItems: "center",
-                flexShrink: 0,
-                marginLeft: 8,
-              }}
-            >
-              {/* Category badge */}
-              {categoryLabel && (
-                <span
-                  style={{
-                    fontSize: 10,
-                    padding: "2px 8px",
-                    borderRadius: 4,
-                    background: categoryColor + "22",
-                    color: categoryColor,
-                    fontWeight: 500,
-                  }}
-                >
-                  {categoryLabel}
-                </span>
-              )}
-              <span
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  fontFamily: "'JetBrains Mono', monospace",
-                }}
-              >
-                {timeAgo(email.received_at)}
-              </span>{" "}
-            </div>{" "}
-          </div>{" "}
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: readStyle.subjectWeight,
-              color: readStyle.subjectColor,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              marginBottom: 2,
-            }}
-          >
-            {email.subject || "(no subject)"}
-            {email.has_attachments && " \uD83D\uDCCE"}
-          </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              gap: 6,
-              alignItems: "center",
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 12,
-                color: D.muted,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                flex: 1,
-              }}
-            >
-              {email.snippet}
-            </div>
-            {vendorName && (
-              <span
-                style={{
-                  fontSize: 10,
-                  padding: "2px 8px",
-                  borderRadius: 4,
-                  background: D.purple + "22",
-                  color: D.purple,
-                  fontWeight: 500,
-                  flexShrink: 0,
-                }}
-              >
-                {vendorName}
-              </span>
-            )}
-          </div>
-          {/* Auto-action indicator */}
-          {autoActionLabel && (
-            <div
-              style={{
-                fontSize: 11,
-                color: categoryColor,
-                marginTop: 4,
-                opacity: 0.8,
-              }}
-            >
-              {"\u2713"} {autoActionLabel}
-            </div>
-          )}
-        </div>{" "}
-      </div>
-      {/* Expanded thread view */}
-      {isSelected && (
-        <div
-          style={{
-            background: D.bg,
-            borderBottom: `1px solid ${D.border}`,
-            padding: "20px 24px",
-          }}
-        >
-          {/* Actions */}
-          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-            {[
-              {
-                label: "Archive",
-                icon: "\uD83D\uDCE5",
-                action: () => removeEmail(email.id, "archive"),
-              },
-              {
-                label: "Trash",
-                icon: "\uD83D\uDDD1\uFE0F",
-                action: () => removeEmail(email.id, "trash"),
-              },
-              {
-                label: "Reclassify",
-                icon: "\uD83E\uDD16",
-                action: () => handleReclassify(email.id),
-              },
-            ].map((a) => (
-              <button
-                key={a.label}
-                onClick={a.action}
-                style={{
-                  padding: "5px 12px",
-                  fontSize: 12,
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: "transparent",
-                  color: D.muted,
-                  cursor: "pointer",
-                }}
-              >
-                {a.icon} {a.label}
-              </button>
-            ))}
-          </div>
-          {/* Classification detail */}
-          {extractedData && (
-            <div
-              style={{
-                background: D.card,
-                borderRadius: 8,
-                padding: "10px 14px",
-                border: `1px solid ${D.border}`,
-                marginBottom: 16,
-                fontSize: 12,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  flexWrap: "wrap",
-                }}
-              >
-                {" "}
-                <span style={{ color: D.muted }}>AI classification:</span>{" "}
-                <span
-                  style={{
-                    color: categoryColor,
-                    fontWeight: 500,
-                  }}
-                >
-                  {categoryLabel || category}
-                </span>
-                {[
-                  {
-                    key: "urgency",
-                    value: extractedData.urgency,
-                    prefix: "Urgency: ",
-                    style: {
-                      color: extractedData.urgency === "high" ? D.red : D.amber,
-                    },
-                  },
-                  {
-                    key: "person",
-                    value: extractedData.person_name,
-                    style: { color: D.text },
-                  },
-                  {
-                    key: "phone",
-                    value: extractedData.phone,
-                    style: {
-                      color: D.text,
-                      fontFamily: "'JetBrains Mono', monospace",
-                    },
-                  },
-                  {
-                    key: "service",
-                    value: extractedData.service_interest,
-                    style: { color: D.green },
-                  },
-                  {
-                    key: "invoice",
-                    value: extractedData.invoice_amount,
-                    prefix: "$",
-                    style: {
-                      color: D.purple,
-                      fontFamily: "'JetBrains Mono', monospace",
-                    },
-                  },
-                ]
-                  .filter((detail) => detail.value)
-                  .map((detail) => (
-                    <span key={detail.key} style={detail.style}>
-                      {detail.prefix}
-                      {detail.value}
-                    </span>
-                  ))}
-              </div>{" "}
-            </div>
-          )}
-          {/* Thread messages */}
-          {thread.map((msg) => (
-            <div
-              key={msg.id}
-              style={{
-                marginBottom: 16,
-                background: D.card,
-                borderRadius: 8,
-                padding: 16,
-                border: `1px solid ${D.border}`,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: 8,
-                }}
-              >
-                {" "}
-                <div>
-                  {" "}
-                  <span
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 500,
-                      color: D.heading,
-                    }}
-                  >
-                    {msg.from_name || msg.from_address}
-                  </span>{" "}
-                  <span
-                    style={{
-                      fontSize: 12,
-                      color: D.muted,
-                      marginLeft: 8,
-                    }}
-                  >
-                    &lt;{msg.from_address}&gt;
-                  </span>{" "}
-                </div>{" "}
-                <span
-                  style={{
-                    fontSize: 11,
-                    color: D.muted,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  {new Date(msg.received_at).toLocaleString("en-US", {
-                    timeZone: "America/New_York",
-                  })}
-                </span>{" "}
-              </div>
-              {msg.to_address && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: D.muted,
-                    marginBottom: 8,
-                  }}
-                >
-                  To: {msg.to_address}
-                </div>
-              )}
-              <EmailBody html={msg.body_html} text={msg.body_text} />
-              {msg.attachments?.length > 0 && (
-                <div
-                  style={{
-                    marginTop: 12,
-                    display: "flex",
-                    gap: 8,
-                    flexWrap: "wrap",
-                  }}
-                >
-                  {msg.attachments.map((att) => (
-                    <a
-                      key={att.id}
-                      href={`/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`}
-                      onClick={(event) =>
-                        handleDownloadAttachment(event, msg, att)
-                      }
-                      style={{
-                        padding: "6px 12px",
-                        background: D.card,
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 6,
-                        fontSize: 12,
-                        color: D.teal,
-                        textDecoration: "none",
-                      }}
-                    >
-                      {"\uD83D\uDCCE"} {att.filename} (
-                      {Math.round((att.size_bytes || 0) / 1024)}
-                      KB)
-                    </a>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-          <EmailReply active={active} sender={sender} mailbox={mailbox} editor={editor} />{" "}
-        </div>
-      )}
+  return <section id={`email-conversation-${email.id}`} aria-label="Selected email" className="min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
+    <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
+      <Button variant="ghost" onClick={onBack} className="gap-2 xl:hidden"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>
+      <h2 ref={headingRef} tabIndex={-1} className="m-0 u-focus-ring break-words text-18 font-medium leading-[1.35]">{email.subject || "(no subject)"}</h2>
+      <p className="m-0 break-words text-ink-secondary">{sender}{email.from_name && ` · ${email.from_address}`}</p>
     </div>
-  );
+    <div className="space-y-4 p-4">
+      <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" onClick={() => removeEmail(email.id, "archive")} disabled={Boolean(pendingAction)} loading={pendingAction === `archive:${email.id}`} className="gap-2"><Archive size={16} aria-hidden />Archive</Button>
+        <Button variant="secondary" onClick={() => removeEmail(email.id, "trash")} disabled={Boolean(pendingAction)} loading={pendingAction === `trash:${email.id}`} className="gap-2"><Trash2 size={16} aria-hidden />Trash</Button>
+        <Button variant="secondary" onClick={() => handleReclassify(email.id)} disabled={Boolean(pendingAction)} loading={pendingAction === `reclassify:${email.id}`} className="gap-2"><Sparkles size={16} aria-hidden />Reclassify</Button>
+      </div>
+      {extractedData && <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-md border-hairline border-zinc-200 bg-white p-4 text-ui-body">
+        <span className="text-ink-secondary">AI classification:</span><span className="font-medium">{categoryLabel || category}</span>
+        {[
+          { key: "urgency", value: extractedData.urgency, prefix: "Urgency: ", alert: extractedData.urgency === "high" },
+          { key: "person", value: extractedData.person_name }, { key: "phone", value: extractedData.phone },
+          { key: "service", value: extractedData.service_interest }, { key: "invoice", value: extractedData.invoice_amount, prefix: "$" },
+        ].filter((detail) => detail.value).map((detail) => <span key={detail.key} className={cn("break-words", detail.alert && "text-alert-fg")}>{detail.prefix}{detail.value}</span>)}
+      </div>}
+      {threadState.loading && <p className="m-0 min-h-32 text-ink-secondary" role="status">Loading conversation…</p>}
+      {threadState.error && <ActionFeedback error onRetry={() => loadThread(email)}>The email conversation is unavailable.</ActionFeedback>}
+      <div ref={historyRef} role="region" aria-label="Email history" tabIndex={0}
+        aria-busy={threadState.loading}
+        className="u-focus-ring max-h-[420px] space-y-4 overflow-y-auto overscroll-contain xl:max-h-[480px]"
+        onScroll={(event) => {
+          const node = event.currentTarget;
+          followLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop < 64;
+        }}>
+      {!threadState.loading && !threadState.error && thread.length === 0 && <p className="m-0 p-4 text-ink-secondary">No messages in this conversation.</p>}
+      {thread.map((message) => <article key={message.id} className="rounded-md border-hairline border-zinc-200 bg-white p-4">
+        <div className="mb-2 flex flex-wrap justify-between gap-x-4 gap-y-1">
+          <div className="min-w-0 break-words"><span className="font-medium">{message.from_name || message.from_address}</span> <span className="text-ink-secondary">&lt;{message.from_address}&gt;</span></div>
+          <span className="u-nums text-ui-caption text-ink-secondary">{new Date(message.received_at).toLocaleString("en-US", { timeZone: "America/New_York" })}</span>
+        </div>
+        {message.to_address && <p className="m-0 mb-3 break-words text-ui-caption text-ink-secondary">To: {message.to_address}</p>}
+        <EmailBody html={message.body_html} text={message.body_text} />
+        {message.attachments?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">
+          {message.attachments.map((attachment) => <a key={attachment.id}
+            href={`/api/admin/email/message/${message.id}/attachment/${attachment.gmail_attachment_id}`}
+            onClick={(event) => handleDownloadAttachment(event, message, attachment)}
+            className={buttonStyles({ variant: "secondary", density: "comfortable", className: "max-w-full gap-2 whitespace-normal break-words text-left" })}>
+            <Paperclip size={16} className="shrink-0" aria-hidden /><span>{attachment.filename} ({Math.round((attachment.size_bytes || 0) / 1024)} KB)</span>
+          </a>)}
+        </div>}
+      </article>)}
+      </div>
+      <EmailReply active={active} sender={sender} mailbox={mailbox} editor={editor} />
+    </div>
+  </section>;
+}
+
+function LinkedEmailError({ mailbox, onBack }) {
+  return <div className="min-h-48 space-y-3 rounded-md border-hairline border-zinc-200 bg-white p-6">
+    {mailbox.selectedEmail && <Button variant="ghost" onClick={onBack} className="gap-2"><ArrowLeft size={16} aria-hidden />Back to inbox</Button>}
+    <ActionFeedback error onRetry={mailbox.retrySelection}>The linked email is unavailable.</ActionFeedback>
+  </div>;
+}
+
+function EmailConversationPane({ active, mailbox, editor, selected, onBack }) {
+  if (mailbox.messageState.error) return <LinkedEmailError mailbox={mailbox} onBack={onBack} />;
+  if (mailbox.messageState.loading && !selected) return <div role="status" className="min-h-48 rounded-md border-hairline border-zinc-200 bg-white p-6">Loading linked email…</div>;
+  if (selected) return <EmailConversation active={active} mailbox={mailbox} editor={editor} onBack={onBack} />;
+  return <div className="hidden min-h-80 flex-col items-center justify-center rounded-md border-hairline border-zinc-200 bg-white p-8 text-center xl:flex">
+    <Mail size={24} className="mb-3 text-ink-secondary" aria-hidden />
+    <h2 className="m-0 mb-2 text-18 font-medium leading-[1.35]">Choose an email</h2>
+    <p className="m-0 max-w-sm text-ink-secondary">Select a message from the inbox to read the conversation and reply.</p>
+  </div>;
 }
 
 export function EmailInbox({ active, mailbox, editor }) {
-  const {
-    stats,
-    total,
-    visibleEmails,
-    filter,
-    setFilter,
-    search,
-    setSearch,
-    page,
-    setPage,
-    showArchived,
-    setShowArchived,
-  } = mailbox;
-  const counts = stats || {};
-  const firstPage = page === 1;
-  const lastPage = page >= Math.ceil(total / 50);
+  const { stats, total, visibleEmails, filter, setFilter, search, setSearch, page, setPage, showArchived, setShowArchived } = mailbox;
+  const counts = mailbox.statsState.error ? {} : stats || {};
+  const lastOpenedRef = useRef(null), searchRef = useRef(null), wasSelectedRef = useRef(false);
+  const selected = Boolean(mailbox.selectedEmail);
+  const conversationOpen = selected && !mailbox.messageState.error;
+  const openEmail = (event, email) => {
+    lastOpenedRef.current = event.currentTarget;
+    mailbox.openEmail(email);
+  };
+  // Whatever closed the conversation (Back to inbox, browser Back, archive),
+  // its focused heading unmounts, so focus returns to the opened row or search.
+  useEffect(() => {
+    const wasSelected = wasSelectedRef.current;
+    wasSelectedRef.current = selected;
+    if (selected || !wasSelected) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const target = lastOpenedRef.current?.isConnected ? lastOpenedRef.current : searchRef.current;
+      target?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selected]);
+  const backToInbox = () => mailbox.closeEmail(mailbox.selectedEmail.id, true);
   const filters = [
-    { key: "all", label: "All", count: counts.total },
-    { key: "unread", label: "Unread", count: counts.unread },
-    { key: "starred", label: "Starred", count: counts.starred },
-    { key: "leads", label: "Leads", color: D.green },
-    { key: "invoices", label: "Invoices", color: D.purple },
-    { key: "customer", label: "Customer", color: D.teal },
-    { key: "complaints", label: "Complaints", color: D.red },
-    { key: "vendor", label: "Vendor", count: counts.vendor },
+    { key: "all", label: "All", count: counts.total }, { key: "unread", label: "Unread", count: counts.unread },
+    { key: "starred", label: "Starred", count: counts.starred }, { key: "leads", label: "Leads" },
+    { key: "invoices", label: "Invoices" }, { key: "customer", label: "Customer" },
+    { key: "complaints", label: "Complaints" }, { key: "vendor", label: "Vendor", count: counts.vendor },
   ];
-  return (
-    <>
-      {/* Filter bar */}
-      <div
-        className="tab-pill-scroll"
-        style={{
-          display: "flex",
-          gap: 8,
-          marginBottom: 12,
-          alignItems: "center",
-          flexWrap: "nowrap",
-          overflowX: "auto",
-          whiteSpace: "nowrap",
-          WebkitOverflowScrolling: "touch",
-        }}
-      >
-        {filters.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => {
-              setFilter(f.key);
-              setPage(1);
-            }}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              border: "none",
-              flexShrink: 0,
-              background:
-                filter === f.key ? (f.color || D.teal) + "22" : "transparent",
-              color: filter === f.key ? f.color || D.teal : D.muted,
-            }}
-          >
-            {f.label}
-            {f.count != null ? ` (${f.count})` : ""}
-          </button>
-        ))}
-        <button
-          onClick={() => {
-            setShowArchived(!showArchived);
-            setPage(1);
-          }}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 6,
-            fontSize: 12,
-            fontWeight: 500,
-            cursor: "pointer",
-            border: "none",
-            flexShrink: 0,
-            background: showArchived ? D.amber + "22" : "transparent",
-            color: showArchived ? D.amber : D.muted,
-          }}
-        >
-          Archived
-        </button>{" "}
-      </div>
-      <div style={{ marginBottom: 16 }}>
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search emails..."
-          style={{
-            padding: "8px 14px",
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            color: D.text,
-            fontSize: 13,
-            width: "100%",
-            maxWidth: 360,
-            boxSizing: "border-box",
-            outline: "none",
-          }}
-        />{" "}
-      </div>
-      {/* Email list */}
-      <div
-        style={{
-          background: D.card,
-          borderRadius: 12,
-          border: `1px solid ${D.border}`,
-          overflow: "hidden",
-        }}
-      >
-        {visibleEmails.length === 0 ? (
-          <div
-            style={{
-              padding: 40,
-              textAlign: "center",
-              color: D.muted,
-              fontSize: 14,
-            }}
-          >
-            No emails found
+  return <div className="space-y-4">
+    <div role="group" aria-label="Email filters" className={cn("flex gap-2 overflow-x-auto pb-1", selected && "max-xl:hidden")}>
+      {filters.map((item) => <Button key={item.key} variant={filter === item.key ? "secondary" : "ghost"} aria-pressed={filter === item.key} className="shrink-0"
+        onClick={() => { setFilter(item.key); setPage(1); }}>{item.label}{item.count != null ? ` (${item.count})` : ""}</Button>)}
+      <Button variant={showArchived ? "secondary" : "ghost"} aria-pressed={showArchived} className="shrink-0" onClick={() => { setShowArchived(!showArchived); setPage(1); }}>Archived</Button>
+    </div>
+    <div className="grid items-start gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+      <section aria-label="Email inbox" className={cn("min-w-0 overflow-hidden rounded-md border-hairline border-zinc-200 bg-white", selected && "max-xl:hidden")}>
+        <div className="space-y-3 border-b-hairline border-zinc-200 p-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="m-0 text-18 font-medium leading-[1.35]">Inbox</h2>
+            <span className="u-nums text-ui-caption text-ink-secondary">{mailbox.inboxState.error || mailbox.inboxState.loading ? "—" : total} matching messages</span>
           </div>
-        ) : (
-          visibleEmails.map((email) => (
-            <EmailMessage
-              active={active}
-              key={email.id}
-              email={email}
-              mailbox={mailbox}
-              editor={editor}
-            />
-          ))
-        )}
-      </div>
-      {/* Pagination */}
-      {total > 50 && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            gap: 8,
-            marginTop: 16,
-          }}
-        >
-          {" "}
-          <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={firstPage}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              fontSize: 12,
-              border: `1px solid ${D.border}`,
-              background: "transparent",
-              color: firstPage ? D.muted : D.text,
-              cursor: firstPage ? "default" : "pointer",
-            }}
-          >
-            Previous
-          </button>{" "}
-          <span style={{ padding: "6px 14px", fontSize: 12, color: D.muted }}>
-            Page {page} of {Math.ceil(total / 50)}
-          </span>{" "}
-          <button
-            onClick={() => setPage((p) => p + 1)}
-            disabled={lastPage}
-            style={{
-              padding: "6px 14px",
-              borderRadius: 6,
-              fontSize: 12,
-              border: `1px solid ${D.border}`,
-              background: "transparent",
-              color: lastPage ? D.muted : D.text,
-              cursor: lastPage ? "default" : "pointer",
-            }}
-          >
-            Next
-          </button>{" "}
+          <Field label="Search emails"><Input ref={searchRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search emails..." /></Field>
         </div>
-      )}
-    </>
-  );
+        <div className="max-h-[680px] overflow-y-auto overscroll-contain">
+          {mailbox.inboxState.loading ? <p className="m-0 min-h-48 p-6 text-ink-secondary" role="status">Loading inbox…</p>
+            : mailbox.inboxState.error ? <ActionFeedback error onRetry={mailbox.loadEmails} className="min-h-48 p-6">The email inbox is unavailable.</ActionFeedback>
+            : visibleEmails.length === 0 ? <p className="m-0 p-8 text-center text-ink-secondary">No emails found</p>
+            : visibleEmails.map((email) => <EmailMessageRow key={email.id} email={email} mailbox={mailbox} editor={editor} onOpen={openEmail} conversationOpen={conversationOpen} />)}
+        </div>
+        {total > 50 && <div className="flex flex-wrap items-center justify-between gap-2 border-t-hairline border-zinc-200 p-3">
+          <span className="u-nums w-full text-center text-ui-caption text-ink-secondary">Page {page} of {Math.ceil(total / 50)}</span>
+          <Button variant="secondary" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1 || mailbox.inboxState.loading || mailbox.inboxState.error}>Previous</Button>
+          <Button variant="secondary" onClick={() => setPage((current) => current + 1)} disabled={page >= Math.ceil(total / 50) || mailbox.inboxState.loading || mailbox.inboxState.error}>Next</Button>
+        </div>}
+      </section>
+      <EmailConversationPane active={active} mailbox={mailbox} editor={editor} selected={selected} onBack={backToInbox} />
+    </div>
+  </div>;
 }
