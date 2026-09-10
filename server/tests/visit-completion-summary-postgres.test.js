@@ -1644,6 +1644,22 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('payer writers see an in-flight combined-visit send for the customer and for a billed service', async () => {
+    const { packetInvoiceSendInFlight } = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sending', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(true);
+      expect(await packetInvoiceSendInFlight({ scheduledServiceId: fixture.serviceIds[0] })).toBe(true);
+      expect(await packetInvoiceSendInFlight({ scheduledServiceId: randomUUID() })).toBe(false);
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+      expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(false);
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('a bounce reconciliation serializes behind the packet close and alerts on the closed packet', async () => {
     fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });

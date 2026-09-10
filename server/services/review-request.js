@@ -1711,6 +1711,10 @@ const ReviewService = {
         purpose: "review_request",
         customerId: customer.id,
         entryPoint: "review_request_send",
+        // Re-judged inside the canonical sender immediately before provider
+        // preparation: a summary bounce that parked this ask after it was
+        // loaded stops it here.
+        preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
       });
 
       if (result.sent) {
@@ -3443,6 +3447,7 @@ const ReviewService = {
         customerId: customer.id,
         entryPoint: "review_outreach_touch",
         metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
+        preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
       });
     } catch (err) {
       if (manageRetryVia === "cron") {
@@ -3565,6 +3570,13 @@ const ReviewService = {
       result = await EmailLib.sendTemplate({
         templateKey: "review_request_email",
         to: contact.email,
+        // Re-judged immediately before the SendGrid request.
+        withProviderHandoff: async (dispatch) => {
+          const verdict = await this._visitSummaryPreDispatch(request?.service_record_id);
+          if (verdict.ok !== true) return verdict;
+          await dispatch();
+          return { ok: true };
+        },
         payload: {
           first_name: firstNameFrom(contact.name) || customer.first_name || "",
           review_url: reviewUrl,
@@ -4697,6 +4709,14 @@ const ReviewService = {
       logger.info(`[review] Sequences: ${sent} sent, ${completed} completed, ${stopped} stopped, ${deferred} deferred, ${redeemed} redeemed`);
     }
     return { sent, stopped, completed, deferred, redeemed };
+  },
+
+  // The combined-visit summary this ask follows must not be parked as
+  // uncertain at the moment the provider is contacted.
+  async _visitSummaryPreDispatch(serviceRecordId) {
+    if (!serviceRecordId) return { ok: true };
+    const uncertain = await require("./visit-completion-summary").visitSummaryUncertainForRecord(serviceRecordId);
+    return uncertain ? { ok: false, code: "VISIT_SUMMARY_UNCERTAIN", reason: "The visit summary this review follows is awaiting recovery" } : { ok: true };
   },
 
   async stopReviewSequence(sequenceId, reason = "manual") {

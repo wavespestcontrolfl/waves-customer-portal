@@ -411,6 +411,23 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   } };
 }
 
+// True while a combined-visit invoice minted self-pay for this customer (or
+// for the packet that billed this scheduled service) is claimed for delivery.
+// Payer writers refuse the assignment in that window: the send claim holds
+// the customer and billed-member rows while ownership is resolved, and a
+// payer that lands after the claim commits would otherwise reach the
+// homeowner with debt that now belongs to AP.
+async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId = null } = {}, database = db) {
+  if (!customerId && !scheduledServiceId) return false;
+  const query = database('invoices').where({ status: 'sending' }).whereNotNull('visit_completion_packet_id').whereNull('payer_id');
+  if (customerId) query.where({ customer_id: customerId });
+  if (scheduledServiceId) {
+    query.whereIn('visit_completion_packet_id', database('visit_completion_packet_items')
+      .where({ scheduled_service_id: scheduledServiceId }).select('packet_id'));
+  }
+  return Boolean(await query.first('id'));
+}
+
 // The active third-party payer that now owns a BILLED member, resolved live
 // through the canonical Bill-To resolver with its per-job precedence (a
 // per-job payer wins, a per-job self-pay override blocks the customer default,
@@ -553,4 +570,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { packetInvoiceSendInFlight, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };

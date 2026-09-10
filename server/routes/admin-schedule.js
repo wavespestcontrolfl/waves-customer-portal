@@ -8195,6 +8195,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if ((payerChanged || poChanged || selfPayChanged) && req.techRole !== 'admin') {
             return res.status(403).json({ error: 'Admin access required to change the billing payer or PO' });
           }
+          // A combined-visit invoice that billed this service and is being
+          // delivered self-pay cannot change Bill-To underneath its send.
+          if ((payerChanged || selfPayChanged)
+              && await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id })) {
+            return res.status(409).json({ error: 'The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.', code: 'invoice_send_in_flight' });
+          }
           if (payerChanged) updates.payer_id = nextPayerId;
           if (poChanged) updates.po_number = nextPo;
           if (selfPayChanged) updates.self_pay_override = nextSelfPay;
