@@ -6,7 +6,7 @@ const ASK_SPACING_MS = 72 * 3600000;
 const REVIEW_LINK_RE = /g\.page\/(?:r\/)?[^\s/]+\/review\b|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b/i;
 const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edit|(?:mind|consider|how\s+about)\s+(?:leaving|writing|posting|submitting|sharing|giving|adding|updating|editing))\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+us\b|\bshare\s+your\s+experience\s+in\s+a\s+review\b/i;
 
-const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
+const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love|be\s+(?:really\s+)?grateful\s+for)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
 
 // Link-library destinations and explicit requests count. Acknowledgments
 // ("Thanks for your Google review") without a link/request do not.
