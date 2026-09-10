@@ -855,8 +855,8 @@ test('a phone or email literal that resolved nobody fails scoped and selector-fr
 test('a vendor, lead source or marketing channel after "for" is a filter, not an unresolved customer', async () => {
   rows.vendors = [{ name: 'SiteOne Landscape Supply' }];
   rows.lead_sources = [{ name: 'Door Hangers', channel: 'print' }];
-  rows.expenses = [{ vendor_name: 'Univar' }];
-  for (const prompt of ['Show expenses for SiteOne', 'Show ad attribution for Facebook', 'Show acquisition for print', 'Show expenses for Univar', 'Show attribution for Hangers']) {
+  rows.expenses = [{ vendor_name: 'Univar' }, { vendor_name: 'Jiffy Lube' }];
+  for (const prompt of ['Show expenses for SiteOne', 'Show ad attribution for Facebook', 'Show acquisition for print', 'Show expenses for Univar', 'Show attribution for Hangers', 'Show expenses for Jiffy Lube']) {
     const task = await Context.resolve({ prompt, pageData: {} });
     expect({ prompt, namesRequested: task.namesRequested, targets: task.targets }).toEqual({ prompt, namesRequested: false, targets: [] });
     expect(await Context.prepareReadInput({}, task, { toolName: 'get_expenses', schema: { properties: {} } })).toEqual({ input: {} });

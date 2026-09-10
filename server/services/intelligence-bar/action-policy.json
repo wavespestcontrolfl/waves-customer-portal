@@ -437,7 +437,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_content_pipeline": {
     "module": "seo-tools.js",
@@ -445,7 +445,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_content_workflow_brief": {
     "module": "seo-tools.js",
@@ -453,7 +453,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_conversation_thread": {
     "module": "comms-tools.js",
@@ -949,7 +949,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "get_sentry_issue_detail": {
     "module": "sentry-ops-tools.js",
@@ -1237,7 +1237,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "intent_routing_report": {
     "module": "seo-tools.js",
@@ -1317,7 +1317,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "query_customers": {
     "module": "tools.js",
@@ -1365,7 +1365,7 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
-    "scope": "none"
+    "scope": "broad"
   },
   "query_stock": {
     "module": "procurement-tools.js",

@@ -139,7 +139,12 @@ old list).
   `get_recent_merged_prs` are `broad`: commit messages and PR titles are
   developer free text where customer details have appeared (AGENTS.md).
   `get_social_channel_status` (post titles) and `get_gbp_status` (local-post
-  summaries) return business-authored free text verbatim and are `broad`.
+  summaries) return business-authored free text verbatim and are `broad`, as
+  do the SEO readers that return blog or page titles, target keywords and
+  concept labels (`get_content_pipeline`, `get_content_workflow_brief`,
+  `query_blog_performance`, `get_content_decay_alerts`, `query_seo_rankings`,
+  `inspect_url`, `get_semantic_concept_map`). The remaining SEO readers return
+  URLs, counts, statuses and scores and stay `none`.
 - A word after "for" is a filter rather than an unresolved customer when the
   database verifies it as a customer city, an active technician, a vendor or
   expense vendor, a lead source name or channel, or it is a known marketing

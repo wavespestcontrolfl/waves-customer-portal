@@ -168,14 +168,14 @@ async function verifiedFilterWords(prompt) {
       db('customers').whereNull('deleted_at')
         .whereRaw('? = ? OR ? = ? OR ? = ?', [normalizedStoredName('city'), word, normalizedStoredName('first_name'), word, normalizedStoredName('last_name'), word])
         .select('first_name', 'last_name', 'city'),
-      db('expenses').whereRaw('? = ?', [normalizedStoredName('vendor_name'), word]).select('vendor_name').limit(1),
+      db('expenses').whereRaw('? LIKE ?', [normalizedStoredName('vendor_name'), pattern]).select('vendor_name').limit(5),
       db('vendors').whereRaw('? LIKE ?', [normalizedStoredName('name'), pattern]).select('name').limit(5),
       db('lead_sources').whereRaw('? LIKE ? OR ? LIKE ?', [normalizedStoredName('name'), pattern, normalizedStoredName('channel'), pattern]).select('name', 'channel').limit(5),
     ]);
     const person = rows.some(row => normalizeName(row.first_name) === word || normalizeName(row.last_name) === word);
     const verified = rows.some(row => normalizeName(row.city) === word)
       || technicianWords.has(word) || MARKETING_CHANNEL_WORDS.has(word)
-      || expenseVendors.some(row => normalizeName(row.vendor_name) === word)
+      || expenseVendors.some(row => hasWord(row.vendor_name, word))
       || vendors.some(row => hasWord(row.name, word))
       || sources.some(row => hasWord(row.name, word) || hasWord(row.channel, word));
     if (!person && verified) filters.add(word);
@@ -519,7 +519,16 @@ function bulkLeadSelection(toolName, records, params) {
 // Per-tool data scope comes from action-policy.json (see scope-policy.js).
 // A tool whose scope is missing or invalid is refused here as well as by the
 // registry, so no caller can reach an unclassified reader or writer.
-const { validScope, UNCLASSIFIED } = require('./scope-policy');
+const { validScope, scopeOf, UNCLASSIFIED } = require('./scope-policy');
+
+// A request about one customer: a resolved target, an unresolved name, or a
+// phone/email literal that identifies the customer.
+const customerSpecific = context => Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
+
+// Readers whose appointment selector is not named appointment_id: the
+// closeout readers take service_id and the gap reader tests candidate_service_id
+// (it loads that appointment's customer preferences, plan holds and location).
+const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
 
 // Address-bound readers (lookup_property, and find_available_slots inside a
 // customer-scoped task) take a model-supplied address. It must be one of the
@@ -597,26 +606,24 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
   // Every caller names the tool; a call without one has no reviewed scope
   // and is refused like an unclassified tool rather than admitted.
-  const policy = toolName === undefined ? undefined : require('./action-policy.json')[toolName];
-  const scope = validScope(policy) ? policy.scope : null;
+  const scope = scopeOf(toolName);
   if (!scope) return UNCLASSIFIED;
+  const policy = require('./action-policy.json')[toolName];
   // Route-wide writers act on every stop for a date or technician and carry no
   // record identifiers. A customer-scoped task cannot mint an approval for
   // them: the stored action would have no references for the confirm-time
   // recheck. An explicitly named customer who did not resolve keeps the task
   // customer-scoped (as for the broad readers), so a misspelling never widens
   // a request to a whole date or technician.
-  if ((context.targets?.length || context.namesRequested || context.contactRequested) && scope === 'route_wide') {
+  if (scope === 'route_wide' && customerSpecific(context)) {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
-  if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
+  if (policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
   }
   const references = { ...params };
-  if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
-  // The gap reader loads the candidate appointment's customer preferences,
-  // plan holds and location, so the candidate is an appointment reference.
-  if (toolName === 'find_schedule_gaps' && params.candidate_service_id) references.appointment_id = params.candidate_service_id;
+  const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
+  if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
@@ -697,8 +704,7 @@ const SCOPE_REFUSALS = {
   actor_wide: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.',
 };
 function readScopeRefusal(scope, params, context, { toolName, schema }) {
-  const customerSpecific = Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
-  if (!customerSpecific) return null;
+  if (!customerSpecific(context)) return null;
   if (SCOPE_REFUSALS[scope]) return { error: SCOPE_REFUSALS[scope], code: 'customer_scope_required' };
   if (context.targets?.length || SELECTOR_FREE_READS_NO_CUSTOMER_ROWS.has(toolName)) return null;
   if (['phone_keyed', 'email_keyed', 'address_keyed'].includes(scope)) {

@@ -218,6 +218,10 @@ const SCOPE_SNAPSHOT = {
     // Social post titles and Google Business Profile post summaries are
     // business-authored free text a customer name or address can be typed into.
     'get_gbp_status', 'get_social_channel_status',
+    // Blog and page titles, target keywords and concept labels are
+    // operator-authored strings returned verbatim.
+    'get_content_decay_alerts', 'get_content_pipeline', 'get_content_workflow_brief', 'get_semantic_concept_map', 'inspect_url',
+    'query_blog_performance', 'query_seo_rankings',
   ],
   scoped: ['draft_email_reply', 'get_email_thread', 'get_schedule_view', 'get_stale_leads', 'match_existing_customer', 'query_customers', 'query_leads', 'search_emails'],
   actor_wide: ['search_ib_history'],
