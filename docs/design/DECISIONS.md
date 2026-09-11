@@ -2340,6 +2340,41 @@ The gate fails in both directions. Over the allowance is a regression, so a file
 
 `SecurePlanChoice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than baselined. Two emoji the scanner found in doc comments rather than rendered JSX were removed from the prose.
 
+## 2026-09-11 — The brand gate was counting comments (R3a)
+
+Two of the 90 baselined violations were never on a customer surface: `Icon.jsx`'s
+note describing how a sweep could migrate the old portal's emoji keys to
+`<Icon name="home" />`, and `GlassEstimateExtras`' "5-star reviews only" docblock.
+`check-portal-brand.js` scans line by line with no notion of comments, so prose
+ABOUT an emoji counted as a raw emoji — the gate forbade describing the very
+sweep it asks for, and `Icon.jsx` sat in `LEGACY_BASELINE` carrying debt it did
+not have.
+
+Whole-line comments are now skipped, block state tracked across lines by
+`commentSkipper()`. **Only** whole-line comments: anything sharing a line with
+code is scanned in full, in both directions — a trailing `// note` after code,
+and code trailing a `*/` on a block's closing line. That second direction was a
+real masking bug in the first cut of this change (`*/ const label = '🔒';`
+vanished) and is now a regression test; the rule is never to mask, so where
+comment and code overlap the scanner wins and the odd false positive on comment
+prose is accepted.
+
+The lookalike that makes this subtle is CSS's universal selector: a bare `* {`
+line is code, not a comment. A leading `*` therefore never means anything outside
+an already-open block — otherwise `* { font-size: 12px }` would be waved through
+a gate whose whole job is catching that.
+
+The gate is now importable (`module.exports = { checkFile, commentSkipper,
+LEGACY_BASELINE }`, CLI behind `require.main === module`) and has its first
+tests, in `scripts/qa/tests/check-portal-brand.test.js` (already wired into CI as
+`npm run test:qa-workflow`). It had none — on a script whose last two regressions
+were a baseline that only failed in one direction and a walker that skipped CSS,
+both caught by review rather than by CI.
+
+Debt: **90 → 88 across 26 files**. `Icon.jsx` delisted (a stale entry fails the
+gate, so the line had to go), `GlassEstimateExtras` 4 → 3. No customer pixel
+changes; the remaining 88 are real, and still R3/R4 work.
+
 ## 2026-09-11 — R2a: one customer page column (CustomerColumn)
 
 The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §3) found five different phone gutters (10/12/16/20/24) and several desktop column widths across the customer glass pages, because no page-column primitive existed — every page hand-authored its own wrapper, and `index.css` carried five near-duplicate classes (`.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`) on top of that. `components/brand/CustomerColumn.jsx` is now the one primitive: `boxSizing: 'border-box'`, `width: '100%'`, `margin: '0 auto'`, `padding: '28px 16px 56px'` (`PAGE_TOP` / `PAGE_GUTTER` / `PAGE_BOTTOM`, new named tokens in `theme-doc.js`), `flex: 1` (page roots use `flex: 1`, DECISIONS 2026-09-04, so the shell footer follows the content), and `maxWidth` from `column`: `"document"` (default) → `DOC_COLUMN_MAX` (760) of CONTENT, `"flow"` → `FLOW_COLUMN_MAX` (640) of content. The named widths are content widths — the audit measured card edges — so the border-box outer cap is content + both gutters (792 / 672); a 760 outer cap would have rendered 728 of content past 792px viewports, a 32px narrowing of every desktop document that the first cut of this primitive actually had. None of this is a new choice — 760/28/56 is `DOC_PAGE_MARGIN` and 640 is `FLOW_COLUMN_MAX`, both already exported by `theme-doc.js` per the PR #2527 ruling ("pay's cap is the standard"); the fix is giving every page ONE way to reach them instead of eleven-plus. `DOC_COLUMN` (theme-doc's `min(100% - 32px, 760px)` width string) stays exported for its one non-`<CustomerColumn>` consumer (the tokens dev-preview) but no longer backs any page wrapper; the parallel `FLOW_COLUMN` string had no consumer and was not kept — flow pages reach 640 only through `<CustomerColumn column="flow">`.

@@ -212,6 +212,35 @@ function relKey(filePath) {
   return path.relative(ROOT, filePath).split(path.sep).join('/');
 }
 
+// Whole-line comment detection, stateful across a file's lines. Returns a
+// closure so each file gets its own block state. Skips a line only when the
+// line carries no code at all:
+//   `// ...`                     whole-line line comment
+//   inside an open /* ... */     every line up to and including one ending `*/`
+//   `/* ... */` alone on a line  opened and closed with nothing either side
+// A line where a block closes and code follows (`*/ const x = ...`) is NOT
+// skipped -- that was a real masking bug, caught in review. The lookalike is
+// CSS's universal selector: a bare `* {` line is code, not a comment, which is
+// why a leading `*` never means anything outside an already-open block.
+function commentSkipper() {
+  let inBlock = false;
+  return function skip(line) {
+    const t = line.trim();
+    const closes = t.includes('*/');
+    if (inBlock) {
+      if (!closes) return true;          // wholly inside the block
+      inBlock = false;
+      return t.endsWith('*/');           // code after the close? scan it
+    }
+    if (t.startsWith('//')) return true;
+    if (t.startsWith('/*')) {
+      if (!closes) { inBlock = true; return true; }
+      return t.endsWith('*/');
+    }
+    return false;
+  };
+}
+
 function checkFile(filePath) {
   const rel = relKey(filePath);
   const text = fs.readFileSync(filePath, 'utf8');
@@ -219,27 +248,18 @@ function checkFile(filePath) {
   const violations = [];
 
   // A line that is ENTIRELY a comment renders nothing, so scanning it reports
-  // debt that does not exist: Icon.jsx's `// sweep could migrate {'\u{1F3E0}'} \u2192 <Icon/>`
-  // note and GlassEstimateExtras' `* 5\u2605 reviews only.` docblock were both
-  // counted as raw-emoji violations, and a developer could not so much as
-  // DESCRIBE the sweep this gate asks for without tripping it. Only whole-line
-  // comments are skipped \u2014 a code line with a trailing comment is still scanned
-  // in full, so nothing real can hide behind a `//`. Block state is tracked
-  // across lines; a line that opens and closes a comment mid-line falls
-  // through to the scanner deliberately (conservative: never mask).
-  let inBlock = false;
+  // debt that does not exist: Icon.jsx's note about migrating the old portal's
+  // emoji keys to <Icon/>, and GlassEstimateExtras' "5-star reviews only"
+  // docblock, were both counted as raw-emoji violations -- the gate forbade
+  // DESCRIBING the sweep it asks for. Only whole-line comments are skipped.
+  // Anything sharing a line with code is scanned in full, in both directions:
+  // a trailing `// note` after code, and code trailing a `*/` on the closing
+  // line of a block. The rule is never to mask, so where the two overlap the
+  // scanner wins and we accept the odd false positive on comment prose.
+  const skipComment = commentSkipper();
   lines.forEach((line, i) => {
     const n = i + 1;
-    const t = line.trim();
-    const opens = t.indexOf('/*') !== -1;
-    const closes = t.indexOf('*/') !== -1;
-    if (inBlock) {
-      if (closes) inBlock = false;
-      return; // whole line sits inside /* ... */ (or is its closing line)
-    }
-    if (t.startsWith('//')) return;
-    if (t.startsWith('/*') && !closes) { inBlock = true; return; }
-    if (t.startsWith('/*') && closes && t.endsWith('*/')) return;
+    if (skipComment(line)) return;
 
     if (EMOJI_RX.test(line)) {
       violations.push({
@@ -449,4 +469,4 @@ function main() {
 // this gate before, so they get a test rather than a comment.
 if (require.main === module) main();
 
-module.exports = { checkFile, LEGACY_BASELINE };
+module.exports = { checkFile, commentSkipper, LEGACY_BASELINE };

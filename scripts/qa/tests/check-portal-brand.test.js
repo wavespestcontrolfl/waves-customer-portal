@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { checkFile } = require('../../check-portal-brand.js');
+const { checkFile, commentSkipper } = require('../../check-portal-brand.js');
 
 function scan(name, source) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brand-gate-'));
@@ -63,4 +63,34 @@ test('a lone * line outside a block comment is CSS, not a comment', () => {
 test('emoji in live JSX is still a violation', () => {
   const hits = scan('Sample.jsx', ["const label = '\u{1F512}';"]. join('\n'));
   assert.deepEqual(hits, ['emoji:1']);
+});
+
+test('code trailing a block-comment close is still scanned', () => {
+  // The masking bug the first cut of this shipped with: inBlock + a closing
+  // `*/` returned unconditionally, so live code after the close vanished.
+  const hits = scan('Sample.jsx', [
+    '/**',
+    ' * a note',
+    " */ const label = '\u{1F512}';",
+  ].join('\n'));
+  assert.deepEqual(hits, ['emoji:3']);
+});
+
+test('an unterminated block comment swallows the rest of the file', () => {
+  const hits = scan('Sample.jsx', [
+    '/* opened and never closed',
+    'const a = { fontSize: 12 };',
+  ].join('\n'));
+  assert.deepEqual(hits, []);
+});
+
+test('commentSkipper keeps block state per instance', () => {
+  const a = commentSkipper();
+  assert.equal(a('/* open'), true);
+  assert.equal(a('still inside'), true);
+  assert.equal(a(' */'), true);
+  assert.equal(a('const x = 1;'), false);
+  // A fresh file must not inherit the previous one's block state.
+  const b = commentSkipper();
+  assert.equal(b('const y = 2;'), false);
 });
