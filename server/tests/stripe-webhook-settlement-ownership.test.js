@@ -122,7 +122,12 @@ function mockMakeBuilder(table, { inTrx } = {}) {
       // Inside the transaction WITH forUpdate = the post-wait re-read.
       return (inTrx && b._forUpdate) ? mockState.lockedInvoice : mockState.preLockInvoice;
     }
-    if (table === 'payments') return null; // no existing payment row
+    // Outside the transaction, a `processing` row exists exactly when this
+    // PI's ACH is still in flight; inside it (the fallback's FOR UPDATE read)
+    // there is never a pre-existing row — that is the path under test.
+    if (table === 'payments') {
+      return (!inTrx && mockState.processingPaymentsUpdated > 0) ? { id: 'pay-processing' } : null;
+    }
     return null;
   };
   b.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
@@ -236,6 +241,21 @@ describe('the withdrawal is re-read under the settlement lock', () => {
 
     expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
     expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeTruthy();
+  });
+
+  test('a withdrawal visible on the FIRST read still settles an in-flight ACH', async () => {
+    // The early quarantine must not fire when a payments row for this PI is
+    // already `processing`: those funds are captured and the row would be
+    // stranded (audit P0).
+    mockState.processingPaymentsUpdated = 1;
+    mockState.preLockInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'payer_billed:5' };
+    mockState.settleReadInvoice = { ...mockState.preLockInvoice };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+    const alert = mockState.inserts.find((i) => i.table === 'customer_health_alerts');
+    expect(alert?.payload.alert_type).toBe('wh_payer_billed_settled');
   });
 
   test('an ACH row already in `processing` settles but raises an alert', async () => {

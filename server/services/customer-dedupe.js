@@ -4352,10 +4352,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // committed, so the resolver reads the post-undo Bill-To. Reconciliation
     // resolves ownership per packet and releases nothing that still has a live
     // payer, so an undo that leaves the payer in place is a no-op.
+    // The LOSER runs unconditionally (audit P1): a payer-linked winner
+    // absorbing a self-pay loser withdraws the loser's invoices while writing
+    // no backfill at all, so gating on the winner's payer left exactly that
+    // direction's restored rows stamped and unpayable. Splitting the loser
+    // back out always changes its Bill-To. The WINNER's own invoices are
+    // reconciled only when the undo actually moved its payer.
+    const Packets = require('./visit-completion-packets');
+    await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: loserId });
     if (Object.prototype.hasOwnProperty.call(winnerPatch, 'payer_id')) {
-      const Packets = require('./visit-completion-packets');
       await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
-      await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: loserId });
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({

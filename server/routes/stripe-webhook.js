@@ -1553,7 +1553,20 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // must-not-settle success is. Only a CUSTOMER-initiated intent: an
   // office-initiated saved-card charge that was already in flight when the
   // withdrawal committed is the office's own collection and settles normally.
-  if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard
+  // …unless a payments row for this PI is already sitting in `processing`
+  // (audit P0): that ACH was accepted server-side while the invoice was still
+  // self-pay, the funds are captured, and quarantining here would return
+  // before the settle path below and leave the row stuck in `processing`
+  // forever. Those settle with the durable alert instead.
+  const processingPaymentForIntent = invoiceForTenderGuard && !savedCardAttemptForTenderGuard
+    && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)
+    // No catch: a failed read cannot tell "nothing in flight" from "cannot
+    // see it", and both wrong answers move or strand money. Let it throw so
+    // Stripe redelivers, the way the statement rail handles an unresolved
+    // lookup.
+    ? await db('payments').where({ stripe_payment_intent_id: piId, status: 'processing' }).first('id')
+    : null;
+  if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard && !processingPaymentForIntent
     && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)) {
     const reason = `PI ${piId} succeeded on invoice ${invoiceForTenderGuard.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
     logger.error(`[stripe-webhook] Quarantining ${reason}`);

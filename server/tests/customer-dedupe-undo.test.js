@@ -2949,7 +2949,26 @@ describe('revertMerge', () => {
     expect(reconcileWithdrawn).toHaveBeenCalledWith(trx, { customerId: WINNER });
     expect(reconcileWithdrawn).toHaveBeenCalledWith(trx, { customerId: LOSER });
 
-    // An undo that leaves Bill-To alone has nothing to release.
+    // The OPPOSITE merge direction (audit P1): a payer-linked winner absorbing
+    // a self-pay loser withdraws the loser's invoices while writing no
+    // backfill, so the winner's payer never changes — the restored loser still
+    // has to be reconciled or its returned invoices stay stamped.
+    reconcileWithdrawn.mockClear();
+    const { trx: winnerPayer } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: { ...baseWinner(), payer_id: 5 },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(winnerPayer));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(winnerPayer, { customerId: LOSER });
+    expect(reconcileWithdrawn).not.toHaveBeenCalledWith(winnerPayer, { customerId: WINNER });
+
+    // An undo that leaves Bill-To alone still releases the restored loser.
     reconcileWithdrawn.mockClear();
     const { trx: noPayer } = buildRevertTrx({
       journal: baseJournal(),
@@ -2962,7 +2981,8 @@ describe('revertMerge', () => {
     });
     db.transaction.mockImplementation(async (fn) => fn(noPayer));
     await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
-    expect(reconcileWithdrawn).not.toHaveBeenCalled();
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(noPayer, { customerId: LOSER });
+    expect(reconcileWithdrawn).not.toHaveBeenCalledWith(noPayer, { customerId: WINNER });
   });
 
   it('refuses (409) on unjournaled payment_method_consents tied to a returned card; journaled consents pass', async () => {
