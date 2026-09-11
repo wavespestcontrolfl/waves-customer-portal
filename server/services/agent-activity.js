@@ -385,6 +385,40 @@ function clampWindowHours(value) {
   return Math.min(Math.floor(n), MAX_WINDOW_HOURS);
 }
 
+// Digest rows for the feed. Two queries, not one windowed query with a
+// LIMIT: the PINNED set — unread actions (ACT: / [Review]) and UNRESOLVED
+// FIX: digests — must survive however old they are (their email was
+// suppressed, so the row is the only copy; opening a FIX does not fix it,
+// only the fall-off rule's metadata.resolved does), and a single ORDER BY
+// DESC + LIMIT over the union would silently drop the oldest pinned rows
+// once enough newer ones exist (pre-push P1 on #4397). The windowed set
+// fills the rest; ids are merged so a row never renders twice.
+const DIGEST_COLUMNS = ['id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at'];
+async function loadDigestRows(db, since) {
+  const base = () => db('notifications')
+    .select(...DIGEST_COLUMNS)
+    .where({ recipient_type: 'admin', category: DIGEST_CATEGORY });
+  const pinned = await base()
+    .where((q) =>
+      q.where((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'"))
+        .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw("title ~* '^FIX:'")))
+    .orderBy('created_at', 'desc')
+    .limit(MAX_ITEMS);
+  const windowed = await base()
+    .where('created_at', '>=', since)
+    .orderBy('created_at', 'desc')
+    .limit(MAX_ITEMS);
+  const seen = new Set();
+  const rows = [];
+  for (const row of [].concat(pinned || [], windowed || [])) {
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    rows.push(row);
+  }
+  return rows;
+}
+
 async function loadRows(windowHours) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
   // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
@@ -447,22 +481,7 @@ async function loadRows(windowHours) {
             .orWhere('consecutive_failures', '>', 0))
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
-    safe('notifications', () =>
-      db('notifications')
-        .select('id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at')
-        .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
-        // An unread action (ACT: / [Review]) stays in the feed until read,
-        // however old — its email was suppressed, so this row is the only
-        // place it exists. A FIX: digest stays until RESOLVED (the fall-off
-        // rule stamps metadata.resolved), not merely read: opening it does
-        // not fix it, and it must not vanish from the feed before the check
-        // runs clean (codex P1 on #4392). FYI rows keep the window.
-        .where((q) =>
-          q.where('created_at', '>=', since)
-            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'"))
-            .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw("title ~* '^FIX:'")))
-        .orderBy('created_at', 'desc')
-        .limit(MAX_ITEMS)),
+    safe('notifications', () => loadDigestRows(db, since)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -506,4 +525,6 @@ async function getActivity({ windowHours } = {}) {
   };
 }
 
-module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE };
+module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
+  _private: { loadDigestRows },
+};
