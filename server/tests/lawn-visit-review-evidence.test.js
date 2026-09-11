@@ -39,6 +39,10 @@ describe('technician lawn evidence and reconciliation', () => {
     ['No chinch bugs but weeds present', 'weed pressure'],
     ['Dollar spot confirmed. No pets on site today', 'dollar spot'],
     ['Checked for chinch bugs; none found, weeds present', 'weed pressure'],
+    // Comma-joined segments: a generic condition is not a governed cause, so the
+    // clause has to split on condition-bearing segments, not cause mentions.
+    ['Chinch bugs confirmed, no weeds present', 'chinch bug activity'],
+    ['No chinch bugs, weeds present', 'weed pressure'],
   ])('resolves cause polarity: %s', (text, label) => {
     const built = review(run({ findings: [] }), { addedDetails: [{ text }] });
     expect(built.added_details[0]).toMatchObject({

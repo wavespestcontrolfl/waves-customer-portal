@@ -40,10 +40,18 @@ const POSITIVE_MARKER_RE = /\b(?:confirmed|confirms?|active|present|found|seen|o
 // words such as "weeds", so testing it alone dropped "No chinch bugs but weeds
 // present" down to a clean lawn: ruling one cause out must never erase another
 // condition the technician actually observed.
-const namesCondition = (text) => SUMMARY_CAUSE_RE.test(text) || safeConditionLabel(text, 'moderate') !== NO_STRESS_LABEL;
+// Tested with the negation words removed, so "no weeds present" still counts as
+// naming a condition — the polarity is resolved separately, per segment.
+const NEGATION_WORDS_RE = new RegExp(NEGATED_DETAIL_RE.source, 'gi');
+const namesCondition = (text) => SUMMARY_CAUSE_RE.test(text)
+  || safeConditionLabel(String(text || '').replace(NEGATION_WORDS_RE, ' ').trim(), 'moderate') !== NO_STRESS_LABEL;
 function causePartsOf(clause) {
-  const mentions = (String(clause).match(new RegExp(SUMMARY_CAUSE_RE.source, 'gi')) || []).length;
-  const parts = mentions > 1 ? clause.split(/,|\b(?:and|or)\b/i).map((part) => part.trim()).filter(Boolean) : [clause];
+  // Split whenever more than one SEGMENT names a condition, not just when more
+  // than one governed cause is mentioned: SUMMARY_CAUSE_RE excludes generic
+  // class words, so "No chinch bugs, weeds present" counted one mention, stayed
+  // whole, and the negation swallowed the weed observation.
+  const segments = clause.split(/,|\b(?:and|or)\b/i).map((part) => part.trim()).filter(Boolean);
+  const parts = segments.filter((part) => namesCondition(part)).length > 1 ? segments : [clause];
   const entries = parts.map((part) => ({ clause: part, cause: namesCondition(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
   entries.forEach((entry, index) => {
     if (!entry.cause || entry.negation || entry.positive) return;
