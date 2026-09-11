@@ -40,6 +40,7 @@ function LoadingState({ children }) {
 // pre-wrapped text (no Markdown renderer on this route) but lifts ATX
 // headings into real heading elements so the §5.7 in-page TOC has targets.
 const HEADING_LINE = /^(#{1,3})\s+(.+?)\s*#*\s*$/;
+const FENCE_LINE = /^\s*(`{3,}|~{3,})/;
 
 function slugify(text, index) {
   const base = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -53,11 +54,19 @@ export function splitArticleSections(content) {
     if (text.length > 0) sections.push({ kind: "text", body: text.join("\n") });
     text = [];
   };
-  let fenced = false;
+  // CommonMark: a fence closes only on the same delimiter, at least as long as
+  // the opener. A ``` line inside a ```` fence, or a ~~~ line inside a ``` one,
+  // is fence content -- closing on it would promote the code sample's `#` lines.
+  let fence = null;
   String(content || "").split(/\r?\n/).forEach((line) => {
     // A `# comment` inside a ``` / ~~~ fence is code, not a heading.
-    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
-    const match = fenced ? null : HEADING_LINE.exec(line);
+    const marker = FENCE_LINE.exec(line);
+    if (marker) {
+      const [, delimiter] = marker;
+      if (!fence) fence = { char: delimiter[0], length: delimiter.length };
+      else if (delimiter[0] === fence.char && delimiter.length >= fence.length) fence = null;
+    }
+    const match = fence ? null : HEADING_LINE.exec(line);
     if (!match) {
       text.push(line);
       return;

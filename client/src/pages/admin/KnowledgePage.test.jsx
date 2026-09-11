@@ -258,7 +258,7 @@ describe("KnowledgePage embedded navigation", () => {
 
   it("builds an in-page table of contents from article headings", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
-    const content = "Intro line\n# Termite basics\nBody one\n```sh\n# shell comment\n```\n## Bait stations\nBody two\n# Not a heading? #\nTail";
+    const content = "Intro line\n# Termite basics\nBody one\n```sh\n# shell comment\n```\n## Bait stations\nBody two\n````md\n```\n# nested sample\n```\n~~~\n# tilde inside backticks\n~~~\n````\n# Not a heading? #\nTail";
     fetch.mockImplementation(async (url) => (
       url.endsWith("/knowledge/article/fixture")
         ? response({ article: { title: "Fixture article", content, tags: [] } })
@@ -273,8 +273,11 @@ describe("KnowledgePage embedded navigation", () => {
     expect(entries).toEqual(["Termite basics", "Bait stations", "Not a heading?"]);
     expect(screen.getByRole("heading", { level: 2, name: "Termite basics" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 3, name: "Bait stations" })).toBeInTheDocument();
-    expect(screen.getByText("Body two")).toBeInTheDocument();
+    expect(screen.getByText(/Body two/)).toBeInTheDocument();
     expect(screen.getByText(/# shell comment/)).toBeInTheDocument();
+    // A shorter or mismatched marker cannot close the four-backtick fence.
+    expect(screen.getByText(/# nested sample/)).toBeInTheDocument();
+    expect(screen.getByText(/# tilde inside backticks/)).toBeInTheDocument();
 
     fireEvent.click(within(toc).getByRole("button", { name: "Bait stations" }));
     expect(screen.getByRole("heading", { level: 3, name: "Bait stations" })).toHaveFocus();
