@@ -31,8 +31,9 @@ async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), passed: false, scenarios: [], screenshots: [], requests: [], unmatched: [], pageErrors: [] };
   const server = await previewServer(root, process.env.ADMIN_UI_PREVIEW_URL);
-  const browser = await launchBrowser();
+  let browser = null;
   try {
+    browser = await launchBrowser();
     for (const width of [390, 1440]) {
       const context = await browser.newContext({
         viewport: { width, height: width === 390 ? 900 : 1000 },
@@ -146,8 +147,8 @@ async function main() {
     report.passed = true;
   } finally {
     fs.writeFileSync(path.join(output, "report.json"), JSON.stringify(report, null, 2));
-    await browser.close();
-    await server.close();
+    try { if (browser) await browser.close(); }
+    finally { await server.close(); }
   }
   console.log(`Admin social foundation proof passed: ${report.scenarios.length} viewport states. Evidence: ${output}`);
 }

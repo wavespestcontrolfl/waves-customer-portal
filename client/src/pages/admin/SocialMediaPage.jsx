@@ -1027,7 +1027,11 @@ function AutonomousRunCard({ run, variantChoice, setVariantChoice, acting, appro
                 </div>
 
                 {run.skipReason && (
-                  <div className="mt-2.5 text-ui-body text-alert-fg">
+                  // The reason follows its own row's status: a disabled, paused
+                  // or human-rejected run is routine and reads in the secondary
+                  // ink, the way its badge already does; only a real failure is
+                  // alert red.
+                  <div className={cn("mt-2.5 text-ui-body", statusTone(run.status) === "alert" ? "text-alert-fg" : "text-ink-secondary")}>
                     {run.skipReason}
                   </div>
                 )}
