@@ -135,6 +135,45 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     }
   });
 
+  test('the CLAIM itself guards a zero-due visit-linked invoice — record-linked or not: settled → refused as prepaid (report-only for the completion), unsettleable → deposit_settlement_pending; the row is never flipped to sending (Codex P1 r9 #4131)', async () => {
+    const db = require('../models/db');
+    const InvoiceService = require('../services/invoice');
+    const { claimInvoiceForSend } = InvoiceService;
+    db.__state.status = 'draft';
+    db.__state.sent_at = null;
+    db.__state.queuedCompletionText = null;
+    const original = db.getMockImplementation();
+    let row = { id: 'inv-1', status: 'draft', total: 0, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: 'sr-1' };
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'invoices') q.first = jest.fn(async () => row);
+      return q;
+    });
+    const settle = jest.spyOn(InvoiceService, 'settleZeroBalance');
+    try {
+      settle.mockResolvedValueOnce({ settled: true, invoice: { ...row, status: 'prepaid' } });
+      await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/Cannot send a prepaid invoice/);
+      expect(settle).toHaveBeenCalledWith('inv-1');
+      expect(db.__state.status).toBe('draft'); // no claim flip happened
+      settle.mockResolvedValueOnce({ settled: false, reason: 'followup_in_flight', retryable: true });
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'deposit_settlement_pending' });
+      settle.mockRejectedValueOnce(new Error('deadlock detected'));
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'deposit_settlement_pending', message: expect.stringMatching(/deadlock detected/) });
+      // Out of scope: a balance due, or no visit link → the normal claim.
+      settle.mockClear();
+      row = { ...row, total: 117 };
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true });
+      db.__state.status = 'draft';
+      row = { ...row, total: 0, scheduled_service_id: null };
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true });
+      expect(settle).not.toHaveBeenCalled();
+      db.__state.status = 'draft';
+    } finally {
+      settle.mockRestore();
+      db.mockImplementation(original);
+    }
+  });
+
   test('adoption consumes the send\'s own still-scheduled held SMS leg under the claim, then re-checks strictly: a row the worker claimed meanwhile keeps the delivery and the claim is given back (Codex P1 r6 #4131)', async () => {
     const db = require('../models/db');
     const { claimInvoiceForSend } = require('../services/invoice');

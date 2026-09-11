@@ -918,33 +918,52 @@ async function consumeQueuedInvoiceSend(invoiceId) {
   return Array.isArray(rows) ? rows.length : 0;
 }
 
-// A claimable invoice linked to an open visit (no service record yet) with
-// nothing due: settle (prepaid, system:zero_balance) and report it covered;
-// if the settlement is refused or throws, refuse the send with a retryable
-// code. Null for every other invoice — the normal send proceeds.
-async function zeroDueOpenVisitSendOutcome(service, row, invoiceId) {
-  if (!row || !row.scheduled_service_id || row.service_record_id) return null;
-  if (!SEND_CLAIMABLE_STATUSES.includes(row.status)) return null;
-  if (row.total == null || require("./invoice-helpers").invoiceAmountDue(row) > 0) return null;
-  let settlement;
+// Nothing due on an invoice linked to a scheduled visit (the estimate
+// deposit covered it) while it is still in a claimable status: the ONE
+// zero-balance guard every sender shares (Codex P1 r7 + r9 #4131). It
+// lives in the claim so the completion's own claim, the SMS-only path and
+// the wrapper all hit it — and it applies whether or not the visit's
+// completion has back-linked a service record yet (the completion links
+// the record BEFORE its delivery phase; a record-only restriction switched
+// the guard off exactly when the reused $0 draft was about to be texted).
+function zeroDueVisitInvoice(row) {
+  if (!row || !row.scheduled_service_id) return false;
+  if (!SEND_CLAIMABLE_STATUSES.includes(row.status)) return false;
+  if (row.total == null) return false;
+  return require("./invoice-helpers").invoiceAmountDue(row) === 0;
+}
+
+// Settle (prepaid, system:zero_balance) or report why not — never throws.
+async function settleZeroDueVisitInvoice(invoiceId) {
   try {
-    settlement = await service.settleZeroBalance(invoiceId);
+    const settlement = await InvoiceService.settleZeroBalance(invoiceId);
+    if (settlement?.settled) {
+      logger.info(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice (deposit-covered) — settled instead of delivering a $0 pay link`);
+      return settlement;
+    }
+    return { settled: false, reason: settlement?.reason || "refused", invoice: settlement?.invoice || null };
   } catch (err) {
-    settlement = { settled: false, reason: err.message };
+    return { settled: false, reason: err.message, invoice: null };
   }
-  if (settlement?.settled) {
-    logger.info(`[invoice] ${invoiceId}: nothing due on the open-visit invoice (deposit-covered) — settled at send instead of delivering a $0 pay link`);
+}
+
+function depositSettlementPendingError(invoiceId, reason) {
+  logger.warn(`[invoice] ${invoiceId}: nothing due on the visit-linked invoice but zero-balance settlement was refused (${reason}) — send refused`);
+  const e = new Error(`Nothing is due on this invoice (covered by the estimate deposit), but it could not be settled yet (${reason}) — not sent. Retry shortly; the visit's completion settles it too.`);
+  e.code = "deposit_settlement_pending";
+  return e;
+}
+
+// The wrapper's result-shaped outcome (sendViaSMSAndEmail returns objects,
+// not throws, for "nothing to deliver"); null when the normal send proceeds.
+async function zeroDueOpenVisitSendOutcome(row, invoiceId) {
+  if (!zeroDueVisitInvoice(row)) return null;
+  const settlement = await settleZeroDueVisitInvoice(invoiceId);
+  if (settlement.settled) {
     return { ok: true, settled_by_deposit: true, sms: { ok: false, code: "settled_by_deposit" }, email: { ok: false, code: "settled_by_deposit" }, payUrl: null };
   }
-  const reason = settlement?.reason || "refused";
-  logger.warn(`[invoice] ${invoiceId}: nothing due on the open-visit invoice but zero-balance settlement was refused (${reason}) — send refused`);
-  return {
-    ok: false,
-    code: "deposit_settlement_pending",
-    error: `Nothing is due on this invoice (covered by the estimate deposit), but it could not be settled yet (${reason}) — not sent. Retry shortly; the visit's completion settles it too.`,
-    sms: { ok: false, code: "deposit_settlement_pending" },
-    email: { ok: false, code: "deposit_settlement_pending" },
-  };
+  const err = depositSettlementPendingError(invoiceId, settlement.reason);
+  return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
 }
 
 function queuedPayLinkError(queued) {
@@ -969,6 +988,15 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   }
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
+  }
+  // Nothing due on a visit-linked invoice: settle it and refuse the claim
+  // as "prepaid — nothing to deliver" (the completion reads that as
+  // report-only), or refuse with a retryable code when settlement is not
+  // possible right now. Never hand out a claim that would text a $0 link.
+  if (zeroDueVisitInvoice(current)) {
+    const settlement = await settleZeroDueVisitInvoice(invoiceId);
+    if (settlement.settled) throw invoiceNotSendableError(settlement.invoice || { ...current, status: "prepaid" });
+    throw depositSettlementPendingError(invoiceId, settlement.reason);
   }
   const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
   if (queuedBefore) throw queuedPayLinkError(queuedBefore);
@@ -2961,16 +2989,17 @@ const InvoiceService = {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "status", "total", "credit_applied", "scheduled_service_id", "service_record_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "status", "total", "credit_applied", "scheduled_service_id");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }
-    // Nothing due on a pre-completion invoice linked to an OPEN visit (the
-    // estimate deposit covered it): never text a $0 pay link or arm
-    // follow-ups (Codex P1 r7 #4131). Settle it through the zero-balance
-    // transition instead; when that is refused right now, refuse the send
-    // (retryable) rather than deliver — whichever client called.
-    const zeroDue = await zeroDueOpenVisitSendOutcome(this, accrualPre, invoiceId);
+    // Nothing due on a visit-linked invoice (the estimate deposit covered
+    // it): never text a $0 pay link or arm follow-ups (Codex P1 r7/r9
+    // #4131). Settle it through the zero-balance transition instead; when
+    // that is refused right now, refuse the send (retryable) rather than
+    // deliver. claimInvoiceForSend applies the same guard for every other
+    // claimant; this pre-check only gives the wrapper its result shape.
+    const zeroDue = await zeroDueOpenVisitSendOutcome(accrualPre, invoiceId);
     if (zeroDue) return zeroDue;
     // Claim FIRST, then apply credit. Applying before the claim strands credit when
     // two sends race: the loser draws down the balance, but the winner already owns

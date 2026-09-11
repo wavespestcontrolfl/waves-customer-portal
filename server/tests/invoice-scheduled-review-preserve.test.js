@@ -393,9 +393,17 @@ describe('sendViaSMSAndEmail: nothing due on a pre-completion open-visit invoice
     expect(smsSpy).not.toHaveBeenCalled();
   });
 
-  test('scope: a balance due, a record-linked invoice, an unlinked invoice, or a non-claimable status all take the normal path', async () => {
+  test('a record-linked visit invoice is IN scope (the completion back-links the record before it delivers — Codex P1 r9)', async () => {
+    db.mockReturnValueOnce(chain({ first: zeroDue({ service_record_id: 'sr-1' }) }));
+    const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true, invoice: { id: 'inv-1', status: 'prepaid' } });
+    expect(await InvoiceService.sendViaSMSAndEmail('inv-1', {})).toMatchObject({ ok: true, settled_by_deposit: true });
+    expect(settle).toHaveBeenCalledWith('inv-1');
+    expect(smsSpy).not.toHaveBeenCalled();
+  });
+
+  test('scope: a balance due, an unlinked invoice, or a non-claimable status all take the normal path', async () => {
     const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true });
-    for (const row of [zeroDue({ total: 117 }), zeroDue({ service_record_id: 'sr-1' }), zeroDue({ scheduled_service_id: null }), zeroDue({ status: 'void' })]) {
+    for (const row of [zeroDue({ total: 117 }), zeroDue({ scheduled_service_id: null }), zeroDue({ status: 'void' })]) {
       db.mockReset();
       // mockSendSequence's first read IS the pre-check: the merged row carries the scope fields.
       mockSendSequence({ ...scheduledInvoice(), ...row });
