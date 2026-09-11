@@ -5718,6 +5718,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
             err.code = 'VISIT_TIER_CHANGED';
             throw err;
           }
+          // The billing lane likewise (Codex #4365 P2): lawnPlanProgramApplies
+          // lets an explicit per_visit / one_time lane defeat the tier, so a
+          // billing_mode edit that committed between the plan build and this
+          // customer share lock would stamp attribution the current lane
+          // denies (or omit attribution it now allows). Same retryable shape;
+          // the retry rebuilds the plan from the current lane.
+          if (lawnLedgerVisit && waveguardPlan && billingModeColumnsExist
+            && String(snapshotCustomer.billing_mode || '') !== String(waveguardPlan.propertyGate?.billingMode || '')) {
+            const err = new Error('This customer\'s billing lane changed while completing — reload the job and complete it again.');
+            err.statusCode = 409;
+            err.isOperational = true;
+            err.code = 'VISIT_BILLING_LANE_CHANGED';
+            throw err;
+          }
           Object.assign(recordInsert, completionTierSnapshotFields({
             serviceRecordCols,
             waveguardTier: snapshotCustomer ? snapshotCustomer.waveguard_tier : svc.cust_waveguard_tier,

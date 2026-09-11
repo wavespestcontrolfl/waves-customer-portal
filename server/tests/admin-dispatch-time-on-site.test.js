@@ -1084,6 +1084,16 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan\s*&& String\(snapshotCustomer\.waveguard_tier \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.serviceTier \|\| ''\)\) \{/);
   });
 
+  test('a ledgered visit rechecks the billing lane under the customer share lock and aborts retryably when billing_mode changed mid-flight (codex #4365 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan && billingModeColumnsExist\s*&& String\(snapshotCustomer\.billing_mode \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.billingMode \|\| ''\)\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_BILLING_LANE_CHANGED';\s*throw err;\s*\}/);
+    // Reads the column the same reread already selects (billing_mode), after the tier check.
+    const tierAt = source.indexOf("err.code = 'VISIT_TIER_CHANGED';");
+    const laneAt = source.indexOf("err.code = 'VISIT_BILLING_LANE_CHANGED';");
+    expect(tierAt).toBeGreaterThan(-1);
+    expect(laneAt).toBeGreaterThan(tierAt);
+  });
+
   test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // The IDs copied from the appointment assignment are tracked...
