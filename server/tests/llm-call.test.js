@@ -489,6 +489,42 @@ describe('dispatchWithFallback', () => {
     expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
   });
 
+  test('a billed leg that failed carries its usage on the failure entry; an unbilled one carries none', async () => {
+    // A complete, parseable-but-empty JSON answer the provider billed.
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ output_text: 'not json', usage: { input_tokens: 900, output_tokens: 40, output_tokens_details: { reasoning_tokens: 10 } } }),
+    });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"text":"ok"}' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true });
+    expect(result).toMatchObject({ ok: true, fallbackUsed: true, failures: [{ provider: PROVIDER.OPENAI, reason: 'empty_json', usage: { input_tokens: 900, output_tokens: 40, reasoning_tokens: 10 } }] });
+
+    // A 529 never reached the model: no usage on that failure, and a validator rejection of a billed answer keeps its usage.
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 529 });
+    const down = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true });
+    expect(down.failures[0]).toEqual({ provider: PROVIDER.OPENAI, model: OPENAI_BEST, reason: 'openai_529' });
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ output_text: '{"text":"bad"}', usage: { input_tokens: 5, output_tokens: 2 } }) });
+    const rejected = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+    }, { text: 'write', jsonMode: true }, { validate: (r) => (r.json.text === 'bad' ? 'too_bad' : null) });
+    expect(rejected.failures[0]).toMatchObject({ reason: 'too_bad', validator: true, usage: { input_tokens: 5, output_tokens: 2 } });
+
+    // An Anthropic-first chain: the adapter's successful result carries usage too, so a validator rejection keeps it.
+    mockAnthropicCreate.mockResolvedValueOnce({ content: [{ type: 'text', text: '{"text":"bad"}' }], usage: { input_tokens: 7, output_tokens: 3 } });
+    global.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ output_text: '{"text":"ok"}' }) });
+    const anthropicFirst = await dispatchWithFallback({
+      primary: { provider: PROVIDER.ANTHROPIC, model: FLAGSHIP },
+      fallback: { provider: PROVIDER.OPENAI, model: OPENAI_BEST },
+    }, { text: 'write', jsonMode: true }, { validate: (r) => (r.json.text === 'bad' ? 'too_bad' : null) });
+    expect(anthropicFirst.failures[0]).toMatchObject({ provider: PROVIDER.ANTHROPIC, reason: 'too_bad', validator: true, usage: { input_tokens: 7, output_tokens: 3 } });
+  });
+
   test('uses the other provider when primary is unavailable', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 529 });
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
@@ -609,5 +645,83 @@ describe('geminiText — the one parser for callGemini and the direct-fetch phot
     expect(geminiText({})).toBe('');
     expect(geminiText({ candidates: [{}] })).toBe('');
     expect(geminiText(null)).toBe('');
+  });
+});
+
+// Lawn visit assessment additions (2026-09-08): numbered photos ride as label
+// text parts before each image on every provider; Gemini takes a thinkingLevel
+// and returns its usage; the GPT-6 line takes the same reasoning object as
+// GPT-5 with 'low' as its floor.
+describe('image labels, Gemini thinking level + usage, GPT-6 reasoning', () => {
+  let saved;
+  beforeEach(() => {
+    saved = { openai: process.env.OPENAI_API_KEY, gemini: process.env.GEMINI_API_KEY };
+    process.env.OPENAI_API_KEY = 'test-key';
+    process.env.GEMINI_API_KEY = 'test-key';
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    for (const [key, value] of [['OPENAI_API_KEY', saved.openai], ['GEMINI_API_KEY', saved.gemini]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const images = [{ data: 'AAA', mimeType: 'image/jpeg', label: 'Photo 1 (front)' }, { data: 'BBB', mimeType: 'image/png' }];
+
+  test('Gemini: a label is a text part immediately before its image; unlabeled images are bare', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }], usageMetadata: { promptTokenCount: 2300, candidatesTokenCount: 40, thoughtsTokenCount: 900 } }) });
+    const r = await callGemini({ model: GEMINI_VISION_BEST, text: 'assess', images, jsonMode: true, thinkingLevel: 'low' });
+    expect(r.ok).toBe(true);
+    expect(r.usage).toEqual(expect.objectContaining({ input_tokens: 2300, output_tokens: 40, reasoning_tokens: 900 }));
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.contents[0].parts).toEqual([
+      { text: 'Photo 1 (front)' },
+      { inline_data: { mime_type: 'image/jpeg', data: 'AAA' } },
+      { inline_data: { mime_type: 'image/png', data: 'BBB' } },
+      { text: 'assess' },
+    ]);
+    expect(body.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'LOW' });
+  });
+
+  test('Gemini: no thinkingLevel or an unknown one leaves thinkingConfig off', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }) });
+    await callGemini({ model: GEMINI_VISION_BEST, text: 'a', jsonMode: true });
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body).generationConfig.thinkingConfig).toBeUndefined();
+    await callGemini({ model: GEMINI_VISION_BEST, text: 'a', jsonMode: true, thinkingLevel: 'turbo' });
+    expect(JSON.parse(global.fetch.mock.calls.at(-1)[1].body).generationConfig.thinkingConfig).toBeUndefined();
+  });
+
+  test('OpenAI: labels ride as input_text parts before their images, after the prompt', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    await callOpenAI({ model: 'gpt-6-astra', text: 'assess', images, jsonMode: true, maxTokens: 4096, reasoningEffort: 'medium' });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.input[0].content).toEqual([
+      { type: 'input_text', text: 'assess' },
+      { type: 'input_text', text: 'Photo 1 (front)' },
+      { type: 'input_image', image_url: 'data:image/jpeg;base64,AAA' },
+      { type: 'input_image', image_url: 'data:image/png;base64,BBB' },
+    ]);
+    // The GPT-6 line takes the same reasoning object; the caller's effort passes through above the floor.
+    expect(body.reasoning).toEqual({ effort: 'medium' });
+    expect(body.max_output_tokens).toBe(4096);
+  });
+
+  test('OpenAI: a sub-floor cap on the GPT-6 line lands on effort low (it has no none) with the widened wire cap', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+    await callOpenAI({ model: 'gpt-6-astra', text: 'classify', jsonMode: true, maxTokens: 60 });
+    const body = JSON.parse(global.fetch.mock.calls.at(-1)[1].body);
+    expect(body.reasoning).toEqual({ effort: 'low' });
+    expect(body.max_output_tokens).toBe(1024);
+  });
+
+  test('Anthropic: labels ride as text blocks before their images', async () => {
+    process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'test-key';
+    mockAnthropicCreate.mockReset().mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: FLAGSHIP, text: 'assess', images, jsonMode: true });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].messages[0].content).toEqual([
+      { type: 'text', text: 'Photo 1 (front)' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAA' } },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'BBB' } },
+      { type: 'text', text: 'assess' },
+    ]);
   });
 });

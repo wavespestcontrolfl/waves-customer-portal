@@ -10,7 +10,7 @@
  * auto-dispatch scores a visit's current placement with. Both sides MUST use
  * it: auto-dispatch compares a current placement against the candidates this
  * module produces, so a local copy of the constants here would put the two
- * sides on different scales. No API calls per request.
+ * sides on different scales. Capacity reads use one bounded traffic budget.
  */
 
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -20,7 +20,9 @@ const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable } = require('../technician-eligibility');
-const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement } = require('./arrival-route');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
+const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
+const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -29,6 +31,10 @@ const DEFAULT_SERVICE_MIN = 60;
 // driveMin is auto-dispatch/geo's — the one coordinate-glue over
 // route-optimizer's model, so this module and auto-dispatch score on the
 // same scale (a local copy lived here until the travel-gap lane).
+
+function hasCoords(stop) {
+  return stop != null && stop.lat != null && stop.lng != null;
+}
 
 function timeToMinutes(hhmm) {
   if (!hhmm) return null;
@@ -75,18 +81,19 @@ async function findArrivalWindowSlots(opts) {
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
     for (const tech of techs) {
+      // `changes` is the caller's pending edit (duration, a re-picked
+      // service address) — the same shape the save probe hands the
+      // checker, so the ranking simulates the visit being saved, not the
+      // one stored.
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
-        excludeServiceIds: opts.excludeServiceIds, now,
+        excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
       });
       if (!context) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);
-      for (let start = Math.ceil(floor / 60) * 60; start + durationMinutes <= ADMIN_DAY_END_MINUTES; start += 60) {
-        evaluated++;
-        const windowStart = minutesToTime(start);
-        const windowEnd = minutesToTime(start + durationMinutes);
-        const fit = evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes });
-        if (!fit.feasible) continue;
+      const candidates = enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin: floor, latestServiceEndMin: ADMIN_DAY_END_MINUTES });
+      evaluated += candidates.evaluated;
+      for (const { windowStart, windowEnd, fit } of candidates.placements) {
         const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
         slots.push({
           date, technician: { id: tech.id, name: tech.name },
@@ -96,7 +103,7 @@ async function findArrivalWindowSlots(opts) {
           waiting_minutes: fit.waitingMinutes, arrival_delay_minutes: fit.arrivalDelayMinutes,
           estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
           route_mode: 'arrival_windows', stops_that_day: fit.arrivals.length - 1,
-          latest_start_min: start,
+          latest_start_min: timeToMinutes(windowStart),
         });
       }
     }
@@ -104,6 +111,86 @@ async function findArrivalWindowSlots(opts) {
   slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes
     || a.arrival_delay_minutes - b.arrival_delay_minutes || a.start_time.localeCompare(b.start_time));
   return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
+}
+
+async function findCapacitySlots(opts) {
+  const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
+  let query = applyAssignable(db('technicians'));
+  if (technicianId) query = query.where('technicians.id', technicianId);
+  const techs = await query.select('id', 'name');
+  const { getBlackoutLayers } = require('./blackout-dates');
+  let requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
+    .filter(Boolean).map(service_type => ({ service_type }));
+  if (!requestedServices.length && opts.excludeServiceIds?.length) {
+    requestedServices = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type');
+  }
+  const inactive = opts.arrivalWindow?.serviceId ? []
+    : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
+  const inactiveTechs = new Set(inactive.map(row => row.technician_id));
+  const blackout = opts.includeBlackoutDates ? new Set() : (await getBlackoutLayers(dateFrom, dateTo)).dates;
+  const now = new Date();
+  const today = etDateString(now);
+  const parts = etParts(now);
+  const travel = require('../route-optimizer').createSchedulingTravel();
+  const candidates = [];
+  for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
+    if (date < today || blackout.has(date)) continue;
+    for (const tech of techs) {
+      if (inactiveTechs.has(tech.id)) continue;
+      const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
+        excludeServiceIds: opts.excludeServiceIds,
+        ...(opts.arrivalWindow?.serviceId ? {
+          serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
+        } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
+          service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
+      });
+      if (!context) continue;
+      if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
+        .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
+      const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
+        date === today ? parts.hour * 60 + parts.minute + 30 : 0);
+      for (let start = Math.ceil(floor / 60) * 60; start + SHIFT.arrivalMinutes <= SHIFT.endMinutes; start += 60) {
+        if (!placementFitsShift(start, start + durationMinutes)) continue;
+        candidates.push({ context, date, tech, start, options: {
+          windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
+          // Owner policy: ordinary setup/closeout is already in the on-site allowance.
+          durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
+        } });
+      }
+    }
+  }
+  // Pairwise matrix estimates generate candidates; repeated simulation asks
+  // for affected legs at their predicted departures. All Google work shares
+  // one bounded, request-local budget across the complete calendar horizon.
+  for (let pass = 0; pass < 3; pass++) {
+    const legs = [];
+    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
+    await travel.preload(legs);
+  }
+  const slots = [];
+  for (const candidate of candidates) {
+    const { context, date, tech, start, options } = candidate;
+    const fit = evaluateArrivalPlacement(context, options);
+    if (!fit.feasible) continue;
+    // Existing save probes have no traffic preload; their fallback must fit too.
+    if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) continue;
+    const index = fit.routeOrder.indexOf(context.target.id);
+    const byId = new Map(context.rows.map(row => [row.id, row]));
+    const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
+      context.target.service_type, { before: byId.get(fit.routeOrder[index - 1]), after: byId.get(fit.routeOrder[index + 1]) });
+    const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+    slots.push({ date, technician: { id: tech.id, name: tech.name }, start_time: options.windowStart,
+      end_time: options.windowEnd, detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+      score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
+      occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
+      estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
+      stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
+    });
+  }
+  slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
+  return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
+    evaluated: candidates.length, total_feasible: slots.length, travel: travel.diagnostics() };
 }
 
 /**
@@ -123,6 +210,7 @@ async function findArrivalWindowSlots(opts) {
  * @returns {Promise<{slots: Array, evaluated: number}>}
  */
 async function findAvailableSlots(opts) {
+  if (capacityEnabled()) return findCapacitySlots(opts);
   const {
     lat, lng,
     durationMinutes = DEFAULT_SERVICE_MIN,
@@ -280,7 +368,9 @@ async function findAvailableSlots(opts) {
         evaluated++;
 
         const baselineDrive = driveMin(prev, next);
-        const detourDrive = driveMin(prev, newStop) + driveMin(newStop, next);
+        const driveIn = driveMin(prev, newStop);
+        const driveOut = driveMin(newStop, next);
+        const detourDrive = driveIn + driveOut;
         const extraDrive = Math.max(0, detourDrive - baselineDrive);
 
         // Earliest the new job could start: after prev.endMin + drive from
@@ -289,7 +379,7 @@ async function findAvailableSlots(opts) {
         const nextIsStop = next.id !== 'HQ_END';
         const earliestStart = Math.max(
           dayOpen,
-          prev.endMin + driveMin(prev, newStop) + (prevIsStop ? stopBuffer : 0),
+          prev.endMin + driveIn + (prevIsStop ? stopBuffer : 0),
           date === todayEt ? todayFloorMin : 0,
           earliestStartMin, // honor a hard time-window lower bound (0 = no-op)
         );
@@ -301,7 +391,7 @@ async function findAvailableSlots(opts) {
           : earliestStart;
         const earliestEnd = startMin + durationMinutes;
         // Must allow drive from new → next before next.startMin
-        const latestEnd = next.startMin - driveMin(newStop, next) - (nextIsStop ? stopBuffer : 0);
+        const latestEnd = next.startMin - driveOut - (nextIsStop ? stopBuffer : 0);
 
         if (earliestEnd > latestEnd) continue; // doesn't fit
         if (earliestEnd > dayClose) continue;  // past end of day
@@ -323,6 +413,15 @@ async function findAvailableSlots(opts) {
           detour_minutes: extraDrive,
           baseline_drive_minutes: baselineDrive,
           total_drive_minutes: detourDrive,
+          // The two legs the detour is made of, so a picker can say what the
+          // van actually drives INTO this stop (from the previous anchor)
+          // separately from what the insertion adds to the route. A
+          // coordless anchor scores as zero drive above (so its gaps stay
+          // offered), but that zero is a sentinel, not a trip — report the
+          // leg as unknown (null) so a hint omits it rather than claiming
+          // "0 min drive" (Codex #4120 r2 P2).
+          drive_in_minutes: hasCoords(prev) ? driveIn : null,
+          drive_out_minutes: hasCoords(next) ? driveOut : null,
           score,
           // Last start this gap can hold (its end still clears the drive to
           // the next anchor). Availability surfaces that only offer clean
@@ -336,6 +435,8 @@ async function findAvailableSlots(opts) {
           insertion: {
             after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
             before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
+            // Bare name for labels ("from <previous stop>"); null = the home base.
+            after_name: prev.id === 'HQ_START' ? null : prev.customer,
             after_stop_id: prev.id === 'HQ_START' || prev.id === 'HQ_END' ? null : prev.id,
             before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,
           },

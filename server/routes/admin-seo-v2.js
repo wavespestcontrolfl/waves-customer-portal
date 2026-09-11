@@ -419,6 +419,7 @@ const SiteRollup = require('../services/seo/site-rollup');
 const GeoGrid = require('../services/seo/geo-grid-tracker');
 const { geoGridToCSV } = require('../services/csv-generators');
 const { isEnabled } = require('../config/feature-gates');
+const { isEntityQuestion } = require('../services/seo/aeo-entity-facts');
 
 // Geo-grid map-pack tracker (Pillar 3). Needs BOTH the feature gate AND the SEO
 // master gate (DataForSEO calls are blocked by seoIntelligence) — report ungated
@@ -700,6 +701,15 @@ router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) =
     if ('city' in (req.body || {})) patch.city = req.body.city || null;
     if ('service' in (req.body || {})) patch.service = req.body.service || null;
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'nothing to update' });
+    // Entity-cohort rows are keyed by their exact prompt: the text is frozen
+    // (toggle `active` instead; a new prompt is a new cohort version).
+    if (patch.query) {
+      const current = await db('seo_llm_mention_queries').where('id', req.params.id).first('query');
+      if (!current) return res.status(404).json({ error: 'not found' });
+      if (isEntityQuestion(current.query) && patch.query !== current.query) {
+        return res.status(409).json({ error: 'entity cohort question text is frozen; toggle active instead' });
+      }
+    }
     patch.updated_at = db.fn.now();
     const [row] = await db('seo_llm_mention_queries').where('id', req.params.id).update(patch).returning('*');
     if (!row) return res.status(404).json({ error: 'not found' });

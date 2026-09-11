@@ -75,6 +75,7 @@ const {
 } = require('../services/estimate-card-holds');
 const {
   createRecurringCardSetupIntentForEstimate,
+  replaceRecurringCardIntent,
   resolveRecurringCardPolicyForEstimate,
 } = require('../services/recurring-card-on-file');
 const { recordCheckoutStepReached, CHECKOUT_KIND } = require('../services/estimate-checkout-events');
@@ -331,6 +332,10 @@ router.get('/:token/available-slots', async (req, res) => {
     if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
+    if (err.code === 'SLOT_UNAVAILABLE') {
+      const unavailable = require('../services/scheduling/arrival-route').capacityError();
+      return res.status(409).json({ error: unavailable.message, code: unavailable.code, retry: true });
+    }
     logger.error(`[estimate-slots-public] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to load availability', retry: true });
   }
@@ -453,6 +458,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   } catch (err) {
     if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
       return res.status(409).json({ error: err.message, code: err.code });
+    }
+    if (err.code === 'SLOT_UNAVAILABLE') {
+      const unavailable = require('../services/scheduling/arrival-route').capacityError();
+      return res.status(409).json({ error: unavailable.message, code: unavailable.code, retry: true });
     }
     logger.error(`[estimate-slots-public:find-slots] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to search availability', retry: true });
@@ -779,7 +788,29 @@ router.post('/:token/recurring-card-intent', depositLimiter, async (req, res) =>
       return res.status(409).json({ error: 'No card on file is required for this estimate', exemptReason: policy.exemptReason || null });
     }
 
-    const intent = await createRecurringCardSetupIntentForEstimate(estimate);
+    // "Use a different payment method": the customer already saved one on
+    // this estimate's succeeded intent and wants to replace it. The service
+    // mints the replacement first, then retires the old intent in Stripe
+    // (the accept gate refuses it from here on; the deterministic mint
+    // follows it to the replacement). Fails closed on an id that is not
+    // this estimate's own capture.
+    const replaceSetupIntentId = typeof req.body?.replaceSetupIntentId === 'string'
+      ? req.body.replaceSetupIntentId.trim()
+      : '';
+    let intent = null;
+    if (replaceSetupIntentId) {
+      const replaced = await replaceRecurringCardIntent({ estimate, setupIntentId: replaceSetupIntentId });
+      if (!replaced.ok) {
+        if (replaced.reason === 'estimate_accepted') return res.status(409).json({ error: 'Estimate already accepted' });
+        if (replaced.reason === 'estimate_inactive') return res.status(409).json({ error: 'Estimate is no longer active' });
+        return res.status(replaced.reason === 'intent_mismatch' ? 400 : 503).json({
+          error: 'We could not switch your payment method. Please refresh this page and try again.',
+        });
+      }
+      intent = replaced.intent;
+    } else {
+      intent = await createRecurringCardSetupIntentForEstimate(estimate);
+    }
     if (!intent) {
       return res.status(503).json({ error: 'Payments are temporarily unavailable. Please call us to confirm your service.' });
     }

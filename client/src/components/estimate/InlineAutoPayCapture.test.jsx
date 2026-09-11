@@ -157,6 +157,7 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
         ref={ref}
         intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'] }}
         loadStripeSdk={loadStripeSdk}
+        onReplace={vi.fn()}
       />,
     );
     await flush();
@@ -168,19 +169,95 @@ describe('InlineAutoPayCapture tender-aware consent', () => {
     const result = await ref.current.confirmSetup();
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/refresh this page/);
+    // The stale replay is not a dead end: the replace action appears.
+    expect(first.getByText('Use a different payment method')).toBeInTheDocument();
     first.unmount();
-    // With the tender resolved by the mint, the same replay passes through.
+    // With the tender resolved by the mint, the same replay passes through
+    // on the server-named intent — no Payment Element, no retrieve.
     const ref2 = React.createRef();
     const second = render(
       <InlineAutoPayCapture
         ref={ref2}
-        intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account' }}
+        intent={{ ...INTENT, setupIntentId: 'seti_1', paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'us_bank_account' }}
         loadStripeSdk={loadStripeSdk}
       />,
     );
     await flush();
     await act(async () => { second.getByRole('checkbox').click(); });
     expect(await ref2.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+  });
+
+  // "Use a different payment method" (customer report 2026-09-08): a
+  // succeeded replay renders as a saved-method panel with a way out, instead
+  // of a Payment Element on a finished intent that could only re-hand the
+  // customer the first tender they saved.
+  describe('succeeded replay → saved-method panel + replace', () => {
+    const REPLAY = { ...INTENT, setupIntentId: 'seti_1', paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'card' };
+
+    it('mounts no Payment Element, reports ready, and hands the saved intent to confirm', async () => {
+      const { StripeCtor, calls } = makeStripeStub();
+      const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+      const onStateChange = vi.fn();
+      const ref = React.createRef();
+      const { getByText, getByRole } = render(
+        <InlineAutoPayCapture ref={ref} intent={REPLAY} loadStripeSdk={loadStripeSdk} onStateChange={onStateChange} onReplace={vi.fn()} />,
+      );
+      await flush();
+      expect(calls.mounts).toBe(0);
+      expect(loadStripeSdk).not.toHaveBeenCalled();
+      expect(getByText(/Your card is already saved for this plan/)).toBeInTheDocument();
+      expect(onStateChange).toHaveBeenLastCalledWith(expect.objectContaining({ ready: true, agreed: false, methodType: 'card' }));
+      await act(async () => { getByRole('checkbox').click(); });
+      expect(await ref.current.confirmSetup()).toEqual({ ok: true, setupIntentId: 'seti_1' });
+    });
+
+    it('offers "Use a different payment method" and passes the saved intent id to onReplace', async () => {
+      const { StripeCtor } = makeStripeStub();
+      const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+      const onReplace = vi.fn(async () => true);
+      const { getByText } = render(
+        <InlineAutoPayCapture intent={REPLAY} loadStripeSdk={loadStripeSdk} onReplace={onReplace} />,
+      );
+      await flush();
+      await act(async () => { getByText('Use a different payment method').click(); });
+      expect(onReplace).toHaveBeenCalledWith('seti_1');
+    });
+
+    it('surfaces a failed switch instead of leaving the customer stuck', async () => {
+      const { StripeCtor } = makeStripeStub();
+      const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+      const onReplace = vi.fn(async () => false);
+      const { getByText, getByRole } = render(
+        <InlineAutoPayCapture intent={REPLAY} loadStripeSdk={loadStripeSdk} onReplace={onReplace} />,
+      );
+      await flush();
+      await act(async () => { getByText('Use a different payment method').click(); });
+      expect(getByRole('alert')).toHaveTextContent(/could not switch your payment method/);
+      expect(getByText('Use a different payment method')).not.toBeDisabled();
+    });
+
+    // A caller that resolves the tender but does not name the intent (the
+    // /secure page shape before #4144) must keep the Payment Element path —
+    // the replay panel can only hand back an id it was given (pre-push
+    // Codex P1 r2).
+    it('keeps the element path when the caller omits setupIntentId', async () => {
+      const { StripeCtor, calls } = makeStripeStub();
+      const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+      const { queryByText } = render(
+        <InlineAutoPayCapture intent={{ ...INTENT, paymentMethodTypes: ['card', 'us_bank_account'], capturedMethodType: 'card' }} loadStripeSdk={loadStripeSdk} onReplace={vi.fn()} />,
+      );
+      await flush();
+      expect(calls.mounts).toBe(1);
+      expect(queryByText(/already saved for this plan/)).toBeNull();
+    });
+
+    it('hides the replace action when the parent offers none', async () => {
+      const { StripeCtor } = makeStripeStub();
+      const loadStripeSdk = vi.fn(() => Promise.resolve(StripeCtor));
+      const { queryByText } = render(<InlineAutoPayCapture intent={REPLAY} loadStripeSdk={loadStripeSdk} />);
+      await flush();
+      expect(queryByText('Use a different payment method')).toBeNull();
+    });
   });
 
   it('keeps the card copy when the intent is card-only', async () => {

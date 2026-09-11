@@ -21,6 +21,7 @@
 
 const logger = require('../../logger');
 const { isSessionTerminal, isSessionError } = require('../../agent-control/session-events');
+const { readSessionFrames } = require('../../agent-control/session-stream');
 const { executeBriefTool, getDraft, getCheckedRoutes, clearDraft, registerSessionLint } = require('./brief-driven-tools');
 const { recordSessionUsage } = require('../../llm-dispatch-metrics');
 
@@ -260,6 +261,10 @@ class AgentDispatcher {
       return {
         ok: false,
         reason: `streaming_failed: ${err.message}`,
+        // Machine-readable exit class (session_stream_eof / session_timeout /
+        // session_error_event) so the runner can decide what is retryable
+        // without parsing the message.
+        code: err.code || 'streaming_failed',
         session_id: sessionId,
         agent_id: route.agent_id,
         partial_draft: partial || null,
@@ -399,7 +404,7 @@ class AgentDispatcher {
   }
 }
 
-// ── SSE streaming helper (mirrors content-agent.js production pattern) ─
+// ── SSE transport and dispatcher deadline ─
 
 // Our own deadline, not the provider's — the ledger files it as a timeout.
 function deadlineError(sessionId, deadline) {
@@ -429,37 +434,11 @@ async function* streamSessionEvents(sessionId, deadline) {
       const errText = res.body ? await res.text() : '';
       throw Object.assign(new Error(`SSE open failed ${res.status}: ${errText.slice(0, 200)}`), { status: res.status, code: `anthropic_${res.status}` });
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let currentEvent = 'message';
-    while (true) {
+    for await (const { event, data: text } of readSessionFrames(res.body)) {
       if (Date.now() >= deadline) throw deadlineError(sessionId, deadline);
-      const { done, value } = await reader.read();
-      if (done) return;
-      buf += decoder.decode(value, { stream: true });
-      // SSE frames are separated by a blank line. The spec allows LF,
-      // CRLF, or bare CR boundaries — only matching \n\n loses frames
-      // on servers that emit \r\n\r\n and the dispatcher times out
-      // with streaming_failed even though events were arriving.
-      const FRAME_SEP = /\r\n\r\n|\n\n|\r\r/;
-      let m;
-      while ((m = FRAME_SEP.exec(buf))) {
-        const frame = buf.slice(0, m.index);
-        buf = buf.slice(m.index + m[0].length);
-        let evName = currentEvent;
-        let dataLines = [];
-        for (const rawLine of frame.split('\n')) {
-          const line = rawLine.replace(/\r$/, '');
-          if (line.startsWith('event:')) evName = line.slice(6).trim();
-          else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
-        }
-        if (dataLines.length === 0) continue;
-        const dataStr = dataLines.join('\n');
-        let data = null;
-        try { data = JSON.parse(dataStr); } catch { data = dataStr; }
-        yield { event: evName, data };
-      }
+      let data;
+      try { data = JSON.parse(text); } catch { data = text; }
+      yield { event, data };
     }
   } catch (err) {
     // The AbortController firing at the deadline rejects reader.read() with

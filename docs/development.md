@@ -116,6 +116,22 @@ external requests remain blocked. Font files, upstream source hashes and license
 live in `client/public/fonts/`; Inter and Roboto use the existing Fontsource
 dependencies. No font download is needed during a build or QA run.
 
+Customer app guide captures also use these standalone entries:
+
+- `/preview-schedule-flow.html`: real reschedule picker, fictional dates and
+  times, with working local search and confirmation. `?flow=reservice` shows
+  the callback flow; `?scenario=collective` shows the later-visit disclosure.
+- `/preview-track.html`: real arrival countdown and contact action.
+  `?state=scheduled`, `?state=on_property`, and `?state=complete` cover the
+  other service-day states. The fixture has no coordinates and shows the
+  real GPS-reconnecting message; maps and live vehicle delivery are not tested.
+
+Both entries are excluded from the production build. Fetches for unknown APIs
+or external origins return a local 404, and the tracker disables Socket.IO
+transport startup in its preview document. `qa:previews` covers both widths,
+the search/reset/select/confirm journey, and tracker completion links. The
+confirmation text shown by the real component is simulated; no message is sent.
+
 Browser previews are fixture-based UI evidence. They do not exercise the backend,
 provider APIs or database and must not be described as full end-to-end QA.
 

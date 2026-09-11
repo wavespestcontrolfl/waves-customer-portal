@@ -9,6 +9,7 @@ import React, {
 import { createPortal } from 'react-dom';
 import useModalFocus from '../../hooks/useModalFocus';
 import { cn } from './cn';
+import { useUiDensity } from './UiSurface';
 
 const DialogTitleContext = createContext(null);
 
@@ -25,16 +26,17 @@ export function Dialog({
   'aria-label': ariaLabel,
 }) {
   const panelRef = useModalFocus(open, onClose);
+  const density = useUiDensity();
   const titleId = useId();
   // aria-labelledby must reference an element that actually exists. Some
   // dialogs (e.g. bare confirmation prompts) render only a DialogBody, so
   // the ID is only wired up once a DialogTitle registers itself — otherwise
   // screen readers announce a dialog with a dangling label reference.
   // Callers without a title can pass an explicit aria-label instead.
-  const [hasTitle, setHasTitle] = useState(false);
-  const registerTitle = useCallback(() => {
-    setHasTitle(true);
-    return () => setHasTitle(false);
+  const [registeredTitleId, setRegisteredTitleId] = useState();
+  const registerTitle = useCallback((id) => {
+    setRegisteredTitleId(id);
+    return () => setRegisteredTitleId((current) => current === id ? undefined : current);
   }, []);
 
   useEffect(() => {
@@ -47,9 +49,9 @@ export function Dialog({
   if (!open) return null;
 
   // `sm` dialogs are short confirmation prompts and stay a centered card at
-  // every width. `md`/`lg` carry real content, so below the `sm` breakpoint
+  // every width. `md`/`lg` carry real content, so below the `md` breakpoint
   // they fill the phone viewport (the same treatment the completion sheet
-  // gets). Only `max-sm:` classes are added for that — the ≥640px classes
+  // gets). Only `max-md:` classes are added for that — the ≥768px classes
   // are unchanged, so a caller's own `className` sizing (e.g. the customer
   // preview's `h-[calc(100dvh-2rem)] max-w-6xl`) still wins on desktop.
   const isCompact = size === 'sm';
@@ -58,11 +60,11 @@ export function Dialog({
   const mobileFullScreenClass = isCompact
     ? ''
     : cn(
-        'max-sm:h-full max-sm:max-w-none max-sm:rounded-none max-sm:box-border',
-        // The overlay's safe-area padding is zeroed below `sm`, so the panel
+        'max-md:h-full max-md:max-w-none max-md:rounded-none max-md:box-border',
+        // The overlay's safe-area padding is zeroed below `md`, so the panel
         // carries the insets itself (all four sides — landscape notches too).
-        'max-sm:pt-[env(safe-area-inset-top)] max-sm:pb-[env(safe-area-inset-bottom)]',
-        'max-sm:pl-[env(safe-area-inset-left)] max-sm:pr-[env(safe-area-inset-right)]',
+        'max-md:pt-[env(safe-area-inset-top)] max-md:pb-[env(safe-area-inset-bottom)]',
+        'max-md:pl-[env(safe-area-inset-left)] max-md:pr-[env(safe-area-inset-right)]',
       );
 
   return createPortal(
@@ -78,13 +80,14 @@ export function Dialog({
         // otherwise it paints beneath the overlay that opened it.
         'fixed inset-0 flex items-center justify-center p-4',
         // `!` beats the inline safe-area padding below; that padding stays for
-        // every card layout (compact dialogs, and content dialogs from `sm` up).
-        !isCompact && 'max-sm:!p-0',
+        // every card layout (compact dialogs, and content dialogs from `md` up).
+        !isCompact && 'max-md:!p-0',
       )}
       role="dialog"
+      data-ui-density={density}
       aria-modal="true"
       aria-label={ariaLabel}
-      aria-labelledby={!ariaLabel && hasTitle ? titleId : undefined}
+      aria-labelledby={!ariaLabel ? registeredTitleId : undefined}
       // The dialog is portaled to <body>, but React still bubbles its
       // synthetic events through the REACT tree — so a click inside it would
       // reach whatever opened it (a row's onClick, an overlay's onClose).
@@ -138,17 +141,19 @@ export function DialogHeader({ className, children, ...rest }) {
   );
 }
 
-export function DialogTitle({ className, children, ...rest }) {
+export function DialogTitle({ id, className, children, ...rest }) {
   const context = useContext(DialogTitleContext);
-  // Tell the parent Dialog a title exists so it can point aria-labelledby
-  // at us; registerTitle returns its own cleanup for unmount.
+  const resolvedId = id || context?.titleId;
+  const registerTitle = context?.registerTitle;
+  // Register the rendered ID, including a caller's custom ID. Depending on
+  // the stable callback avoids rerunning registration on a parent render.
   useEffect(
-    () => (context?.registerTitle ? context.registerTitle() : undefined),
-    [context],
+    () => registerTitle?.(resolvedId),
+    [registerTitle, resolvedId],
   );
   return (
     <h2
-      id={rest.id || context?.titleId}
+      id={resolvedId}
       className={cn('text-18 font-medium tracking-tight text-zinc-900', className)}
       {...rest}
     >

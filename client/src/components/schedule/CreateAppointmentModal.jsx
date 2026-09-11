@@ -1,3 +1,4 @@
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // client/src/components/schedule/CreateAppointmentModal.jsx
 //
 // Modal opened from the SchedulePage / DispatchPageV2 "+ New" CTA.
@@ -34,8 +35,9 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
-import BestTimeHint from './BestTimeHint';
+import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
+import { etDateString } from '../../lib/timezone';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -73,7 +75,8 @@ function adminFetch(path, options = {}) {
   });
 }
 
-const TIER_COLORS = { Platinum: '#E5E4E2', Gold: '#FDD835', Silver: '#90CAF9', Bronze: '#CD7F32', 'One-Time': '#0A7EC2' };
+// Tier chips stay on the file's zinc palette — the label carries the tier, not a metal colour.
+const TIER_COLORS = { Platinum: D.text, Gold: D.text, Silver: D.text, Bronze: D.text, 'One-Time': D.text };
 
 const CATEGORY_LABELS = { recurring: 'Recurring Services', one_time: 'One-Time Treatments', assessment: 'Assessments', pest_control: 'Pest Control', lawn_care: 'Lawn Care', mosquito: 'Mosquito', termite: 'Termite', rodent: 'Rodent', tree_shrub: 'Tree & Shrub', inspection: 'Inspections', specialty: 'Specialty', other: 'Other' };
 
@@ -135,6 +138,19 @@ const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, b
 const labelStyle = { fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, fontWeight: 500, display: 'block', marginBottom: 4 };
 const sectionStyle = { background: D.card, borderRadius: 8, padding: 16, border: `1px solid ${D.border}`, marginBottom: 12 };
 const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
+
+// Second line of a Find-a-Time result: the drive the van makes INTO the
+// stop from the anchor it leaves (home base for the first stop), then what
+// the insertion adds to the route — same wording as the picker hint, so
+// "+57 min" never reads as a drive time. A result without a single
+// insertion leg (arrival-window mode) keeps the detour-only form.
+export function findTimeSlotDetail(slot) {
+  const added = detourPhrase({ detourMinutes: slot.detour_minutes });
+  const driveIn = Math.round(Number(slot.drive_in_minutes));
+  if (slot.drive_in_minutes == null || !Number.isFinite(driveIn) || !slot.insertion) return added;
+  const from = slot.insertion.after_stop_id ? (slot.insertion.after_name || 'the previous stop') : 'home base';
+  return `${driveIn} min drive from ${from} · ${added} · before ${slot.insertion.before}`;
+}
 
 function normalizeHourTime(value, fallback = '09:00') {
   const match = String(value || '').trim().match(/^(\d{1,2})(?::(\d{2}))?/);
@@ -415,6 +431,16 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
 // Multi-property booking helpers (pure — unit-tested).
 // The picker defaults to the customer's PRIMARY property (customers.address_*
 // mirrors it, so this is the address every other reader already assumes).
+// Customer-search dropdown chip: "N properties" for a customer with 2+
+// ACTIVE saved properties (the list endpoint's propertyCount), nothing for
+// 0/1 — a single property is the default and needs no callout. The chip is
+// a heads-up only; which property gets booked is still the picker below.
+export function customerPropertyCountLabel(propertyCount) {
+  const n = Number(propertyCount);
+  if (!Number.isFinite(n) || n < 2) return null;
+  return `${n} properties`;
+}
+
 export function defaultBookingPropertyId(properties = []) {
   const primary = properties.find((p) => p && p.is_primary) || properties[0];
   return primary ? String(primary.id) : '';
@@ -916,6 +942,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // during the awaited re-quote and booked twice; the ref is synchronous.
   const submittingRef = useRef(false);
   const [toast, setToast] = useState('');
+  const [duplicateConflict, setDuplicateConflict] = useState(null);
+  const [separateProgramReason, setSeparateProgramReason] = useState('');
+  const duplicateConflictRef = useRef(null);
+  const submitLockRef = useRef(false);
+  useEffect(() => {
+    if (duplicateConflict) duplicateConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  }, [duplicateConflict]);
+  useEffect(() => {
+    setDuplicateConflict(null);
+    setSeparateProgramReason('');
+  }, [selectedCustomer?.id, selectedPropertyId, services]);
 
   // Per-line helpers. Each entry in `services` carries its own `price`
   // string (so an operator can override goodwill / loyalty pricing on one
@@ -1737,7 +1774,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     // Rank at the CHOSEN property, not the customer's primary.
@@ -1747,10 +1784,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
+    // The picked-hour verdict is priced on ONE technician's route. In Auto
+    // mode the booking's server-side matcher picks its own tech (or leaves
+    // the visit unassigned), and the typed hour has no chip to adopt the
+    // scored one — a cost for a route the booking will not use. Chips stay:
+    // picking one adopts its technician (Codex #4120 r5 P2).
+    pickedStart: techMode === 'choose' && techId ? windowStart : undefined,
+    rangeFrom: etDateString(),
   });
 
   // Submit
-  const handleSubmit = async () => {
+  const submitAppointments = async (separateProgram) => {
     if (!selectedCustomer || services.length === 0 || bookingPropertyState === 'loading') return;
     if (submittingRef.current) return;
     submittingRef.current = true;
@@ -1866,6 +1910,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           && visitsPerYearForCadence(prepayCadenceKey(group.cadence, group.intervalDays)) != null
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
         const body = {
+          ...(separateProgram?.key === key ? {
+            allowDuplicateSeries: true,
+            duplicateSeriesOverride: {
+              reason: separateProgramReason.trim(),
+              existingSeriesIds: separateProgram.existingSeries.map((series) => series.id),
+            },
+          } : {}),
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
           serviceType: primary.name,
@@ -1984,27 +2035,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             (s) => s?.sourceEstimateId != null && String(s.sourceEstimateId) === String(linkedEstimate.id),
           ).length
           : 0;
-        if (ownSeriesCount > 0) {
-          // The guard matches by service FAMILY, so with multiple seasonal
-          // lines the first sibling's series also conflicts with the second
-          // group (codex r26 P1). Recovery skips ONLY when the owned-series
-          // count exceeds this group's position among same-family groups —
-          // that count proves this group's own series exists. When it
-          // doesn't, the duplicate error surfaces with the server's guidance
-          // (extend the series, or intentionally run a second program) —
-          // never an automatic allowDuplicateSeries override, whose
-          // client-side count proof is not atomic and could double-book
-          // under concurrent retries (codex r27 P0). Multiple same-family
-          // seasonal lines on one estimate are not producible by the
-          // estimate builder today, so this conservative surface is the
-          // operator-decides path, not a workflow regression.
-          const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
-          if (ownSeriesCount > familyIndex) {
-            createdGroupKeysRef.current.add(key);
-            continue;
-          }
+        // The guard matches by service FAMILY, so with multiple seasonal
+        // lines the first sibling's series also conflicts with the second
+        // group (codex r26 P1). Recovery skips ONLY when the owned-series
+        // count exceeds this group's position among same-family groups —
+        // that count proves this group's own series exists. When it
+        // doesn't, the duplicate error surfaces with the server's guidance
+        // (extend the series, or intentionally run a second program) —
+        // never an automatic allowDuplicateSeries override, whose
+        // client-side count proof is not atomic and could double-book
+        // under concurrent retries (codex r27 P0). Multiple same-family
+        // seasonal lines on one estimate are not producible by the
+        // estimate builder today, so this conservative surface is the
+        // operator-decides path, not a workflow regression.
+        const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
+        if (ownSeriesCount > familyIndex && separateProgram?.key !== key) {
+          createdGroupKeysRef.current.add(key);
+          continue;
         }
-        firstError = { label: groupLabel(group), message: e.message };
+        if (dupBody) {
+          setDuplicateConflict({ ...dupBody, key, retryUncertain: separateProgram?.key === key });
+          setSeparateProgramReason('');
+        }
+        firstError = { label: groupLabel(group), message: e.message, duplicate: !!dupBody };
         break;
       }
     }
@@ -2018,10 +2071,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const tail = created > 0 ? ' Click Save to retry the rest.' : '';
       // Warnings from groups that DID commit must surface here too: those
       // groups are recorded in createdGroupKeysRef and skipped on retry, so
-      // this partial-failure alert is their only chance to be seen (e.g. an
+      // their persistent notice must survive the retry (e.g. an
       // advisory schedule-overlap note on an already-booked group).
       const committedWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
-      alert(lead + tail + (committedWarnings.length ? `\n\n${committedWarnings.join('\n\n')}` : ''));
+      if (committedWarnings.length) showScheduleSaveNotice(committedWarnings.join('\n\n'));
+      if (firstError.duplicate) setToast(created ? `${created} of ${total} appointment series saved. Review the remaining program below.` : 'Review the existing recurring program below.');
+      else alert(lead + tail);
       return;
     }
     // Annual prepay on a manual booking: mint AFTER the series is committed,
@@ -2115,12 +2170,27 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
     // pending manager approval) books fine but couldn't be auto-accepted — tell
     // the operator so they can record the win from the Estimates page.
-    if (apptWarnings.length) alert(apptWarnings.join('\n\n'));
+    if (apptWarnings.length) showScheduleSaveNotice(`Appointment saved.\n\n${apptWarnings.join('\n\n')}`);
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
       onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
     }, 1200);
+    return true;
+  };
+
+  // Header, footer and second-program CTA share one synchronous lock. React
+  // state alone can admit two taps before the first render marks us saving.
+  const handleSubmit = async (separateProgram) => {
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    let booked = false;
+    try {
+      booked = await submitAppointments(separateProgram);
+    } finally {
+      // A successful booking stays locked until its closing timer runs.
+      submitLockRef.current = booked === true;
+    }
   };
 
   const overlayStyle = {
@@ -2344,7 +2414,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                             {c.address || c.phone || ''}
                           </div>
                         </div>
-                        {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal, flex: '0 0 auto' }}>{c.tier}</span>}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flex: '0 0 auto' }}>
+                          {customerPropertyCountLabel(c.propertyCount) && (
+                            <span style={{ fontSize: 14, lineHeight: '18px', padding: '1px 8px', borderRadius: 6, border: `1px solid ${D.border}`, color: D.muted, whiteSpace: 'nowrap' }}>
+                              {customerPropertyCountLabel(c.propertyCount)}
+                            </span>
+                          )}
+                          {c.tier && <span style={{ fontSize: 11, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal }}>{c.tier}</span>}
+                        </div>
                       </button>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
@@ -2576,7 +2653,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                               background: D.bg,
                               textTransform: 'uppercase',
                               letterSpacing: 0.5,
-                              fontSize: 10,
+                              fontSize: 11,
                             }}>
                               {accepted ? 'Accepted' : 'Not yet accepted'}
                             </span>
@@ -2648,13 +2725,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           fontSize: 12,
                           fontWeight: 500,
                           cursor: 'pointer',
-                          border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
-                          background: active ? '#DCFCE7' : D.bg,
-                          color: active ? '#166534' : D.muted,
+                          border: active ? `1.5px solid ${D.text}` : `1px solid ${D.border}`,
+                          background: active ? D.card : D.bg,
+                          color: active ? D.text : D.muted,
                         });
                         return (
                           <div style={{ marginTop: 10 }}>
-                            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+                            <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
                               Billing on acceptance
                             </div>
                             <div style={{ display: 'flex', gap: 8 }}>
@@ -2766,7 +2843,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
                   </div>
                   {!isMobile && idx === 0 && services.length > 1 && (
-                    <div style={{ fontSize: 10, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
+                    <div style={{ fontSize: 11, color: D.muted, textTransform: 'uppercase', letterSpacing: 0.5, marginTop: 4 }}>Primary</div>
                   )}
                 </div>
 
@@ -3161,16 +3238,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             fontSize: 14,
             fontWeight: 500,
             cursor: 'pointer',
-            border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
-            background: active ? '#DCFCE7' : D.bg,
-            color: active ? '#166534' : D.muted,
+            border: active ? `1.5px solid ${D.text}` : `1px solid ${D.border}`,
+            background: active ? D.card : D.bg,
+            color: active ? D.text : D.muted,
           });
           const prepayLabel = manualPrepayLoading
             ? 'Annual prepay — pricing…'
             : (eligible ? `Annual prepay — invoices ${formatMoney(manualPrepay.prepayTotal)}` : 'Annual prepay');
           return (
             <div style={sectionStyle}>
-              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
                 Billing
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -3249,9 +3326,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         onClick={() => setPrepayMethod(m)}
                         style={{
                           padding: '4px 10px', borderRadius: 6, fontSize: 12, fontWeight: 500,
-                          border: prepayMethod === m ? '1.5px solid #166534' : '1px solid #D4D4D8',
-                          background: prepayMethod === m ? '#DCFCE7' : '#fff',
-                          color: prepayMethod === m ? '#166534' : '#52525B',
+                          border: prepayMethod === m ? `1.5px solid ${D.text}` : '1px solid #D4D4D8',
+                          background: prepayMethod === m ? D.bg : '#fff',
+                          color: prepayMethod === m ? D.text : '#52525B',
                           cursor: 'pointer',
                         }}
                       >
@@ -3324,7 +3401,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {timeSlots.length > 0 && (
                 <>
                 {!timeSlots.some(slot => Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= 15) && (
-                  <div style={{ background: '#EFF6FF', border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
+                  <div style={{ background: D.bg, border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 8, fontSize: 12, color: D.muted }}>
                     No route near this customer that day yet — here's what's close.
                   </div>
                 )}
@@ -3348,7 +3425,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           {fmtSlotDay(slot.date)} · {fmtTime(slot.start_time)} · {slot.technician.name}
                         </div>
                         <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                          +{slot.detour_minutes} min detour · between {slot.insertion.after} and {slot.insertion.before}
+                          {findTimeSlotDetail(slot)}
                         </div>
                       </div>
                       <div style={{ fontSize: 11, color: D.teal, fontWeight: 500 }}>Use →</div>
@@ -3374,16 +3451,59 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </select>
             </div>
           </div>
+          {duplicateConflict && (
+            <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 500 }}>An active program already exists</div>
+              <p>{duplicateConflict.retryUncertain
+                ? 'The program list changed. Your previous save may have completed. Check the existing appointments before starting another program.'
+                : 'Open a program to edit or extend it. Create a separate program only when this customer needs additional recurring work.'}</p>
+              {duplicateConflict.existingSeries?.map((series) => (
+                <div key={series.id} style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+                  <div>{series.serviceType} · {String(series.pattern || 'Recurring').replaceAll('_', ' ')}</div>
+                  <div>Next visit: {series.nextUpcomingDate || 'Not scheduled'}</div>
+                  <div>Recorded address: {series.recordedAddress || 'Not recorded — check the existing appointment'}</div>
+                  <a href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(series.appointmentDate || series.nextUpcomingDate || apptDate)}&appointment=${encodeURIComponent(series.appointmentId || series.id)}`}
+                    target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' }}>Open existing program</a>
+                </div>
+              ))}
+              {duplicateConflict.canCreateSeparateProgram === true && !duplicateConflict.retryUncertain && (
+                <div style={{ marginTop: 12 }}>
+                  <label htmlFor="separate-program-reason">Reason for a separate recurring program</label>
+                  <textarea id="separate-program-reason" value={separateProgramReason} maxLength={500}
+                    onChange={(event) => setSeparateProgramReason(event.target.value)}
+                    placeholder="Describe the additional scope of work"
+                    style={{ display: 'block', boxSizing: 'border-box', width: '100%', margin: '8px 0', padding: 12, fontSize: 14, border: `1px solid ${D.border}`, borderRadius: 6 }} />
+                  <button type="button" disabled={saving || separateProgramReason.trim().length < 5}
+                    onClick={() => handleSubmit(duplicateConflict)}
+                    style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: saving || separateProgramReason.trim().length < 5 ? 0.5 : 1 }}>
+                    Create separate recurring program
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}
+            picked={picked}
+            bestInRange={bestInRange}
             currentStart={windowStart}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentTechnicianId={techMode === 'choose' ? techId : null}
             onPick={(slot) => {
               // Mirror applySlot: the detour was scored for a specific
               // technician, so picking the chip adopts that tech too —
               // leaving auto mode would let assignment land elsewhere and
               // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            onPickDate={(slot) => {
+              setApptDate(slot.date);
               setWindowStart(slot.start);
               if (slot.technicianId) {
                 setTechMode('choose');
