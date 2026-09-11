@@ -136,12 +136,16 @@ html[data-glass-theme] [data-gt="eyebrow"] {
 /* Numbers read on the same scale as the headings they sit under (owner ruling
    C4, DECISIONS 2026-09-11). Pages had authored 17, 19, 22, 24, 28, 34, 50 and
    64px metrics against a role that set weight and figures but never a size.
-   The role now carries the size, and the sizes are the type scale already in
-   this sheet — h3 20, h2 26, h1 32/40 — so a metric never introduces a step
-   that no heading uses. `md` is the default because it matches h2, the card
-   heading most metrics sit beneath. */
+   The sizes below are the type scale already in this sheet — h3 20, h2 26,
+   h1 32/40 — so a metric never introduces a step that no heading uses.
+   The BASE role deliberately stays size-neutral. A default here would be
+   `!important` over every caller that has not migrated yet, and the legacy
+   estimate walker already tags prices `data-gt="metric"`: the fallback
+   one-time price would drop 34 → 26 and the recurring price would lose its
+   responsive 24–40 clamp the moment this shipped. Moving those callers onto
+   `data-gt-size` is R4; until then an untagged metric renders as it does on
+   main. */
 html[data-glass-theme] [data-gt="metric"] {
-  font-size: 26px !important;
   font-weight: 700 !important;
   letter-spacing: -0.035em !important;
   line-height: 1 !important;
@@ -488,7 +492,13 @@ html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius:
    One floor for chips and CTAs alike makes that exception unnecessary. */
 html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
 html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 44px !important; }
-html[data-glass-theme] :is(button, a)[data-glass-size="primary"] { min-height: 48px !important; }
+/* `.btn-primary` is listed because the older shared `components/Button.jsx`
+   primitive still renders the primary action on /book, RatePage and
+   ReviewPage. It passes `data-glass-accent` without the size tag, so the 44px
+   accent rule above — being `!important` — beat its own non-important 48px
+   minimum and left those document actions at 44 despite C3. */
+html[data-glass-theme] :is(button, a)[data-glass-size="primary"],
+html[data-glass-theme] :is(button, a)[data-glass-accent].btn-primary { min-height: 48px !important; }
 /* Placeholders read as hints, never as entered values (owner 2026-09-06,
    customer feedback): italic, slate-500 (#64748B, 4.8:1 on white — WCAG AA for
    14px text; a lighter grey fell to 2.6:1). This is the
@@ -634,8 +644,23 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass-accent],
   /* The estimate page builds its cards from `.gc-*` classes rather than the
      `data-glass` attributes, so forced colours left it rendering glass over
-     the user's own palette (G-10). */
-  html[data-glass-theme] [class*="gc-"] {
+     the user's own palette (G-10). Enumerated rather than `[class*="gc-"]`:
+     that substring match also catches text and layout helpers
+     (`.gc-proof-item`, `.gc-gr-name`, `.gc-phone-cam`), and giving each of
+     those a Canvas background and a border turns the page into nested boxes.
+     These are the `.gc-*` rules that actually paint a translucent or blurred
+     material — grep `glass-components.css` for backdrop-filter / rgba
+     backgrounds if the set changes. */
+  html[data-glass-theme] .gc-av-glow,
+  html[data-glass-theme] .gc-freq-btn,
+  html[data-glass-theme] .gc-mbb,
+  html[data-glass-theme] .gc-mbb-btn,
+  html[data-glass-theme] .gc-proof,
+  html[data-glass-theme] .gc-scarcity,
+  html[data-glass-theme] .gc-section-cta,
+  html[data-glass-theme] .gc-slot-priority,
+  html[data-glass-theme] .gc-slot-rain,
+  html[data-glass-theme] .gc-tech-chip {
     background: Canvas !important;
     color: CanvasText !important;
     border: 1px solid CanvasText !important;

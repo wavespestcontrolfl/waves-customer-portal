@@ -421,7 +421,7 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     .dm-page { background: #071F30 !important; background-image: none !important; }
     .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
     .dm-card a { color: #6CC1F0 !important; }
-    .dm-card a.dm-gold, a.dm-gold { color: #1B2C5B !important; }
+    .dm-card a.dm-gold, a.dm-gold { color: #04395E !important; }
     .dm-card a.dm-onnavy, a.dm-onnavy { color: #FFFFFF !important; }
     .dm-box span.dm-chip-lite { color: #04395E !important; }
     .dm-lightcard { background: #FFFFFF !important; }
@@ -443,7 +443,7 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
   [data-ogsc] .dm-card, [data-ogsb] .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
   [data-ogsc] .dm-card a { color: #6CC1F0 !important; }
-  [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #1B2C5B !important; }
+  [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #04395E !important; }
   [data-ogsc] .dm-card a.dm-onnavy, [data-ogsc] a.dm-onnavy { color: #FFFFFF !important; }
   [data-ogsc] .dm-box span.dm-chip-lite { color: #04395E !important; }
   [data-ogsc] .dm-lightcard, [data-ogsb] .dm-lightcard { background: #FFFFFF !important; }
