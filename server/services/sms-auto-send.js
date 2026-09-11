@@ -64,7 +64,8 @@ const FAILED_STATUS = 'auto_send_failed';
 // claim still holds while recent, but past this window fails like any other
 // orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
 // drafting rather than staying invisibly stuck.
-const UNCERTAIN_CLAIM_HOLD_HOURS = 24;
+// One source of truth with the readers' hide window (review-ask-reservation).
+const { REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS } = require('./messaging/review-ask-reservation');
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 

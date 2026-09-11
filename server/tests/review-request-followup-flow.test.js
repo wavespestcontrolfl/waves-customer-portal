@@ -252,6 +252,7 @@ describe('review request follow-up flow', () => {
       chain({ first: jest.fn().mockResolvedValue(null) }),
       chain(), // durable pre-provider reservation
       updateQuery,
+      updateQuery, // the reopen after the definite not-sent
     ];
     const customerQuery = chain({
       first: jest.fn().mockResolvedValue({

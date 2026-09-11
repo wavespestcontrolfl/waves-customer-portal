@@ -18,7 +18,8 @@ db.schema = { hasTable: async () => true };
 
 const {
   isUnresolvedReviewAskReservation,
-  excludeUnresolvedReviewAskReservations,
+  isUnresolvedSendReservation,
+  excludeUnresolvedSendReservations,
 } = require('../services/messaging/review-ask-reservation');
 const ContextAggregator = require('../services/context-aggregator');
 const customerHealth = require('../services/customer-health');
@@ -35,9 +36,18 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
     }
   });
 
-  test('a Communications reply reservation (manual_send_reservation) is the same kind of placeholder', () => {
-    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { manual_send_reservation: true } })).toBe(true);
-    expect(isUnresolvedReviewAskReservation({ status: 'sent', metadata: { manual_send_reservation: true } })).toBe(false);
+  test('a reply reservation is NOT review-ask spacing evidence, but IS a placeholder general readers hide — while its hold runs', () => {
+    const fresh = new Date(Date.now() - 3600000);
+    const stale = new Date(Date.now() - 25 * 3600000);
+    for (const marker of ['manual_send_reservation', 'auto_send_reservation']) {
+      expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { [marker]: true }, created_at: fresh })).toBe(false);
+      expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: fresh })).toBe(true);
+      expect(isUnresolvedSendReservation({ status: 'sent', metadata: { [marker]: true }, created_at: fresh })).toBe(false);
+      // Past the reconciliation hold it SURFACES as the unresolved attempt it is.
+      expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: stale })).toBe(false);
+    }
+    // A review-ask reservation is hidden for as long as it is unresolved.
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: stale })).toBe(true);
   });
 
   test('false for an ordinary sending row without the marker', () => {
@@ -51,18 +61,20 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
   });
 });
 
-describe('excludeUnresolvedReviewAskReservations — SQL-level exclusion', () => {
+describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
   test('compiles a NOT(status=sending AND marker) filter against the bare table', () => {
     const knex = require('knex')({ client: 'pg' });
-    const { sql } = excludeUnresolvedReviewAskReservations(knex('sms_log')).toSQL();
+    const { sql } = excludeUnresolvedSendReservations(knex('sms_log')).toSQL();
     expect(sql).toContain("NOT (sms_log.status = 'sending'");
     expect(sql).toContain("sms_log.metadata->>'review_ask_reservation'");
     expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
+    expect(sql).toContain("sms_log.metadata->>'auto_send_reservation'");
+    expect(sql).toContain("sms_log.created_at >= NOW() - INTERVAL '24 hours'");
   });
 
   test('qualifies an aliased/joined table when given', () => {
     const knex = require('knex')({ client: 'pg' });
-    const { sql } = excludeUnresolvedReviewAskReservations(knex('sms_log as reply'), 'reply').toSQL();
+    const { sql } = excludeUnresolvedSendReservations(knex('sms_log as reply'), 'reply').toSQL();
     expect(sql).toContain("NOT (reply.status = 'sending'");
   });
 });
@@ -104,7 +116,7 @@ function makeSmsLogQuery(rows, { customerIdFromObject = true } = {}) {
     limit(n) { limitN = n; return q; },
     then(resolve, reject) {
       let out = rows.filter((r) => customerId === undefined || r.customer_id === customerId);
-      if (excludeReservations) out = out.filter((r) => !isUnresolvedReviewAskReservation(r));
+      if (excludeReservations) out = out.filter((r) => !isUnresolvedSendReservation(r));
       if (order) {
         const [col, dir] = order;
         out = [...out].sort((a, b) => {
@@ -241,7 +253,7 @@ function makeGeneralSmsLogQuery(rows) {
   };
   const resolved = () => {
     let out = filtered;
-    if (excludeReservations) out = out.filter((r) => !isUnresolvedReviewAskReservation(r));
+    if (excludeReservations) out = out.filter((r) => !isUnresolvedSendReservation(r));
     if (order) {
       const [col, dir] = order;
       out = [...out].sort((a, b) => {
@@ -299,9 +311,9 @@ describe('signal-detector NO_RESPONSE_MULTIPLE — outbound count excludes only 
 
 describe('admin-communications ai-draft context — excludes only the unresolved reservation', () => {
   // Route handlers aren't easily invoked in isolation here; this exercises
-  // the same excludeUnresolvedReviewAskReservations + limit(5) composition
+  // the same excludeUnresolvedSendReservations + limit(5) composition
   // ai-draft applies to its recent-SMS-for-context query, the same
-  // SQL-level guarantee proven for excludeUnresolvedReviewAskReservations
+  // SQL-level guarantee proven for excludeUnresolvedSendReservations
   // above (bounded window can't be displaced by an unresolved reservation).
   test('a reservation newer than the last 5 real messages cannot occupy a context slot', async () => {
     const real = Array.from({ length: 5 }, (_, i) => ({
@@ -321,7 +333,7 @@ describe('admin-communications ai-draft context — excludes only the unresolved
     // — where(...).orderBy(...).limit(5) — filters the reservation out at
     // the SQL level before the LIMIT, then apply that same WHERE/ORDER/LIMIT
     // in-memory against the fixture to assert the resulting row set.
-    const { sql } = excludeUnresolvedReviewAskReservations(
+    const { sql } = excludeUnresolvedSendReservations(
       knex('sms_log').where(function () {
         this.where('from_phone', 'like', '%5551234').orWhere('to_phone', 'like', '%5551234');
       }),
@@ -351,7 +363,7 @@ describe('csr-coach verifyFollowUps — an unresolved reservation is not proof s
         whereRaw(sql) { if (/review_ask_reservation/.test(sql)) excludeReservations = true; return q; },
         async first() {
           let out = rows.filter((r) => r.customer_id === customerId && r.direction === 'outbound');
-          if (excludeReservations) out = out.filter((r) => !isUnresolvedReviewAskReservation(r));
+          if (excludeReservations) out = out.filter((r) => !isUnresolvedSendReservation(r));
           return out[0] ?? null;
         },
       };
