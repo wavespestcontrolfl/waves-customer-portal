@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  appointmentGroupRequestBody,
   assertManualPrepayMintEligible,
   bookableProperties,
-  bookingLogisticsFields,
   bookingPropertyTarget,
-  boosterMonthsForGroup,
   buildFindTimeRequestBody,
   canSubmitAppointments,
   classifyManualPrepayMintOutcome,
@@ -13,27 +12,23 @@ import {
   customerPropertyCountLabel,
   decideAnnualPrepayAttachment,
   defaultBookingPropertyId,
-  duplicateProgramOverrideFields,
   ESTIMATE_SOURCE_LABEL,
   filterScheduleEstimatesForProperty,
   findScheduleEstimateById,
   firstGroupSendFlags,
   isBookableProperty,
+  lineDiscountFields,
   matchesPrepayTarget,
   formatScheduleEstimateAmount,
-  mosquitoQuotePendingOutcome,
-  mosquitoRevalidationOutcome,
   mosquitoSubmitGate,
   MANUAL_SERVICE_ENTRY_LABEL,
   pickAutoScheduleEstimate,
-  prepaidFields,
-  primaryLineRequestFields,
+  plannedRecurringCount,
   quickAddConfirmFlags,
   quickAddConflictFromError,
-  recurringScheduleFields,
+  recurringGroupRequestFields,
   shouldMintManualPrepay,
   submitFailureNotice,
-  technicianAssignmentFields,
 } from './CreateAppointmentModal.jsx';
 
 describe('CreateAppointmentModal won estimate helpers', () => {
@@ -276,40 +271,6 @@ describe('canSubmitAppointments', () => {
   });
 });
 
-describe('mosquitoQuotePendingOutcome', () => {
-  it('clears the cached quote and blames the failed fetch on error status', () => {
-    expect(mosquitoQuotePendingOutcome({ status: 'error' })).toEqual({
-      clearQuote: true,
-      message: 'Mosquito price quote failed — retrying; submit again in a moment or enter a price',
-    });
-  });
-
-  it('asks the operator to wait while a quote is still resolving', () => {
-    expect(mosquitoQuotePendingOutcome({ status: 'loading' })).toEqual({
-      clearQuote: false,
-      message: 'Fetching the lot-based mosquito price — try again in a moment or enter a price',
-    });
-    expect(mosquitoQuotePendingOutcome(null)).toMatchObject({ clearQuote: false });
-  });
-});
-
-describe('mosquitoRevalidationOutcome', () => {
-  it('flags a changed price and carries the fresh numeric value', () => {
-    expect(mosquitoRevalidationOutcome({ price: 42 }, { price: 30 })).toEqual({ changed: true, freshPrice: 42 });
-  });
-
-  it('reports unchanged when the fresh price matches the cached one', () => {
-    expect(mosquitoRevalidationOutcome({ price: 30 }, { price: 30 })).toEqual({ changed: false, freshPrice: 30 });
-  });
-
-  it('treats a missing fresh price as null, never NaN or 0', () => {
-    expect(mosquitoRevalidationOutcome({}, { price: 30 })).toEqual({ changed: true, freshPrice: null });
-    // Both sides null-ish: freshPrice resolves to null, the cached side to
-    // undefined (no quote object at all) — a strict !== still reads that as
-    // changed, same as the original inline comparison.
-    expect(mosquitoRevalidationOutcome(null, null)).toEqual({ changed: true, freshPrice: null });
-  });
-
 describe('mosquitoSubmitGate', () => {
   const base = { mosquitoQuote: { status: 'ready', price: 89 }, customerId: 'c-1' };
   it('holds a submit while the quote is still resolving, clearing only a failed quote', async () => {
@@ -336,11 +297,17 @@ describe('mosquitoSubmitGate', () => {
     expect(await mosquitoSubmitGate({ ...base, quotePending: false, needsRevalidation: true, fetchQuote: async () => ({}) }))
       .toMatchObject({ refresh: true, price: null });
   });
+  it('treats a missing fresh price as null, never NaN or 0, so a missing price still reads as changed', async () => {
+    // Both sides null-ish: freshPrice resolves to null, the cached side to
+    // undefined (no quote object at all) — a strict !== still reads that as
+    // changed, same as the pre-fold inline comparison.
+    expect(await mosquitoSubmitGate({ quotePending: false, needsRevalidation: true, mosquitoQuote: null, customerId: 'c-1', fetchQuote: async () => ({}) }))
+      .toMatchObject({ refresh: true, price: null });
+  });
   it('clears the cached quote and holds when the re-verification fetch fails', async () => {
     expect(await mosquitoSubmitGate({ ...base, quotePending: false, needsRevalidation: true, fetchQuote: async () => { throw new Error('offline'); } }))
       .toMatchObject({ clearQuote: true, refresh: false, holdMs: 3200, message: /Could not re-verify/ });
   });
-});
 });
 
 describe('classifySubmitGroupFailure', () => {
@@ -407,81 +374,93 @@ describe('classifySubmitGroupFailure', () => {
   });
 });
 
-describe('duplicateProgramOverrideFields', () => {
-  it('carries the override only for the matching group key', () => {
-    const separateProgram = { key: 'quarterly', existingSeries: [{ id: 's1' }, { id: 's2' }] };
-    expect(duplicateProgramOverrideFields(separateProgram, 'quarterly', '  second program, different address  ')).toEqual({
-      allowDuplicateSeries: true,
-      duplicateSeriesOverride: { reason: 'second program, different address', existingSeriesIds: ['s1', 's2'] },
+describe('lineDiscountFields', () => {
+  it('shapes the 5-key discount block from a discount object', () => {
+    expect(lineDiscountFields({ id: 'd1', name: '10% off', discount_type: 'percent', amount: 10 }, 4)).toEqual({
+      discountId: 'd1', discountName: '10% off', discountType: 'percent', discountAmount: 10, discountDollars: 4,
     });
-    expect(duplicateProgramOverrideFields(separateProgram, 'monthly', 'x')).toEqual({});
-    expect(duplicateProgramOverrideFields(null, 'quarterly', 'x')).toEqual({});
+  });
+
+  it('defaults every key to null with no discount attached, independent of the dollars argument', () => {
+    expect(lineDiscountFields(null, 0)).toEqual({ discountId: null, discountName: null, discountType: null, discountAmount: null, discountDollars: null });
+    expect(lineDiscountFields(undefined, 5)).toEqual({ discountId: null, discountName: null, discountType: null, discountAmount: null, discountDollars: 5 });
   });
 });
 
-describe('primaryLineRequestFields', () => {
-  it('sends a blank-priced auto-mosquito primary as null regardless of groupHasPrice', () => {
-    expect(primaryLineRequestFields({
-      primaryId: 5, primaryIsBlankAutoMosquito: true, groupHasPrice: true, primaryBasePrice: 40, primaryDiscount: null, primaryDiscountDollars: 0,
-    })).toMatchObject({ serviceId: 5, primaryLinePrice: null });
+describe('appointmentGroupRequestBody', () => {
+  const base = {
+    separateProgram: null, key: 'quarterly', separateProgramReason: '',
+    customerId: 'cust-1', scheduledDate: '2026-09-14',
+    primaryId: 5, primaryName: 'Quarterly Pest',
+    primaryIsBlankAutoMosquito: false, groupHasPrice: true, primaryBasePrice: 40,
+    primaryDiscount: null, primaryDiscountDollars: 0,
+    serviceAddons: [], windowStart: '09:00', windowEnd: '10:00',
+    techMode: 'auto', techId: null,
+    groupSubtotal: 40, groupDuration: 45, linkedEstimate: { id: 'est-1' },
+    propertyPickerActive: true, selectedPropertyId: 'p-2',
+    customerNotes: 'gate code 1234', internalNotes: 'watch the dog',
+  };
+
+  it('assembles the full non-recurring body: id/price/discount, technician, logistics, and the static flags', () => {
+    expect(appointmentGroupRequestBody({
+      ...base,
+      primaryDiscount: { id: 'd1', name: '10% off', discount_type: 'percent', amount: 10 },
+      primaryDiscountDollars: 4,
+      serviceAddons: [{ serviceId: 's2', name: 'Rodent add-on' }],
+      techMode: 'choose', techId: 'tech-9',
+    })).toEqual({
+      customerId: 'cust-1',
+      scheduledDate: '2026-09-14',
+      serviceType: 'Quarterly Pest',
+      serviceId: 5,
+      primaryLinePrice: 40,
+      primaryLineDiscount: { discountId: 'd1', discountName: '10% off', discountType: 'percent', discountAmount: 10, discountDollars: 4 },
+      serviceAddons: [{ serviceId: 's2', name: 'Rodent add-on' }],
+      windowStart: '09:00',
+      windowEnd: '10:00',
+      assignmentMode: 'choose',
+      technicianId: 'tech-9',
+      estimatedPrice: 40,
+      estimatedDuration: 45,
+      sourceEstimateId: 'est-1',
+      propertyId: 'p-2',
+      notes: 'gate code 1234',
+      internalNotes: 'watch the dog',
+      urgency: 'routine',
+      createInvoice: true,
+    });
+  });
+
+  it('sends a blank-priced auto-mosquito primary as null regardless of groupHasPrice, with no discount block', () => {
+    expect(appointmentGroupRequestBody({ ...base, primaryIsBlankAutoMosquito: true })).toMatchObject({ serviceId: 5, primaryLinePrice: null });
+    expect(appointmentGroupRequestBody(base).primaryLineDiscount).toBeUndefined();
   });
 
   it('sends null price when the group carries no price at all', () => {
-    expect(primaryLineRequestFields({
-      primaryId: 5, primaryIsBlankAutoMosquito: false, groupHasPrice: false, primaryBasePrice: 40, primaryDiscount: null, primaryDiscountDollars: 0,
-    })).toMatchObject({ primaryLinePrice: null });
+    expect(appointmentGroupRequestBody({ ...base, groupHasPrice: false })).toMatchObject({ primaryLinePrice: null, estimatedPrice: null });
   });
 
-  it('sends the base price when the group has a price and the line is not blank auto-mosquito', () => {
-    expect(primaryLineRequestFields({
-      primaryId: 5, primaryIsBlankAutoMosquito: false, groupHasPrice: true, primaryBasePrice: 40, primaryDiscount: null, primaryDiscountDollars: 0,
-    })).toMatchObject({ primaryLinePrice: 40 });
-  });
-
-  it('shapes the discount block only when a discount is attached', () => {
-    expect(primaryLineRequestFields({
-      primaryId: 5, primaryIsBlankAutoMosquito: false, groupHasPrice: true, primaryBasePrice: 40,
-      primaryDiscount: { id: 'd1', name: '10% off', discount_type: 'percent', amount: 10 }, primaryDiscountDollars: 4,
-    }).primaryLineDiscount).toEqual({ discountId: 'd1', discountName: '10% off', discountType: 'percent', discountAmount: 10, discountDollars: 4 });
-    expect(primaryLineRequestFields({
-      primaryId: 5, primaryIsBlankAutoMosquito: false, groupHasPrice: true, primaryBasePrice: 40, primaryDiscount: null, primaryDiscountDollars: 0,
-    }).primaryLineDiscount).toBeUndefined();
-  });
-});
-
-describe('technicianAssignmentFields', () => {
-  it('sends the chosen tech only in choose mode', () => {
-    expect(technicianAssignmentFields('choose', 'tech-9')).toEqual({ assignmentMode: 'choose', technicianId: 'tech-9' });
-    expect(technicianAssignmentFields('auto', 'tech-9')).toEqual({ assignmentMode: 'auto', technicianId: undefined });
-  });
-});
-
-describe('bookingLogisticsFields', () => {
-  it('sends null estimated price when the group has none, and omits duration/property when absent', () => {
-    expect(bookingLogisticsFields({
-      groupHasPrice: false, groupSubtotal: 0, groupDuration: 0, linkedEstimate: null,
+  it('omits duration/estimate-link/property/notes when absent, and never sends propertyId with an inactive picker', () => {
+    expect(appointmentGroupRequestBody({
+      ...base, groupHasPrice: false, groupSubtotal: 0, groupDuration: 0, linkedEstimate: null,
       propertyPickerActive: false, selectedPropertyId: '', customerNotes: '', internalNotes: '',
-    })).toEqual({
-      estimatedPrice: null, estimatedDuration: undefined, sourceEstimateId: undefined,
+    })).toMatchObject({
+      estimatedDuration: undefined, sourceEstimateId: undefined,
       propertyId: undefined, notes: undefined, internalNotes: undefined,
     });
+    expect(appointmentGroupRequestBody({ ...base, propertyPickerActive: false }).propertyId).toBeUndefined();
   });
 
-  it('sends the subtotal, duration, linked estimate id and chosen property when present', () => {
-    expect(bookingLogisticsFields({
-      groupHasPrice: true, groupSubtotal: 199, groupDuration: 45, linkedEstimate: { id: 'est-1' },
-      propertyPickerActive: true, selectedPropertyId: 'p-2', customerNotes: 'gate code 1234', internalNotes: 'watch the dog',
-    })).toEqual({
-      estimatedPrice: 199, estimatedDuration: 45, sourceEstimateId: 'est-1',
-      propertyId: 'p-2', notes: 'gate code 1234', internalNotes: 'watch the dog',
+  it('carries the manual "separate program" override only for the matching group key', () => {
+    const separateProgram = { key: 'quarterly', existingSeries: [{ id: 's1' }, { id: 's2' }] };
+    expect(appointmentGroupRequestBody({
+      ...base, separateProgram, separateProgramReason: '  second program, different address  ',
+    })).toMatchObject({
+      allowDuplicateSeries: true,
+      duplicateSeriesOverride: { reason: 'second program, different address', existingSeriesIds: ['s1', 's2'] },
     });
-  });
-
-  it('never sends propertyId when the picker is inactive, even with a selected id', () => {
-    expect(bookingLogisticsFields({
-      groupHasPrice: true, groupSubtotal: 1, groupDuration: 1, linkedEstimate: null,
-      propertyPickerActive: false, selectedPropertyId: 'p-2', customerNotes: '', internalNotes: '',
-    }).propertyId).toBeUndefined();
+    expect(appointmentGroupRequestBody({ ...base, separateProgram, key: 'monthly' })).not.toHaveProperty('allowDuplicateSeries');
+    expect(appointmentGroupRequestBody({ ...base, separateProgram: null })).not.toHaveProperty('allowDuplicateSeries');
   });
 });
 
@@ -507,71 +486,79 @@ describe('firstGroupSendFlags', () => {
   });
 });
 
-describe('recurringScheduleFields', () => {
-  it('sends everything undefined for a one-time group', () => {
-    expect(recurringScheduleFields({ isRecurring: false, group: { cadence: 'one_time' }, recurringCount: '4', skipWeekends: true, weekendShift: 'back' }))
-      .toEqual({
-        recurringPattern: undefined, recurringCount: undefined, recurringOngoing: undefined,
-        recurringIntervalDays: undefined, recurringNth: undefined, recurringWeekday: undefined,
-        skipWeekends: undefined, weekendShift: undefined,
-      });
+describe('plannedRecurringCount', () => {
+  it('parses a finite integer >= 2', () => {
+    expect(plannedRecurringCount('6')).toBe(6);
+    expect(plannedRecurringCount(8)).toBe(8);
   });
 
-  it('leaves recurringCount undefined (ongoing) when the operator typed nothing usable', () => {
-    const fields = recurringScheduleFields({ isRecurring: true, group: { cadence: 'quarterly' }, recurringCount: '', skipWeekends: false, weekendShift: 'forward' });
-    expect(fields).toMatchObject({ recurringPattern: 'quarterly', recurringCount: undefined, recurringOngoing: true });
-  });
-
-  it('sends a finite recurringCount only when the operator typed >= 2', () => {
-    expect(recurringScheduleFields({ isRecurring: true, group: { cadence: 'quarterly' }, recurringCount: '6', skipWeekends: false, weekendShift: 'forward' }))
-      .toMatchObject({ recurringCount: 6, recurringOngoing: false });
-    expect(recurringScheduleFields({ isRecurring: true, group: { cadence: 'quarterly' }, recurringCount: '1', skipWeekends: false, weekendShift: 'forward' }))
-      .toMatchObject({ recurringCount: undefined, recurringOngoing: true });
-  });
-
-  it('sends the custom interval / nth-weekday config only for the matching cadence', () => {
-    expect(recurringScheduleFields({ isRecurring: true, group: { cadence: 'custom', intervalDays: 42 }, recurringCount: '', skipWeekends: false, weekendShift: 'forward' }))
-      .toMatchObject({ recurringIntervalDays: 42, recurringNth: undefined, recurringWeekday: undefined });
-    expect(recurringScheduleFields({ isRecurring: true, group: { cadence: 'monthly_nth_weekday', nth: 3, weekday: 2 }, recurringCount: '', skipWeekends: false, weekendShift: 'forward' }))
-      .toMatchObject({ recurringNth: 3, recurringWeekday: 2, recurringIntervalDays: undefined });
-  });
-
-  it('sends weekendShift only when skipWeekends is on', () => {
-    expect(recurringScheduleFields({ isRecurring: true, group: { cadence: 'weekly' }, recurringCount: '', skipWeekends: true, weekendShift: 'back' }))
-      .toMatchObject({ skipWeekends: true, weekendShift: 'back' });
-    expect(recurringScheduleFields({ isRecurring: true, group: { cadence: 'weekly' }, recurringCount: '', skipWeekends: false, weekendShift: 'back' }))
-      .toMatchObject({ skipWeekends: false, weekendShift: undefined });
+  it('is null for anything under 2, blank, or unparsable', () => {
+    expect(plannedRecurringCount('1')).toBeNull();
+    expect(plannedRecurringCount('')).toBeNull();
+    expect(plannedRecurringCount('abc')).toBeNull();
+    expect(plannedRecurringCount(undefined)).toBeNull();
   });
 });
 
-describe('boosterMonthsForGroup', () => {
-  it('is undefined for a one-time group even with booster months on a line', () => {
-    expect(boosterMonthsForGroup({ lines: [{ boosterMonths: [3, 6] }] }, false)).toBeUndefined();
+describe('recurringGroupRequestFields', () => {
+  const base = {
+    isRecurring: true, group: { cadence: 'quarterly', lines: [{}] }, recurringCount: '',
+    skipWeekends: false, weekendShift: 'forward',
+    collectPrepay: false, groupSubtotal: 100, prepayMethod: 'cash', prepayNote: '',
+  };
+
+  it('sends only boosterMonths/prepaid, both undefined, for a one-time group', () => {
+    expect(recurringGroupRequestFields({ ...base, isRecurring: false })).toEqual({ boosterMonths: undefined, prepaid: undefined });
   });
 
-  it('unions and sorts booster months across every line, dropping out-of-range picks', () => {
-    expect(boosterMonthsForGroup({ lines: [{ boosterMonths: [6, 13] }, { boosterMonths: [3, 6, 0] }] }, true)).toEqual([3, 6]);
+  it('assembles the full recurring body: a finite count, unioned boosters, and a collected prepay', () => {
+    expect(recurringGroupRequestFields({
+      ...base,
+      group: { cadence: 'quarterly', lines: [{ boosterMonths: [6, 13] }, { boosterMonths: [3, 6, 0] }] },
+      recurringCount: '6', skipWeekends: true, weekendShift: 'back',
+      collectPrepay: true, prepayMethod: 'check', prepayNote: 'ck #204',
+    })).toEqual({
+      recurringPattern: 'quarterly',
+      recurringCount: 6,
+      recurringOngoing: false,
+      recurringIntervalDays: undefined,
+      recurringNth: undefined,
+      recurringWeekday: undefined,
+      skipWeekends: true,
+      weekendShift: 'back',
+      boosterMonths: [3, 6],
+      prepaid: { totalAmount: 600, method: 'check', note: 'ck #204' },
+    });
   });
 
-  it('is undefined (not an empty array) when no line carries a booster month', () => {
-    expect(boosterMonthsForGroup({ lines: [{}, { boosterMonths: [] }] }, true)).toBeUndefined();
+  it('assembles a recurring-ongoing body with a custom interval, no boosters, weekendShift only when skipWeekends is on', () => {
+    expect(recurringGroupRequestFields({ ...base, group: { cadence: 'custom', intervalDays: 42, lines: [{}] } })).toEqual({
+      recurringPattern: 'custom',
+      recurringCount: undefined,
+      recurringOngoing: true,
+      recurringIntervalDays: 42,
+      recurringNth: undefined,
+      recurringWeekday: undefined,
+      skipWeekends: false,
+      weekendShift: undefined,
+      boosterMonths: undefined,
+      prepaid: undefined,
+    });
   });
-});
 
-describe('prepaidFields', () => {
-  it('is undefined unless both collectPrepay and isRecurring are true', () => {
-    expect(prepaidFields({ collectPrepay: false, isRecurring: true, recurringCount: '4', groupSubtotal: 100, prepayMethod: 'cash', prepayNote: '' })).toEqual({ prepaid: undefined });
-    expect(prepaidFields({ collectPrepay: true, isRecurring: false, recurringCount: '4', groupSubtotal: 100, prepayMethod: 'cash', prepayNote: '' })).toEqual({ prepaid: undefined });
+  it('sends nth-weekday config only for that cadence, and falls back to the 4-visit prepay default when the typed count is unusable', () => {
+    expect(recurringGroupRequestFields({
+      ...base, group: { cadence: 'monthly_nth_weekday', nth: 3, weekday: 2, lines: [{}] },
+      recurringCount: '1', collectPrepay: true,
+    })).toMatchObject({
+      recurringNth: 3, recurringWeekday: 2, recurringIntervalDays: undefined,
+      recurringCount: undefined, recurringOngoing: true,
+      prepaid: { totalAmount: 400, method: 'cash', note: undefined },
+    });
   });
 
-  it('projects the subtotal across the finite typed count when >= 2', () => {
-    expect(prepaidFields({ collectPrepay: true, isRecurring: true, recurringCount: '6', groupSubtotal: 100, prepayMethod: 'check', prepayNote: 'ck #204' }))
-      .toEqual({ prepaid: { totalAmount: 600, method: 'check', note: 'ck #204' } });
-  });
-
-  it('falls back to the 4-visit default when the count is not a usable finite number', () => {
-    expect(prepaidFields({ collectPrepay: true, isRecurring: true, recurringCount: '', groupSubtotal: 100, prepayMethod: 'cash', prepayNote: '' }))
-      .toEqual({ prepaid: { totalAmount: 400, method: 'cash', note: undefined } });
+  it('is undefined (not an empty array) for boosterMonths when no line carries one', () => {
+    expect(recurringGroupRequestFields({ ...base, group: { cadence: 'quarterly', lines: [{}, { boosterMonths: [] }] } }).boosterMonths).toBeUndefined();
   });
 });
 

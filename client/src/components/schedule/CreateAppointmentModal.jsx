@@ -528,10 +528,11 @@ export function buildFindTimeRequestBody({
 
 // ---------------------------------------------------------------------------
 // submitAppointments helpers (structural lint follow-up — eslint `complexity`
-// max 20; see AGENTS.md ~L396-400). Each helper below computes one payload
-// section or one decision from plain inputs; submitAppointments composes
-// them. No behavior change — every branch here is a relocation of an
-// existing one, not a new decision.
+// max 20; see AGENTS.md ~L396-400). Pure request-body assembly and outcome
+// classification, separated from the orchestration in submitAppointments. A
+// decision the pre-split code repeated at two call sites (a discount's
+// 5-key shape, parsing a typed recurring count) is now made once, below,
+// and both call sites use it.
 // ---------------------------------------------------------------------------
 
 // Preconditions for submitAppointments: a picked customer and services, the
@@ -541,24 +542,6 @@ export function buildFindTimeRequestBody({
 export function canSubmitAppointments({ selectedCustomer, services, bookingPropertyState, alreadySubmitting }) {
   if (alreadySubmitting) return false;
   return !!selectedCustomer && services.length > 0 && bookingPropertyState !== 'loading';
-}
-
-// Toast copy + whether to clear the cached quote when a mosquito line's
-// price is still resolving at submit time — an auto-priced mosquito line
-// must not be booked until the live server quote resolved, otherwise the
-// operator confirms a total that omits (or misstates) what the server will
-// stamp. On a failed quote the state is cleared so the fetch effect retries.
-export function mosquitoQuotePendingOutcome(mosquitoQuote) {
-  if (mosquitoQuote?.status === 'error') {
-    return {
-      clearQuote: true,
-      message: 'Mosquito price quote failed — retrying; submit again in a moment or enter a price',
-    };
-  }
-  return {
-    clearQuote: false,
-    message: 'Fetching the lot-based mosquito price — try again in a moment or enter a price',
-  };
 }
 
 // Classify a failed group POST. Idempotent retry recovery, PROVEN only
@@ -602,69 +585,80 @@ export function classifySubmitGroupFailure(e, { group, linkedEstimate, separateP
   };
 }
 
-// The manual "separate program" override for one group's POST — present
-// only when the operator explicitly confirmed booking a second program
-// alongside an existing duplicate-conflicted series.
-export function duplicateProgramOverrideFields(separateProgram, key, separateProgramReason) {
-  if (separateProgram?.key !== key) return {};
+// The 5-key discount shape a request-body line carries — the primary line
+// and every add-on line duplicated this exact object literal. Dollars are
+// passed in, not computed here: they depend on the live discount preview
+// against the line's effective base amount, component state this pure
+// helper doesn't have.
+export function lineDiscountFields(discount, discountDollars) {
   return {
-    allowDuplicateSeries: true,
-    duplicateSeriesOverride: {
-      reason: separateProgramReason.trim(),
-      existingSeriesIds: separateProgram.existingSeries.map((series) => series.id),
-    },
+    discountId: discount?.id || null,
+    discountName: discount?.name || null,
+    discountType: discount?.discount_type || null,
+    discountAmount: discount?.amount != null ? Number(discount.amount) : null,
+    discountDollars: discountDollars || null,
   };
 }
 
-// Primary line's id/price/discount fields for one appointment-group POST. A
-// blank-priced one-time mosquito line must reach the server as null price so
-// the lot-ladder default applies — groupHasPrice would otherwise coerce it
-// to 0 when another line in the group carries a price. An ENTERED 0
-// (deliberate waiver) still goes through as 0 via groupHasPrice +
-// primaryBasePrice upstream.
-export function primaryLineRequestFields({
-  primaryId,
-  primaryIsBlankAutoMosquito,
-  groupHasPrice,
-  primaryBasePrice,
-  primaryDiscount,
-  primaryDiscountDollars,
+// A recurringCount typed by the operator, parsed once: a finite integer >=
+// 2, or null when the input is blank/unusable and the server's own
+// plannedCount fallback (recurringCount || 4) should own the default — the
+// recurring fields and the prepay total projection each parsed this
+// independently.
+export function plannedRecurringCount(recurringCount) {
+  const parsed = Number.parseInt(recurringCount, 10);
+  return Number.isInteger(parsed) && parsed >= 2 ? parsed : null;
+}
+
+// An amount destined for the server as null unless it's worth sending — a
+// deliberately-entered 0 (preserveZero: a one-time mosquito waiver) rides
+// through as 0, else a non-positive value collapses to null so the
+// server's own default applies. basePrice and price answered this
+// identically.
+function amountOrNull(value, preserveZero) {
+  return preserveZero ? value : (value > 0 ? value : null);
+}
+
+// The full non-recurring part of one appointment-group POST: the manual
+// "separate program" override, the primary line's id/price/discount,
+// technician assignment, and the pricing/estimate-link/property/notes
+// fields every group POST carries — folded from four builders that split
+// this one request-body shape across four call sites.
+export function appointmentGroupRequestBody({
+  separateProgram, key, separateProgramReason,
+  customerId, scheduledDate, primaryId, primaryName,
+  primaryIsBlankAutoMosquito, groupHasPrice, primaryBasePrice,
+  primaryDiscount, primaryDiscountDollars,
+  serviceAddons, windowStart, windowEnd,
+  techMode, techId,
+  groupSubtotal, groupDuration, linkedEstimate,
+  propertyPickerActive, selectedPropertyId,
+  customerNotes, internalNotes,
 }) {
   return {
+    ...(separateProgram?.key === key ? {
+      allowDuplicateSeries: true,
+      duplicateSeriesOverride: {
+        reason: separateProgramReason.trim(),
+        existingSeriesIds: separateProgram.existingSeries.map((series) => series.id),
+      },
+    } : {}),
+    customerId,
+    scheduledDate,
+    serviceType: primaryName,
     serviceId: primaryId || null,
-    primaryLinePrice: primaryIsBlankAutoMosquito
-      ? null
-      : (groupHasPrice ? primaryBasePrice : null),
-    primaryLineDiscount: primaryDiscount ? {
-      discountId: primaryDiscount.id || null,
-      discountName: primaryDiscount.name || null,
-      discountType: primaryDiscount.discount_type || null,
-      discountAmount: primaryDiscount.amount != null ? Number(primaryDiscount.amount) : null,
-      discountDollars: primaryDiscountDollars || null,
-    } : undefined,
-  };
-}
-
-// Technician assignment fields for one appointment-group POST.
-export function technicianAssignmentFields(techMode, techId) {
-  return {
+    // A blank-priced one-time mosquito line must reach the server as null
+    // price so the lot-ladder default applies — groupHasPrice would
+    // otherwise coerce it to 0 when another line in the group carries a
+    // price. An ENTERED 0 (deliberate waiver) still goes through as 0 via
+    // groupHasPrice + primaryBasePrice upstream.
+    primaryLinePrice: primaryIsBlankAutoMosquito ? null : (groupHasPrice ? primaryBasePrice : null),
+    primaryLineDiscount: primaryDiscount ? lineDiscountFields(primaryDiscount, primaryDiscountDollars) : undefined,
+    serviceAddons,
+    windowStart,
+    windowEnd,
     assignmentMode: techMode,
     technicianId: techMode === 'choose' ? techId : undefined,
-  };
-}
-
-// Pricing/estimate-link/property/notes fields shared by every group POST.
-export function bookingLogisticsFields({
-  groupHasPrice,
-  groupSubtotal,
-  groupDuration,
-  linkedEstimate,
-  propertyPickerActive,
-  selectedPropertyId,
-  customerNotes,
-  internalNotes,
-}) {
-  return {
     // Parent's estimated_price reflects the whole group so completion-
     // triggered auto-invoicing (server/routes/admin-dispatch.js) charges the
     // full visit. Per-line prices stay on each addon row for breakdown /
@@ -686,6 +680,8 @@ export function bookingLogisticsFields({
     propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : undefined,
     notes: customerNotes || undefined,
     internalNotes: internalNotes || undefined,
+    urgency: 'routine',
+    createInvoice: true,
   };
 }
 
@@ -703,68 +699,47 @@ export function firstGroupSendFlags({ resultsCount, createdCount, sendSms, cardL
   };
 }
 
-// Recurring-cadence request fields for one appointment-group POST — pattern,
-// count/ongoing, interval/nth/weekday, skip-weekend rule. All undefined for
-// a one-time group so the server's own defaults own that shape.
-// recurringCount is sent as a finite override only when the operator
-// explicitly typed >= 2 in the Visits input — otherwise undefined lets the
-// server's plannedCount fallback (recurringCount || 4) own the default.
-export function recurringScheduleFields({ isRecurring, group, recurringCount, skipWeekends, weekendShift }) {
-  if (!isRecurring) {
-    return {
-      recurringPattern: undefined,
-      recurringCount: undefined,
-      recurringOngoing: undefined,
-      recurringIntervalDays: undefined,
-      recurringNth: undefined,
-      recurringWeekday: undefined,
-      skipWeekends: undefined,
-      weekendShift: undefined,
-    };
+// Everything a recurring series' POST carries: cadence pattern,
+// count/ongoing, interval/nth/weekday, skip-weekend rule, the union of
+// every line's booster-month picks, and the manual "collect prepay" flag —
+// folded from three builders that split this one "is this group recurring"
+// decision across three call sites. All omitted for a one-time group
+// (JSON-equivalent to the pre-split code's eight explicit undefined keys).
+export function recurringGroupRequestFields({
+  isRecurring, group, recurringCount, skipWeekends, weekendShift,
+  collectPrepay, groupSubtotal, prepayMethod, prepayNote,
+}) {
+  if (!isRecurring) return { boosterMonths: undefined, prepaid: undefined };
+  // Sent as a finite override only when the operator typed >= 2 — otherwise
+  // undefined lets the server's plannedCount fallback (|| 4) own the
+  // default; the same parsed count sizes the prepay projection below.
+  const finiteCount = plannedRecurringCount(recurringCount);
+  // Union of every line's booster-month picks — operators can tag chips on
+  // add-on lines too, not just the primary.
+  const boosterSet = new Set();
+  for (const s of group.lines) {
+    if (Array.isArray(s.boosterMonths)) {
+      for (const m of s.boosterMonths) boosterSet.add(parseInt(m));
+    }
   }
-  const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-  const hasFiniteRecurringCount = Number.isInteger(parsedRecurringCount) && parsedRecurringCount >= 2;
+  const boosterMonths = Array.from(boosterSet).filter((m) => m >= 1 && m <= 12).sort((a, b) => a - b);
   return {
     recurringPattern: group.cadence,
-    recurringCount: hasFiniteRecurringCount ? parsedRecurringCount : undefined,
-    recurringOngoing: !hasFiniteRecurringCount,
+    recurringCount: finiteCount ?? undefined,
+    recurringOngoing: finiteCount == null,
     recurringIntervalDays: group.cadence === 'custom' ? group.intervalDays : undefined,
     recurringNth: group.cadence === 'monthly_nth_weekday' ? group.nth : undefined,
     recurringWeekday: group.cadence === 'monthly_nth_weekday' ? group.weekday : undefined,
     skipWeekends: !!skipWeekends,
     weekendShift: skipWeekends ? weekendShift : undefined,
-  };
-}
-
-// Union of every line's booster-month picks in a cadence group. Operators
-// most often configure boosters on the primary, but if they tag chips on
-// add-on lines too, those months should also produce booster visits.
-// One-time groups never carry boosters.
-export function boosterMonthsForGroup(group, isRecurring) {
-  if (!isRecurring) return undefined;
-  const set = new Set();
-  for (const s of group.lines) {
-    if (Array.isArray(s.boosterMonths)) {
-      for (const m of s.boosterMonths) set.add(parseInt(m));
-    }
-  }
-  const arr = Array.from(set).filter((m) => m >= 1 && m <= 12).sort((a, b) => a - b);
-  return arr.length > 0 ? arr : undefined;
-}
-
-// Manual "collect prepay" flag on a recurring group: totalAmount projects
-// the group's per-visit subtotal across the planned visit count (the same
-// finite-count-or-4 default the server's plannedCount fallback uses).
-export function prepaidFields({ collectPrepay, isRecurring, recurringCount, groupSubtotal, prepayMethod, prepayNote }) {
-  if (!collectPrepay || !isRecurring) return { prepaid: undefined };
-  const parsedRecurringCount = Number.parseInt(recurringCount, 10);
-  const hasFiniteRecurringCount = Number.isInteger(parsedRecurringCount) && parsedRecurringCount >= 2;
-  return {
-    prepaid: {
-      totalAmount: groupSubtotal * (hasFiniteRecurringCount ? parsedRecurringCount : 4),
+    boosterMonths: boosterMonths.length > 0 ? boosterMonths : undefined,
+    // totalAmount projects the per-visit subtotal across the planned visit
+    // count (the same finite-count-or-4 default the server's fallback uses).
+    prepaid: collectPrepay ? {
+      totalAmount: groupSubtotal * (finiteCount ?? 4),
       method: prepayMethod,
       note: prepayNote || undefined,
-    },
+    } : undefined,
   };
 }
 
@@ -847,25 +822,30 @@ export function assertManualPrepayMintEligible({ fresh, manualPrepay }) {
   }
 }
 
-// A cached one-time-mosquito quote revalidated at the moment of booking: lot
-// data or the live pricing config may have changed while the modal sat
-// open, and the POST recalculates server-side — the operator must confirm
-// the amount that will actually be stamped.
-export function mosquitoRevalidationOutcome(fresh, cachedQuote) {
-  const freshPrice = fresh?.price != null ? Number(fresh.price) : null;
-  return { changed: freshPrice !== cachedQuote?.price, freshPrice };
-}
-
 // The one-time-mosquito quote gate every submit passes before any group
 // posts. Resolves null to proceed, or the hold the form applies: the toast
 // and how long it stays, whether the cached quote is cleared so the fetch
 // effect retries, and (refresh) the re-verified price the totals must show
-// before the operator submits again. Both pre-flight outcomes above feed it;
-// the fetch is injectable so the gate is testable without the form.
+// before the operator submits again. Both pre-flight outcomes (a
+// still-pending quote, a price that changed on revalidation) are folded in
+// here, their only caller; the fetch is injectable so the gate is testable
+// without the form.
 export async function mosquitoSubmitGate({ quotePending, needsRevalidation, mosquitoQuote, customerId, fetchQuote = adminFetch }) {
   if (quotePending) {
-    const pending = mosquitoQuotePendingOutcome(mosquitoQuote);
-    return { message: pending.message, holdMs: 2800, clearQuote: pending.clearQuote, refresh: false, price: null };
+    // An auto-priced mosquito line must not be booked until the live server
+    // quote resolved, otherwise the operator confirms a total that omits
+    // (or misstates) what the server will stamp. On a failed quote the
+    // cached state is cleared so the fetch effect retries.
+    if (mosquitoQuote?.status === 'error') {
+      return {
+        message: 'Mosquito price quote failed — retrying; submit again in a moment or enter a price',
+        holdMs: 2800, clearQuote: true, refresh: false, price: null,
+      };
+    }
+    return {
+      message: 'Fetching the lot-based mosquito price — try again in a moment or enter a price',
+      holdMs: 2800, clearQuote: false, refresh: false, price: null,
+    };
   }
   if (!needsRevalidation) return null;
   let fresh;
@@ -877,11 +857,15 @@ export async function mosquitoSubmitGate({ quotePending, needsRevalidation, mosq
       holdMs: 3200, clearQuote: true, refresh: false, price: null,
     };
   }
-  const revalidation = mosquitoRevalidationOutcome(fresh, mosquitoQuote);
-  if (!revalidation.changed) return null;
+  // A cached one-time-mosquito quote revalidated at the moment of booking:
+  // lot data or the live pricing config may have changed while the modal
+  // sat open, and the POST recalculates server-side — the operator must
+  // confirm the amount that will actually be stamped.
+  const freshPrice = fresh?.price != null ? Number(fresh.price) : null;
+  if (freshPrice === mosquitoQuote?.price) return null;
   return {
     message: 'The lot-based mosquito price changed — totals updated, review and submit again',
-    holdMs: 3200, clearQuote: false, refresh: true, price: revalidation.freshPrice,
+    holdMs: 3200, clearQuote: false, refresh: true, price: freshPrice,
   };
 }
 
@@ -2247,7 +2231,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Set when the series the manual prepay choice priced is actually created.
     let prepaySeriesId = null;
     // A blank-priced one-time mosquito primary must reach the server as a
-    // null price — see primaryLineRequestFields. Named locally so the &&
+    // null price — see appointmentGroupRequestBody. Named locally so the &&
     // that decides it lives in its own scope, not submitAppointments's.
     const isPrimaryBlankAutoMosquito = (s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s);
     for (const group of groups) {
@@ -2267,24 +2251,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           const basePrice = lineBaseAmount(s);
           const p = lineNetAmount(s);
           // One-time mosquito add-on lines: an ENTERED 0 (deliberate waiver)
-          // must reach the server as 0 — the `> 0 ? : null` coercion below
-          // would otherwise turn it into null and the server would stamp the
-          // lot-ladder charge instead. Blank stays null so the ladder applies.
+          // must reach the server as 0 — amountOrNull's `> 0 ? : null`
+          // coercion would otherwise turn it into null and the server would
+          // stamp the lot-ladder charge instead. Blank stays null so the
+          // ladder applies.
           const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
+          const recurringLine = !!s.cadence && s.cadence !== 'one_time';
           return {
             serviceId: s.id || null,
             serviceName: s.name,
             name: s.name,
-            basePrice: preserveZero ? basePrice : (basePrice > 0 ? basePrice : null),
-            price: preserveZero ? p : (p > 0 ? p : null),
-            discountId: s.lineDiscount?.id || null,
-            discountName: s.lineDiscount?.name || null,
-            discountType: s.lineDiscount?.discount_type || null,
-            discountAmount: s.lineDiscount?.amount != null ? Number(s.lineDiscount.amount) : null,
-            discountDollars: lineDiscountAmount(s) || null,
+            basePrice: amountOrNull(basePrice, preserveZero),
+            price: amountOrNull(p, preserveZero),
+            ...lineDiscountFields(s.lineDiscount, lineDiscountAmount(s)),
             ...serviceCadenceConfig(s),
-            skipWeekends: s.cadence && s.cadence !== 'one_time' ? !!skipWeekends : undefined,
-            weekendShift: s.cadence && s.cadence !== 'one_time' && skipWeekends ? weekendShift : undefined,
+            skipWeekends: recurringLine ? !!skipWeekends : undefined,
+            weekendShift: recurringLine && skipWeekends ? weekendShift : undefined,
           };
         });
         const isRecurring = group.cadence !== 'one_time';
@@ -2305,24 +2287,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           linkedEstimate,
         });
         const body = {
-          ...duplicateProgramOverrideFields(separateProgram, key, separateProgramReason),
-          customerId: selectedCustomer.id,
-          scheduledDate: apptDate,
-          serviceType: primary.name,
-          ...primaryLineRequestFields({
+          ...appointmentGroupRequestBody({
+            separateProgram, key, separateProgramReason,
+            customerId: selectedCustomer.id,
+            scheduledDate: apptDate,
             primaryId: primary.id,
+            primaryName: primary.name,
             primaryIsBlankAutoMosquito: isPrimaryBlankAutoMosquito(primary),
             groupHasPrice,
             primaryBasePrice: lineBaseAmount(primary),
             primaryDiscount: primary.lineDiscount,
             primaryDiscountDollars: lineDiscountAmount(primary),
-          }),
-          serviceAddons: addons,
-          windowStart,
-          windowEnd: computeWindowEnd(windowStart, groupDuration),
-          ...technicianAssignmentFields(techMode, techId),
-          ...bookingLogisticsFields({
-            groupHasPrice,
+            serviceAddons: addons,
+            windowStart,
+            windowEnd: computeWindowEnd(windowStart, groupDuration),
+            techMode,
+            techId,
             groupSubtotal,
             groupDuration,
             linkedEstimate,
@@ -2331,7 +2311,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             customerNotes,
             internalNotes,
           }),
-          urgency: 'routine',
           // Only the FIRST created group of a booking asks for the customer
           // confirmation text and carries the card-link flag — a split
           // seasonal/year-round save posts multiple series for the same
@@ -2345,10 +2324,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             sendCardLink,
           }),
           isRecurring,
-          ...recurringScheduleFields({ isRecurring, group, recurringCount, skipWeekends, weekendShift }),
-          boosterMonths: boosterMonthsForGroup(group, isRecurring),
-          createInvoice: true,
-          ...prepaidFields({ collectPrepay, isRecurring, recurringCount, groupSubtotal, prepayMethod, prepayNote }),
+          ...recurringGroupRequestFields({
+            isRecurring, group, recurringCount, skipWeekends, weekendShift,
+            collectPrepay, groupSubtotal, prepayMethod, prepayNote,
+          }),
           billingTerm,
         };
         if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
