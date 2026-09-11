@@ -1133,8 +1133,15 @@ router.post('/sms', async (req, res, next) => {
     else if (realProviderSend && manualReservationId) {
       await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: catchProviderOutcome });
     } else await clearManualReservation();
-    // Before dispatch a claim can be released. After provider entry, only
-    // definitive non-delivery may release it; uncertainty retains evidence.
+    // Same for the inline review claim: a throw with NO confirmed provider
+    // acceptance means the ask never left — hand the claim back so an
+    // immediate retry isn't blocked for the 10-minute stale window. A throw
+    // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
+    // same convention) means the ask DID text: stamp it delivered instead so
+    // it can never go out twice. Between those two, uncertainty retains the
+    // evidence: only a throw raised BEFORE provider entry is definitively a
+    // non-send, so that is the only case normalized to 'not_sent' here, and a
+    // path that already settled the ask is left alone.
     if (claimedReviewRequestId && !reviewSettlementAttempted) {
       if (!reviewProviderStarted) err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
       try {
@@ -2283,9 +2290,10 @@ async function settleInlineReviewAfterSend({ result, requestId, claimToken, emai
 // the existing stale-claim provider reconciliation.
 async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailRequested }) {
   const ReviewService = require('../services/review-request');
-  if (err?.providerOutcome?.deliveryOutcome !== 'accepted'
-    && !require('../services/sms-auto-send').isRealProviderSend(err?.providerOutcome)) {
-    if (err?.providerOutcome?.deliveryOutcome === 'not_sent') await ReviewService.releaseInlineClaim(requestId, claimToken);
+  const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
+  if (isAmbiguousProviderOutcome(err?.providerOutcome)) return;
+  if (!isRealProviderSend(err?.providerOutcome)) {
+    await ReviewService.releaseInlineClaim(requestId, claimToken);
     return;
   }
   await ReviewService.markInlineDelivered(requestId, claimToken);
