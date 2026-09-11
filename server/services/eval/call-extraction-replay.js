@@ -152,6 +152,7 @@ async function emailFailure({ sendEmail, subject, textBody, key = 'call-extracti
     // The eval_regression bell from notifyFailure / notifyInconclusive
     // stays; in-app mode adds the ops_digest row the Activity feed lists.
     const result = await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key,
       subject,
       text: textBody,

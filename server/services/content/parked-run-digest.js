@@ -518,6 +518,7 @@ async function runParkedRunDigest(opts = {}) {
   let result;
   try {
     result = await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'parked-run-digest',
       subject: composed.subject,
       html: composed.bodyHtml,

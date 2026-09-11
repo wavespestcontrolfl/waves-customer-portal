@@ -825,6 +825,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'unworked-comms',
       subject: composed.subject,
       html: composed.html,

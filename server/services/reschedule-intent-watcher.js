@@ -412,6 +412,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'reschedule-intent',
       subject: composed.subject,
       html: composed.html,

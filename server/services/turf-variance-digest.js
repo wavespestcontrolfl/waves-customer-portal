@@ -196,6 +196,7 @@ async function runTurfVarianceDigest(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'turf-variance',
       subject: composed.subject,
       html: composed.html,

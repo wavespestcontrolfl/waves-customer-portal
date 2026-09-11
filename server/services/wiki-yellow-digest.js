@@ -161,6 +161,7 @@ async function sendYellowDigestLocked(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'wiki-yellow-digest',
       subject: composed.subject,
       html: composed.html,

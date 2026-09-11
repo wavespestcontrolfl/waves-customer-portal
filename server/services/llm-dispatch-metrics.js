@@ -727,6 +727,7 @@ function emailExceptions(day, exceptions) {
   // written, which covers the "database unreachable" path this sender was
   // originally kept on email for.
   return require('./ops-digest').deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
     key: 'llm-dispatch-exceptions',
     subject,
     html: body,

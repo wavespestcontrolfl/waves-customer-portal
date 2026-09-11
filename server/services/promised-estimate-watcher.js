@@ -299,6 +299,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'promised-estimate',
       subject: composed.subject,
       html: composed.html,

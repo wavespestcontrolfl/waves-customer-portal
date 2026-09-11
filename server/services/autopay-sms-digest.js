@@ -274,6 +274,7 @@ async function runAutopaySmsDigest(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'autopay-sms-digest',
       subject: composed.subject,
       html: composed.html,

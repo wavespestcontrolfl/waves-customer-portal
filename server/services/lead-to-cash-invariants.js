@@ -337,6 +337,7 @@ async function runLeadToCashInvariantSweep({ now = new Date(), mailer = sendgrid
   if (await sentRecently()) return { skipped: 'recent_send', results: summary };
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'lead-to-cash-invariants',
       subject: report.subject,
       html: report.html,

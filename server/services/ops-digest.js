@@ -87,6 +87,8 @@ function inAppEnabled() {
  * @param {string} [p.dedupeKey]      one standing row per key (notifyAdmin dedupe)
  * @param {number} [p.dedupeWindowMs] rolling window for that dedupe
  * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
+ * @param {boolean} [p.fallOff]       the sender retires this key on its clean run (ops-digest-fall-off.js);
+ *                                    stamps metadata.fallOff so the Activity feed pins the row until resolved
  * @param {() => Promise<any>} p.sendEmail  the sender's existing mailer call
  * @returns {{ ok: boolean, channel: 'email'|'in_app', result?: any, error?: string, id?: string|null, fallback?: boolean }}
  *
@@ -94,7 +96,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, dedupeKey, dedupeWindowMs, refreshOnDedupe, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, dedupeKey, dedupeWindowMs, refreshOnDedupe, fallOff = false, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -114,7 +116,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
       // reports the same standing list must hold ONE row, refreshed when
       // the list changes, not one unread row per morning.
       ...(dedupeKey ? { dedupeKey, ...(dedupeWindowMs ? { dedupeWindowMs } : {}), ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}) } : {}),
-      metadata: { opsKey: key, subject, ...metadata },
+      metadata: { opsKey: key, subject, ...(fallOff ? { fallOff: true } : {}), ...metadata },
     });
   } catch (err) {
     logger.error(`[ops-digest] ${key}: bell write threw: ${err.message}`);

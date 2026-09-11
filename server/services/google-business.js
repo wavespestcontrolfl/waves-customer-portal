@@ -1826,6 +1826,7 @@ class GoogleBusinessService {
         // The 'review' bell above stays the claim; in-app mode adds the
         // ops_digest row the Activity feed lists (email cadence).
         const sent = await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
           key: 'gbp-sync-health',
           subject,
           text: body,

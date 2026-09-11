@@ -349,7 +349,7 @@ function checkedSince(database, since, { exclusive = false, until = null } = {})
 
 // ── send legs ───────────────────────────────────────────────────────
 
-async function sendComposed(composed, { mailer, database, markerKey, markerAt = null, categories, label }) {
+async function sendComposed(composed, { mailer, database, markerKey, markerAt = null, categories, label, fallOff = false }) {
   if (!digestEnabled()) {
     logger.info(`[impact-digest] gated OFF — would send: ${composed.subject}`);
     return { skipped: 'gated', subject: composed.subject };
@@ -370,6 +370,7 @@ async function sendComposed(composed, { mailer, database, markerKey, markerAt = 
   try {
     await deliverOpsDigest({
       key: opsKeyFor(label),
+      fallOff,
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
@@ -451,6 +452,7 @@ async function alertPausedLanes({ database, mailer, tracker }) {
     markerKey: pausedMarkerKey(due[0].bucket),
     categories: ['content-engine', 'impact-paused'],
     label: PAUSED_LANE_LABEL,
+    fallOff: true, // retired by retireIfClean when no lane is paused
   });
   if (result.sent) {
     for (const entry of due.slice(1)) await stampSendMarker(database, pausedMarkerKey(entry.bucket));
@@ -486,6 +488,7 @@ async function alertBlindLoop({ database, mailer }) {
     markerKey: BLIND_MARKER_KEY,
     categories: ['content-engine', 'impact-blind'],
     label: BLIND_LOOP_LABEL,
+    fallOff: true, // retired by retireIfClean once the loop grades again
   });
 }
 

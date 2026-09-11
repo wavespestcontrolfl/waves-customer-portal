@@ -33,6 +33,14 @@ describe('deliverOpsDigest', () => {
     expect(opts).not.toHaveProperty('dedupeKey');
     expect(opts).not.toHaveProperty('dedupeWindowMs');
     expect(opts).not.toHaveProperty('refreshOnDedupe');
+    expect(opts.metadata).not.toHaveProperty('fallOff');
+  });
+
+  it('gate on: fallOff stamps metadata.fallOff so the feed pins the row until resolved', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n11' });
+    await deliverOpsDigest({ key: 'lead-to-cash-invariants', subject: 'FIX: x', text: 't', fallOff: true, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants', fallOff: true });
   });
 
   it('gate off: runs the sender email call and touches no bell', async () => {
