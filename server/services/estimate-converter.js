@@ -5107,9 +5107,15 @@ const EstimateConverter = {
     // even while the broader separate-visits gate is off, so a companion is
     // created independently instead of being added to the certified visit.
     const primaryOnlyCapacityReservation = reservedRows[0]?.reservation_policy_version === 2 && !combinedCapacity;
-    const separateReservedPrograms = primaryOnlyCapacityReservation
+    // A persisted version-2 COMBINED allocation was certified under the
+    // separate-visits gate with one member row per program; its retired
+    // two-program routes must stay separated at conversion even after that
+    // gate is disabled, or the anchor is rewritten into one combined row and
+    // the persisted mix no longer matches its members (codex #4351 P0).
+    const persistedCapacitySeparation = primaryOnlyCapacityReservation || combinedCapacity?.version === 2;
+    const separateReservedPrograms = persistedCapacitySeparation
       || process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
-    if (primaryOnlyCapacityReservation) {
+    if (persistedCapacitySeparation) {
       combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
         ...combinedSchedulingOptions,
         forceSeparateRetiredRoutes: true,

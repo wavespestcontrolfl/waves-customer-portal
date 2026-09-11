@@ -196,11 +196,17 @@ postgres('combined capacity conversion on the migrated application schema', () =
   test.each([
     ['one program', lines.slice(0, 1), [30]],
     ['two programs', lines.slice(0, 2), [30, 40]],
+    // A retired two-program route (lawn + tree & shrub) held as a combined
+    // version-2 allocation must keep both members even when the
+    // separate-visits gate is off at conversion (codex #4351 P0).
+    ['a retired lawn and tree pair', [lines[1], lines[2]], [30, 40]],
     ['bait with retained bond', [termiteLine], [90]],
   ])('version-2 conversion preserves %s allowances after capacity shutdown', async (_, selected, durations) => {
     const trx = await mockPg.transaction();
     const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    const separateGate = process.env.GATE_SEPARATE_COMBO_VISITS;
     delete process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'false';
     try {
       const count = selected.length;
       const withBond = selected[0].service === 'termite_bait';
@@ -246,6 +252,8 @@ postgres('combined capacity conversion on the migrated application schema', () =
       await trx.rollback();
       if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
       else process.env.GATE_SCHEDULING_CAPACITY = gate;
+      if (separateGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = separateGate;
     }
   });
 
