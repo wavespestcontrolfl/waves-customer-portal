@@ -41,7 +41,7 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const PIN = require('../../services/route-optimizer').HQ;
 const { addETDays, etDateString } = require('../../utils/datetime-et');
-const { signSlotOffer, appendOfferToSlotId } = require('../../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../../utils/slot-offer-token');
 const connection = process.env.SCHEDULING_CAPACITY_TEST_DATABASE_URL;
 const describeDb = connection ? describe : describe.skip;
 
@@ -102,10 +102,18 @@ function createCapacityDbFixture(prefix = 'scheduling_capacity') {
   return {
     schema, date, ids, PIN, estimateData,
     get db() { return mockPg; }, get admin() { return admin; },
-    signedSlot(estimateId, durationMinutes = 30, start = '10:00') {
+    // `policy` override lets a test mint an explicit-policy (or, with
+    // `policy: null`, a legacy no-policy) offer; by default the offer signs
+    // under CAPACITY_OFFER_POLICY whenever the capacity gate is on, matching
+    // what reserveSlot verifies against.
+    signedSlot(estimateId, durationMinutes = 30, start = '10:00', { policy } = {}) {
+      const effectivePolicy = policy !== undefined
+        ? policy
+        : (process.env.GATE_SCHEDULING_CAPACITY === 'true' ? CAPACITY_OFFER_POLICY : undefined);
       return appendOfferToSlotId(`${date}_${start.replace(':', '-')}_${ids.technician}`,
         signSlotOffer({ surface: 'estimate', scopeId: estimateId, date,
-          startMinutes: Number(start.slice(0, 2)) * 60, technicianId: ids.technician, durationMinutes }));
+          startMinutes: Number(start.slice(0, 2)) * 60, technicianId: ids.technician, durationMinutes,
+          policy: effectivePolicy }));
     },
     baseStop(extra = {}) { return { id: randomUUID(), scheduled_date: date, technician_id: ids.technician,
       customer_id: ids.customer, service_type: 'Pest Control', status: 'confirmed', window_start: '08:00',

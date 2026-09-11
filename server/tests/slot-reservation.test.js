@@ -26,7 +26,7 @@ const db = require('../models/db');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const reservationHoldMigration = require('../models/migrations/20260516000016_allow_scheduled_service_reservation_holds');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 
 // Mint the exact slotId shape the generator returns — base id + `.exp.sig`
 // (signCustomerFacingSlots). durationMinutes must match what reserveSlot
@@ -1436,6 +1436,63 @@ describe('reserveSlot signed-offer gate (booking-audit round 2)', () => {
       expect(technicianBuilder.where).not.toHaveBeenCalled();
     } finally {
       jest.useRealTimers();
+    }
+  });
+
+  test('a CAPACITY-policy offer redeemed with the gate OFF fails the in-txn HMAC — legacy path never books it', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      const { technicianBuilder, scheduledBuilders } = makeVerifyHarness();
+      const offer = signSlotOffer({ surface: 'estimate', scopeId: 'estimate-456', date: '2027-05-20',
+        startMinutes: 9 * 60, technicianId: 'tech-1', durationMinutes: 90, policy: CAPACITY_OFFER_POLICY });
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: appendOfferToSlotId('2027-05-20_09-00_tech-1', offer),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(scheduledBuilders).toHaveLength(0);
+      expect(technicianBuilder.where).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
+  test('a LEGACY offer redeemed with the gate ON is rejected before the transaction and the cached slot list is invalidated', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const estimateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ id: 'estimate-456', status: 'sent', address: '1 Main St', service_interest: 'Pest Control' }),
+    };
+    const emptyBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    db.mockImplementation((table) => (table === 'estimates' ? estimateBuilder : emptyBuilder));
+    db.transaction = jest.fn();
+    estimateSlotAvailability.resolveEstimateCoords = jest.fn().mockResolvedValue({ lat: 27.4217, lng: -82.4065 });
+    const travel = jest.spyOn(require('../services/route-optimizer'), 'createSchedulingTravel');
+    try {
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'invalid_offer' });
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(travel).not.toHaveBeenCalled();
+      // Pre-transaction rejections must still drop the wrapper cache so the
+      // public 409 recovery payload re-signs fresh slots instead of re-serving
+      // the stale list (codex #4346 P2).
+      expect(estimateSlotAvailability.invalidateEstimate).toHaveBeenCalledWith('estimate-456');
+    } finally {
+      travel.mockRestore();
+      delete estimateSlotAvailability.resolveEstimateCoords;
+      db.mockReset();
+      jest.useRealTimers();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
     }
   });
 

@@ -3,6 +3,7 @@ const { createCapacityDbFixture, describeDb } = require('./helpers/scheduling-ca
 const { reserveSlot } = require('../services/slot-reservation');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+const { lockClosureState } = require('../services/scheduling/blackout-dates');
 jest.setTimeout(30000);
 
 describeDb('scheduling capacity holds on PostgreSQL', () => {
@@ -155,6 +156,62 @@ describeDb('scheduling capacity holds on PostgreSQL', () => {
     } finally {
       if (!dispatch.isCompleted()) await dispatch.rollback();
       if (reserve) await reserve;
+    }
+  });
+
+  test('an uncommitted exclusive closure-state lock blocks reservation, then the newly closed day is rejected', async () => {
+    const blocker = await f.db.transaction();
+    let reserve;
+    try {
+      const { rows: [{ pid }] } = await blocker.raw('SELECT pg_backend_pid()::int AS pid');
+      await lockClosureState(blocker, { exclusive: true });
+      await blocker('schedule_blackout_dates').insert({ date: f.date, reason: 'test' });
+      reserve = reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0]) })
+        .then(value => ({ value }), error => ({ error }));
+      await waitForBlockedBy(pid, 'Reservation never waited for the closure-state lock held by the blackout write');
+      await blocker.commit();
+      expect((await reserve).error).toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'day_unavailable' });
+      expect(await f.db('scheduled_services')).toHaveLength(0);
+    } finally {
+      if (!blocker.isCompleted()) await blocker.rollback();
+      if (reserve) await reserve;
+    }
+  });
+
+  test('reserve holds the closure-state lock shared through its outer commit, blocking an exclusive blackout write', async () => {
+    let releaseReserve;
+    const release = new Promise(resolve => { releaseReserve = resolve; });
+    let bodyReady;
+    const ready = new Promise(resolve => { bodyReady = resolve; });
+    let reserve;
+    let writer;
+    f.beforeNextOuterCommit(async trx => {
+      const { rows: [{ pid }] } = await trx.raw('SELECT pg_backend_pid()::int AS pid');
+      bodyReady({ trx, pid });
+      await release;
+    });
+    try {
+      reserve = reserveSlot({ estimateId: f.ids.estimates[0], slotId: f.signedSlot(f.ids.estimates[0]) })
+        .then(value => ({ value }), error => ({ error }));
+      const { pid } = await Promise.race([ready, reserve.then((outcome) => {
+        if (outcome.error) throw outcome.error;
+        throw new Error('Reservation committed without reaching the outer-transaction pause');
+      })]);
+      const held = await f.admin.raw(`SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = ?::int
+        AND locktype = 'advisory' AND granted AND classid = hashtext('slot-reserve')::oid
+        AND objid = hashtext('closure-state')::oid) AS held`, [pid]);
+      expect(held.rows[0].held).toBe(true);
+      writer = f.db.transaction(async trx => {
+        await lockClosureState(trx, { exclusive: true });
+        return 'locked';
+      }).then(value => ({ value }), error => ({ error }));
+      await waitForBlockedBy(pid, 'Exclusive closure-state write never waited for the reservation shared lock');
+      releaseReserve();
+      expect((await reserve).value).toMatchObject({ scheduledServiceId: expect.anything() });
+      expect((await writer).value).toBe('locked');
+    } finally {
+      releaseReserve();
+      await Promise.allSettled([reserve, writer].filter(Boolean));
     }
   });
 });
