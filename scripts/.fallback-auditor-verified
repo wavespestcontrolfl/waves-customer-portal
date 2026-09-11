@@ -2,5 +2,5 @@
 # Commit it: the pre-push hook warns when the installed claude CLI or the
 # sandbox definition differs from what was last actually proved here.
 claude_version=2.1.258
-sandbox_fingerprint=5fa231c7f145c8eedaaa3005bf879f55cab0079d76ad9825ab55af784a843ff1
-verified_at=2026-09-11T04:12:46Z
+sandbox_fingerprint=69e85fc354ebd6510c3f6b2637af5c7a25f5ab60676e92d8502731d776c565f9
+verified_at=2026-09-11T04:22:13Z

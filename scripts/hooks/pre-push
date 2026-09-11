@@ -563,7 +563,7 @@ PYEOF
 # to run is the right trade; an unverified sandbox is still a sandbox.
 SANDBOX_STAMP="scripts/.fallback-auditor-verified"
 sandbox_fingerprint() {
-  printf '%s|%s|%s' "$CLAUDE_SANDBOX_FLAGS" "$CLAUDE_ENV_SCRUB" "$CLAUDE_DISALLOWED_TOOLS" \
+  printf '%s|%s|%s' "$CLAUDE_SANDBOX_FLAGS" "$CLAUDE_ENV_ALLOW" "$CLAUDE_DISALLOWED_TOOLS" \
     | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}'
 }
 warn_if_sandbox_unverified() {
@@ -621,13 +621,31 @@ warn_if_sandbox_unverified() {
 # The verifier greps all three of these out of this file so it can assert the
 # sandbox the hook ACTUALLY uses. Keep them as plain single-line assignments.
 CLAUDE_SANDBOX_FLAGS="--restricted --strict-mcp-config"
-# The hook usually runs from inside a Claude Code session, which exports a
-# messaging socket, a bearer token and session ids. A child auditing an
-# untrusted diff has no business inheriting the parent session's channel, so
-# they are stripped. (CLAUDECODE itself does NOT block a nested run — every
-# fallback verdict on this PR was produced with CLAUDECODE=1 set — but it is
-# dropped with the rest so the child is a plain, unattached session.)
-CLAUDE_ENV_SCRUB="-u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_BRIDGE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_PID -u CLAUDE_EFFORT"
+# The child gets an ALLOWLISTED environment (`env -i`), not the parent's
+# environment minus a denylist. A push shell routinely carries Stripe keys,
+# database URLs and GitHub tokens, and when the hook runs from inside a
+# Claude Code session it also carries that session's messaging socket, bearer
+# token and session ids. A process whose job is to read an untrusted diff
+# has no business holding any of that: the sandbox flags stop the model
+# USING tools, but the process's own environment would still be there for a
+# crash trace or a debug artifact to spill. (CLAUDECODE itself does NOT
+# block a nested run — every fallback verdict on this PR was produced with
+# CLAUDECODE=1 set — it simply is not on the list.)
+#
+# What the CLI needs, measured rather than guessed: HOME for its config and
+# credentials, PATH to be found, USER because the keychain credential lookup
+# keys off it (without USER the child reports "Not logged in" every time),
+# and TMPDIR. The rest are harmless locale/terminal names plus the CLI's own
+# optional auth and config overrides, forwarded only when set.
+CLAUDE_ENV_ALLOW="HOME PATH TMPDIR USER LOGNAME SHELL TERM LANG LC_ALL LC_CTYPE TZ SECURITYSESSIONID CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN"
+claude_env_args() {
+  # Prints NAME=value, one per line, for every allowlisted name that is set.
+  local name
+  for name in $CLAUDE_ENV_ALLOW; do
+    [ -n "${!name+x}" ] && printf '%s=%s\n' "$name" "${!name}"
+  done
+  return 0
+}
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
   # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
@@ -705,9 +723,11 @@ run_claude_audit() {
     fi
 
     # Same process-group watchdog discipline as the codex leg above.
+    local -a claude_env=()
+    while IFS= read -r kv; do claude_env+=("$kv"); done < <(claude_env_args)
     set -m
-    # shellcheck disable=SC2086  # both vars are intentionally word-split
-    env $CLAUDE_ENV_SCRUB claude -p \
+    # shellcheck disable=SC2086  # CLAUDE_SANDBOX_FLAGS is intentionally word-split
+    env -i "${claude_env[@]}" claude -p \
            --model "$CLAUDE_MODEL" \
            --output-format json \
            $CLAUDE_SANDBOX_FLAGS \

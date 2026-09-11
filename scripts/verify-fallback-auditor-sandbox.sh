@@ -11,7 +11,7 @@
 #
 # IT TESTS THE HOOK'S FLAGS, NOT ITS OWN
 # Every part of the sandbox is grepped out of scripts/hooks/pre-push at run
-# time: the env scrub, the sandbox flags, and the disallow list. If someone
+# time: the env allowlist, the sandbox flags, and the disallow list. If someone
 # drops --restricted from the hook, this script drops it too and the probes
 # start failing. A verifier that supplies its own flags would keep printing
 # VERIFIED for a sandbox the hook no longer uses.
@@ -77,11 +77,17 @@ command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 not on PATH (needed 
 # ── Source every sandbox component from the hook itself ──────────────────
 hook_var() { sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$HOOK" | head -1; }
 SANDBOX_FLAGS="$(hook_var CLAUDE_SANDBOX_FLAGS)"
-ENV_SCRUB="$(hook_var CLAUDE_ENV_SCRUB)"
+ENV_ALLOW="$(hook_var CLAUDE_ENV_ALLOW)"
 DISALLOWED="$(hook_var CLAUDE_DISALLOWED_TOOLS)"
 
 [ -n "$SANDBOX_FLAGS" ] || { echo "FAIL: could not read CLAUDE_SANDBOX_FLAGS from $HOOK"; exit 1; }
-[ -n "$ENV_SCRUB" ]     || { echo "FAIL: could not read CLAUDE_ENV_SCRUB from $HOOK"; exit 1; }
+[ -n "$ENV_ALLOW" ]     || { echo "FAIL: could not read CLAUDE_ENV_ALLOW from $HOOK"; exit 1; }
+# Same construction as the hook's claude_env_args: only allowlisted names,
+# only when set. The sandboxed probes below run under exactly this.
+SANDBOXED_ENV=()
+for name in $ENV_ALLOW; do
+  [ -n "${!name+x}" ] && SANDBOXED_ENV+=("$name=${!name}")
+done
 [ -n "$DISALLOWED" ]    || { echo "FAIL: could not read CLAUDE_DISALLOWED_TOOLS from $HOOK"; exit 1; }
 
 # The assignments are not the sandbox — the INVOCATION is. Reading the three
@@ -99,13 +105,31 @@ HOOK_INVOCATION="$(awk '
 [ -n "$HOOK_INVOCATION" ] || { echo "FAIL: could not find the claude -p invocation inside run_claude_audit in $HOOK"; exit 1; }
 CALL_SITES="$(grep -c '[[:space:]]claude -p\([[:space:]]\|$\)' "$HOOK")"
 [ "$CALL_SITES" = "1" ] || { echo "FAIL: expected exactly one claude -p call site in $HOOK, found $CALL_SITES — this script only proves the one in run_claude_audit"; exit 1; }
-for component in 'env $CLAUDE_ENV_SCRUB claude -p' '$CLAUDE_SANDBOX_FLAGS' '--disallowedTools "$CLAUDE_DISALLOWED_TOOLS"'; do
+for component in 'env -i "${claude_env[@]}" claude -p' '$CLAUDE_SANDBOX_FLAGS' '--disallowedTools "$CLAUDE_DISALLOWED_TOOLS"'; do
   case "$HOOK_INVOCATION" in
     *"$component"*) ;;
     *) echo "FAIL: the hook's claude -p invocation no longer expands $component"; echo "$HOOK_INVOCATION" | sed 's/^/        /'; exit 1 ;;
   esac
 done
 echo "  hook invocation expands all three sandbox components (1 call site)"
+
+# The environment the child actually receives, checked against ground truth
+# rather than the allowlist's intent: export a canary secret here, build the
+# child env the way the hook does, and read it back with /usr/bin/env. The
+# canary must be absent and every name present must be on the allowlist.
+export SANDBOX_CANARY_SECRET="sk_live_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+CHILD_ENV_NAMES="$(env -i "${SANDBOXED_ENV[@]}" /usr/bin/env | sed 's/=.*//')"
+if printf '%s\n' "$CHILD_ENV_NAMES" | grep -qx SANDBOX_CANARY_SECRET; then
+  echo "FAIL: the child environment still carries a variable that is not on CLAUDE_ENV_ALLOW"; exit 1
+fi
+for name in $CHILD_ENV_NAMES; do
+  case " $ENV_ALLOW " in
+    *" $name "*) ;;
+    *) echo "FAIL: child environment contains $name, which is not on CLAUDE_ENV_ALLOW"; exit 1 ;;
+  esac
+done
+unset SANDBOX_CANARY_SECRET
+echo "  child environment holds only allowlisted names ($(printf '%s\n' "$CHILD_ENV_NAMES" | grep -c .) of them); a canary secret did not reach it"
 
 # Assert the boundary the probes below assume, so a silently weakened hook
 # is a hard failure rather than a quietly easier test.
@@ -203,8 +227,8 @@ ask() {
   local prompt="$1" mode="$2" env_file="$WORK/envelope.json" status=0
   REPLY=""
   if [ "$mode" = "sandboxed" ]; then
-    # shellcheck disable=SC2086  # hook-sourced vars are intentionally split
-    printf '%s\n' "$prompt" | env $ENV_SCRUB claude -p --model "$MODEL" \
+    # shellcheck disable=SC2086  # SANDBOX_FLAGS is intentionally split
+    printf '%s\n' "$prompt" | env -i "${SANDBOXED_ENV[@]}" claude -p --model "$MODEL" \
       --output-format json $SANDBOX_FLAGS --disallowedTools "$DISALLOWED" \
       >"$env_file" 2>"$WORK/stderr.txt" || status=$?
   else
@@ -326,7 +350,7 @@ if [ "$FAILURES" -eq 0 ]; then
   # depends on someone remembering to re-run this script after an upgrade
   # that could rename or add a tool the disallow list does not name.
   STAMP="$SCRIPT_DIR/.fallback-auditor-verified"
-  FINGERPRINT="$(printf '%s|%s|%s' "$SANDBOX_FLAGS" "$ENV_SCRUB" "$DISALLOWED" \
+  FINGERPRINT="$(printf '%s|%s|%s' "$SANDBOX_FLAGS" "$ENV_ALLOW" "$DISALLOWED" \
     | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}')"
   {
     echo "# Written by scripts/verify-fallback-auditor-sandbox.sh. Do not edit by hand."
