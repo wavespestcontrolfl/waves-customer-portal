@@ -456,9 +456,13 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     // string/object filter).
     const exclusionCall = (calls.whereCalls || []).find(([arg]) => typeof arg === 'function');
     expect(exclusionCall).toBeTruthy();
-    const qb = { whereNull: jest.fn(() => qb), orWhereNotIn: jest.fn(() => qb) };
+    const qb = { whereNull: jest.fn(() => qb), orWhereNull: jest.fn(() => qb), orWhereNotIn: jest.fn(() => qb) };
     exclusionCall[0](qb);
     expect(qb.whereNull).toHaveBeenCalledWith('em.id');
+    // A linked row with a NULL status is unknown, not bad: status is
+    // nullable, and `NULL NOT IN (...)` is NULL, so without this branch such
+    // a row would be excluded as a confirmed bad delivery (pre-push audit).
+    expect(qb.orWhereNull).toHaveBeenCalledWith('em.status');
     // A bounced/dropped/blocked/failed email_messages match is excluded —
     // exactly the status vocabulary webhooks-sendgrid.js's
     // computeEmailMessageEventUpdates writes for those terminal outcomes.

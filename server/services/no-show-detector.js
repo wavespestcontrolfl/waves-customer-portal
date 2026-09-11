@@ -209,7 +209,15 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
       .whereRaw("ci.metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
-      .where((qb) => qb.whereNull('em.id').orWhereNotIn('em.status', ['bounced', 'dropped', 'blocked', 'failed']))
+      // whereNull('em.status') is not redundant with whereNull('em.id'):
+      // status is nullable (20260518000001_email_template_library.js writes a
+      // 'queued' DEFAULT, not NOT NULL), and under three-valued logic
+      // `NULL NOT IN (...)` is NULL — so a LINKED row with no status would be
+      // excluded, i.e. read as a CONFIRMED bad delivery. That is the opposite
+      // of this read's rule: only a known-bad status is bad evidence,
+      // everything unknown stays neutral (pre-push audit, round 5).
+      .where((qb) => qb.whereNull('em.id').orWhereNull('em.status')
+        .orWhereNotIn('em.status', ['bounced', 'dropped', 'blocked', 'failed']))
       .select('ci.id', 'ci.metadata', 'ci.created_at'),
     () => conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
       .whereIn('resource_id', visitIds).where('created_at', '<=', now).select('id', 'resource_id', 'metadata', 'created_at'),
