@@ -13,8 +13,9 @@ async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), passed: false, screenshots: [], scenarios: [], unmatched: [], pageErrors: [], requests: [] };
   const server = await previewServer(root);
-  const browser = await launchBrowser();
+  let browser = null;
   try {
+    browser = await launchBrowser();
     for (const width of [1440, 390, 700, 820, 1024]) {
       let failSave = true, empty = false;
       template.name = "Example agreement";
@@ -140,7 +141,7 @@ async function main() {
     report.passed = true;
   } finally {
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
-    try { await browser.close(); }
+    try { if (browser) await browser.close(); }
     finally { await server.close(); }
   }
   console.log(JSON.stringify({ passed: report.passed, scenarios: report.scenarios, output }));
