@@ -97,10 +97,11 @@ identity; version-1 members keep their 60-minute contract. Public offer/cache
 responses omit catalog identifiers, route internals and allocation stamps.
 Reservation and acceptance re-resolve catalog policies. Transactional catalog
 reads hold matched rows with FOR SHARE until the outer transaction ends, and
-duration-authority reads also hold a shared catalog-identity advisory lock to
-that commit, so an absent match is serialized too: catalog create, update and
-archive take the same lock exclusively before writing, and a row activated or
-mapped after a lookup cannot overtake a validated allowance. Existing version-2 holds
+duration-authority reads also hold a `services` table SHARE lock to that
+commit, so an absent match is serialized too: every catalog insert, update or
+delete — admin edits and pre-deploy migrations alike — conflicts with that
+lock at the database, and a row activated or mapped after a lookup cannot
+overtake a validated allowance. Existing version-2 holds
 reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
 Reservation creation prepares bounded route traffic outside the transaction,
 then takes the date occupancy lock and the selected-technician/unassigned day

@@ -385,10 +385,12 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   // but a lookup that finds no row locks nothing — an admin could activate
   // or map a longer-duration row between this read and the commit, and a
   // version-2 hold on the 60-minute fallback would graduate against a
-  // policy it never saw. Duration authorities take the catalog-identity
-  // lock SHARED here, before any services row lock, and hold it to their
-  // commit; service-library's create/update/archive take it EXCLUSIVE.
-  // Identity-only callers keep their lock-free fail-open read.
+  // policy it never saw. Duration authorities take the services table
+  // SHARE lock here (scheduling/catalog-lock.js), before any services row
+  // lock, and hold it to their commit: every catalog INSERT/UPDATE/DELETE —
+  // admin writes and pre-deploy migrations alike — conflicts with it at the
+  // database, so no writer convention is needed. Identity-only callers keep
+  // their lock-free fail-open read.
   if (lockCatalog && validateAllowance) {
     await require('./scheduling/catalog-lock').lockCatalogIdentity(conn);
   }
