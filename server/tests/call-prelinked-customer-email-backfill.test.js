@@ -15,12 +15,14 @@
  *     and never overwrites a valid stored email (codex round-12 P2);
  *   • it rides the email-claim guard and only settles the missing-email card
  *     when the guard actually applied the email;
- *   • the pre-linked wiring runs after the phone-match/create chain, gated on
- *     the INBOUND ANI (not a dictated callback number) being the customer's
- *     own, the spoken name not contradicting the record, and never from a
- *     voicemail or a third-party call nature — and NOT on the creation-only
- *     non-customer aggregate, which would skip the existing-customer natures
- *     this repair exists for.
+ *   • the gate itself (prelinkedBackfillGate + linkedCustomerAcceptsBackfill)
+ *     rejects a voicemail, a third-party call nature, a call that already
+ *     backfilled, and any caller whose IDENTITY number (the inbound ANI, not
+ *     a dictated callback number) is not the linked customer's own or whose
+ *     spoken name contradicts the record — tested as behavior, not as a
+ *     source-text shape (GH codex #4432 r2 P1);
+ *   • the gate does NOT reuse the creation-only non-customer aggregate, which
+ *     would skip the existing-customer natures this repair exists for.
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); return db; });
@@ -36,7 +38,7 @@ const path = require('path');
 const fanout = require('../services/customer-email-fanout');
 const { _test } = require('../services/call-recording-processor');
 
-const { backfillLinkedCustomerFromExtraction } = _test;
+const { backfillLinkedCustomerFromExtraction, prelinkedBackfillGate, linkedCustomerAcceptsBackfill } = _test;
 
 describe('backfillLinkedCustomerFromExtraction', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -115,25 +117,82 @@ describe('backfillLinkedCustomerFromExtraction', () => {
   });
 });
 
-describe('pre-linked call wiring (source guard)', () => {
+describe('prelinkedBackfillGate — identity and trust rules (behavioral)', () => {
+  const inbound = { direction: 'inbound', from_phone: '+15555550188', to_phone: '+15555550199' };
+  const base = {
+    call: inbound, customerId: 'c-1', createdCustomerFromCall: false,
+    phoneMatchedThisPass: false, extracted: {}, thirdPartyCallNature: false,
+  };
+
+  test('an ordinary pre-linked inbound call is eligible, on the ANI', () => {
+    expect(prelinkedBackfillGate(base)).toEqual({ eligible: true, identityPhone: '+15555550188' });
+  });
+
+  test('identity is the ANI even when a different callback number was dictated', () => {
+    // resolveCallContactPhone would prefer extracted.phone here; the gate
+    // must not (r1 P2) — the ANI is what established the link.
+    const gate = prelinkedBackfillGate({ ...base, extracted: { phone: '+15555550166' } });
+    expect(gate.identityPhone).toBe('+15555550188');
+  });
+
+  test('an outbound call is identified by the number we dialed', () => {
+    const gate = prelinkedBackfillGate({
+      ...base, call: { direction: 'outbound-api', from_phone: '+15555550199', to_phone: '+15555550177' },
+    });
+    expect(gate).toEqual({ eligible: true, identityPhone: '+15555550177' });
+  });
+
+  test.each([
+    ['no linked customer', { customerId: null }],
+    ['the customer was created from this call', { createdCustomerFromCall: true }],
+    ['the phone-match branch already backfilled', { phoneMatchedThisPass: true }],
+    ['a voicemail', { extracted: { is_voicemail: true } }],
+    ['a third-party call nature', { thirdPartyCallNature: true }],
+    ['no usable identity number', { call: { direction: 'inbound', from_phone: null, to_phone: '+15555550199' } }],
+  ])('is not eligible: %s', (_label, patch) => {
+    expect(prelinkedBackfillGate({ ...base, ...patch }).eligible).toBe(false);
+  });
+});
+
+describe('linkedCustomerAcceptsBackfill', () => {
+  const linked = { id: 'c-1', first_name: 'Pat', last_name: 'Rivera', phone: '+15555550188' };
+
+  test('accepts when the identity number is the customer\'s own and the name agrees', () => {
+    expect(linkedCustomerAcceptsBackfill(linked, '+15555550188', { first_name: 'Pat', last_name: 'Rivera' })).toBe(true);
+  });
+
+  test('accepts a nickname of the stored first name', () => {
+    expect(linkedCustomerAcceptsBackfill(linked, '+15555550188', { first_name: 'Patricia' })).toBe(true);
+  });
+
+  test('rejects when the identity number is not on the record', () => {
+    expect(linkedCustomerAcceptsBackfill(linked, '+15555550166', { first_name: 'Pat' })).toBe(false);
+  });
+
+  test('rejects when the spoken name contradicts the record', () => {
+    expect(linkedCustomerAcceptsBackfill(linked, '+15555550188', { first_name: 'Jordan' })).toBe(false);
+  });
+
+  test('rejects a missing or soft-deleted customer', () => {
+    expect(linkedCustomerAcceptsBackfill(null, '+15555550188', {})).toBe(false);
+    expect(linkedCustomerAcceptsBackfill({ ...linked, deleted_at: new Date() }, '+15555550188', {})).toBe(false);
+  });
+});
+
+describe('pre-linked call wiring (placement)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'call-recording-processor.js'), 'utf8');
 
-  test('the pre-linked backfill runs outside the booking branch with the trust gates', () => {
+  test('the call site delegates to the tested gate and sits before the booking backfill', () => {
     const start = src.indexOf("source: 'call-extraction-backfill-prelinked'");
     expect(start).toBeGreaterThan(-1);
-    const block = src.slice(Math.max(0, start - 1400), start);
-    expect(block).toMatch(/customerId && !createdCustomerFromCall && !phoneMatchedThisPass/);
-    expect(block).toMatch(/!extracted\.is_voicemail && !v2ThirdPartyCallNature/);
-    expect(block).toMatch(/customerPhoneMatches\(backfillIdentityPhone, linked\) && extractedNameMatchesCustomer\(extracted, linked\)/);
-    // Identity is the ANI (or, outbound, the number we dialed) — never
-    // resolveCallContactPhone's dictated-callback-preferring result.
-    expect(block).toMatch(/isOutboundCall\(call\)\s*\n\s*\? firstExternalPhone\(call\.to_phone\)\s*\n\s*: firstExternalPhone\(call\.from_phone\)/);
-    expect(block).toMatch(/whereNull\('deleted_at'\)/);
-    // Sits in Step 3, before the appointment branch's own backfill.
+    const block = src.slice(Math.max(0, start - 900), start);
+    expect(block).toMatch(/prelinkedBackfillGate\(/);
+    expect(block).toMatch(/linkedCustomerAcceptsBackfill\(linked, prelinkedGate\.identityPhone, extracted\)/);
+    expect(block).toMatch(/thirdPartyCallNature: v2ThirdPartyCallNature/);
     expect(start).toBeLessThan(src.indexOf('backfillCustomerFromAppointmentContact(customerId, customer, extracted'));
   });
 
-  test('the phone-match branch delegates to the same helper', () => {
+  test('the phone-match branch delegates to the same backfill helper', () => {
     const idx = src.indexOf("source: 'call-extraction-backfill',");
     expect(idx).toBeGreaterThan(-1);
     expect(src.slice(idx - 300, idx)).toMatch(/phoneMatchedThisPass = true/);

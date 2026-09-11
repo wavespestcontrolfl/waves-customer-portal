@@ -4795,6 +4795,44 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
+// The pre-linked contact-backfill gate, as a pure decision so the identity
+// rules are testable as BEHAVIOR and not as a source-text shape (GH codex
+// #4432 r2 P1): a future edit that preserves the wording while inverting a
+// condition has to fail a test.
+//
+// IDENTITY is the inbound ANI — never resolveCallContactPhone's result, which
+// prefers a DICTATED callback number and says nothing about who is on the
+// line (r1 P2); an outbound call's identity is the number WE dialed.
+// `thirdPartyCallNature` must be the update-path subset (job_applicant /
+// vendor_or_partner), NOT the creation-only aggregate, which also holds the
+// existing-customer natures this backfill exists to serve (r1 P1).
+function prelinkedBackfillIdentityPhone(call = {}) {
+  return isOutboundCall(call)
+    ? firstExternalPhone(call.to_phone)
+    : firstExternalPhone(call.from_phone);
+}
+
+function prelinkedBackfillGate({
+  call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted = {}, thirdPartyCallNature,
+} = {}) {
+  const identityPhone = prelinkedBackfillIdentityPhone(call);
+  const eligible = !!customerId
+    && !createdCustomerFromCall     // a fresh row already carries this call's capture
+    && !phoneMatchedThisPass        // the phone-match branch already backfilled
+    && !!identityPhone
+    && !extracted.is_voicemail      // one-sided transcription: too lossy to trust contact detail
+    && !thirdPartyCallNature;       // an applicant's / vendor's email is not the customer's
+  return { eligible, identityPhone };
+}
+
+// The customer-level half: the identity number must be the linked customer's
+// own, and the spoken name must not contradict the record. A missing or
+// soft-deleted row accepts nothing.
+function linkedCustomerAcceptsBackfill(linked, identityPhone, extracted = {}) {
+  if (!linked || linked.deleted_at) return false;
+  return customerPhoneMatches(identityPhone, linked) && extractedNameMatchesCustomer(extracted, linked);
+}
+
 // Email + address backfill for a call that resolved to an EXISTING customer.
 // Shared by the phone-match branch and the pre-linked branch of Step 3.
 //
@@ -9399,14 +9437,14 @@ const CallRecordingProcessor = {
     // existing_customer_scheduling, which are precisely the linked-customer
     // calls this backfill exists to repair (GH codex #4432 r1 P1).
     // Fail-soft.
-    const backfillIdentityPhone = isOutboundCall(call)
-      ? firstExternalPhone(call.to_phone)
-      : firstExternalPhone(call.from_phone);
-    if (customerId && !createdCustomerFromCall && !phoneMatchedThisPass
-      && backfillIdentityPhone && !extracted.is_voicemail && !v2ThirdPartyCallNature) {
+    const prelinkedGate = prelinkedBackfillGate({
+      call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted,
+      thirdPartyCallNature: v2ThirdPartyCallNature,
+    });
+    if (prelinkedGate.eligible) {
       try {
         const linked = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
-        if (linked && customerPhoneMatches(backfillIdentityPhone, linked) && extractedNameMatchesCustomer(extracted, linked)) {
+        if (linkedCustomerAcceptsBackfill(linked, prelinkedGate.identityPhone, extracted)) {
           await backfillLinkedCustomerFromExtraction({
             customerId, existing: linked, extracted, source: 'call-extraction-backfill-prelinked',
           });
@@ -17211,6 +17249,8 @@ const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
   backfillLinkedCustomerFromExtraction,
+  prelinkedBackfillGate,
+  linkedCustomerAcceptsBackfill,
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
