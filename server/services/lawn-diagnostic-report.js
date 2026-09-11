@@ -675,69 +675,86 @@ const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+[\s‐‑‒
 // precedes it, so the whole clause is negated rather than only the object.
 const SYMPTOM_OBJECT = /^\s*(?:(?:visible|active|clear|obvious|new|fresh|further|additional|significant|major|real|current)\s+)*(?:signs?|evidence|lesions?|symptoms?|damage|activity|pressure|spots?|presence|feeding|indications?|issues?|problems?)\b/;
 const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/;
+// "not only" / "not just" / "not merely" intensify rather than negate ("Large
+// patch is not only visible but spreading"), so they are removed before any
+// negation check. Shared with the copy module's establishesCause.
+const INTENSIFIER_NOT = /\bnot\s+(?:only|just|merely|simply)\b/gi;
+function stripIntensifierNot(text) {
+  return String(text || '').replace(INTENSIFIER_NOT, ' ').replace(/\s+/g, ' ');
+}
+// One clause: the predicate segments that carry a negated-absence marker are
+// uncertain and dropped; the rest of the clause is judged on its own, so
+// "Large patch present, chinch bugs not confirmed" keeps large patch while
+// "Not free of chinch bugs" leaves nothing behind.
+function withoutUncertainSegments(text) {
+  const segments = predicateSegments(text);
+  const remaining = segments.filter((segment) => !NEGATED_ABSENCE.test(segment));
+  if (remaining.length === segments.length) return { text, uncertain: false };
+  return { text: remaining.join(', '), uncertain: true };
+}
+// One clause: its "-free" differential is removed; the remainder counts only
+// when it names a condition on its own.
+function withoutFreeDifferential(text) {
+  const FREE_DIFFERENTIAL = freeDifferentialRe();
+  const found = FREE_DIFFERENTIAL.test(text);
+  FREE_DIFFERENTIAL.lastIndex = 0;
+  if (!found) return { text, negated: false };
+  const rest = text.replace(FREE_DIFFERENTIAL, ' ').replace(/\s+/g, ' ').trim();
+  FREE_DIFFERENTIAL.lastIndex = 0;
+  const named = !!rest && CONDITION_LABELS.some(([pattern]) => pattern.test(rest));
+  return { text: named ? rest : '', negated: true };
+}
+// Positive statements of a clause whose negation scopes forward: the head
+// before the marker, unless a whole-clause marker sits anywhere else in the
+// clause or "no" is followed by a generic symptom noun that describes the
+// cause before it ("Chinch bugs — no evidence observed", "Large patch: no
+// signs present"); and any later comma/colon segment that carries its own
+// predicate and names a condition ("No weeds, large patch present" keeps
+// large patch, "No weeds, disease, or pests observed" stays one list).
+function forwardScopedPositives(text, forward) {
+  const rest = text.slice(forward.index + forward[0].length);
+  if (SYMPTOM_OBJECT.test(rest)) return [];
+  const positive = [];
+  const head = text.slice(0, forward.index).trim();
+  const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
+  if (head && !wholeClauseMarker) positive.push(head);
+  for (const segment of rest.split(/[,:]/).slice(1)) {
+    const part = segment.trim();
+    if (!part || /^(?:and|or|nor)\b/.test(part) || NEGATION_MARKER.test(part)) continue;
+    if (SEGMENT_PREDICATE.test(part) && (SUMMARY_CAUSE_RE.test(part) || /\bweeds?\b/.test(part))) positive.push(part);
+  }
+  return positive;
+}
+// Positive statements of a negated clause. A determiner-style marker scopes
+// forward; any other marker is postpositive ("weeds absent", "not present",
+// "ruled out") and negates only the segment that carries it: "Large patch
+// present, weeds absent" and "Large patch present and weeds absent" keep large
+// patch, while a conjunct with no predicate of its own shares the next one
+// ("Chinch bugs and weeds absent" is all negated).
+function negatedClausePositives(text, causeAhead) {
+  const forward = FORWARD_NEGATION.exec(text);
+  const scopesForward = !!forward && (!/^(?:not|never)$/.test(forward[1]) || causeAhead.test(text.slice(forward.index + forward[0].length)));
+  if (scopesForward) return forwardScopedPositives(text, forward);
+  return predicateSegments(text).filter((part) => !CLEAN_CLAUSE_LEAD.test(part) && !NEGATION_MARKER.test(part));
+}
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
   let uncertain = false;
   const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
-  const FREE_DIFFERENTIAL = freeDifferentialRe();
-  for (const clause of stripNegatedRecovery(spaceJoinedNon(lower)).split(CLAUSE_SPLIT)) {
-    let text = clause.trim();
+  for (const clause of stripIntensifierNot(stripNegatedRecovery(spaceJoinedNon(lower))).split(CLAUSE_SPLIT)) {
+    // The uncertain segments go first, before the "-free" strip, so "Not free
+    // of chinch bugs" / "Turf is not pest-free" stay uncertain instead of clean.
+    const scoped = withoutUncertainSegments(clause.trim());
+    uncertain = uncertain || scoped.uncertain;
+    const stripped = withoutFreeDifferential(scoped.text);
+    negated = negated || stripped.negated;
+    const text = stripped.text;
     if (!text) continue;
-    // Checked before the "-free" strip so "Not free of chinch bugs" / "Turf is
-    // not pest-free" stay uncertain instead of becoming a clean lawn. The
-    // uncertainty is scoped to its own predicate segment, so "Large patch
-    // present, chinch bugs not confirmed" and "Large patch visible and chinch
-    // bugs cannot be ruled out" keep large patch while the differential is
-    // dropped; a clause with nothing else beside it stays uncertain.
-    const segments = predicateSegments(text);
-    if (segments.some((segment) => NEGATED_ABSENCE.test(segment))) {
-      uncertain = true;
-      const remaining = segments.filter((segment) => !NEGATED_ABSENCE.test(segment));
-      if (!remaining.length) continue;
-      text = remaining.join(', ');
-    }
-    if (FREE_DIFFERENTIAL.test(text)) {
-      FREE_DIFFERENTIAL.lastIndex = 0;
-      negated = true;
-      text = text.replace(FREE_DIFFERENTIAL, ' ').replace(/\s+/g, ' ').trim();
-      // The remainder counts only when it names a condition on its own.
-      if (!text || !CONDITION_LABELS.some(([pattern]) => pattern.test(text))) continue;
-    }
-    FREE_DIFFERENTIAL.lastIndex = 0;
     if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
     if (!CLEAN_CLAUSE_LEAD.test(text) && !RECOGNIZED_MARKER.test(text) && unrecognizedNegationRe().test(text)) { uncertain = true; continue; }
     negated = true;
-    const forward = FORWARD_NEGATION.exec(text);
-    const rest = forward ? text.slice(forward.index + forward[0].length) : '';
-    const scopesForward = !!forward && (!/^(?:not|never)$/.test(forward[1]) || causeAhead.test(rest));
-    if (scopesForward) {
-      const head = text.slice(0, forward.index).trim();
-      // "no" followed by a generic symptom noun negates the cause before it:
-      // "Chinch bugs — no evidence observed", "Large patch: no signs present".
-      if (SYMPTOM_OBJECT.test(rest)) continue;
-      // A whole-clause marker anywhere else in the clause still negates all of it.
-      const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
-      if (head && !wholeClauseMarker) positive.push(head);
-      // A later comma/colon segment that carries its own predicate and names a
-      // condition is a new positive statement, not a list item: "No weeds,
-      // large patch present" keeps large patch, while "No weeds, disease, or
-      // pests observed" stays one negated list.
-      for (const segment of rest.split(/[,:]/).slice(1)) {
-        const part = segment.trim();
-        if (!part || /^(?:and|or|nor)\b/.test(part) || NEGATION_MARKER.test(part)) continue;
-        if (SEGMENT_PREDICATE.test(part) && (SUMMARY_CAUSE_RE.test(part) || /\bweeds?\b/.test(part))) positive.push(part);
-      }
-      continue;
-    }
-    // A postpositive marker ("weeds absent", "not present", "ruled out") negates
-    // the segment that carries it, not its siblings: "Large patch present, weeds
-    // absent" and "Large patch present and weeds absent" keep large patch. A
-    // conjunct with no predicate of its own shares the next one ("Chinch bugs and
-    // weeds absent" is all negated).
-    for (const part of predicateSegments(text)) {
-      if (!CLEAN_CLAUSE_LEAD.test(part) && !NEGATION_MARKER.test(part)) positive.push(part);
-    }
+    positive.push(...negatedClausePositives(text, causeAhead));
   }
   return { positive, negated, uncertain };
 }
@@ -824,11 +841,16 @@ const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an
 // so the backstop does not depend on the grammar's finite suffix list.
 // A modal-hedged form ("may have been active", "might still be active") is the
 // downgrade's own output, not a definitive claim, so it is excluded here.
-const DEFINITIVE_PREDICATE = /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!\b(?:may|might|could)\s(?:\w+\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\s+(?:\w+\s+){0,6}?active)\b/i;
+// "active" is a predicate only when it does not modify a following recovery /
+// turf noun: "Large patch has active recovery" describes regrowth, not a
+// definitive activity claim, on both the scrub and the backstop.
+const PREDICATIVE_ACTIVE = '(?!\\s+(?:recovery|regrowth|growth|repair|healing|recuperation|rooting|greening|fill[\\s-]*in|turf|grass|lawn|roots?|blades?|canopy|ingredients?)\\b)';
+const DEFINITIVE_PREDICATE = new RegExp(`\\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\\s+(?:\\w+\\s+){0,6}?active${PREDICATIVE_ACTIVE})\\b`, 'i');
 // "and" joins two independent clauses only when each side has its own finite
 // verb ("The schedule was confirmed and large patch remains only a possibility");
 // a compound subject ("Large patch and dollar spot are confirmed") stays whole.
-const FINITE_VERB = /\b(?:is|are|was|were|has|have|had|remains?|remained|appears?|appeared|looks?|looked|stays?|stayed|seems?|seemed|continues?|continued|keeps?|kept|\w+ed)\b/i;
+// A modal ('may be present', 'could be spreading') is a finite verb too.
+const FINITE_VERB = /\b(?:is|are|was|were|has|have|had|remains?|remained|appears?|appeared|looks?|looked|stays?|stayed|seems?|seemed|continues?|continued|keeps?|kept|may|might|could|can|should|would|will|must|shall|\w+ed)\b/i;
 function splitIndependentAnd(clause) {
   const out = [];
   let buffer = '';
@@ -853,7 +875,7 @@ function residualDefinitiveClaim(text) {
   const flattened = String(text || '')
     .replace(/(^|[.!?;]\s*)(confirmed|definite|certain)\s*[:—–-]\s*/gi, '$1$2 ')
     // Cause-first headings: "Large patch: confirmed", "Chinch bugs — active".
-    .replace(/\s*[:—–-]\s*(?=(?:\w+\s+){0,2}?active\b)/gi, ' is ')
+    .replace(new RegExp(`\\s*[:—–-]\\s*(?=(?:\\w+\\s+){0,2}?active\\b${PREDICATIVE_ACTIVE})`, 'gi'), ' is ')
     .replace(/\s*[:—–-]\s*(?=(?:\w+\s+){0,2}?(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b)/gi, ' ')
     .replace(/,\s((?:which|that|who|where|as|especially|particularly|mostly|mainly|in|on|at|near|along|by|with|including|like|such as|now|still|again)\b[^,.!?;:]{0,80}),\s/gi, ' $1 ');
   return flattened.split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).flatMap(splitIndependentAnd).some((clause) => (
@@ -945,7 +967,7 @@ const PLURAL_LINKER = /^(?:are|have|remain|stay|continue|keep)\b/i;
 // consistent with the visible pattern in the shade".
 const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?<phrase>(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|presence|signs?|evidence|symptoms?|feeding|population|outbreak|disease|infestation|stress|spots?))*)\\s+${PREDICATE_LINKER}`;
 const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|only|\\w+ly)){0,6})\\s+confirmed\\b`, 'gi');
-const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|only|\\w+ly)){0,6})\\s+active\\b`, 'gi');
+const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|only|\\w+ly)){0,6})\\s+active\\b${PREDICATIVE_ACTIVE}`, 'gi');
 // Named groups survive SUMMARY_CAUSE_RE's own groups; the cause is always $1.
 function predicateParts(args) {
   const groups = args[args.length - 1];
@@ -1124,6 +1146,7 @@ module.exports = {
   residualDefinitiveClaim,
   spaceJoinedNon,
   stripNegatedRecovery,
+  stripIntensifierNot,
   safeCustomerSummary,
   SUMMARY_CAUSE_RE,
   lowerConfidence,

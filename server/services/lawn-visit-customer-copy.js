@@ -1,5 +1,5 @@
 /** Customer publication rules for lawn visit results and repeated reviews. */
-const { scrubCustomerText, SUMMARY_CAUSE_RE, residualDefinitiveClaim, spaceJoinedNon, stripNegatedRecovery } = require('./lawn-diagnostic-report');
+const { scrubCustomerText, SUMMARY_CAUSE_RE, residualDefinitiveClaim, spaceJoinedNon, stripNegatedRecovery, stripIntensifierNot } = require('./lawn-diagnostic-report');
 const { containsReportAccessCode } = require('./service-report/technician-report-copy');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
@@ -78,12 +78,28 @@ const SPECIFIC_FAMILY = {
   'iron deficiency': 'nutrient', 'nitrogen deficiency': 'nutrient', 'magnesium deficiency': 'nutrient',
   nutsedge: 'weed', crabgrass: 'weed', dollarweed: 'weed', clover: 'weed', spurge: 'weed',
 };
+// A generic class word never authorizes prose, but it still counts as a
+// distinct cause when no named cause of its class is beside it: "Chinch bugs
+// and disease" is two causes, while "Chinch bug infestation", "Fungal disease"
+// and "Insect pests" stay one. "Infestation" belongs to whatever cause it is
+// attached to and counts only when it stands alone.
+const GENERIC_CLASS = { insect: 'pest', pest: 'pest', disease: 'disease' };
+const FAMILY_CLASS = { caterpillar: 'pest', fungal: 'disease' };
+const TERM_CLASS = { chinch: 'pest', grub: 'pest' };
 function distinctCauseCount(name) {
-  const terms = new Set([...governedTerms(name)].filter((term) => !GENERIC_CAUSE_TERMS.includes(term)).map((term) => CAUSE_SYNONYMS[term] || term));
-  const specifics = [...terms].filter((term) => !GENERIC_FAMILY_WORDS[term]);
+  const all = new Set([...governedTerms(name)].map((term) => CAUSE_SYNONYMS[term] || term));
+  const terms = [...all].filter((term) => !GENERIC_CAUSE_TERMS.includes(term));
+  const specifics = terms.filter((term) => !GENERIC_FAMILY_WORDS[term]);
   const coveredFamilies = new Set(specifics.map((term) => SPECIFIC_FAMILY[term]).filter(Boolean));
-  const generics = [...terms].filter((term) => GENERIC_FAMILY_WORDS[term] && !coveredFamilies.has(GENERIC_FAMILY_WORDS[term]));
-  return specifics.length + generics.length;
+  const generics = terms.filter((term) => GENERIC_FAMILY_WORDS[term] && !coveredFamilies.has(GENERIC_FAMILY_WORDS[term]));
+  const coveredClasses = new Set([
+    ...specifics.map((term) => TERM_CLASS[term] || FAMILY_CLASS[SPECIFIC_FAMILY[term]]),
+    ...generics.map((term) => FAMILY_CLASS[GENERIC_FAMILY_WORDS[term]]),
+  ].filter(Boolean));
+  const classWords = [...all].filter((term) => GENERIC_CAUSE_TERMS.includes(term));
+  const classes = new Set(classWords.map((term) => GENERIC_CLASS[term]).filter((cls) => cls && !coveredClasses.has(cls)));
+  const bareInfestation = classWords.includes('infestation') && !specifics.length && !generics.length && !classes.size;
+  return specifics.length + generics.length + classes.size + (bareInfestation ? 1 : 0);
 }
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
@@ -116,7 +132,8 @@ function establishesCause(finding) {
   // publication path, not only reviewedObservations.
   if (finding.keep === false || finding.negated || finding.label === NO_STRESS_LABEL) return false;
   // A negated recovery ("Large patch is not improving") is positive evidence.
-  const name = stripNegatedRecovery(spaceJoinedNon(finding.name || ''));
+  // "not only visible but spreading" intensifies rather than negates.
+  const name = stripIntensifierNot(stripNegatedRecovery(spaceJoinedNon(finding.name || '')));
   if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
   return distinctCauseCount(name) <= 1;

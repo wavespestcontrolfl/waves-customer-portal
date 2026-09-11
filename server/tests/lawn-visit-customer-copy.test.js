@@ -68,7 +68,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed', 'Chinch bugs & drought stress', 'Chinch bugs + drought stress', 'Chinch bugs, drought stress', 'Chinch bug drought stress', 'Large patch and dollar spot'])(
+  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed', 'Chinch bugs & drought stress', 'Chinch bugs + drought stress', 'Chinch bugs, drought stress', 'Chinch bug drought stress', 'Large patch and dollar spot', 'Chinch bugs and disease', 'Chinch bugs plus disease', 'Drought stress and insects', 'Weeds and disease'])(
     'an unresolved differential named %s cannot authorize either cause', (name) => {
       const evidence = { name, label: 'general lawn stress', confidence: 'high' };
       expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
@@ -346,6 +346,17 @@ describe('customer publication', () => {
   test.each(['Call 555-0100 if the patch spreads.', 'Call +44 20 7946 0958 if the patch spreads.'])('observations never publish the contact number in %s', (text) => {
     expect(copy.customerObservations(text, [])).not.toMatch(/0100|7946|0958/);
     expect(copy.customerObservations(text, [])).toMatch(/if the patch spreads/);
+  });
+
+  test.each([
+    ['Chinch bug infestation', 'Chinch bug activity along the edge.'],
+    ['Fungal disease', 'Fungal activity in the shade.'],
+    ['Large patch disease', 'Large patch in the shade.'],
+    ['Large patch is not only visible but spreading', 'Large patch is spreading in the shade.'],
+  ])('a generic class word beside its own cause in %s still counts as one cause', (name, text) => {
+    const evidence = { name, label: 'general lawn stress', confidence: 'moderate' };
+    expect(copy.customerObservations(text, [evidence])).toBe(text);
+    expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
   });
 
   test('confirmation steps obey the same privacy and cause rules', () => {

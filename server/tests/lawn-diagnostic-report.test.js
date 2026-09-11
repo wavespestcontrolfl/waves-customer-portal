@@ -552,6 +552,14 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(residualDefinitiveClaim('Chinch bugs appear most consistent with the visible pattern.')).toBe(false);
     // No governed term in the sentence: not a cause claim.
     expect(residualDefinitiveClaim('The watering schedule is confirmed for Tuesday.')).toBe(false);
+    // A modal clause is a finite clause, so the unrelated "confirmed" stays on its own side.
+    expect(residualDefinitiveClaim('The watering schedule was confirmed and large patch may be present.')).toBe(false);
+    expect(residualDefinitiveClaim('The controller was adjusted and chinch bugs could be active along the edge.')).toBe(false);
+    expect(residualDefinitiveClaim('Large patch and dollar spot are confirmed.')).toBe(true);
+    // Adjectival "active" modifies a recovery noun; it is not an activity claim.
+    expect(residualDefinitiveClaim('Large patch has active recovery in the shade.')).toBe(false);
+    expect(residualDefinitiveClaim('Chinch bug damage has active regrowth.')).toBe(false);
+    expect(residualDefinitiveClaim('Chinch bug colonies are active along the edge.')).toBe(true);
     // The definitive word must share the cause's clause, not merely its sentence.
     const unrelated = 'The watering schedule was confirmed with the customer, while large patch remains only a possibility.';
     expect(residualDefinitiveClaim(unrelated)).toBe(false);
@@ -591,6 +599,14 @@ describe('lawn diagnostic auto-release ladder', () => {
     const out = scrubCustomerText(text);
     expect(out).not.toMatch(digits);
     expect(out).toMatch(/if the patch spreads\./);
+  });
+
+  test.each(['Large patch has active recovery in the shade.', 'Chinch bug damage has active regrowth.', 'Dollar spot is showing active fill-in.'])('scrubCustomerText leaves the adjectival active phrase in %s alone', (text) => {
+    expect(scrubCustomerText(text)).toBe(text);
+  });
+
+  test('scrubCustomerText still downgrades a predicative active claim beside a recovery noun', () => {
+    expect(scrubCustomerText('Chinch bugs are active and recovery is slow.')).toMatch(/chinch bugs may be active and recovery is slow/i);
   });
 
   test('scrubCustomerText keeps ordinary short figures', () => {
@@ -733,6 +749,10 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Drought stress unconfirmed; chinch bug damage along the edge', 'chinch bug activity'],
     // The nominal absence form negates its own segment.
     ['Large patch present, chinch bug absence', 'large patch (fungal) activity'],
+    // "not only" / "not just" intensify rather than negate.
+    ['Large patch is not only visible but spreading', 'large patch (fungal) activity'],
+    ['Chinch bug damage is not just visible, it is spreading', 'chinch bug activity'],
+    ['Dollar spot not merely present but spreading', 'dollar spot'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
   });
