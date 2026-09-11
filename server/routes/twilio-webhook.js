@@ -787,6 +787,14 @@ router.post('/sms', async (req, res) => {
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
 
     if (smsReaction) {
+      // Same persistence contract as the ordinary-text insert below (codex
+      // #4210 round-3 P1; docs/public-route-contracts.md "Failure to persist
+      // that source returns 503"): a swallowed failure here used to reach
+      // the 200 ack, so a loud reaction whose row never landed had nothing
+      // for dispatchUnknownSenderAlert to stamp eligibility or a receipt on,
+      // the recovery sweep's sms_log join could never see it, Twilio would
+      // not retry, and the inbound SID claim stayed held. Rethrow into the
+      // route-level catch instead: 503 + claim release, Twilio retries.
       await db('sms_log').insert({
         customer_id: customer?.id || null,
         direction: 'inbound', from_phone: From, to_phone: To,
@@ -799,7 +807,13 @@ router.post('/sms', async (req, res) => {
           domain: numberConfig.domain,
           media: inboundMedia,
         }),
-      }).catch(() => {});
+      }).catch(() => {
+        sourcePersistenceFailed = true;
+        throw new Error('inbound_sms_source_unavailable');
+      });
+      // Durably recorded — from here a retry would duplicate the row, so the
+      // claim must be kept on any later error (see `persisted` above).
+      persisted = true;
       if (!quietReaction) {
         // Same SELECT→INSERT window as the general path: if the thread was
         // read while this legacy row was being written, mirror it now.

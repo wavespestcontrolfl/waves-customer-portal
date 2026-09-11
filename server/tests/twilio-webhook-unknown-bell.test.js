@@ -396,6 +396,26 @@ test('a failed sms_log insert is a failed webhook (503, inbound claim released),
   expect(mockState.sms).toEqual([]);
 });
 
+test('a failed sms_log insert for a LOUD REACTION is the same failed webhook (503, inbound claim released) — the reaction branch used to swallow it and ack 200 (codex #4210 round-3 P1)', async () => {
+  mockState.ai = false;
+  mockState.failSmsLogInsert = true;
+  const { releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
+  const res = new EventEmitter();
+  res.status = (code) => { res.statusCode = code; return res; };
+  res.type = () => res;
+  res.send = (value) => { res.body = value; return res; };
+  await handler({ body: { From: sender, To: numbers.locations.parrish.number, Body: 'Disliked "We will treat inside"', MessageSid: 'SM-synthetic-reaction-insert-failure' } }, res);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Before the fix the swallowed insert reached the 200 ack: Twilio never
+  // retried, the SID claim stayed held, and the deferred dispatch had no row
+  // to stamp — a message the recovery sweep's sms_log join can never see.
+  expect(res.statusCode).toBe(503);
+  expect(releaseInboundWebhook).toHaveBeenCalledWith('SM-synthetic-reaction-insert-failure');
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(mockClaim.calls).toEqual([]);
+  expect(mockState.sms).toEqual([]);
+});
+
 test('a delivered alert confirms the claim to the full 4h window, not left on the short claim lease (codex #4210 round-2 P1)', async () => {
   mockState.ai = false;
   const before = Date.now();
