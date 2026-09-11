@@ -394,6 +394,59 @@ persist_ref_artifacts() {
   return 0
 }
 
+# ── JSON salvage ─────────────────────────────────────────────────────────
+# Pulls the first balanced top-level object that actually looks like a
+# review (has a "findings" key) out of a reply that wrapped it in prose or
+# a fence. Scans for a real object rather than regexing, so a brace inside
+# a finding's description string cannot truncate it. No python3 → no
+# salvage, and the caller falls through to its retry: this is a recovery
+# path, never a requirement.
+extract_review_json() {
+  # $1 = raw reply text, $2 = out file. 0 = salvaged, 1 = nothing usable.
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$1" "$2" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    sys.exit(1)
+start = raw.find("{")
+while start != -1:
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    obj = json.loads(raw[start:i + 1])
+                except ValueError:
+                    break
+                if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+                    with open(sys.argv[2], "w", encoding="utf-8") as fh:
+                        json.dump(obj, fh)
+                    sys.exit(0)
+                break
+    start = raw.find("{", start + 1)
+sys.exit(1)
+PYEOF
+}
+
 # ── Fallback auditor: Claude ─────────────────────────────────────────────
 # Same prompt, same schema, same P0 gate. Codex gets the schema via
 # --output-schema; claude has no such flag, so the contract goes in the
@@ -414,11 +467,15 @@ persist_ref_artifacts() {
 #                         without it the model can load a deferred tool's
 #                         schema and call it, which makes every other entry
 #                         in this list bypassable
-# Verified empirically, not inferred from --help: scripts/verify-fallback-auditor-sandbox.sh
-# runs functional probes (ask for Bash, ToolSearch, WebFetch) and asserts
-# the tools are absent. A control run without these flags has Bash, Edit,
-# Write and Read present, so the probes are measuring the flags and not the
-# model's own reluctance. Re-run that script after any CLI upgrade.
+# Verified empirically, not inferred from --help, by
+# scripts/verify-fallback-auditor-sandbox.sh. What that script actually
+# proves, against ground truth on disk and the network rather than the
+# model's self-report: a sandboxed run cannot READ a nonce file outside the
+# repo, cannot WRITE a file, cannot reach a ToolSearch-loaded tool to do
+# either, and cannot make an HTTP request to a local canary listener. A
+# CONTROL run without the flags must succeed at the read, or the script
+# fails rather than reporting a green sandbox it did not measure. Re-run it
+# after any `claude` CLI upgrade or any change to these flags.
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
   # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
@@ -442,70 +499,102 @@ run_claude_audit() {
 
   echo "[codex-review] codex unavailable for $label — falling back to claude ($CLAUDE_MODEL)…" >&2
 
-  # Same process-group watchdog discipline as the codex leg above.
-  set -m
-  claude -p \
-         --model "$CLAUDE_MODEL" \
-         --output-format json \
-         --restricted \
-         --strict-mcp-config \
-         --disallowedTools "$CLAUDE_DISALLOWED_TOOLS" \
-         < "$claude_prompt" >"$envelope" 2>"$TMPDIR_RUN/claude-$idx.stderr" &
-  child_pid=$!
-  (
-    sleep "$CLAUDE_TIMEOUT"
-    touch "$TMPDIR_RUN/timed-out-claude-$idx"
-    kill -TERM -"$child_pid" 2>/dev/null
-    sleep 5
-    kill -KILL -"$child_pid" 2>/dev/null
-  ) >/dev/null 2>&1 &
-  watchdog_pid=$!
-  set +m
-  wait "$child_pid" || child_status=$?
-  if [ -f "$TMPDIR_RUN/timed-out-claude-$idx" ]; then
-    kill -KILL -"$child_pid" 2>/dev/null
-  fi
-  kill -TERM -"$watchdog_pid" 2>/dev/null
-  wait "$watchdog_pid" 2>/dev/null
+  # Two attempts. Codex is pinned to the schema by --output-schema; claude
+  # has no such flag, so a reviewer that finds something interesting will
+  # sometimes answer in prose and ignore the contract entirely (observed:
+  # a full markdown write-up of a real P1 instead of the JSML object). The
+  # salvage pass below recovers an object embedded in prose; attempt 2 is
+  # for a reply that contained no object at all. A rejected reply is NOT
+  # treated as clean — it falls through to UN-AUDITED like any other
+  # failure.
+  local attempt
+  for attempt in 1 2; do
+    : > "$envelope"
+    rm -f "$TMPDIR_RUN/timed-out-claude-$idx"
+    child_status=0
 
-  if [ -f "$TMPDIR_RUN/timed-out-claude-$idx" ]; then
-    echo "[codex-review] claude timed out after ${CLAUDE_TIMEOUT}s on $label (set CLAUDE_REVIEW_TIMEOUT to adjust)." >&2
-    return 1
-  fi
-  if [ "$child_status" -ne 0 ] || [ ! -s "$envelope" ]; then
-    echo "[codex-review] claude failed for $label; last stderr lines:" >&2
-    tail -n 15 "$TMPDIR_RUN/claude-$idx.stderr" >&2
-    return 1
-  fi
-  if ! jq empty "$envelope" >/dev/null 2>&1; then
-    echo "[codex-review] claude envelope for $label is not valid JSON." >&2
-    return 1
-  fi
-  if [ "$(jq -r '.is_error // false' "$envelope")" = "true" ]; then
-    echo "[codex-review] claude reported an error for $label: $(jq -r '.result // "(none)"' "$envelope" | head -c 300)" >&2
-    return 1
-  fi
+    # Same process-group watchdog discipline as the codex leg above.
+    set -m
+    claude -p \
+           --model "$CLAUDE_MODEL" \
+           --output-format json \
+           --restricted \
+           --strict-mcp-config \
+           --disallowedTools "$CLAUDE_DISALLOWED_TOOLS" \
+           --append-system-prompt "You are being called as a machine-readable code reviewer. Your ENTIRE reply must be one JSON object matching the schema you are given. No prose, no markdown, no code fence, no commentary before or after. Findings go in the findings array, never in prose." \
+           < "$claude_prompt" >"$envelope" 2>"$TMPDIR_RUN/claude-$idx.stderr" &
+    child_pid=$!
+    (
+      sleep "$CLAUDE_TIMEOUT"
+      touch "$TMPDIR_RUN/timed-out-claude-$idx"
+      kill -TERM -"$child_pid" 2>/dev/null
+      sleep 5
+      kill -KILL -"$child_pid" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    watchdog_pid=$!
+    set +m
+    wait "$child_pid" || child_status=$?
+    if [ -f "$TMPDIR_RUN/timed-out-claude-$idx" ]; then
+      kill -KILL -"$child_pid" 2>/dev/null
+    fi
+    kill -TERM -"$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
 
-  # Unwrap the print-mode envelope, then strip a markdown fence if the model
-  # added one despite the contract.
-  jq -r '.result // empty' "$envelope" | sed -e '/^[[:space:]]*```/d' > "$out_file"
+    # A timeout or a dead CLI will not improve on a retry — give up now.
+    if [ -f "$TMPDIR_RUN/timed-out-claude-$idx" ]; then
+      echo "[codex-review] claude timed out after ${CLAUDE_TIMEOUT}s on $label (set CLAUDE_REVIEW_TIMEOUT to adjust)." >&2
+      return 1
+    fi
+    if [ "$child_status" -ne 0 ] || [ ! -s "$envelope" ]; then
+      echo "[codex-review] claude failed for $label; last stderr lines:" >&2
+      tail -n 15 "$TMPDIR_RUN/claude-$idx.stderr" >&2
+      return 1
+    fi
+    if ! jq empty "$envelope" >/dev/null 2>&1; then
+      echo "[codex-review] claude envelope for $label is not valid JSON." >&2
+      return 1
+    fi
+    if [ "$(jq -r '.is_error // false' "$envelope")" = "true" ]; then
+      echo "[codex-review] claude reported an error for $label: $(jq -r '.result // "(none)"' "$envelope" | head -c 300)" >&2
+      return 1
+    fi
 
-  if [ ! -s "$out_file" ]; then
-    echo "[codex-review] claude returned an empty verdict for $label — not a clean review." >&2
+    # Unwrap the print-mode envelope, strip a markdown fence, and salvage an
+    # object that arrived wrapped in prose.
+    jq -r '.result // empty' "$envelope" > "$TMPDIR_RUN/claude-raw-$idx.txt"
+    sed -e '/^[[:space:]]*```/d' "$TMPDIR_RUN/claude-raw-$idx.txt" > "$out_file"
+
+    if [ -s "$out_file" ] && jq empty "$out_file" >/dev/null 2>&1 \
+       && [ "$(jq -r 'has("findings") and (.findings|type=="array")' "$out_file")" = "true" ]; then
+      return 0
+    fi
+
+    if extract_review_json "$TMPDIR_RUN/claude-raw-$idx.txt" "$out_file"; then
+      echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
+      return 0
+    fi
+
+    if [ "$attempt" = "1" ]; then
+      echo "[codex-review] claude did not return the JSON contract for $label — retrying once." >&2
+      # Attempt 2 gets the contract alone, with the prose reply quoted back.
+      {
+        echo "Your previous reply did not follow the output contract: it was not a single JSON object."
+        echo "Re-issue the SAME review as one JSON object matching the schema below. Nothing else."
+        echo ""
+        echo "── Your previous reply ────────────────────────────────────────────"
+        head -c 20000 "$TMPDIR_RUN/claude-raw-$idx.txt"
+        echo ""
+        echo "── Schema ─────────────────────────────────────────────────────────"
+        cat "$SCHEMA"
+      } > "$claude_prompt"
+      continue
+    fi
+
+    echo "[codex-review] claude output for $label is not valid JSON after 2 attempts:" >&2
+    sed -n '1,20p' "$TMPDIR_RUN/claude-raw-$idx.txt" >&2
     return 1
-  fi
-  if ! jq empty "$out_file" >/dev/null 2>&1; then
-    echo "[codex-review] claude output for $label is not valid JSON:" >&2
-    sed -n '1,20p' "$out_file" >&2
-    return 1
-  fi
-  # Shape check: the scoring block indexes .findings[].priority, and a
-  # well-formed-but-wrong object would otherwise score as silently clean.
-  if [ "$(jq -r 'has("findings") and (.findings|type=="array")' "$out_file")" != "true" ]; then
-    echo "[codex-review] claude output for $label has no findings array — discarding." >&2
-    return 1
-  fi
-  return 0
+  done
+  return 1
 }
 
 P0_TOTAL=0
