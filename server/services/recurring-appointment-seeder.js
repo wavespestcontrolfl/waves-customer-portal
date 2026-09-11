@@ -450,6 +450,15 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',
+      // The term link alone does NOT make a visit covered: annualPrepayCoversVisit
+      // requires prepaid_method + a positive prepaid_amount + the term id, all
+      // three. Copying only the link produced children that read as UNCOVERED
+      // (43 such rows in prod, 2026-09-11) and billed again for a visit the
+      // customer had already prepaid — they were rescued only when a later
+      // term activation / schedule edit happened to re-run
+      // applyPrepaidCoverageForTerm. The stamp travels with the link.
+      'prepaid_method',
+      'prepaid_amount',
       // Catalog link: follow-ups must resolve the same completion profile
       // as their parent (combined services especially — name matching alone
       // breaks if the catalog row is ever renamed).
@@ -472,6 +481,21 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'zip',
     ]);
     Object.assign(row, require('./booking/visit-financial-stamps').recurringServiceAddress(parent));
+    // Coverage is a three-field invariant (annualPrepayCoversVisit): term id +
+    // method + positive amount. A partial copy is worse than none — a stamp
+    // with no term id makes the CHARGING guard throw "coverage unverifiable"
+    // rather than read as uncovered, so a half-inherited row blocks billing
+    // instead of failing open. Carry all three or carry none.
+    // The LINK is left alone either way (readers and the later coverage
+    // re-stamp rely on it); only a half-copied STAMP is dropped.
+    const prepayStampComplete = row.annual_prepay_term_id
+      && row.prepaid_method
+      && Number(row.prepaid_amount) > 0;
+    if (!prepayStampComplete) {
+      delete row.prepaid_method;
+      delete row.prepaid_amount;
+    }
+
     // Resolved identity outranks the parent's copied link AND snapshot (the
     // parent may be unlinked, linked to a row since renamed, or carry a
     // stale snapshot that must not ride into the child — codex #3604 r5
