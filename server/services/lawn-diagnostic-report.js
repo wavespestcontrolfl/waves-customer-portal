@@ -670,6 +670,10 @@ function unrecognizedNegationRe() {
 // Lack of confirmation ("not confirmed", "unconfirmed", "cannot be verified")
 // is uncertainty as well: it establishes neither presence nor absence.
 const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+\s+){0,2}?(?:ruled[\s‐‑‒–—-]+out|absent|excluded|unlikely|negative|free|confirmed|verified|established|certain|definite)\b|\bunconfirmed\b/;
+// A generic symptom noun right after a forward negation ("no signs", "no
+// evidence observed", "without visible lesions") describes the cause that
+// precedes it, so the whole clause is negated rather than only the object.
+const SYMPTOM_OBJECT = /^\s*(?:(?:visible|active|clear|obvious|new|fresh|further|additional|significant|major|real|current)\s+)*(?:signs?|evidence|lesions?|symptoms?|damage|activity|pressure|spots?|presence|feeding|indications?|issues?|problems?)\b/;
 const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
 function positiveClauses(lower) {
   const positive = [];
@@ -697,6 +701,9 @@ function positiveClauses(lower) {
     const scopesForward = !!forward && (!/^(?:not|never)$/.test(forward[1]) || causeAhead.test(rest));
     if (scopesForward) {
       const head = text.slice(0, forward.index).trim();
+      // "no" followed by a generic symptom noun negates the cause before it:
+      // "Chinch bugs — no evidence observed", "Large patch: no signs present".
+      if (SYMPTOM_OBJECT.test(rest)) continue;
       // A whole-clause marker anywhere else in the clause still negates all of it.
       const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
       if (head && !wholeClauseMarker) positive.push(head);
@@ -804,7 +811,13 @@ function residualDefinitiveClaim(text) {
   // text is kept, so "Large patch, in the shaded area, is confirmed" and "Large
   // patch, which is confirmed in the shade, is spreading" both keep the cause
   // and the definitive predicate in one clause.
-  const flattened = String(text || '').replace(/,\s([^,.!?;:]{1,80}),\s/g, ' $1 ');
+  // Only a relative or prepositional parenthetical is flattened; a coordinated
+  // independent clause ("…, the controller was adjusted, and …") keeps its
+  // commas so an unrelated "confirmed" is not attached to a tentative cause.
+  // A heading-style "Confirmed:" attaches to the clause that follows it.
+  const flattened = String(text || '')
+    .replace(/(^|[.!?;]\s*)(confirmed|definite|certain)\s*[:—–-]\s*/gi, '$1$2 ')
+    .replace(/,\s((?:which|that|who|where|as|especially|particularly|mostly|mainly|in|on|at|near|along|by|with|including|like|such as|now|still|again)\b[^,.!?;:]{0,80}),\s/gi, ' $1 ');
   return flattened.split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).some((clause) => (
     DEFINITIVE_PREDICATE.test(clause) && SUMMARY_CAUSE_RE.test(clause)
   ));
@@ -908,7 +921,8 @@ function predicateParts(args) {
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text).replace(/\s+/g, ' ')
-    .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s+(${SUMMARY_CAUSE_RE.source})`, 'gi'),
+    // "Confirmed chinch bugs" and the heading form "Confirmed: chinch bugs".
+    .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s*(?:[:—–-]\\s*)?(${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
     .replace(CONFIRMED_PREDICATE, (...args) => {
       const { subject, qualifier, appears } = predicateParts(args);

@@ -633,6 +633,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Healthy overall, nothing concerning', 'Nothing concerning',
     // A non prefix joined directly to the cause.
     'Nonfungal stress', 'Nonchinch damage',
+    // "no" + a generic symptom noun negates the cause before it.
+    'Chinch bugs \u2014 no evidence observed', 'Dollar spot with no lesions visible', 'Large patch: no signs present',
     // A conjunct without its own predicate shares the negated one after it.
     'Chinch bugs and weeds absent', 'Large patch and dollar spot ruled out',
     // "free of" keeps its scope across a coordinated list.

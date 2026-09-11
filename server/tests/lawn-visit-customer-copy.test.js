@@ -137,6 +137,20 @@ describe('customer publication', () => {
     },
   );
 
+  test.each(['Confirmed: chinch bugs along the edge.', 'Confirmed \u2014 chinch bugs along the edge.', 'Confirmed - chinch bugs along the edge.'])(
+    'a heading-style confirmed claim %s is downgraded before publication', (text) => {
+      const evidence = { label: 'chinch bug activity', confidence: 'moderate' };
+      expect(copy.customerObservations(text, [evidence])).toMatch(/^suspected chinch bugs along the edge\.$/i);
+      expect(copy.safeConfirmationStep(text, evidence)).not.toMatch(/\bconfirmed\b/i);
+    },
+  );
+
+  test('a coordinated clause with an unrelated confirmation is not a residual definitive claim', () => {
+    const text = 'The irrigation schedule was confirmed, the controller was adjusted, and large patch remains only a possibility.';
+    expect(copy.residualDefinitiveClaim(text)).toBe(false);
+    expect(copy.customerObservations(text, [{ label: 'large patch (fungal) activity', confidence: 'moderate' }])).toBe(text);
+  });
+
   test.each(['Chinch bugs may have been active along the edge.', 'Chinch bugs may have been previously active.', 'Chinch bugs may be active along the edge.'])(
     'the downgraded hedged form is not itself a residual definitive claim: %s', (text) => {
       expect(copy.residualDefinitiveClaim(text)).toBe(false);
@@ -144,7 +158,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.', 'Chinch bug colonies are active along the edge.', 'Large patch, in the shaded area, is confirmed.', 'Large patch, which is confirmed in the shaded area, is spreading.'])(
+  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.', 'Chinch bug colonies are active along the edge.', 'Large patch, in the shaded area, is confirmed.', 'Large patch, which is confirmed in the shaded area, is spreading.', 'Confirmed: chinch bug colonies along the edge.'])(
     'a residual definitive cause claim the grammar did not downgrade is rejected whole: %s', (text) => {
       const evidence = { label: 'chinch bug activity', confidence: 'high' };
       expect(copy.residualDefinitiveClaim(text)).toBe(true);
