@@ -320,3 +320,42 @@ describe('callerIdentityMatches (shared caller-identity rule with call-reschedul
     expect(callerIdentityMatches({ direction: 'inbound', from_phone: '+19410000001' }, null)).toBe(false);
   });
 });
+
+describe('series reschedule confirmation feeds promise evidence (P1-1)', () => {
+  // admin-dispatch.js's applySeriesMoveEffects sends
+  // reschedule_series_confirmation with purpose='appointment'. Before this
+  // fix its metadata carried only {scheduled_service_id, series_move_id,
+  // reasonText} — no rendered_slot_ms and not the rain_out_moved legacy
+  // type — so loadPromiseEvents' SQL predicate
+  // (`purpose = 'appointment' AND (rendered_slot_ms IS NOT NULL OR
+  // original_message_type LIKE 'rain_out_moved%')`) excluded the row
+  // entirely: it never became a candidate row, so latestPromises kept
+  // ranking the ORIGINAL booking confirmation as "latest" and the detector
+  // enforced the pre-move window after a customer-notified series move
+  // (codex P1). These are the exact shapes loadPromiseEvents' `messages.map`
+  // produces from a messaging_audit_log row — before (no rendered_slot_ms,
+  // excluded from the query, so never in this array at all) and after (the
+  // fix stamps rendered_slot_ms, so the row is included).
+  test('a series move notice with rendered_slot_ms outranks the stale original-booking promise', () => {
+    const originalBooking = { visit_id: 'visit', start_at: '2026-09-10T13:00:00.000Z',
+      communicated_at: '2026-09-01T12:00:00.000Z', source: 'message' };
+    // The series notice, AFTER the fix: rendered_slot_ms present, so
+    // loadPromiseEvents' ternary resolves start_at instead of null.
+    const seriesMoveNotice = { visit_id: 'visit', start_at: '2026-09-12T13:00:00.000Z',
+      communicated_at: '2026-09-10T15:00:00.000Z', source: 'message' };
+    const map = latestPromises([originalBooking, seriesMoveNotice], new Date('2026-09-10T16:00:00.000Z'));
+    expect(map.get('visit').start_at).toBe(seriesMoveNotice.start_at);
+    expect(map.get('visit').start_at).not.toBe(originalBooking.start_at);
+  });
+
+  test('without rendered_slot_ms (the pre-fix shape) the notice is invisible and the stale promise wins', () => {
+    // Models loadPromiseEvents' own ternary directly: no rendered_slot_ms in
+    // metadata -> start_at: null (the "excluded from the WHERE clause
+    // entirely" case is stronger still — this models the row even reaching
+    // the mapper, and it's STILL unusable).
+    const metadata = { scheduled_service_id: 'visit', series_move_id: 'move-1', reasonText: 'weather' };
+    const startAt = Number.isFinite(Number(metadata?.rendered_slot_ms)) && metadata?.rendered_slot_ms != null
+      ? new Date(Number(metadata.rendered_slot_ms)).toISOString() : null;
+    expect(startAt).toBeNull();
+  });
+});

@@ -395,6 +395,18 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
     expect(seriesBlock).toContain('failed: true, guards: seriesReminderGuards');
   });
 
+  test('series path: the customer-notification metadata carries rendered_slot_ms (codex P1)', () => {
+    // Without this, no-show-detector.js's loadPromiseEvents predicate
+    // (purpose='appointment' AND rendered_slot_ms IS NOT NULL) never picks
+    // up the series-move confirmation, and latestPromises keeps enforcing
+    // the pre-move window after a customer-notified series move.
+    expect(seriesBlock).toContain("'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, rendered_slot_ms: renderedSlotMs }");
+    // Computed the same way the neighboring cadence-row rendered_slot_ms
+    // calls already do in this file (rescheduleReminderTime + parseETDateTime),
+    // from the exact slot the notice text itself quotes (startForText).
+    expect(seriesBlock).toContain('const renderedSlotMs = parseETDateTime(rescheduleReminderTime(String(newDate).split(\'T\')[0], { start: startForText })).getTime();');
+  });
+
   test('single path: notice routes through the shared helper after the sync — no inline send, capture, or rearm remains', () => {
     // The single-reschedule path no longer captures/rearms locally: the
     // notice (and its guarded snapshot semantics) live inside

@@ -4500,6 +4500,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
+        // Persist the promised arrival instant the same way the single-visit
+        // reschedule path does (appointment-reminders.js's reschedule notice:
+        // rendered_slot_ms: newApptTime.getTime()) — without it the no-show
+        // detector's promise-evidence predicate (messaging_audit_log rows
+        // with purpose='appointment' need rendered_slot_ms IS NOT NULL to
+        // count as a scheduling notice) never picks this series notice up,
+        // and keeps enforcing the pre-move window after a customer-notified
+        // series move (codex P1).
+        const renderedSlotMs = parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })).getTime();
         // sendOutcome: the sender reports a DEFERRED send (send window,
         // provider hold) separately from a definitive non-send, and
         // providerAccepted once ANY recipient's handoff succeeded — read in
@@ -4523,7 +4532,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               entity_type: 'scheduled_service',
               entity_id: serviceId,
             });
-          }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText }, {
+          }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, rendered_slot_ms: renderedSlotMs }, {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions. A CUSTOMER-driven
