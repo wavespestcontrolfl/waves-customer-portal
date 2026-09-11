@@ -99,6 +99,7 @@ const JOB_EFFECTS = {
 };
 
 const BILLING_TOOL_NAMES = new Set([
+  'save_customer_estimate',
   'request_instant_payout',
   'request_standard_payout',
   'approve_price',
@@ -108,6 +109,7 @@ const BILLING_TOOL_NAMES = new Set([
 ]);
 
 const ACTION_LABELS = {
+  save_customer_estimate: 'Save customer estimate',
   send_sms: 'Send a text message',
   reply_via_sms: 'Reply by text',
   send_email_reply: 'Send an email reply',
@@ -252,6 +254,21 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     effects.push({ kind, label, ...extra });
   };
   const propertyAction = PROPERTY_ACTION_TOOL_NAMES.has(toolName);
+  const customerEstimateAction = toolName === 'save_customer_estimate';
+  if (customerEstimateAction) {
+    if (preview.estimate_id) push('operational', `Saved estimate: ${preview.estimate_id}`);
+    push('billing', `WaveGuard ${preview.quote_tier} pricing`);
+    push('customer', `${preview.customer.name} — ${preview.property.address}`);
+    push('operational', `${preview.property.treatable_lawn_sqft} sq ft saved treatable lawn; ${humanKey(preview.property.grass_type)}`);
+    for (const line of preview.lines) {
+      push('billing', `${humanKey(line.service)}: $${Number(line.per_application).toFixed(2)} per application, ${line.applications} applications per year`);
+      if (line.initial) push('billing', `Initial: $${Number(line.initial).toFixed(2)}`);
+    }
+    for (const cadence of preview.offered_cadences) {
+      push('billing', `Customer option${cadence.selected ? ' (selected)' : ''}: ${cadence.applications} applications per year at $${Number(cadence.per_application).toFixed(2)} per application`);
+    }
+    push('operational', preview.effect);
+  }
   if (propertyAction) {
     if (preview?.customer?.name) push('customer', preview.customer.name);
     if (preview?.address) push('customer', `Save property: ${preview.address}`);
@@ -538,7 +555,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (!propertyAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  if (!propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -562,7 +579,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // one level of plain-object params flattens to its own lines (so an
   // update_customer card says WHAT changes), deeper structure is described
   // in full rather than dropped.
-  for (const [k, v] of Object.entries(propertyAction ? {} : (displayParams || {}))) {
+  for (const [k, v] of Object.entries(propertyAction || customerEstimateAction ? {} : (displayParams || {}))) {
     if (k.startsWith('_')) continue;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
