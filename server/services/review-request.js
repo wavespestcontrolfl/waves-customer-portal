@@ -1905,8 +1905,45 @@ const ReviewService = {
         }
       }
     } catch (err) {
-      // Same retry contract on a thrown exception (network down etc.):
-      // re-queue for the cron rather than leave the row stranded.
+      // A throw here can ALSO land AFTER the provider handoff (an audit-
+      // persistence failure post-accept) — sendCustomerMessage attaches
+      // err.providerOutcome with what actually happened on the wire (the
+      // composer's convention). A sent or explicitly-uncertain outcome must
+      // never fall into the blind 5-minute retry below, or the customer
+      // risks a duplicate text (codex #4338 P1).
+      const providerOutcome = err?.providerOutcome || null;
+      if (providerOutcome?.sent === true) {
+        try {
+          await db("review_requests").where({ id: requestId }).update({
+            sms_sent_at: new Date(),
+            status: "sent",
+          });
+          logger.error(
+            `[review] SMS accepted but its audit write failed (requestId=${requestId} errType=${err?.name || "Error"})`,
+          );
+        } catch (dbErr) {
+          logger.error(
+            `[review] SMS accepted, audit write AND status update both failed (requestId=${requestId} errType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
+          );
+        }
+        return;
+      }
+      if (isExplicitlyUncertainOutcome(providerOutcome)) {
+        try {
+          await db("review_requests").where({ id: requestId }).update({ status: "deferred" });
+          logger.error(
+            `[review] SMS outcome UNCERTAIN after a thrown post-handoff error (requestId=${requestId} errType=${err?.name || "Error"}) — held, not retried automatically`,
+          );
+        } catch (dbErr) {
+          logger.error(
+            `[review] SMS uncertain AND status update failed (requestId=${requestId} errType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
+          );
+        }
+        return;
+      }
+      // Same retry contract on an ordinary thrown exception (network down,
+      // failure before the provider handoff, etc.): re-queue for the cron
+      // rather than leave the row stranded.
       try {
         const retryAt = new Date(Date.now() + 5 * 60 * 1000);
         await db("review_requests").where({ id: requestId }).update({
@@ -3070,6 +3107,30 @@ const ReviewService = {
         sentThisRun.add(request.customer_id);
         sent++;
       } catch (err) {
+        // A throw here can land AFTER the provider handoff — err.providerOutcome
+        // carries what actually happened. Sent or explicitly uncertain, and the
+        // ordinary log-only path below would leave followup_sent unset, so the
+        // NEXT run's candidate query stays eligible and re-sends this follow-up
+        // (codex #4338 P1). Mark it attempted, same as the returned-result branch
+        // above, instead of retrying blind.
+        const providerOutcome = err?.providerOutcome || null;
+        if (providerOutcome?.sent === true || isExplicitlyUncertainOutcome(providerOutcome)) {
+          try {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+          } catch (dbErr) {
+            logger.error(`[review] Follow-up SMS post-handoff bookkeeping failed (requestId=${request.id} errType=${dbErr?.name || "Error"})`);
+          }
+          if (providerOutcome.sent === true) {
+            sentThisRun.add(request.customer_id);
+            sent++;
+          } else {
+            suppressed++;
+          }
+          continue;
+        }
         logger.error(`[review] Follow-up SMS failed: ${err.message}`);
       }
     }
@@ -3552,11 +3613,14 @@ const ReviewService = {
       }
     } catch { /* observability only */ }
 
-    // ONLY the send attempt is in the retry-on-throw path. If sendCustomerMessage
-    // itself throws (network/provider), it's safe to retry — Twilio never
-    // accepted it. If it RETURNS and then post-send bookkeeping throws (a
-    // transient Postgres error after Twilio accepted), we must NOT retry, or the
-    // customer gets the SMS twice (audit P1).
+    // ONLY the send attempt is in the retry-on-throw path. sendCustomerMessage
+    // itself throwing used to mean network/provider failure — safe to retry,
+    // Twilio never accepted it. That is no longer the whole story: it can now
+    // ALSO throw AFTER the provider handoff (an audit-persistence failure),
+    // attaching err.providerOutcome with what actually happened on the wire
+    // (the composer's convention — see tech-line.js's textFromLine). A sent
+    // or explicitly-uncertain outcome must never fall into the blind retry
+    // below, or the customer risks a duplicate text (codex #4338 P1).
     let result;
     try {
       result = await sendCustomerMessage({
@@ -3570,6 +3634,17 @@ const ReviewService = {
         metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
       });
     } catch (err) {
+      const providerOutcome = err?.providerOutcome || null;
+      if (providerOutcome?.sent === true || isExplicitlyUncertainOutcome(providerOutcome)) {
+        try {
+          return await this._applyOutreachSendResult(request, providerOutcome, manageRetryVia, "sms");
+        } catch (bookErr) {
+          logger.error(`[review] outreach SMS post-handoff bookkeeping failed after a throw (requestId=${request.id} errType=${bookErr?.name || "Error"})`);
+          return providerOutcome.sent === true
+            ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: providerOutcome.auditLogId }
+            : { ok: false, deferred: true, uncertain: true, channel: "sms", requestId: request.id, code: providerOutcome.code };
+        }
+      }
       if (manageRetryVia === "cron") {
         await db("review_requests")
           .where({ id: request.id })
@@ -3615,8 +3690,13 @@ const ReviewService = {
       // customer may already hold this touch. Hold it out of
       // processScheduled rather than schedule an automatic resend, which
       // could duplicate a text that already landed (codex #4338 P1).
+      // `uncertain: true` is a distinct marker from the generic
+      // `deferred: true` below — a sequence-step caller (_runSequenceStep)
+      // must hold the WHOLE sequence rather than schedule the same step
+      // again in 30 minutes, which would re-run sendOutreachTouch and send
+      // a second text (codex #4338 P1, round 2).
       await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
-      return { ok: false, deferred: true, channel, requestId: request.id, code: result?.code };
+      return { ok: false, deferred: true, uncertain: true, channel, requestId: request.id, code: result?.code };
     }
     const deferredRetryAt = retryAtForDeferredSend(result);
     if (deferredRetryAt) {
@@ -4747,6 +4827,24 @@ const ReviewService = {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
       return stop("opted_out");
+    }
+
+    if (outcome.uncertain) {
+      // The provider handoff crossed the SDK boundary with no definitive
+      // accept/reject — the customer may already hold this touch. Hold the
+      // WHOLE sequence rather than reschedule this step: the generic
+      // 30-minute retry below would re-run sendOutreachTouch and send a
+      // second text (codex #4338 P1). next_run_at stays null and status
+      // stays 'active' (not the enrollment-only 'deferred' lifecycle
+      // _sweepDeferredEnrollments owns, which restarts via
+      // startReviewSequence rather than resuming this step) so the due
+      // sweep's next_run_at scan never re-picks this row automatically;
+      // stopReviewSequence still reaches an 'active' row for a manual stop.
+      await db("review_sequences").where({ id: seq.id }).update({
+        decision: sequenceDecision({ reason: "provider_outcome_uncertain" }),
+        updated_at: new Date(),
+      });
+      return { ran: false, deferred: true, uncertain: true };
     }
 
     // Deferred / transient → retry this step later without advancing. Only a

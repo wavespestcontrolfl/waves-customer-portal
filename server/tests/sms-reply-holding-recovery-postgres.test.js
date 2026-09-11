@@ -163,4 +163,27 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     expect(await trx('agent_decisions').where({ id: parked.id }).first('status')).toMatchObject({ status: 'ignored' });
     expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
   });
+
+  test('an auto-send claim past the reconciliation window fails like any other orphan, freeing its reservation once the parked side reopens', async () => {
+    const used = await decision({ workflow: autoSend.AUTOSEND_WORKFLOW, status: autoSend.CLAIM_STATUS });
+    const parked = await decision({ message: 'Human review fallback.' });
+    const reservationId = await uncertainReservation({ kind: 'auto', used, parked });
+    // Provider evidence never arrives: push the reservation's own updated_at
+    // well past a short reconciliation window passed to both sweeps.
+    await trx('sms_log').where({ id: reservationId }).update({ updated_at: new Date(Date.now() - 3 * 60 * 60 * 1000) });
+
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30, uncertainReconciliationHours: 1 }))
+      .toMatchObject({ failed: 1 });
+    expect(await trx('agent_decisions').where({ id: used.id }).first('status')).toMatchObject({ status: autoSend.FAILED_STATUS });
+
+    // The parked sibling reopens through the existing suggestion sweep (same
+    // bounded window); once both linked decisions are terminal/reopened, the
+    // reservation row itself is no longer "live" and clears on the next pass.
+    expect(await suggest.recoverSuggestionHoldingStates({ orphanMinutes: 30, uncertainReconciliationHours: 1 })).toBe(1);
+    expect(await trx('agent_decisions').where({ id: parked.id }).first('status')).toMatchObject({ status: 'pending_review' });
+
+    expect(await autoSend.reconcileAutoSendClaims({ orphanMinutes: 30, uncertainReconciliationHours: 1 }))
+      .toMatchObject({ reservationsCleared: 1 });
+    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
+  });
 });

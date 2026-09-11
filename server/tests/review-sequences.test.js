@@ -2841,6 +2841,74 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences[0].status).toBe('completed');
   });
 
+  // codex #4338 P1, round 2: an uncertain provider handoff on a cadence step
+  // used to fall into the generic deferred/transient branch, which reschedules
+  // next_run_at +30 minutes — so the NEXT processReviewSequences tick re-ran
+  // this same step and sent a second text. The sequence must hold instead.
+  test('an uncertain provider handoff on a cadence step holds the whole sequence — no 30-minute reschedule, no second send', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-1', first_name: 'Uma', last_name: 'N', phone: '+19410000090', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-unc', customer_id: 'unc-1', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' });
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(out.sent).toBe(0);
+    expect(out.stopped).toBe(0);
+    expect(out.completed).toBe(0);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq.status).toBe('active'); // held, not stopped — an operator/later evidence can still resolve it
+    expect(seq.current_step).toBe(0); // not advanced
+    expect(seq.next_run_at).toBeNull(); // NOT rescheduled — the due-sweep will never re-pick this row
+    expect(JSON.parse(seq.decision).reason).toBe('provider_outcome_uncertain');
+
+    // A second cron tick must not re-send: with next_run_at null, this row
+    // never re-enters the due query in the first place.
+    mockSendCustomerMessage.mockClear();
+    const out2 = await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out2.sent).toBe(0);
+  });
+
+  // codex #4338 P1, round 2: sendCustomerMessage can throw AFTER the provider
+  // handoff (audit-persistence failure) instead of returning. _sendOutreachSms's
+  // old catch retried blind on ANY throw; this proves the thrown case reaches
+  // the SAME sequence-hold behavior as a returned uncertain result above.
+  test('an uncertain provider handoff THROWN (not returned) also holds the sequence, end to end', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-2', first_name: 'Vic', last_name: 'N', phone: '+19410000091', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-unc2', customer_id: 'unc-2', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(() => {
+      throw Object.assign(new Error('audit write failed'), {
+        providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+      });
+    });
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(out.sent).toBe(0);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq.status).toBe('active');
+    expect(seq.next_run_at).toBeNull();
+    expect(JSON.parse(seq.decision).reason).toBe('provider_outcome_uncertain');
+    const req = mock.__state.rows.review_requests.find((r) => r.sequence_id === 'seq-unc2');
+    expect(req.status).toBe('deferred');
+  });
+
   test('an ask delivered outside the sequence (legacy path while gate was off) supersedes the cadence', async () => {
     const mock = makeMock({
       customers: [{ id: 'sp-1', first_name: 'Eli', last_name: 'G', phone: '+19410000081', nearest_location_id: 'venice' }],
@@ -3047,6 +3115,71 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(bodies[0]).not.toContain('Longname');
       expect(bodies[1]).toContain('Hi Kim! Waves Pest Control.');
       expect(bodies[1]).not.toContain('Our team');
+    });
+
+    // codex #4338 P1, round 2: sendSMS's catch only handled a thrown pre-handoff
+    // failure (network down, safe to retry). sendCustomerMessage can ALSO throw
+    // AFTER the provider handoff (audit-persistence failure), attaching
+    // err.providerOutcome — the old catch retried blind either way, risking a
+    // duplicate text for an accepted-but-unaudited send, or for an uncertain one.
+    test('sendSMS on a thrown ACCEPTED post-handoff error marks the row sent, never retries', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-1', first_name: 'Rae', last_name: 'Q', phone: '+19410000097', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th1', customer_id: 'th-1', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th1', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(() => {
+        throw Object.assign(new Error('audit write failed'), {
+          providerOutcome: { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-th1' },
+        });
+      });
+
+      await ReviewService.sendSMS('rr-th1');
+
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('sent');
+      expect(row.sms_sent_at).toBeTruthy();
+      expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that would duplicate the text
+    });
+
+    test('sendSMS on a thrown UNCERTAIN post-handoff error holds the row, never retries', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-2', first_name: 'Sam', last_name: 'Q', phone: '+19410000098', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th2', customer_id: 'th-2', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th2', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(() => {
+        throw Object.assign(new Error('audit write failed'), {
+          providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+        });
+      });
+
+      await ReviewService.sendSMS('rr-th2');
+
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('deferred'); // held — processScheduled only picks status='pending'
+      expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that could duplicate the text
+    });
+
+    test('sendSMS on an ordinary pre-handoff throw (no providerOutcome) still retries exactly as before', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-3', first_name: 'Tia', last_name: 'Q', phone: '+19410000099', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th3', customer_id: 'th-3', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th3', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(() => { throw new Error('network down'); });
+
+      await ReviewService.sendSMS('rr-th3');
+
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending'); // unchanged
+      expect(row.scheduled_for).toBeTruthy(); // queued for the cron's 5-minute retry
     });
 
     test('a record-scoped enrollment signs with the linked visit\'s technician, never a newer visit\'s (codex #4139 r2)', async () => {
