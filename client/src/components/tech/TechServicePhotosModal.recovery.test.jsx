@@ -90,3 +90,38 @@ it('retries the same failed photo with its original caption and type, and protec
     expect(body.get('capturedAt')).toBe(new Date(1234567890).toISOString());
   }
 });
+
+it('does not report an empty photo list after a load failure and can retry the read', async () => {
+  let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    reads += 1;
+    return reads === 1
+      ? { ok: false, json: async () => ({ error: 'Example photo list unavailable.' }) }
+      : { ok: true, json: async () => ({ photos: [{ id: 'photo-a', url: '/example.jpg', photo_type: 'before', caption: 'Existing example photo' }] }) };
+  }));
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  await screen.findByText('Example photo list unavailable.');
+  expect(screen.queryByText('No photos yet.')).not.toBeInTheDocument();
+  expect(screen.queryByText('Attached (0)')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry photos', exact: true }));
+  await screen.findByText('Attached (1)');
+  expect(screen.getByText('Existing example photo')).toBeInTheDocument();
+});
+
+it('keeps successful upload feedback when its photo-list refresh fails', async () => {
+  let reads = 0;
+  vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+    if (url.endsWith('photo-marks')) return { ok: true, json: async () => ({ supported: false }) };
+    if (options?.method === 'POST') return { ok: true, json: async () => ({ photo: { id: 'photo-a', staged: true } }) };
+    if (++reads === 1) return { ok: true, json: async () => ({ photos: [] }) };
+    return { ok: false, json: async () => ({ error: 'Refresh unavailable.' }) };
+  }));
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  await screen.findByText('No photos yet.');
+  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  await screen.findByText('Refresh unavailable.');
+  expect(screen.getByText(/Photo saved — it will attach/)).toBeInTheDocument();
+  expect(screen.queryByText('No photos yet.')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Close|×/ })).toBeEnabled();
+});
