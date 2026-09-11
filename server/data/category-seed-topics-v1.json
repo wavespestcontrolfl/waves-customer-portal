@@ -1914,19 +1914,20 @@
       "thesis": "Lizards living inside a Southwest Florida lanai are anoles and house geckos that slipped through a screen or door gap chasing the insects the cage lights attract; the honest fix is a gap-and-light audit plus shrinking the bug supply, not lizard sprays, mothballs or glue boards, and once the buffet is gone they leave on their own.",
       "outline": [
         "Quick answer (5 steps): find and patch the gap they came through, herd out the ones already inside, change the lights that feed them, cut the bug supply, keep the screens tight",
-        "Which lizard is on your lanai: brown anole, green anole, Mediterranean and tropical house geckos, curly-tailed lizard, one line each from UF/IFAS (size, color, day vs night) and which are native vs introduced; all harmless to people and pets",
+        "Which lizard is on your lanai: brown anole, green anole, Mediterranean and tropical house geckos, curly-tailed lizard, one line each from UF/IFAS (size, color, day vs night) and which are native vs introduced; none are venomous and none bite unless picked up",
         "Why they are in there: the cage is a lit, sheltered insect trap, plus water in plant saucers and warm slab edges; lizards follow the bugs, so they are a symptom",
         "How they got in: the gap under the screen door, torn or popped spline at the base panels, the seam where cage meets slab or pool deck, weep holes and kick plates; a five-minute flashlight audit at dusk",
         "Getting the ones already inside out: prop the screen door at dusk and dawn, gentle herding toward it, cup-and-card for a cornered one; what NOT to do: glue boards (kill non-target wildlife), mothballs or naphthalene (label is the law, not a lizard repellent), retail lizard repellent sprays (no evidence)",
         "Cut the buffet: warm-spectrum or yellow bug bulbs, fewer lights on late, no pet food or fruit on the lanai, empty plant-saucer water, keep shrubs 12 inches off the cage, a perimeter pest program to bring insect pressure down",
-        "What Waves does and does not do: we treat the insects that draw them (perimeter pest control, Waveguard), we never remove or poison lizards; large lizards on docks and seawalls (iguanas) are a wildlife-trapper matter",
-        "FAQ: do lizards bite; are lizards poisonous to dogs or cats; do lizards lay eggs inside a lanai; will a pest control treatment kill the lizards; why are there suddenly more lizards after rain"
+        "What Waves does and does not do: we treat the insects that draw them (perimeter pest control, Waveguard); we never remove, trap, relocate or poison lizards, and this post does not cover wildlife removal of any kind",
+        "FAQ: do lizards bite; is it a problem if my cat or dog catches one (bite/venom risk is not the same as eating one — cover the cat-liver-fluke point ONLY if the cited veterinary source supports it, and send pet-health questions to a vet); do lizards lay eggs inside a lanai; will a pest control treatment kill the lizards; why are there suddenly more lizards after rain"
       ],
       "sources": [
         "https://gardeningsolutions.ifas.ufl.edu/care/wildlife/anoles.html",
         "https://edis.ifas.ufl.edu/publication/UW070",
         "Locate the UF/IFAS or FWC species profiles for the brown anole (Anolis sagrei, introduced), green anole (Anolis carolinensis, native), Mediterranean house gecko and tropical house gecko (both introduced) and the northern curly-tailed lizard (introduced); verify size, coloring, activity time and native/introduced status against those pages; snapshot at draft.",
-        "For the what-not-to-do section, cite the EPA or FDACS position that using a registered pesticide (mothballs/naphthalene) in a manner inconsistent with its label is a violation; if no citable page is found, drop the legal framing and keep only 'not labeled for this, does not work'."
+        "For the what-not-to-do section, cite the EPA or FDACS position that using a registered pesticide (mothballs/naphthalene) in a manner inconsistent with its label is a violation; if no citable page is found, drop the legal framing and keep only 'not labeled for this, does not work'.",
+        "https://www.merckvetmanual.com/digestive-system/hepatic-disease-in-small-animals/hepatobiliary-fluke-infection-in-small-animals"
       ],
       "internal_links": [
         "/pest-control-services/",
@@ -1935,9 +1936,9 @@
       ],
       "verify_notes": [
         "Every species ID claim (size, color, native vs introduced, day vs night activity) must be verified against the cited UF/IFAS or FWC page at draft; if a claim cannot be verified, OMIT it. Do NOT call brown anoles or house geckos 'protected' or 'native' — the brown anole and both house geckos are introduced species.",
-        "No health claims beyond what the source supports: do not state that lizards carry or spread a named disease unless the cited page says so; 'harmless, non-venomous, do not bite unless handled' is the ceiling.",
+        "No health claims beyond what the source supports. Nonvenomous and does-not-bite-unless-handled is the ceiling for PEOPLE. Do NOT write that these lizards are harmless to pets as a blanket statement: bite/venom risk and ingestion risk are different questions, and a cat that eats a lizard can pick up liver flukes. State the ingestion point ONLY if the cited veterinary source supports it, keep it to one factual sentence, and refer pet-health questions to a veterinarian. If it cannot be verified, OMIT the whole ingestion point rather than replacing it with a reassurance.",
         "How-to post, not an identification reference: the existing /pest-control/lizard-faeces-swfl-guide/ already owns droppings ID — link it once and keep this page on exclusion, herding, lighting and bug-supply reduction.",
-        "Waves treats insects, not lizards. Never imply we remove, trap, relocate or poison lizards, and never describe any pesticide as 'safe' or 'pet-safe' or give re-entry minutes. Do not name a product for lizard control; no such labeled product is part of our service.",
+        "Waves treats insects, not lizards. Never imply we remove, trap, relocate or poison lizards, and never describe any pesticide as \"safe\" or \"pet-safe\" or give re-entry minutes. Do not name a product for lizard control; no such labeled product is part of our service. NO WILDLIFE-TRAPPING CONTENT of any kind (owner rule, waves-content skill): do not recommend, name or describe a trapper, removal service or relocation, and do not add an iguana-removal aside.",
         "Southwest Florida framing throughout (Sarasota, Bradenton, Venice, Lakewood Ranch, North Port, Palmetto, Parrish, Port Charlotte); no statewide-only framing in title or H2s."
       ]
     }
