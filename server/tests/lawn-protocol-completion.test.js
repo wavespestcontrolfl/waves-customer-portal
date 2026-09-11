@@ -262,6 +262,34 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(JSON.parse(row.metadata).unlistedSkippedProducts).toEqual([{ productId: 'prod-2', productName: 'Fixture pre-emergent' }]);
   });
 
+  test('gate on: an unstamped visit freezes the property the plan proved, never null (codex #4113 P2)', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+      service: { id: 'svc-7', customer_id: 'cust-7', property_id: null }, serviceRecord: { id: 'record-7' }, serviceProducts: [appliedProduct],
+      plan: { protocol: null, propertyGate: { propertyMatchesProfile: true, addressProof: { propertyId: 'prop-9', propertyAddressKey: 'k', visitAddressKey: 'k', stamped: false } } },
+      completionInput: { treatedSqft: 2500 },
+    });
+    expect(completions[0]).toMatchObject({ scheduled_service_id: 'svc-7', property_id: 'prop-9', protocol_key: null });
+    // An explicit visit stamp still wins over the plan's resolution.
+    completions.length = 0;
+    await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+      service: oneTimeVisit, serviceRecord: { id: 'record-2' }, serviceProducts: [appliedProduct],
+      plan: { protocol: null, propertyGate: { addressProof: { propertyId: 'prop-9' } } }, completionInput: { treatedSqft: 2500 },
+    });
+    expect(completions[0].property_id).toBe('prop-2');
+  });
+
+  test('protocol row lookups inside a transaction fail soft under their own savepoint, leaving the transaction usable (codex #4113 P2)', async () => {
+    const { loadProtocolRows } = require('../services/lawn-protocol-completion');
+    const raw = jest.fn(async () => {});
+    const trx = Object.assign((_table) => ({ where: () => ({ first: () => Promise.reject(new Error('relation missing')) }) }), { isTransaction: true, raw });
+    const rows = await loadProtocolRows(trx, { attributed: true, structured: { protocolKey: 'st_augustine', version: 1 }, window: { key: 'summer' } });
+    expect(rows).toEqual({ protocolRow: null, windowRow: null, protocolProducts: [] });
+    const statements = raw.mock.calls.map(([sql]) => sql.replace(/fail_soft_[0-9a-f]+/, 'sp'));
+    expect(statements).toEqual(['SAVEPOINT sp', 'ROLLBACK TO SAVEPOINT sp', 'RELEASE SAVEPOINT sp']);
+  });
+
   test('gate on: a removed substitute resolves to its original protocol product; a default from a plan that changed before submit is not this protocol\'s skip', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const protocolRow = { id: 'pp-1', product_id: 'orig-1', catalog_product_name: 'Original iron', role: 'micronutrient', rate_per_1000: 3, rate_unit: 'fl oz' };

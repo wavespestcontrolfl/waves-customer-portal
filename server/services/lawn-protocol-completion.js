@@ -1,4 +1,5 @@
 const { addETDays, etDateString } = require('../utils/datetime-et');
+const { failSoftRead } = require('../utils/savepoint-read');
 
 // GATE_LAWN_ACTUALS_LEDGER (dark): the ledger records EVERY lawn visit —
 // member, one-time, commercial, and incomplete visits that applied product —
@@ -170,24 +171,26 @@ function resolveAttribution(plan, allLawn) {
 // The protocol rows the completion attributes to: protocol → window →
 // window products. Each lookup depends on the previous one resolving; any
 // read failure degrades to "no row" rather than failing the closeout.
+// Each read runs under its own savepoint: a bare `.catch()` on the
+// completion transaction would return the fallback while PostgreSQL left
+// the transaction aborted, and the completion upsert that follows would
+// fail with 25P02 and roll back the closeout — or its whole packet
+// (Codex #4113 P2). Outside a transaction failSoftRead is a plain read.
 async function loadProtocolRows(trx, { structured, window, attributed }) {
   if (!attributed) return { protocolRow: null, windowRow: null, protocolProducts: [] };
-  const protocolRow = await trx('lawn_protocols')
+  const protocolRow = await failSoftRead(trx, (k) => k('lawn_protocols')
     .where({ protocol_key: structured.protocolKey, version: structured.version })
-    .first('id')
-    .catch(() => null);
+    .first('id'), null);
   const windowRow = protocolRow?.id
-    ? await trx('lawn_protocol_windows')
+    ? await failSoftRead(trx, (k) => k('lawn_protocol_windows')
       .where({ lawn_protocol_id: protocolRow.id, window_key: window.key })
-      .first('id')
-      .catch(() => null)
+      .first('id'), null)
     : null;
   const protocolProducts = windowRow?.id
-    ? await trx('lawn_protocol_products as lpp')
+    ? await failSoftRead(trx, (k) => k('lawn_protocol_products as lpp')
       .leftJoin('products_catalog as pc', 'lpp.product_id', 'pc.id')
       .where({ lawn_protocol_window_id: windowRow.id })
-      .select('lpp.*', 'pc.name as catalog_product_name')
-      .catch(() => [])
+      .select('lpp.*', 'pc.name as catalog_product_name'), [])
     : [];
   return { protocolRow, windowRow, protocolProducts };
 }
@@ -448,7 +451,12 @@ function buildCompletionRow({
     scheduled_service_id: service.id || serviceRecord.scheduled_service_id,
     customer_id: service.customer_id || serviceRecord.customer_id,
     // Frozen service property (migration 20260907000110 ships in this PR).
-    property_id: service.property_id,
+    // An older unstamped visit (null property_id) can still be proven
+    // through the plan's history scope (the sole saved property); that
+    // property governed the protocol, so it is the one frozen here rather
+    // than null — otherwise the row loses its property and the
+    // property-reference preservation cannot see it (Codex #4113 P2).
+    property_id: service.property_id || plan?.propertyGate?.addressProof?.propertyId || null,
     lawn_protocol_id: rows.protocolRow?.id,
     lawn_protocol_window_id: rows.windowRow?.id,
     protocol_key: structured.protocolKey,
@@ -563,6 +571,7 @@ function normalizeCompletionForStructuredNotes(completion) {
 
 module.exports = {
   lawnActualsLedgerEnabled,
+  loadProtocolRows,
   recordLawnProtocolCompletion,
   normalizeChecklist,
   missingRequiredTasks,
