@@ -2909,6 +2909,35 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(req.status).toBe('deferred');
   });
 
+  // codex #4338 P1, round 3: a RETURNED uncertain result whose OWN
+  // deferred-status DB write then fails used to be caught by
+  // _sendOutreachSms's bookkeeping catch, which only special-cased
+  // result.sent and fell back to `retryable: true` for everything else —
+  // losing the known-uncertain marker and letting _runSequenceStep
+  // reschedule a step whose send may already have landed.
+  test('a bookkeeping failure on the deferred-status write still surfaces as uncertain, not a blind retryable', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-3', first_name: 'Wes', last_name: 'N', phone: '+19410000092', nearest_location_id: 'bradenton' }],
+    }, {
+      onUpdate: (table, patch) => {
+        if (table === 'review_requests' && patch.status === 'deferred') throw new Error('pg blip on deferred-status write');
+      },
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', auditLogId: 'audit-unc3',
+    });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(false);
+    expect(out.uncertain).toBe(true);
+    expect(out.deferred).toBe(true);
+    expect(out.retryable).toBeUndefined(); // never the generic bookkeeping_failed shape
+  });
+
   test('an ask delivered outside the sequence (legacy path while gate was off) supersedes the cadence', async () => {
     const mock = makeMock({
       customers: [{ id: 'sp-1', first_name: 'Eli', last_name: 'G', phone: '+19410000081', nearest_location_id: 'venice' }],
@@ -3163,6 +3192,36 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('deferred'); // held — processScheduled only picks status='pending'
       expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that could duplicate the text
+    });
+
+    // codex #4338 P1, round 3: a RETURNED uncertain result whose own
+    // deferred-status DB write then fails used to let that write's exception
+    // reach the generic 5-minute retry queue — the known ambiguous outcome
+    // was lost the moment the bookkeeping call itself failed.
+    test('sendSMS on a RETURNED uncertain result whose deferred-status write fails still never queues a retry', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-4', first_name: 'Uri', last_name: 'Q', phone: '+19410000100', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th4', customer_id: 'th-4', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th4', location_id: 'venice' },
+        ],
+      }, {
+        onUpdate: (table, patch) => {
+          if (table === 'review_requests' && patch.status === 'deferred') throw new Error('pg blip on deferred-status write');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', auditLogId: 'audit-th4',
+      });
+
+      await ReviewService.sendSMS('rr-th4');
+
+      const row = mock.__state.rows.review_requests[0];
+      // The write failed, so status could not flip to 'deferred' — but it
+      // must ALSO never gain a scheduled_for: processScheduled only ever
+      // picks whereNotNull('scheduled_for'), so an unset scheduled_for is
+      // what actually keeps this row out of an automatic resend.
+      expect(row.scheduled_for).toBeUndefined();
     });
 
     test('sendSMS on an ordinary pre-handoff throw (no providerOutcome) still retries exactly as before', async () => {

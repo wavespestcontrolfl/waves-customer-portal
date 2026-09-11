@@ -1830,9 +1830,20 @@ const ReviewService = {
         // row out of the ordinary retry sweep instead of scheduling an
         // automatic resend, which could duplicate a text that already
         // landed (codex #4338 P1).
-        await db("review_requests").where({ id: requestId }).update({
-          status: "deferred",
-        });
+        try {
+          await db("review_requests").where({ id: requestId }).update({
+            status: "deferred",
+          });
+        } catch (bookErr) {
+          // The provider outcome is known (uncertain) regardless of
+          // whether this write landed — never let a bookkeeping failure
+          // here fall into the OUTER catch's generic 5-minute retry,
+          // which would risk a duplicate text over an outcome already
+          // known to be ambiguous (codex #4338 P1, round 3).
+          logger.error(
+            `[review] SMS uncertain-status bookkeeping failed (customerId=${customer.id} requestId=${requestId} errType=${bookErr?.name || "Error"})`,
+          );
+        }
         logger.error(
           `[review] SMS outcome UNCERTAIN (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) — held, not retried automatically`,
         );
@@ -3665,13 +3676,20 @@ const ReviewService = {
       logger.error(
         `[review] post-send bookkeeping failed (requestId=${request.id} sent=${!!result?.sent} errType=${bookErr?.name || "Error"})`,
       );
-      // Only a SENT result must avoid retry (would double-send). A not-sent
-      // result (rate-limit / transient provider failure) has
-      // NO duplicate-send risk, so keep it retryable — don't drop the manual
-      // retry or stop the cadence over a bookkeeping blip.
-      return result?.sent
-        ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId }
-        : { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
+      // A SENT or explicitly-UNCERTAIN result must avoid retry (would risk a
+      // duplicate text) even when the bookkeeping write itself failed — the
+      // known provider outcome does not depend on whether the DB update
+      // landed (codex #4338 P1, round 3). Only a genuinely not-sent result
+      // (never crossed the wire) has NO duplicate-send risk, so it alone
+      // stays retryable — don't drop the manual retry or stop the cadence
+      // over an ordinary bookkeeping blip.
+      if (result?.sent) {
+        return { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId };
+      }
+      if (isExplicitlyUncertainOutcome(result)) {
+        return { ok: false, deferred: true, uncertain: true, channel: "sms", requestId: request.id, code: result?.code };
+      }
+      return { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 
