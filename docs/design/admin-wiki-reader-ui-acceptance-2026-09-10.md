@@ -11,3 +11,7 @@ Failed reads show an error with GET-only retry instead of a blank panel or succe
 Seven focused tests, scoped ESLint, and production build/prebuild gates passed. Actual-route verification passed 40 Chromium/WebKit cases: article and Health at five widths (390/700/820/1024/1440) and two heights (900/390). Read failure/retry, article return, refresh/query context, and technician Health deep-link restrictions passed; all knowledge requests were GETs, with no unexpected requests or page errors.
 
 Desktop/mobile article, Health, and read-error screenshots were visually inspected for readable text, wrapping, and reachable retry controls. Local runner and evidence: `.tmp/wiki-reader/`; screenshots are attached to the PR. Fixtures are fictional and external traffic/WebSockets are blocked. No database/provider/customer action was exercised. Physical iPhone/PWA safe-area and keyboard behavior remain unverified.
+
+## Intelligence Bar census
+
+Two exact request fingerprints were reviewed: `GET /admin/knowledge/article/:id` with the selected article ID and the admin-only `GET /admin/knowledge/health`. Both retain their bearer authentication, response projections, and read-only effects. Extraction adds explicit failure and GET-only retry behavior but no Intelligence Bar tool or verified parity, so both remain explicitly unsupported as `reviewed_unmapped`.
