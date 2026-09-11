@@ -3918,7 +3918,6 @@ function RegistryTab({ showToast }) {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
   const [filter, setFilter] = useState("all");
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -3930,9 +3929,9 @@ function RegistryTab({ showToast }) {
       setLoading(false);
     }
   }, []);
-
-  useEffect(() => { load(); }, [load]);
-
+  useEffect(() => {
+    load();
+  }, [load]);
   const startEdit = (p) => {
     setEditing(p.id);
     setForm({
@@ -3947,16 +3946,21 @@ function RegistryTab({ showToast }) {
       applicationZones: (p.applicationZones || []).join(", "),
     });
   };
-
   const save = async (id) => {
     try {
       const payload = {
         ...form,
         targetPests: form.targetPests
-          ? form.targetPests.split(",").map((s) => s.trim()).filter(Boolean)
+          ? form.targetPests
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
           : [],
         applicationZones: form.applicationZones
-          ? form.applicationZones.split(",").map((s) => s.trim()).filter(Boolean)
+          ? form.applicationZones
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
           : [],
       };
       await adminFetch(`/admin/inventory/${id}`, {
@@ -3970,137 +3974,242 @@ function RegistryTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
-
   const filtered = products.filter((p) => {
     if (filter === "all") return true;
     if (filter === "public") return p.customerVisibility === "public";
     if (filter === "portal") return p.customerVisibility === "portal_only";
     if (filter === "draft") return p.contentStatus === "draft";
-    if (filter === "needs_content") return p.customerVisibility !== "internal_only" && !p.publicSummary;
+    if (filter === "needs_content")
+      return p.customerVisibility !== "internal_only" && !p.publicSummary;
     return true;
   });
-
-  if (loading) return <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>Loading...</div>;
-
+  if (loading)
+    return <ActionFeedback>Loading product registry…</ActionFeedback>;
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+      <div className="flex gap-[6px] mb-[12px] flex-wrap">
         {[
-          { key: "all", label: "All Products" },
-          { key: "public", label: "Public" },
-          { key: "portal", label: "Portal" },
-          { key: "draft", label: "Drafts" },
-          { key: "needs_content", label: "Needs Content" },
+          {
+            key: "all",
+            label: "All Products",
+          },
+          {
+            key: "public",
+            label: "Public",
+          },
+          {
+            key: "portal",
+            label: "Portal",
+          },
+          {
+            key: "draft",
+            label: "Drafts",
+          },
+          {
+            key: "needs_content",
+            label: "Needs Content",
+          },
         ].map((f) => (
-          <button
+          <Button
             key={f.key}
             onClick={() => setFilter(f.key)}
-            style={{
-              minHeight: 40,
-              ...sBtn(filter === f.key ? D.teal : "transparent", filter === f.key ? "#fff" : D.muted),
-              border: filter === f.key ? "none" : `1px solid ${D.border}`,
-              fontSize: 11,
-              padding: "4px 10px",
-            }}
+            variant="secondary"
+            className="min-h-[40px]"
           >
             {f.label}
-          </button>
+          </Button>
         ))}
-        <span style={{ color: D.muted, fontSize: 11, alignSelf: "center", marginLeft: 8 }}>
+        <span className="text-ink-secondary text-ui-body self-center ml-[8px]">
           {filtered.length} product{filtered.length !== 1 ? "s" : ""}
         </span>
       </div>
 
-      <div style={{ display: "grid", gap: 8 }}>
+      <div className="grid gap-[8px]">
         {filtered.map((p) => {
           const isEditing = editing === p.id;
-          const vis = VISIBILITY_OPTIONS.find((v) => v.value === (p.customerVisibility || "internal_only"));
-          const stat = STATUS_OPTIONS.find((s) => s.value === (p.contentStatus || "draft"));
-
+          const vis = VISIBILITY_OPTIONS.find(
+            (v) => v.value === (p.customerVisibility || "internal_only"),
+          );
+          const stat = STATUS_OPTIONS.find(
+            (s) => s.value === (p.contentStatus || "draft"),
+          );
           return (
-            <div key={p.id} style={{ ...sCard, padding: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: isEditing ? 12 : 0 }}>
-                <span style={{ color: D.text, fontWeight: 500, flex: 1 }}>{p.name}</span>
-                <span style={{ fontSize: 11, color: D.muted }}>{p.category}</span>
-                <span style={sBadge(`${vis.color}22`, vis.color)}>{vis.label}</span>
-                <span style={sBadge(`${stat.color}22`, stat.color)}>{stat.label}</span>
+            <Card key={p.id} className="p-5 mb-3 p-[12px]">
+              <div className="flex items-center gap-[10px]">
+                <span className="text-zinc-900 font-medium flex-[1]">
+                  {p.name}
+                </span>
+                <span className="text-ui-body text-ink-secondary">
+                  {p.category}
+                </span>
+                <Badge tone="neutral">{vis.label}</Badge>
+                <Badge tone="neutral">{stat.label}</Badge>
                 {!isEditing && (
-                  <button onClick={() => startEdit(p)} style={{ ...sBtn(D.teal, "#fff"), fontSize: 11, padding: "3px 10px" }}>
+                  <Button onClick={() => startEdit(p)} variant="secondary">
                     Edit
-                  </button>
+                  </Button>
                 )}
               </div>
 
               {isEditing && (
-                <div style={{ display: "grid", gap: 10 }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Visibility</label>
-                      <select value={form.customerVisibility} onChange={(e) => setForm((f) => ({ ...f, customerVisibility: e.target.value }))} style={sInput}>
-                        {VISIBILITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Status</label>
-                      <select value={form.contentStatus} onChange={(e) => setForm((f) => ({ ...f, contentStatus: e.target.value }))} style={sInput}>
-                        {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Common Name</label>
-                      <input value={form.commonName} onChange={(e) => setForm((f) => ({ ...f, commonName: e.target.value }))} placeholder="Plain-language name" style={sInput} />
-                    </div>
+                <div className="grid gap-[10px]">
+                  <div className="grid gap-[8px]">
+                    <Field label="Visibility">
+                      <Select
+                        value={form.customerVisibility}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            customerVisibility: e.target.value,
+                          }))
+                        }
+                      >
+                        {VISIBILITY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Status">
+                      <Select
+                        value={form.contentStatus}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            contentStatus: e.target.value,
+                          }))
+                        }
+                      >
+                        {STATUS_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label="Common Name">
+                      <Input
+                        value={form.commonName}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            commonName: e.target.value,
+                          }))
+                        }
+                        placeholder="Plain-language name"
+                      />
+                    </Field>
                   </div>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Target Pests (comma-separated)</label>
-                      <input value={form.targetPests} onChange={(e) => setForm((f) => ({ ...f, targetPests: e.target.value }))} placeholder="ants, roaches, spiders" style={sInput} />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Application Zones (comma-separated)</label>
-                      <input value={form.applicationZones} onChange={(e) => setForm((f) => ({ ...f, applicationZones: e.target.value }))} placeholder="exterior perimeter, interior cracks" style={sInput} />
-                    </div>
+                  <div className="grid gap-[8px]">
+                    <Field label="Target Pests (comma-separated)">
+                      <Input
+                        value={form.targetPests}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            targetPests: e.target.value,
+                          }))
+                        }
+                        placeholder="ants, roaches, spiders"
+                      />
+                    </Field>
+                    <Field label="Application Zones (comma-separated)">
+                      <Input
+                        value={form.applicationZones}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            applicationZones: e.target.value,
+                          }))
+                        }
+                        placeholder="exterior perimeter, interior cracks"
+                      />
+                    </Field>
                   </div>
 
-                  <div>
-                    <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Public Summary (why we use it — 1-2 sentences)</label>
-                    <textarea value={form.publicSummary} onChange={(e) => setForm((f) => ({ ...f, publicSummary: e.target.value }))} rows={2} placeholder="Non-repellent transfer insecticide that eliminates entire colonies..." style={{ ...sInput, resize: "vertical" }} />
+                  <Field label="Public Summary (why we use it — 1-2 sentences)">
+                    <Textarea
+                      value={form.publicSummary}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          publicSummary: e.target.value,
+                        }))
+                      }
+                      rows={2}
+                      placeholder="Non-repellent transfer insecticide that eliminates entire colonies..."
+                      className="resize-y"
+                    />
+                  </Field>
+
+                  <Field label="Portal Summary (shown in service history)">
+                    <Textarea
+                      value={form.portalSummary}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          portalSummary: e.target.value,
+                        }))
+                      }
+                      rows={2}
+                      placeholder="Applied to your exterior perimeter to create a transfer zone..."
+                      className="resize-y"
+                    />
+                  </Field>
+
+                  <div className="grid gap-[8px]">
+                    <Field label="Customer Safety Summary">
+                      <Textarea
+                        value={form.customerSafetySummary}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            customerSafetySummary: e.target.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder="Applied according to label directions..."
+                        className="resize-y"
+                      />
+                    </Field>
+                    <Field label="Pet/Kid Guidance">
+                      <Textarea
+                        value={form.petKidGuidanceText}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            petKidGuidanceText: e.target.value,
+                          }))
+                        }
+                        rows={2}
+                        placeholder="Safe once dry — technician confirms timing"
+                        className="resize-y"
+                      />
+                    </Field>
                   </div>
 
-                  <div>
-                    <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Portal Summary (shown in service history)</label>
-                    <textarea value={form.portalSummary} onChange={(e) => setForm((f) => ({ ...f, portalSummary: e.target.value }))} rows={2} placeholder="Applied to your exterior perimeter to create a transfer zone..." style={{ ...sInput, resize: "vertical" }} />
-                  </div>
-
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Customer Safety Summary</label>
-                      <textarea value={form.customerSafetySummary} onChange={(e) => setForm((f) => ({ ...f, customerSafetySummary: e.target.value }))} rows={2} placeholder="Applied according to label directions..." style={{ ...sInput, resize: "vertical" }} />
-                    </div>
-                    <div>
-                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Pet/Kid Guidance</label>
-                      <textarea value={form.petKidGuidanceText} onChange={(e) => setForm((f) => ({ ...f, petKidGuidanceText: e.target.value }))} rows={2} placeholder="Safe once dry — technician confirms timing" style={{ ...sInput, resize: "vertical" }} />
-                    </div>
-                  </div>
-
-                  <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                    <button onClick={() => setEditing(null)} style={{ ...sBtn("transparent", D.muted), border: `1px solid ${D.border}`, fontSize: 11, padding: "4px 12px" }}>
+                  <div className="flex gap-[8px] justify-end">
+                    <Button
+                      onClick={() => setEditing(null)}
+                      variant="secondary"
+                    >
                       Cancel
-                    </button>
-                    <button onClick={() => save(p.id)} style={{ ...sBtn(D.green, "#fff"), fontSize: 11, padding: "4px 12px" }}>
+                    </Button>
+                    <Button onClick={() => save(p.id)} variant="primary">
                       Save Registry
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
 
               {!isEditing && p.publicSummary && (
-                <div style={{ marginTop: 6, fontSize: 12, color: D.muted, fontStyle: "italic" }}>
+                <div className="mt-[6px] text-ui-body text-ink-secondary">
                   {p.publicSummary}
                 </div>
               )}
-            </div>
+            </Card>
           );
         })}
       </div>
