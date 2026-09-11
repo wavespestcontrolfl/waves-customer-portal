@@ -383,9 +383,7 @@ export default function SettingsPage() {
             </p>
           </CardHeader>
           <CardBody>
-            {Object.keys(gates).length === 0 ? (
-              <p className="py-4 text-center text-ink-secondary">No feature gates reported.</p>
-            ) : (
+            {Object.keys(gates).length === 0 ? null : (
               <div className="divide-y divide-zinc-200">
                 {Object.entries(gates).map(([key, enabled]) => (
                   <div key={key} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
@@ -1277,7 +1275,7 @@ function BlackoutDaysTab() {
         </p>
       </CardHeader>
       <CardBody>
-      <h2 className="font-medium text-zinc-900">Weekly days off</h2>
+      <h4 className="text-ui-body font-medium text-zinc-900">Weekly days off</h4>
       <p className="mt-1 text-ui-body text-ink-secondary">
         Highlighted days are closed every week — removed from all the same
         customer-facing surfaces as the one-off dates below.

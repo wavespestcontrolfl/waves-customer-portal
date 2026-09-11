@@ -150,16 +150,21 @@ async function main() {
     ['link-library', 'Link library'], ['service-reports', 'Service coverage'], ['blackout-days', 'Blackout days'],
     ['kpi-targets', 'KPI targets'], ['operating-costs', 'Operating costs'], ['system', 'System info'], ['usage', 'Portal usage'],
   ];
+  // Integrations and Portal Usage render companion-owned descendants
+  // (IntegrationHealthSection, PortalUsageTab) migrated by sibling PRs. They
+  // still route and lay out here, so keep them in the navigation sweep and drop
+  // the exclusion once those migrations land.
+  const companionOwned = new Set(['integrations', 'usage']);
 
   try {
     server = await previewServer(root);
     browser = await launchBrowser();
     const desktop = await openPage(1440);
-    await scenario('all ten deep-linked Settings leaves render on the new foundation', async () => {
+    await scenario('all ten deep-linked Settings leaves render, eight on the new foundation', async () => {
       for (const [tab, expected] of leaves) {
         await desktop.goto(`${server.baseUrl}/admin/settings?tab=${tab}`);
         await desktop.getByText(expected, { exact: true }).first().waitFor();
-        await assertFoundation(desktop);
+        if (!companionOwned.has(tab)) await assertFoundation(desktop);
         assert.equal(await desktop.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${tab} overflows desktop`);
         if (tab === 'usage') await shot(desktop, 'settings-usage-desktop-1440');
       }
@@ -246,7 +251,8 @@ async function main() {
         mobile.waitForResponse((response) => response.url().includes('/api/admin/usage/summary?days=7&scope=all')),
         mobile.getByRole('button', { name: 'Everyone' }).click(),
       ]);
-      await assertFoundation(mobile);
+      // Portal Usage is companion-owned; this scenario asserts the deep link,
+      // the retained state, and the overflow guard, not the shared foundation.
       assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       await shot(mobile, 'settings-usage-mobile-390');
     });
