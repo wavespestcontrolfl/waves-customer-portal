@@ -627,7 +627,7 @@ async function section(page, group, leaf) {
 }
 async function fleetDetail(page) {
   await page
-    .getByRole("button", { name: "Open " + equipment.name, exact: true })
+    .getByRole("button", { name: new RegExp("^Expand .*" + equipment.name) })
     .click();
   await page
     .getByRole("button", { name: "Record Maintenance", exact: true })
