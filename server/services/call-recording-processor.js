@@ -4795,6 +4795,65 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
+// Email + address backfill for a call that resolved to an EXISTING customer.
+// Shared by the phone-match branch and the pre-linked branch of Step 3.
+//
+// Same garbled-stored-email rule as the appointment backfill (codex
+// round-12 P2): an invalid stored value is replaceable by a VALID capture; a
+// valid stored email is never overwritten. A REPLACEMENT of a garbled stored
+// email must fan out (copies of the old address exist) and does so in ONE
+// transaction with the customer write, so a partial fan-out cannot strand
+// snapshots on an address the record no longer holds (codex round-24 P1);
+// an empty→value write only settles the missing-email card; neither settles
+// the read-back cards filed for this unverified capture (round-9 + round-10
+// P2; fan-out gap from the local pre-push audit P1). Both paths ride the
+// email-claim guard (r16): every writer that ASSIGNS an email serializes
+// with a concurrent merge-undo's claim probe via the shared normalized-email
+// advisory lock — proceed-with-fresh-read, so only the email column is ever
+// dropped and the address backfill still lands.
+async function backfillLinkedCustomerFromExtraction({ customerId, existing, extracted = {}, source }) {
+  const updates = {};
+  const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
+  const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+  if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
+  if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
+    updates.address_line1 = extracted.address_line1;
+    if (extracted.city) updates.city = extracted.city;
+    if (extracted.zip) updates.zip = extracted.zip;
+  }
+  if (Object.keys(updates).length === 0) return { updates };
+  const fanout = require('./customer-email-fanout');
+  const replacingGarbled = !!(updates.email && existingEmailInvalid);
+  const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
+    customerId, updates,
+    source,
+    ...(replacingGarbled ? {
+      replaceExpectedEmail: existing.email,
+      applyWithEmailInTrx: async (trx) => {
+        await trx('customers').where({ id: customerId }).update(updates);
+        await fanout.propagateCustomerEmailChange({
+          before: existing,
+          after: { id: customerId, email: updates.email },
+          source: `call-captured email replacing a garbled address (${source})`,
+          reviewReasonCodes: ['customer_email_missing'],
+        }, trx);
+      },
+    } : {}),
+  });
+  if (updates.email && guarded.emailApplied && !replacingGarbled) {
+    try {
+      await fanout.resolveOpenEmailReviewCards({
+        customerId, email: updates.email,
+        source: `call-captured email (${source})`,
+        reasonCodes: ['customer_email_missing'],
+      });
+    } catch (e) {
+      logger.warn(`[call-proc] email review-card resolution failed after ${source} for customer ${customerId}: ${e.message}`);
+    }
+  }
+  return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
+}
+
 async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
@@ -9081,6 +9140,7 @@ const CallRecordingProcessor = {
     }
 
     const sharedPhoneAmbiguity = {};
+    let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -9103,63 +9163,12 @@ const CallRecordingProcessor = {
       });
       if (existing) {
         customerId = existing.id;
-        // Update with any new info
-        const updates = {};
-        // Same garbled-stored-email rule as the appointment backfill
-        // (codex round-12 P2): invalid stored value is replaceable by a
-        // VALID capture; a valid stored email is never overwritten.
-        const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
-        const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
-        if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
-        if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
-          updates.address_line1 = extracted.address_line1;
-          if (extracted.city) updates.city = extracted.city;
-          if (extracted.zip) updates.zip = extracted.zip;
-        }
-        if (Object.keys(updates).length > 0) {
-          // Same contract as the appointment backfill above: a REPLACEMENT of
-          // a garbled stored email must fan out (copies of the old address
-          // exist) and does so in ONE transaction with the customer write, so
-          // a partial fan-out cannot strand snapshots on an address the
-          // record no longer holds (codex round-24 P1); an empty→value write
-          // only settles the missing-email card; neither settles the
-          // read-back cards filed for this unverified capture (round-9 +
-          // round-10 P2; fan-out gap from the local pre-push audit P1). Both
-          // paths ride the email-claim guard (r16): every writer that
-          // ASSIGNS an email serializes with a concurrent merge-undo's
-          // claim probe via the shared normalized-email advisory lock —
-          // proceed-with-fresh-read, so only the email column is ever
-          // dropped and the address backfill still lands.
-          const fanout = require('./customer-email-fanout');
-          const replacingGarbled = !!(updates.email && existingEmailInvalid);
-          const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
-            customerId, updates,
-            source: 'call-extraction-backfill',
-            ...(replacingGarbled ? {
-              replaceExpectedEmail: existing.email,
-              applyWithEmailInTrx: async (trx) => {
-                await trx('customers').where({ id: customerId }).update(updates);
-                await fanout.propagateCustomerEmailChange({
-                  before: existing,
-                  after: { id: customerId, email: updates.email },
-                  source: 'call-captured email replacing a garbled address (phone-match update)',
-                  reviewReasonCodes: ['customer_email_missing'],
-                }, trx);
-              },
-            } : {}),
-          });
-          if (updates.email && guarded.emailApplied && !replacingGarbled) {
-            try {
-              await fanout.resolveOpenEmailReviewCards({
-                customerId, email: updates.email,
-                source: 'call-captured email (phone-match update)',
-                reasonCodes: ['customer_email_missing'],
-              });
-            } catch (e) {
-              logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
-            }
-          }
-        }
+        phoneMatchedThisPass = true;
+        // Update with any new info (email + address; shared with the
+        // pre-linked path below).
+        await backfillLinkedCustomerFromExtraction({
+          customerId, existing, extracted, source: 'call-extraction-backfill',
+        });
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
@@ -9347,6 +9356,32 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // Pre-linked calls (call.customer_id set at ring time by the inbound
+    // webhook, an operator link, or the transcript-name reconciliation
+    // above) skipped the phone-match branch entirely, so a capture on a
+    // NON-booking call never reached the customer row: the only other email
+    // backfill sits inside the auto-booking branch. Dot Fitzpatrick
+    // (2026-09-11): the email dictated on her second and third calls stayed
+    // on call_log.ai_extraction while customers.email stayed null, and the
+    // manual booking that evening sent the no-email prep fallback instead of
+    // the guide email. Same trust bar as the phone-match branch: the caller's
+    // number must be the customer's own and the spoken name must not
+    // contradict the record; never from a voicemail or a V2 non-customer
+    // nature (an applicant's email is not the customer's). Fail-soft.
+    if (customerId && !createdCustomerFromCall && !phoneMatchedThisPass
+      && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      try {
+        const linked = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+        if (linked && customerPhoneMatches(phone, linked) && extractedNameMatchesCustomer(extracted, linked)) {
+          await backfillLinkedCustomerFromExtraction({
+            customerId, existing: linked, extracted, source: 'call-extraction-backfill-prelinked',
+          });
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] pre-linked customer backfill skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
@@ -17144,6 +17179,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  backfillLinkedCustomerFromExtraction,
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
