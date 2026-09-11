@@ -2261,6 +2261,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       billing_mode_adopted_from_loser: 'per_application',
       per_application_fee_adopted_from_loser: 85,
       loser_plan_rate_rows_deleted: 1,
+      note_appends: {},
       referral_fold: { loser_enrolled: false },
       autopay_restrictions_inherited: { autopay_enabled: false },
       winner_backfills: { email: 'stub@example.com', billing_mode: 'per_application', per_application_fee: '85.00' },
@@ -2317,8 +2318,9 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(out.financial_effects.saved_card_profile_conflict).toBe(false);
     expect(out.financial_effects.combined_payment_sessions).toEqual({
       winner: [],
-      // Per-intent outcome from the same Stripe read the release makes (r5 P1): pi_b is a single-invoice checkout the release leaves alone.
-      loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b', outcome: 'kept_single_invoice' }],
+      // Per-intent outcome from the same Stripe read the release makes (r5 P1). pi_b is a single-invoice checkout — kept on the WINNER, but this is
+      // the LOSER's, and its PI metadata names the record about to be retired, so the merge cancels it too (r7 P1).
+      loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b', outcome: 'cancel_single_invoice' }],
     });
     // The same session moving to money-in-flight → a different fingerprint (the outcome is pinned, not just the id).
     mockStripePis.pi_a = { ...mockStripePis.pi_a, status: 'processing' };
@@ -2337,6 +2339,107 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     // Cards on a third profile: the executor would refuse — the disclosure says so.
     install({}, { cards: { W: ['cus_other'], L: ['cus_shared'] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.saved_card_profile_conflict).toBe(true);
+  });
+
+  it('cancels the single-invoice checkouts the merge invalidates — the loser\'s always, the winner\'s only on a payer transfer (Codex r7 P1)', async () => {
+    // A single-invoice PI is NOT a combined session, so nothing in its
+    // metadata says who owns it except waves_customer_id — which keeps
+    // naming the record the merge is about to retire.
+    mockStripePis = {
+      pi_l: { id: 'pi_l', status: 'requires_confirmation', metadata: { invoice_id: 'inv-l' } },
+      pi_w: { id: 'pi_w', status: 'requires_confirmation', metadata: { invoice_id: 'inv-w' } },
+    };
+    const sessions = {
+      W: [{ id: 'inv-w', invoice_number: 'INV-W', stripe_payment_intent_id: 'pi_w' }],
+      L: [{ id: 'inv-l', invoice_number: 'INV-L', stripe_payment_intent_id: 'pi_l' }],
+    };
+    // Self-pay merge (neither side has a payer): only the LOSER's checkout
+    // is invalidated — a save-card success on it would mirror consent and
+    // autopay onto the archived customer.
+    install({}, { sessions });
+    const selfPay = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(selfPay.financial_effects.combined_payment_sessions.loser[0].outcome).toBe('cancel_single_invoice');
+    expect(selfPay.financial_effects.combined_payment_sessions.winner[0].outcome).toBe('kept_single_invoice');
+    // A merge that transfers the loser's third-party payer onto a
+    // blank-payer winner invalidates the SURVIVOR's self-pay checkout too:
+    // the homeowner would otherwise pay a debt that now belongs to the payer.
+    install({}, { sessions });
+    const payerMove = await dedupe.describeMergeEffects(db, { ...winner }, { ...loser, payer_id: 'payer-1' });
+    expect(payerMove.financial_effects.combined_payment_sessions.winner[0].outcome).toBe('cancel_single_invoice');
+    // A winner that ALREADY has that payer changes nothing about who pays,
+    // so its open checkout survives.
+    install({}, { sessions });
+    const samePayer = await dedupe.describeMergeEffects(db, { ...winner, payer_id: 'payer-1' }, { ...loser, payer_id: 'payer-1' });
+    expect(samePayer.financial_effects.combined_payment_sessions.winner[0].outcome).toBe('kept_single_invoice');
+    // Money already moving is never cancelled, single-invoice or not — it
+    // is reported so the executor defers.
+    mockStripePis.pi_l = { ...mockStripePis.pi_l, status: 'processing' };
+    install({}, { sessions });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.combined_payment_sessions.loser[0].outcome).toBe('in_flight');
+    // Already cancelled in Stripe → only the stamp cleanup, never a second
+    // cancel promised on the card.
+    mockStripePis.pi_l = { ...mockStripePis.pi_l, status: 'canceled' };
+    install({}, { sessions });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.combined_payment_sessions.loser[0].outcome).toBe('stamps_cleared');
+  });
+
+  it('discloses and pins the CRM / technician notes the merge appends onto the winner (Codex r7 P2)', async () => {
+    const withNotes = { ...loser, crm_notes: 'Gate code 4417', technician_notes: 'Dog in the back yard' };
+    install({});
+    const out = await dedupe.describeMergeEffects(db, { ...winner, crm_notes: 'Prefers morning' }, withNotes);
+    expect(out.financial_effects.note_appends).toEqual({
+      crm_notes: 'Prefers morning\n\n[From merged duplicate L]: Gate code 4417',
+      technician_notes: 'Dog in the back yard',
+    });
+    // Editing the loser's notes during the pending window moves the pin.
+    install({});
+    const edited = await dedupe.describeMergeEffects(db, { ...winner, crm_notes: 'Prefers morning' }, { ...withNotes, technician_notes: 'Dog in the back yard — muzzle' });
+    expect(edited.fingerprint).not.toBe(out.fingerprint);
+    // Text the winner already carries is not re-appended, so the card does
+    // not claim a change that will not happen.
+    install({});
+    const already = await dedupe.describeMergeEffects(db, { ...winner, technician_notes: 'Note: Dog in the back yard today' }, { ...loser, technician_notes: 'Dog in the back yard' });
+    expect(already.financial_effects.note_appends).toEqual({});
+  });
+});
+
+describe('dbLevelMergeConflict (the executor\'s DB-dependent refusals, shared with the preview — Codex r7 P2)', () => {
+  const winner = { id: 'W', billing_mode: null, account_id: null };
+  const loser = { id: 'L', billing_mode: 'per_application', account_id: null };
+  function install({ artifacts = {}, sibling = null } = {}) {
+    installDb((table, q) => {
+      if (table === 'customers') return sibling;
+      return artifacts[q.args('where')[0].customer_id] ? { id: 'row-1' } : null;
+    });
+  }
+
+  it('refuses a legacy/special billing-mode pair only when the flipping side has live billing history', async () => {
+    // The winner is the flipping side (null mode adopting per_application).
+    install({ artifacts: { W: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, winner, loser)).toEqual({
+      code: 'billing_mode_history_conflict',
+      message: expect.stringMatching(/legacy and special billing modes/),
+    });
+    // History on the OTHER side does not flip anyone's cadence.
+    install({ artifacts: { L: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, winner, loser)).toBeNull();
+    // Same mode on both sides is not a cadence flip at all.
+    install({ artifacts: { W: true, L: true } });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application' }, loser)).toBeNull();
+  });
+
+  it('refuses a loser whose multi-property account still has other live members', async () => {
+    install({ sibling: { id: 'sibling-1' } });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application' }, { ...loser, account_id: 'acct-9' })).toEqual({
+      code: 'multi_property_account_conflict',
+      message: expect.stringMatching(/multi-property account/),
+    });
+    // No siblings left → nothing is stranded.
+    install({ sibling: null });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application' }, { ...loser, account_id: 'acct-9' })).toBeNull();
+    // Same account on both sides is not a multi-property group.
+    install({ sibling: { id: 'sibling-1' } });
+    expect(await dedupe.dbLevelMergeConflict(db, { ...winner, billing_mode: 'per_application', account_id: 'acct-9' }, { ...loser, account_id: 'acct-9' })).toBeNull();
   });
 });
 

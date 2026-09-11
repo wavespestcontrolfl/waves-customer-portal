@@ -46,8 +46,9 @@ jest.mock('../services/customer-dedupe', () => ({
   executeMerge: (...args) => mockExecuteMerge(...args),
   duplicatePairEligibility: (...args) => mockDuplicatePairEligibility(...args),
   describeMergeEffects: (...args) => mockDescribeMergeEffects(...args),
-  // The REAL pure rule: the preview must refuse exactly what the executor refuses.
+  // The REAL rules: the preview must refuse exactly what the executor refuses.
   rowLevelMergeConflict: jest.requireActual('../services/customer-dedupe').rowLevelMergeConflict,
+  dbLevelMergeConflict: jest.requireActual('../services/customer-dedupe').dbLevelMergeConflict,
 }));
 
 const db = require('../models/db');
@@ -71,6 +72,7 @@ const FINANCIAL = {
   loser_plan_rate_rows_deleted: 0, referral_fold: NOT_ENROLLED, autopay_restrictions_inherited: {},
   winner_backfills: { email: 'stub@example.com' }, stripe_profile_from_saved_cards: null, saved_card_profile_conflict: false,
   saved_card_demotions: { winner_has_default: false, cards: [] },
+  note_appends: {},
   combined_payment_sessions: { winner: [], loser: [] },
   collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
   predicted_collision_handlers: [], revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)',
@@ -162,6 +164,55 @@ describe('merge_customers', () => {
     expect(card.preview).toBe(true);
   });
 
+  test('a pair the executor would refuse after a QUERY (billing-mode history, multi-property siblings) refuses the preview too (Codex r7 P2)', async () => {
+    // winnerRow has no billing_mode and loserRow is per_application, so the
+    // winner is the flipping side: one live invoice or scheduled service on
+    // it and the executor refuses. The preview must refuse identically
+    // instead of spending an approval on it.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    db.__qb.first.mockResolvedValueOnce({ id: 'ss-1' });
+    const history = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(history).toMatchObject({ code: 'billing_mode_history_conflict', error: /legacy and special billing modes/ });
+    expect(history.preview).toBeUndefined();
+    // A loser in a multi-property account whose group still has other live
+    // members: merging would strand the siblings.
+    db.__qb.select.mockResolvedValueOnce([{ ...winnerRow, billing_mode: 'per_application', per_application_fee: '85.00' }, { ...loserRow, account_id: 'acct-9' }]);
+    db.__qb.first.mockResolvedValueOnce({ id: 'sibling-1' });
+    const stranded = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(stranded).toMatchObject({ code: 'multi_property_account_conflict', error: /multi-property account/ });
+    // Both refusals land before any effect is computed — no card, no engine.
+    expect(mockDescribeMergeEffects).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+  });
+
+  test('the card names the notes the merge appends onto the survivor (Codex r7 P2)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, note_appends: { crm_notes: 'a\n\nb', technician_notes: 'Dog in the back yard' } } });
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(card.note_to_operator).toMatch(/Notes: the archived record's CRM notes and technician notes \(technician-facing instructions\) are appended to the surviving record's/);
+    // Nothing to append → nothing claimed.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    const quiet = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(quiet.note_to_operator).not.toMatch(/Notes:/);
+  });
+
+  test('an already-cancelled session is described as stamp cleanup, not as a cancellation the merge performs (Codex r7 P2)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, combined_payment_sessions: {
+      winner: [{ invoice_id: 'inv-w', payment_intent_id: 'pi_w', outcome: 'cancel_single_invoice' }],
+      loser: [{ invoice_id: 'inv-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', payment_intent_id: 'pi_b', outcome: 'stamps_cleared' }],
+    } } });
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    // Three distinct sentences: one Stripe cancellation of a combined
+    // session, one of an invalidated single-invoice checkout, and one that
+    // cancels NOTHING in Stripe.
+    expect(card.note_to_operator).toMatch(/1 unconfirmed combined payment session\(s\) will be cancelled in Stripe first/);
+    expect(card.note_to_operator).toMatch(/1 single-invoice checkout session\(s\) will be cancelled in Stripe because this merge invalidates them/);
+    expect(card.note_to_operator).toMatch(/1 already-cancelled session\(s\) only have their invoice stamps cleared — nothing is cancelled in Stripe for these/);
+    // The old wording counted the already-cancelled one as a cancellation.
+    expect(card.note_to_operator).not.toMatch(/2 unconfirmed combined payment session/);
+  });
+
   test('the card names every loser card the merge strips of default/autopay, with its before-flags (Codex r6 P1)', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
     mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, saved_card_demotions: { winner_has_default: true, cards: [{ id: 'pm_l1', is_default: true, autopay_enabled: true }, { id: 'pm_l2', is_default: false, autopay_enabled: true }] } } });
@@ -185,7 +236,7 @@ describe('merge_customers', () => {
     // Per-intent outcomes (Codex r5 P1): the note never promises to cancel a single-invoice checkout the release leaves alone.
     mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, combined_payment_sessions: { winner: [{ invoice_id: 'inv-9', invoice_number: 'INV-9', payment_intent_id: 'pi_w', outcome: 'kept_single_invoice' }], loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b', outcome: 'in_flight' }] } } });
     const withSession = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
-    expect(withSession.note_to_operator).toMatch(/1 unconfirmed combined payment session\(s\) will be cancelled in Stripe first; 1 combined payment session\(s\) have money in flight \(a merged-away one defers the merge until it settles\); 1 single-invoice checkout session\(s\) stay open and are NOT cancelled\./);
+    expect(withSession.note_to_operator).toMatch(/1 unconfirmed combined payment session\(s\) will be cancelled in Stripe first; 1 payment session\(s\) have money in flight \(a merged-away one defers the merge until it settles\); 1 single-invoice checkout session\(s\) stay open and are NOT cancelled\./);
     expect(withSession.note_to_operator).not.toMatch(/listed above will be cancelled/);
     // Collection-case reconcile on the card (Codex r5 P1): the approval the merge revokes is named; a dialing case says the merge defers.
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
@@ -319,7 +370,12 @@ describe('merge_customers', () => {
     expect(result.moving).toEqual({ sms_log: 1, total_rows: 1 });
     expect(result.financial_effects.account_credits_moved_to_winner).toBe(0);
     expect(result.effects_fingerprint).toBe('fp-x');
-    expect(db.__qb.first).not.toHaveBeenCalled(); // no local counting
+    // The preview's ONLY own reads are the pair's customer rows and the
+    // executor's DB-dependent refusal probes (billing-mode history,
+    // multi-property siblings) — never a count of its own (codex #4348 r7
+    // P2 shared those probes; moving/effects/fingerprint stay the engine's).
+    expect([...new Set(db.mock.calls.map((c) => c[0]))].sort()).toEqual(['customers', 'invoices', 'scheduled_services']);
+    expect(db.__qb.count).not.toHaveBeenCalled(); // no local counting
   });
 
   test('confirmed call hands the APPROVED fingerprint to the executor (validated under its locks, with the final queue decision) and relays its drift refusal', async () => {

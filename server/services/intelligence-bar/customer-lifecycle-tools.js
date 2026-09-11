@@ -105,10 +105,20 @@ function paymentSessionsNote(sessions) {
   if (!all.length) return '';
   const count = (outcome) => all.filter((s) => s.outcome === outcome).length;
   const parts = [];
-  const cancel = count('cancel') + count('stamps_cleared');
+  const cancel = count('cancel');
   if (cancel) parts.push(`${cancel} unconfirmed combined payment session(s) will be cancelled in Stripe first`);
+  // A single-invoice checkout this merge invalidates is cancelled too, but
+  // for a different reason — say which, because the operator is losing a
+  // live payment link a customer may be holding.
+  const cancelSingle = count('cancel_single_invoice');
+  if (cancelSingle) parts.push(`${cancelSingle} single-invoice checkout session(s) will be cancelled in Stripe because this merge invalidates them (the archived record's own checkout, or a payer change)`);
+  // Already cancelled in Stripe: the merge only finishes the stamp cleanup.
+  // Counting these as cancellations promised a Stripe write that never
+  // happens (codex #4348 r7 P2).
+  const cleared = count('stamps_cleared');
+  if (cleared) parts.push(`${cleared} already-cancelled session(s) only have their invoice stamps cleared — nothing is cancelled in Stripe for these`);
   const inFlight = count('in_flight');
-  if (inFlight) parts.push(`${inFlight} combined payment session(s) have money in flight (a merged-away one defers the merge until it settles)`);
+  if (inFlight) parts.push(`${inFlight} payment session(s) have money in flight (a merged-away one defers the merge until it settles)`);
   const kept = count('kept_single_invoice');
   if (kept) parts.push(`${kept} single-invoice checkout session(s) stay open and are NOT cancelled`);
   return ` Payment sessions listed above: ${parts.join('; ')}.`;
@@ -136,11 +146,23 @@ function savedCardDemotionsNote(demotions) {
   return ` Saved cards: ${demotions.cards.length} card(s) moving from the archived record lose default/autopay because the surviving record already has a default card — ${listed}; the survivor's own default card stays the one autopay card.`;
 }
 
+// The loser's CRM / technician notes are APPENDED onto the winner
+// (customer-dedupe predictNoteAppends — the executor's own rule, pinned by
+// the fingerprint). technician_notes drives technician-facing instructions,
+// so the card names the fields rather than letting the change ride in
+// silently (codex #4348 r7 P2).
+function noteAppendsNote(appends) {
+  const fields = Object.keys(appends || {});
+  if (!fields.length) return '';
+  const LABELS = { crm_notes: 'CRM notes', technician_notes: 'technician notes (technician-facing instructions)' };
+  return ` Notes: the archived record's ${fields.map((f) => LABELS[f] || f).join(' and ')} are appended to the surviving record's — the surviving text is kept and the merged text is added below it.`;
+}
+
 async function previewMergeCustomers(winnerId, loserId) {
   const check = await loadMergeEligibility(winnerId, loserId);
   if (!check.ok) return { error: check.error, code: check.code };
   const { winner, loser, eligibility } = check;
-  const { describeMergeEffects, rowLevelMergeConflict } = require('../customer-dedupe');
+  const { describeMergeEffects, rowLevelMergeConflict, dbLevelMergeConflict } = require('../customer-dedupe');
   // An unexecutable preview is a tool failure, not a card. The executor's
   // own deterministic row-level refusals (inactive winner, two Stripe
   // profiles, two payers, two billing modes / fees) run here FIRST so the
@@ -149,6 +171,14 @@ async function previewMergeCustomers(winnerId, loserId) {
   const rowConflict = rowLevelMergeConflict(winner, loser);
   if (rowConflict) {
     return { error: `These records cannot be merged yet: ${rowConflict.message}.`, code: rowConflict.code };
+  }
+  // The executor's DB-dependent refusals (legacy/special billing modes with
+  // live billing history, a loser in a multi-property account with other
+  // live members) run here too — unlocked, the same rule, so an impossible
+  // merge is refused before it costs an approval (codex #4348 r7 P2).
+  const dbConflict = await dbLevelMergeConflict(db, winner, loser);
+  if (dbConflict) {
+    return { error: `These records cannot be merged yet: ${dbConflict.message}.`, code: dbConflict.code };
   }
   const { moving, financial_effects, fingerprint } = await describeMergeEffects(db, winner, loser);
   // Likewise the executor refuses saved cards on a profile other than the
@@ -175,7 +205,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     financial_effects,
     moving,
     effects_fingerprint: fingerprint,
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)}${noteAppendsNote(financial_effects.note_appends)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
 

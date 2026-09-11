@@ -145,6 +145,17 @@ const ACTION_LABELS = {
   approve_seo_action: 'Approve an SEO action',
 };
 
+// A preview whose combined-payment disclosure cancels a PaymentIntent in
+// Stripe: the DB merge may still be undoable, but that cancellation is
+// permanent, so the card must carry the prominent "Cannot be undone"
+// warning.
+function cancelsStripeCheckoutSession(preview) {
+  const sessions = preview?.financial_effects?.combined_payment_sessions;
+  if (!sessions) return false;
+  return [...(sessions.winner || []), ...(sessions.loser || [])]
+    .some((s) => s && (s.outcome === 'cancel' || s.outcome === 'cancel_single_invoice'));
+}
+
 function tierFor(toolName) {
   if (CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(toolName)) return 'red';
   if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) || LEGACY_BARE_WRITE_TOOL_NAMES.has(toolName)) return 'yellow';
@@ -677,9 +688,14 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // advisor's admin SMS) or spends externally (price research) cannot be
     // undone from the portal.
     // Input-dependent irreversibility rides on the preview: a merge whose
-    // fold the duplicates-queue undo refuses says revertible_from_queue:false.
+    // fold the duplicates-queue undo refuses says revertible_from_queue:false,
+    // and a merge that CANCELS a customer's Stripe checkout session is
+    // irreversible whatever the database undo can do — the canceled
+    // PaymentIntent cannot be restored, and the customer's payment link is
+    // dead (codex #4348 r7 P2).
     irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
-      || preview?.financial_effects?.revertible_from_queue === false,
+      || preview?.financial_effects?.revertible_from_queue === false
+      || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),

@@ -1121,6 +1121,102 @@ function rowLevelMergeConflict(winner, loser) {
 }
 
 /**
+ * The DB-dependent deterministic refusals — the same class as
+ * rowLevelMergeConflict, but each needs a query, so they live in one
+ * async rule the executor throws on and the IB preview runs before it
+ * builds a card (codex #4348 r7 P2: an operator was still able to approve
+ * a legacy/special billing-mode pair, or a loser belonging to a
+ * multi-property account with other live members, and watch the executor
+ * refuse it). `database` is any knex handle — the preview reads unlocked,
+ * executeMerge re-reads under its row locks. Returns { code, message } or
+ * null.
+ */
+async function dbLevelMergeConflict(database, winner, loser) {
+  // Legacy NULL is a real cadence too — the monthly cron treats NULL as
+  // monthly membership, and completion billing reads the SURVIVOR's mode.
+  // Mixing a special-mode side with a legacy side is only safe when the
+  // side whose cadence would flip has no billing artifacts to flip: a
+  // null-mode winner adopting the loser's special mode flips its own
+  // history; a special-mode winner absorbs the loser's legacy visits into
+  // special billing.
+  const winnerMode = winner.billing_mode || null;
+  const loserMode = loser.billing_mode || null;
+  if (winnerMode !== loserMode && (winnerMode === null || loserMode === null)) {
+    const flippingSideId = winnerMode === null ? winner.id : loser.id;
+    for (const table of ['scheduled_services', 'invoices']) {
+       
+      const row = await database(table).where({ customer_id: flippingSideId }).first('id');
+      if (row) {
+        return {
+          code: 'billing_mode_history_conflict',
+          message: 'merging legacy and special billing modes with live billing history — reconcile billing first',
+        };
+      }
+    }
+  }
+  // Multi-property account groups: retiring a loser whose account still
+  // has OTHER live member profiles would strand them — the portal's
+  // property switcher lists rows by the login's account_id, so the
+  // siblings become invisible after the merge. Reconcile accounts first.
+  if (loser.account_id && loser.account_id !== winner.account_id) {
+    const sibling = await database('customers')
+      .where({ account_id: loser.account_id, active: true })
+      .whereNull('deleted_at')
+      .whereNotIn('id', [loser.id, winner.id])
+      .first('id');
+    if (sibling) {
+      return {
+        code: 'multi_property_account_conflict',
+        message: 'the duplicate belongs to a multi-property account with other live members — reconcile accounts first',
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Which side's SINGLE-INVOICE checkout sessions a merge invalidates
+ * (pay-combined stampedSessionOutcome `invalidatedSingleInvoice`).
+ *
+ * - loser: always. Its PaymentIntents carry metadata.waves_customer_id for
+ *   the record this merge retires, so a later save-card success would
+ *   mirror consent/autopay onto the archived customer.
+ * - winner: only when the merge transfers the loser's third-party payer
+ *   onto a blank-payer winner — the same condition the in-flight defer
+ *   below uses. An open self-pay checkout would otherwise let the
+ *   homeowner pay a debt that now belongs to the AP payer.
+ *
+ * Pure, so the preview and the executor decide identically.
+ */
+function singleInvoiceSessionsInvalidatedByMerge(winner, loser) {
+  return { winner: !winner.payer_id && !!loser.payer_id, loser: true };
+}
+
+/**
+ * The loser notes a merge APPENDS onto the winner. Operator context (CRM +
+ * technician notes) must survive the retire, so the append is real — and
+ * technician_notes drives technician-facing instructions, which is why the
+ * confirmation card has to state it (codex #4348 r7 P2). ONE pure rule for
+ * the executor's write and the disclosure, so the fingerprint moves when
+ * either side's notes are edited during the pending window. Returns
+ * { crm_notes?, technician_notes? } holding the FULL text that will be
+ * written.
+ */
+function predictNoteAppends(winner, loser) {
+  const appends = {};
+  for (const col of ['crm_notes', 'technician_notes']) {
+    const loserVal = String(loser[col] || '').trim();
+    if (!loserVal) continue;
+    const winnerVal = String(winner[col] || '').trim();
+    if (winnerVal.includes(loserVal)) continue;
+    appends[col] = winnerVal
+      ? `${winnerVal}\n\n[From merged duplicate ${String(loser.id).slice(0, 8)}]: ${loserVal}`
+      : loserVal;
+  }
+  return appends;
+}
+
+/**
  * The saved cards a merge DEMOTES: when the winner already has a default
  * card, every loser card arriving with is_default or autopay_enabled is
  * cleared (autopay picks .first() among default+autopay rows, and two
@@ -1376,41 +1472,13 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     }
     const { derivedStripeCustomerId, stripeDerivedFrom } = savedCards;
     // (Payer / billing-mode / per-application-fee refusals: rowLevelMergeConflict above.)
-    // Legacy NULL is a real cadence too — the monthly cron treats NULL as
-    // monthly membership, and completion billing reads the SURVIVOR's mode.
-    // Mixing a special-mode side with a legacy side is only safe when the
-    // side whose cadence would flip has no billing artifacts to flip: a
-    // null-mode winner adopting the loser's special mode flips its own
-    // history; a special-mode winner absorbs the loser's legacy visits into
-    // special billing.
-    const winnerMode = winner.billing_mode || null;
-    const loserMode = loser.billing_mode || null;
-    if (winnerMode !== loserMode && (winnerMode === null || loserMode === null)) {
-      const flippingSideId = winnerMode === null ? winnerId : loserId;
-      let hasArtifacts = false;
-      for (const table of ['scheduled_services', 'invoices']) {
-         
-        const row = await trx(table).where({ customer_id: flippingSideId }).first('id');
-        if (row) { hasArtifacts = true; break; }
-      }
-      if (hasArtifacts) {
-        throw new Error('executeMerge: merging legacy and special billing modes with live billing history — reconcile billing first');
-      }
-    }
-    // Multi-property account groups: retiring a loser whose account still
-    // has OTHER live member profiles would strand them — the portal's
-    // property switcher lists rows by the login's account_id, so the
-    // siblings become invisible after the merge. Reconcile accounts first.
-    if (loser.account_id && loser.account_id !== winner.account_id) {
-      const sibling = await trx('customers')
-        .where({ account_id: loser.account_id, active: true })
-        .whereNull('deleted_at')
-        .whereNotIn('id', [loserId, winnerId])
-        .first('id');
-      if (sibling) {
-        throw new Error('executeMerge: the duplicate belongs to a multi-property account with other live members — reconcile accounts first');
-      }
-    }
+    // Deterministic refusals that need a query (legacy/special billing
+    // modes with live billing history, a loser whose multi-property account
+    // still has other live members) — ONE rule, re-read here under the row
+    // locks and run unlocked by the IB preview so the operator never
+    // approves a card this executor would refuse.
+    const dbConflict = await dbLevelMergeConflict(trx, winner, loser);
+    if (dbConflict) throw new Error(`executeMerge: ${dbConflict.message}`);
     // Same-account primary handoff (shared notification/channel prefs
     // resolve via (account_id, is_primary_profile=true)) is decided by
     // promoteWinnerAsPrimaryRule inside predictWinnerBackfills below.
@@ -1852,16 +1920,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // APPEND the loser's notes onto the winner — both sides can hold real
     // context, fill-if-empty would drop one, and the merge journal is not an
     // operator surface.
-    const noteAppends = {};
-    for (const col of ['crm_notes', 'technician_notes']) {
-      const loserVal = String(loser[col] || '').trim();
-      if (!loserVal) continue;
-      const winnerVal = String(winner[col] || '').trim();
-      if (winnerVal.includes(loserVal)) continue;
-      noteAppends[col] = winnerVal
-        ? `${winnerVal}\n\n[From merged duplicate ${String(loserId).slice(0, 8)}]: ${loserVal}`
-        : loserVal;
-    }
+    // ONE reader with the card's disclosure (predictNoteAppends), so the
+    // fingerprint covers the text that actually lands on the winner.
+    const noteAppends = predictNoteAppends(winner, loser);
     // Journal the winner's PRIOR notes alongside the applied concatenation
     // ({ before, applied }, same shape as winner_autopay_before) so the undo
     // can put the winner's own notes back when still the merge-written text
@@ -1976,8 +2037,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // re-reads them under the pay.combined lock and refuses if a session
       // appeared or vanished since (previewChanged — fresh card).
       const pinned = (side) => (approvedEffects ? approvedEffects.combined_payment_sessions[side].map((sess) => sess.payment_intent_id) : null);
-      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId, { expectedPaymentIntentIds: pinned('winner') });
-      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id, { expectedPaymentIntentIds: pinned('loser') });
+      // Single-invoice checkouts are NOT combined sessions, so the release
+      // leaves them alone by default — except the ones this merge
+      // invalidates (the loser's, whose PI metadata names the record being
+      // retired; and the winner's when the merge transfers a payer). Same
+      // rule the card disclosed.
+      const invalidatedSingle = singleInvoiceSessionsInvalidatedByMerge(winner, loser);
+      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId, { expectedPaymentIntentIds: pinned('winner'), invalidatedSingleInvoice: invalidatedSingle.winner });
+      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id, { expectedPaymentIntentIds: pinned('loser'), invalidatedSingleInvoice: invalidatedSingle.loser });
       if (loserRelease.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
       }
@@ -4692,9 +4759,10 @@ async function describeMergeEffects(database, winner, loser) {
   // money in flight — disclosed as the PaymentIntents involved and pinned;
   // the release re-reads them under its own lock (expectedPaymentIntentIds).
   const PayCombined = require('./pay-combined');
+  const invalidatedSingle = singleInvoiceSessionsInvalidatedByMerge(winner, loser);
   const combined_payment_sessions = {
-    winner: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, winner.id),
-    loser: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, loser.id),
+    winner: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, winner.id, { invalidatedSingleInvoice: invalidatedSingle.winner }),
+    loser: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, loser.id, { invalidatedSingleInvoice: invalidatedSingle.loser }),
   };
   // Collection cases landing under the winner: the executor's reconcile
   // can revoke surplus approvals — stated and pinned (state + version).
@@ -4714,6 +4782,10 @@ async function describeMergeEffects(database, winner, loser) {
       ? { stripe_customer_id: savedCards.derivedStripeCustomerId, from: savedCards.stripeDerivedFrom } : null,
     saved_card_profile_conflict: savedCards.conflict,
     saved_card_demotions,
+    // The loser notes appended onto the winner — technician_notes changes
+    // technician-facing instructions, so the full resulting text is
+    // disclosed and pinned rather than left to the journal.
+    note_appends: predictNoteAppends(winner, loser),
     combined_payment_sessions,
     collection_cases,
     predicted_collision_handlers: predictedCollisionHandlers,
@@ -4742,6 +4814,9 @@ module.exports = {
   // a hand-picked subset that could omit a table or a fold.
   previewMergeEffects,
   describeMergeEffects,
+  dbLevelMergeConflict,
+  singleInvoiceSessionsInvalidatedByMerge,
+  predictNoteAppends,
   previewCollectionCaseReconciliation,
   surplusApprovedCollectionCases,
   predictWinnerBackfills,

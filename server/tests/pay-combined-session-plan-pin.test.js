@@ -17,6 +17,7 @@ function database(rowsByCustomer) {
   const fn = jest.fn((table) => {
     const q = { _table: table };
     for (const m of ['where', 'whereNotNull', 'whereNotIn', 'select']) q[m] = jest.fn((...args) => { if (m === 'where') q._where = args[0]; return q; });
+    q.update = jest.fn(async () => 1); // the stamp cleanup after a cancel
     q.then = (resolve, reject) => Promise.resolve(rowsByCustomer[q._where?.customer_id] || []).then(resolve, reject);
     return q;
   });
@@ -79,4 +80,36 @@ test('the release re-reads under the pay.combined lock and refuses with previewC
   await expect(releaseUnconfirmedCombinedSessionsForCustomer(empty, 'L', { expectedPaymentIntentIds: [] })).resolves.toEqual({ released: 0, inFlight: 0 });
   // No pin (admin queue merge): the release runs as before.
   await expect(releaseUnconfirmedCombinedSessionsForCustomer(empty, 'L')).resolves.toEqual({ released: 0, inFlight: 0 });
+});
+
+test('a merge cancels the single-invoice checkouts it invalidates; every other caller still leaves them open (Codex r7 P1)', async () => {
+  StripeService.retrievePaymentIntent.mockImplementation(async (id) => PI[id] || null);
+  // pi_c is an ordinary single-invoice checkout — no combined metadata.
+  const rows = { L: [{ id: 'inv-3', invoice_number: 'INV-3', stripe_payment_intent_id: 'pi_c' }] };
+
+  // The payer-change route and the collection rails pass nothing: unchanged
+  // single-PI contract, nothing cancelled.
+  await expect(releaseUnconfirmedCombinedSessionsForCustomer(database(rows), 'L')).resolves.toEqual({ released: 0, inFlight: 0 });
+  expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+
+  // A merge retiring this record says its checkouts are invalidated: the PI
+  // metadata still names the customer about to be archived, so leaving it
+  // open would let a later save-card success mirror consent/autopay onto
+  // the retired row.
+  await expect(releaseUnconfirmedCombinedSessionsForCustomer(database(rows), 'L', { invalidatedSingleInvoice: true }))
+    .resolves.toEqual({ released: 1, inFlight: 0 });
+  expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_c');
+
+  // The preview says exactly what the release just did.
+  expect(await listUnconfirmedCombinedSessionsForCustomer(database(rows), 'L', { invalidatedSingleInvoice: true }))
+    .toEqual([{ invoice_id: 'inv-3', invoice_number: 'INV-3', payment_intent_id: 'pi_c', outcome: 'cancel_single_invoice' }]);
+
+  // Money already moving on a single-invoice checkout is never cancelled —
+  // it is reported so the merge defers, exactly like a combined one.
+  StripeService.cancelPaymentIntent.mockClear();
+  const inFlightRows = { L: [{ id: 'inv-5', invoice_number: 'INV-5', stripe_payment_intent_id: 'pi_e' }] };
+  StripeService.retrievePaymentIntent.mockImplementation(async () => ({ id: 'pi_e', status: 'processing', metadata: { invoice_id: 'inv-5' } }));
+  await expect(releaseUnconfirmedCombinedSessionsForCustomer(database(inFlightRows), 'L', { invalidatedSingleInvoice: true }))
+    .resolves.toEqual({ released: 0, inFlight: 1 });
+  expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
 });
