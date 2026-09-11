@@ -12,6 +12,22 @@ import {
   Wand2,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  UiSurface,
+  buttonStyles,
+} from "../../components/ui";
 
 // Content Engine + Registry are folded into this page as tabs (Autopilot /
 // Registry) rather than living as their own Marketing nav items; both are
@@ -26,23 +42,6 @@ const ContentRegistryPage = lazy(() => import("./ContentRegistryPage"));
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
 // Semantic green/amber/red preserved for SEO score / status accents.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  orange: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  purple: "#18181B",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
 const HUB_BLOG_TARGET_SITES = ["wavespestcontrol.com"];
 
 async function parseAdminResponse(response) {
@@ -109,8 +108,6 @@ const BLOG_POST_TYPES = [
   { value: "decision", label: "Decision" },
 ];
 
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
-
 // blog_posts.publish_date is a pg DATE: knex hydrates it as a JS Date and the
 // API serializes a full ISO string ("2026-07-15T00:00:00.000Z"), while seeded
 // or legacy rows can carry a bare "YYYY-MM-DD". Appending "T12:00:00" to the
@@ -131,27 +128,10 @@ function publishDateLabel(value) {
       });
 }
 
-function Card({ children, style }) {
-  return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: isMobile ? 14 : 24,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function seoColor(score) {
-  if (!score) return D.muted;
-  if (score >= 70) return D.green;
-  if (score >= 50) return D.amber;
-  return D.red;
+function seoTone(score) {
+  if (!score) return "neutral";
+  if (score >= 70) return "strong";
+  return score < 50 ? "alert" : "neutral";
 }
 
 // =========================================================================
@@ -159,7 +139,6 @@ function seoColor(score) {
 // =========================================================================
 function PostList({ status, onSelectPost }) {
   const [posts, setPosts] = useState([]);
-  const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(true);
   const [filterTag, setFilterTag] = useState("");
   const [filterCity, setFilterCity] = useState("");
@@ -174,7 +153,6 @@ function PostList({ status, onSelectPost }) {
     adminFetch(url)
       .then((d) => {
         setPosts(d.posts || []);
-        setCounts(d.counts || {});
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -187,152 +165,81 @@ function PostList({ status, onSelectPost }) {
 
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading posts...
-      </div>
+      <ActionFeedback loading>Loading posts...</ActionFeedback>
     );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="space-y-4">
       {/* Filters */}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
-        {" "}
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search..."
-          style={{
-            padding: "6px 12px",
-            borderRadius: 6,
-            border: `1px solid ${D.border}`,
-            background: D.bg,
-            color: D.text,
-            fontSize: 12,
-            width: 180,
-          }}
-        />{" "}
-        <select
-          value={filterTag}
-          onChange={(e) => setFilterTag(e.target.value)}
-          style={{
-            padding: "6px 10px",
-            borderRadius: 6,
-            border: `1px solid ${D.border}`,
-            background: D.bg,
-            color: D.text,
-            fontSize: 12,
-          }}
-        >
-          {" "}
-          <option value="">All Topics</option>
-          {tags.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>{" "}
-        <select
-          value={filterCity}
-          onChange={(e) => setFilterCity(e.target.value)}
-          style={{
-            padding: "6px 10px",
-            borderRadius: 6,
-            border: `1px solid ${D.border}`,
-            background: D.bg,
-            color: D.text,
-            fontSize: 12,
-          }}
-        >
-          {" "}
-          <option value="">All Cities</option>
-          {cities.map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-        </select>{" "}
-        <span style={{ fontSize: 12, color: D.muted, marginLeft: "auto" }}>
-          {posts.length} posts
-        </span>{" "}
-      </div>
+      <Card>
+        <CardBody className="flex flex-wrap items-center gap-2">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search posts"
+            aria-label="Search posts"
+            className="sm:max-w-64"
+          />
+          <Select
+            value={filterTag}
+            onChange={(e) => setFilterTag(e.target.value)}
+            aria-label="Filter by topic"
+            className="sm:!w-auto"
+          >
+            <option value="">All topics</option>
+            {tags.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </Select>
+          <Select
+            value={filterCity}
+            onChange={(e) => setFilterCity(e.target.value)}
+            aria-label="Filter by city"
+            className="sm:!w-auto"
+          >
+            <option value="">All cities</option>
+            {cities.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </Select>
+          <span className="ml-auto text-ui-body text-ink-secondary">
+            {posts.length} posts
+          </span>
+        </CardBody>
+      </Card>
       {/* Post Cards */}
       {posts.length === 0 ? (
-        <Card style={{ textAlign: "center", padding: 40 }}>
-          {" "}
-          <div style={{ color: D.muted }}>No posts found</div>{" "}
+        <Card>
+          <CardBody className="py-10 text-center text-ui-body text-ink-secondary">No posts found</CardBody>
         </Card>
       ) : (
         posts.map((p) => (
-          <div
+          <button
+            type="button"
             key={p.id}
             onClick={() => onSelectPost(p)}
-            style={{
-              background: D.card,
-              border: `1px solid ${D.border}`,
-              borderRadius: 10,
-              padding: "14px 18px",
-              cursor: "pointer",
-              transition: "border-color 0.15s",
-              borderLeft: `3px solid ${p.seo_score ? seoColor(p.seo_score) : D.border}`,
-            }}
+            className="w-full rounded-md border-hairline border-zinc-200 bg-white p-4 text-left text-ui-body transition-colors hover:border-zinc-400 u-focus-ring"
           >
-            {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "flex-start",
-                gap: 12,
-              }}
-            >
-              {" "}
-              <div style={{ flex: 1 }}>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 500,
-                    color: D.heading,
-                    marginBottom: 4,
-                  }}
-                >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 text-ui-body font-medium text-ink-primary">
                   {p.seo_score != null && (
-                    <span
-                      style={{ marginRight: 6, color: seoColor(p.seo_score) }}
-                    >
+                    <Badge tone={seoTone(p.seo_score)} className="mr-2">
                       {p.seo_score}/100
-                    </span>
+                    </Badge>
                   )}
                   {p.title}
                 </div>
                 {p.seo_score != null && p.seo_score < 50 && (
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: D.red,
-                      fontWeight: 500,
-                      marginBottom: 4,
-                    }}
-                  >
-                    CRITICAL — needs optimization
+                  <div className="mb-1 text-ui-body font-medium text-alert-fg">
+                    Critical — needs optimization
                   </div>
                 )}
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 12,
-                    fontSize: 11,
-                    color: D.muted,
-                    flexWrap: "wrap",
-                  }}
-                >
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-ui-body text-ink-secondary">
                   {p.tag && <span>{p.tag}</span>}
                   {p.city && <span>{p.city}</span>}
                   {p.keyword && <span>{p.keyword}</span>}
@@ -340,38 +247,18 @@ function PostList({ status, onSelectPost }) {
                     <span>{publishDateLabel(p.publish_date)}</span>
                   )}
                   {p.word_count > 0 && <span>{p.word_count} words</span>}
-                </div>{" "}
-              </div>{" "}
-              <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                </div>
+              </div>
+              <div className="flex shrink-0 gap-2">
                 {status === "queued" && !p.content && (
-                  <span
-                    style={{
-                      fontSize: 10,
-                      padding: "3px 8px",
-                      borderRadius: 4,
-                      background: D.teal + "22",
-                      color: D.teal,
-                    }}
-                  >
-                    Needs Content
-                  </span>
+                  <Badge>Needs content</Badge>
                 )}
                 {status === "queued" && p.content && (
-                  <span
-                    style={{
-                      fontSize: 10,
-                      padding: "3px 8px",
-                      borderRadius: 4,
-                      background: D.green + "22",
-                      color: D.green,
-                    }}
-                  >
-                    Content Ready
-                  </span>
+                  <Badge tone="strong">Content ready</Badge>
                 )}
-              </div>{" "}
-            </div>{" "}
-          </div>
+              </div>
+            </div>
+          </button>
         ))
       )}
     </div>
@@ -609,7 +496,7 @@ function PostEditor({ post, onBack, onUpdate }) {
         {},
       );
       if (result.post) setEditing((prev) => ({ ...prev, ...result.post }));
-    } catch (err) {
+    } catch {
       // Silent — refresh is best-effort
     }
     setAstroRefreshing(false);
@@ -685,936 +572,176 @@ function PostEditor({ post, onBack, onUpdate }) {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {" "}
-      <button
-        onClick={onBack}
-        style={{
-          alignSelf: "flex-start",
-          padding: "6px 14px",
-          borderRadius: 6,
-          border: `1px solid ${D.border}`,
-          background: "transparent",
-          color: D.muted,
-          fontSize: 12,
-          cursor: "pointer",
-        }}
-      >
-        {"←"} Back to list
-      </button>
-      {/* Header */}
+    <div className="space-y-4">
+      <Button variant="secondary" onClick={onBack}>
+        ← Back to list
+      </Button>
+
       <Card>
-        {" "}
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Title
-            </label>{" "}
-            <input
+        <CardHeader><CardTitle>Post details</CardTitle></CardHeader>
+        <CardBody className="space-y-4">
+          <Field label="Title">
+            <Input
               value={editing.title || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({ ...prev, title: e.target.value }))
-              }
-              style={{
-                width: "100%",
-                padding: "10px 12px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.heading,
-                fontSize: 15,
-                fontWeight: 500,
-              }}
-            />{" "}
-          </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile
-                ? "repeat(2, 1fr)"
-                : "1fr 1fr 1fr 1fr",
-              gap: 10,
-            }}
-          >
-            {" "}
-            <div>
-              {" "}
-              <label
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  display: "block",
-                  marginBottom: 4,
-                }}
-              >
-                Keyword
-              </label>{" "}
-              <input
-                value={editing.keyword || ""}
-                onChange={(e) =>
-                  setEditing((prev) => ({ ...prev, keyword: e.target.value }))
-                }
-                style={{
-                  width: "100%",
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: D.bg,
-                  color: D.text,
-                  fontSize: 12,
-                }}
-              />{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <label
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  display: "block",
-                  marginBottom: 4,
-                }}
-              >
-                City
-              </label>{" "}
-              <input
-                value={editing.city || ""}
-                readOnly
-                style={{
-                  width: "100%",
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: D.bg,
-                  color: D.muted,
-                  fontSize: 12,
-                }}
-              />{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <label
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  display: "block",
-                  marginBottom: 4,
-                }}
-              >
-                Tag
-              </label>{" "}
-              <select
-                value={editing.tag || ""}
-                onChange={(e) =>
-                  setEditing((prev) => ({ ...prev, tag: e.target.value }))
-                }
-                style={{
-                  width: "100%",
-                  padding: "6px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: D.bg,
-                  color: D.text,
-                  fontSize: 12,
-                  cursor: "pointer",
-                }}
-              >
-                {" "}
-                <option value="">Select tag...</option>
-                {[
-                  "Ants",
-                  "Bed Bugs",
-                  "Cockroaches",
-                  "Fleas",
-                  "Flying Insects",
-                  "Insects",
-                  "Lawn Care",
-                  "Lawn Pests",
-                  "Mosquitoes",
-                  "Pest Control",
-                  "Rodents",
-                  "Spiders",
-                  "Termites",
-                ].map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
+              onChange={(e) => setEditing((prev) => ({ ...prev, title: e.target.value }))}
+            />
+          </Field>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Keyword">
+              <Input value={editing.keyword || ""} onChange={(e) => setEditing((prev) => ({ ...prev, keyword: e.target.value }))} />
+            </Field>
+            <Field label="City">
+              <Input value={editing.city || ""} readOnly />
+            </Field>
+            <Field label="Tag">
+              <Select value={editing.tag || ""} onChange={(e) => setEditing((prev) => ({ ...prev, tag: e.target.value }))}>
+                <option value="">Select tag</option>
+                {["Ants", "Bed Bugs", "Cockroaches", "Fleas", "Flying Insects", "Insects", "Lawn Care", "Lawn Pests", "Mosquitoes", "Pest Control", "Rodents", "Spiders", "Termites"].map((tag) => (
+                  <option key={tag} value={tag}>{tag}</option>
                 ))}
-              </select>{" "}
-            </div>{" "}
-            <div>
-              {" "}
-              <label
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  display: "block",
-                  marginBottom: 4,
-                }}
-              >
-                Status
-              </label>{" "}
-              <div style={{ padding: "6px 10px", fontSize: 12, color: D.teal }}>
-                {editing.status}
-              </div>{" "}
-            </div>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Meta Description
-            </label>{" "}
-            <input
-              value={editing.meta_description || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({
-                  ...prev,
-                  meta_description: e.target.value,
-                }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-              }}
-            />{" "}
-            <div
-              style={{
-                fontSize: 10,
-                color:
-                  (editing.meta_description || "").length > 0 &&
-                  ((editing.meta_description || "").length < 115 ||
-                    (editing.meta_description || "").length > 160)
-                    ? D.red
-                    : D.muted,
-                marginTop: 2,
-              }}
-            >
-              {(editing.meta_description || "").length}/115-160 chars
-            </div>{" "}
-          </div>{" "}
-        </div>{" "}
-      </Card>
-      {/* v2 Byline + Taxonomy — drives the Astro frontmatter */}
-      <Card>
-        {" "}
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 10,
-          }}
-        >
-          Byline & Taxonomy
-        </div>{" "}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(3, 1fr)",
-            gap: 10,
-          }}
-        >
-          {" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Author
-            </label>{" "}
-            <select
-              value={editing.author_slug || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({ ...prev, author_slug: e.target.value }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-                cursor: "pointer",
-              }}
-            >
-              {" "}
-              <option value="">Select author...</option>
-              {authors.map((a) => (
-                <option key={a.slug} value={a.slug}>
-                  {a.name}
-                  {a.fdacs_license ? ` (${a.fdacs_license})` : ""}
-                </option>
-              ))}
-            </select>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Technical Reviewer
-            </label>{" "}
-            <select
-              value={editing.reviewer_slug || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({
-                  ...prev,
-                  reviewer_slug: e.target.value,
-                }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-                cursor: "pointer",
-              }}
-            >
-              {" "}
-              <option value="">None</option>
-              {authors
-                .filter((a) => a.fdacs_license)
-                .map((a) => (
-                  <option key={a.slug} value={a.slug}>
-                    {a.name}
-                  </option>
-                ))}
-            </select>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Technical Review Date
-            </label>{" "}
-            <input
-              type="date"
-              value={dateInputValue(editing.technically_reviewed_at)}
-              onChange={(e) =>
-                setEditing((prev) => ({
-                  ...prev,
-                  technically_reviewed_at: e.target.value || null,
-                }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-              }}
-            />{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Fact-Check Date
-            </label>{" "}
-            <input
-              type="date"
-              value={dateInputValue(editing.fact_checked_at)}
-              onChange={(e) =>
-                setEditing((prev) => ({
-                  ...prev,
-                  fact_checked_at: e.target.value || null,
-                }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-              }}
-            />{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Category
-            </label>{" "}
-            <select
-              value={editing.category || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({ ...prev, category: e.target.value }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-                cursor: "pointer",
-              }}
-            >
-              {" "}
-              <option value="">Select...</option>
-              {BLOG_CATEGORIES.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Post Type
-            </label>{" "}
-            <select
-              value={editing.post_type || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({ ...prev, post_type: e.target.value }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-                cursor: "pointer",
-              }}
-            >
-              {" "}
-              <option value="">Select...</option>
-              {BLOG_POST_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>{" "}
-          </div>{" "}
-          <div>
-            {" "}
-            <label
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                display: "block",
-                marginBottom: 4,
-              }}
-            >
-              Hero Image Alt
-            </label>{" "}
-            <input
-              value={editing.hero_image_alt || ""}
-              onChange={(e) =>
-                setEditing((prev) => ({
-                  ...prev,
-                  hero_image_alt: e.target.value,
-                }))
-              }
-              style={{
-                width: "100%",
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                background: D.bg,
-                color: D.text,
-                fontSize: 12,
-              }}
-            />{" "}
-          </div>{" "}
-        </div>{" "}
-        <div style={{ marginTop: 14 }}>
-          {" "}
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 6,
-            }}
-          >
-            Service Areas (tags)
-          </label>{" "}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {serviceAreas.map((sa) => {
-              const active = serviceAreaTags.includes(sa.city);
-              return (
-                <button
-                  key={sa.slug}
-                  type="button"
-                  onClick={() => toggleServiceArea(sa.city)}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    fontSize: 11,
-                    cursor: "pointer",
-                    border: `1px solid ${active ? D.teal : D.border}`,
-                    background: active ? D.teal : "transparent",
-                    color: active ? D.white : D.muted,
-                  }}
-                >
-                  {sa.city}
-                </button>
-              );
-            })}
-          </div>{" "}
-        </div>
-        <div style={{ marginTop: 14 }}>
-          {" "}
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 6,
-            }}
-          >
-            Publish target
-          </label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-            <span
-              style={{
-                padding: "4px 10px",
-                borderRadius: 999,
-                fontSize: 11,
-                border: `1px solid ${D.green}`,
-                background: D.green,
-                color: D.white,
-                whiteSpace: "nowrap",
-              }}
-            >
-              Hub — wavespestcontrol.com
-            </span>
-            <span style={{ color: D.muted, fontSize: 12 }}>
-              Blog posts publish only on the Waves hub. Use service/location pages for spoke domains.
-            </span>
+              </Select>
+            </Field>
+            <Field label="Status">
+              <Input value={editing.status || ""} readOnly />
+            </Field>
           </div>
-        </div>{" "}
+          <Field
+            label="Meta description"
+            help={`${(editing.meta_description || "").length}/115–160 characters`}
+            error={(editing.meta_description || "").length > 0 && ((editing.meta_description || "").length < 115 || (editing.meta_description || "").length > 160) ? "Keep the meta description between 115 and 160 characters." : undefined}
+          >
+            <Input value={editing.meta_description || ""} onChange={(e) => setEditing((prev) => ({ ...prev, meta_description: e.target.value }))} />
+          </Field>
+        </CardBody>
       </Card>
-      {/* Content */}
+
       <Card>
-        {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
-          {" "}
-          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
-            Content
-          </div>{" "}
-          <div style={{ display: "flex", gap: 8 }}>
-            {!editing.content && (
-              <button
-                onClick={handleGenerate}
-                disabled={generating}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 6,
-                  border: "none",
-                  background: D.teal,
-                  color: D.heading,
-                  fontSize: 12,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  opacity: generating ? 0.5 : 1,
-                }}
-              >
-                {generating ? "Generating..." : "Generate Content"}
-              </button>
-            )}
-            {editing.content && (
+        <CardHeader><CardTitle>Byline and taxonomy</CardTitle></CardHeader>
+        <CardBody className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="Author">
+              <Select value={editing.author_slug || ""} onChange={(e) => setEditing((prev) => ({ ...prev, author_slug: e.target.value }))}>
+                <option value="">Select author</option>
+                {authors.map((author) => <option key={author.slug} value={author.slug}>{author.name}{author.fdacs_license ? ` (${author.fdacs_license})` : ""}</option>)}
+              </Select>
+            </Field>
+            <Field label="Technical reviewer">
+              <Select value={editing.reviewer_slug || ""} onChange={(e) => setEditing((prev) => ({ ...prev, reviewer_slug: e.target.value }))}>
+                <option value="">None</option>
+                {authors.filter((author) => author.fdacs_license).map((author) => <option key={author.slug} value={author.slug}>{author.name}</option>)}
+              </Select>
+            </Field>
+            <Field label="Technical review date">
+              <Input type="date" value={dateInputValue(editing.technically_reviewed_at)} onChange={(e) => setEditing((prev) => ({ ...prev, technically_reviewed_at: e.target.value || null }))} />
+            </Field>
+            <Field label="Fact-check date">
+              <Input type="date" value={dateInputValue(editing.fact_checked_at)} onChange={(e) => setEditing((prev) => ({ ...prev, fact_checked_at: e.target.value || null }))} />
+            </Field>
+            <Field label="Category">
+              <Select value={editing.category || ""} onChange={(e) => setEditing((prev) => ({ ...prev, category: e.target.value }))}>
+                <option value="">Select category</option>
+                {BLOG_CATEGORIES.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}
+              </Select>
+            </Field>
+            <Field label="Post type">
+              <Select value={editing.post_type || ""} onChange={(e) => setEditing((prev) => ({ ...prev, post_type: e.target.value }))}>
+                <option value="">Select post type</option>
+                {BLOG_POST_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+              </Select>
+            </Field>
+            <Field label="Hero image alt text" className="sm:col-span-2 lg:col-span-3">
+              <Input value={editing.hero_image_alt || ""} onChange={(e) => setEditing((prev) => ({ ...prev, hero_image_alt: e.target.value }))} />
+            </Field>
+          </div>
+          <div>
+            <div className="ui-label mb-2">Service areas</div>
+            <div className="flex flex-wrap gap-2">
+              {serviceAreas.map((area) => {
+                const active = serviceAreaTags.includes(area.city);
+                return <Button key={area.slug} variant={active ? "primary" : "secondary"} onClick={() => toggleServiceArea(area.city)}>{area.city}</Button>;
+              })}
+            </div>
+          </div>
+          <div>
+            <div className="ui-label mb-2">Publish target</div>
+            <div className="flex flex-wrap items-center gap-2 text-ui-body text-ink-secondary">
+              <Badge tone="strong">Hub — wavespestcontrol.com</Badge>
+              <span>Blog posts publish only on the Waves hub. Use service/location pages for spoke domains.</span>
+            </div>
+          </div>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle>Content</CardTitle>
+          <div className="flex flex-wrap gap-2">
+            {!editing.content ? (
+              <Button onClick={handleGenerate} loading={generating}>{generating ? "Generating…" : "Generate content"}</Button>
+            ) : (
               <>
-                {" "}
-                <button
-                  onClick={handleGenerate}
-                  disabled={generating}
-                  style={{
-                    padding: "6px 14px",
-                    borderRadius: 6,
-                    border: `1px solid ${D.border}`,
-                    background: "transparent",
-                    color: D.muted,
-                    fontSize: 12,
-                    cursor: "pointer",
-                    opacity: generating ? 0.5 : 1,
-                  }}
-                >
-                  {generating ? "Regenerating..." : "Regenerate"}
-                </button>{" "}
-                <button
-                  onClick={handleOptimize}
-                  disabled={optimizing}
-                  style={{
-                    padding: "6px 14px",
-                    borderRadius: 6,
-                    border: `1px solid ${D.amber}`,
-                    background: "transparent",
-                    color: D.amber,
-                    fontSize: 12,
-                    cursor: "pointer",
-                    opacity: optimizing ? 0.5 : 1,
-                  }}
-                >
-                  {optimizing ? "Optimizing..." : "Optimize"}
-                </button>{" "}
+                <Button variant="secondary" onClick={handleGenerate} loading={generating}>{generating ? "Regenerating…" : "Regenerate"}</Button>
+                <Button variant="secondary" onClick={handleOptimize} loading={optimizing}>{optimizing ? "Optimizing…" : "Optimize"}</Button>
               </>
             )}
-          </div>{" "}
-        </div>
-        {/* Featured Image */}
-        <div style={{ marginBottom: 12 }}>
-          {" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginBottom: 6,
-            }}
-          >
-            {" "}
-            <label style={{ fontSize: 11, color: D.muted }}>
-              Featured Image (AI-generated)
-            </label>{" "}
-            <button
-              type="button"
-              onClick={handleRegenerateImage}
-              disabled={regeneratingImage}
-              style={{
-                padding: "4px 10px",
-                borderRadius: 6,
-                fontSize: 11,
-                fontWeight: 500,
-                border: `1px solid ${D.teal}`,
-                background: "transparent",
-                color: D.teal,
-                cursor: "pointer",
-                opacity: regeneratingImage ? 0.5 : 1,
-              }}
-            >
-              {regeneratingImage
-                ? "Generating…"
-                : editing.featured_image_url
-                  ? "Regenerate image"
-                  : "Generate image"}
-            </button>{" "}
           </div>
-          {editing.featured_image_url ? (
-            <img
-              src={editing.featured_image_url}
-              alt="Featured"
-              style={{
-                width: "100%",
-                maxHeight: 300,
-                objectFit: "cover",
-                borderRadius: 10,
-                border: `1px solid ${D.border}`,
-              }}
-            />
-          ) : (
-            <div
-              style={{
-                padding: "16px 14px",
-                borderRadius: 8,
-                background: `${D.amber}15`,
-                border: `1px solid ${D.amber}66`,
-                color: D.amber,
-                fontSize: 12,
-                lineHeight: 1.5,
-              }}
-            >
-              No hero image yet. Generate one before publishing to Astro.
-              {imageError && (
-                <div
-                  style={{
-                    marginTop: 6,
-                    color: D.red,
-                    fontFamily: MONO,
-                    fontSize: 11,
-                  }}
-                >
-                  Last attempt: {imageError}
-                </div>
-              )}
+        </CardHeader>
+        <CardBody className="space-y-4">
+          <div>
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="ui-label">Featured image</div>
+              <Button variant="secondary" onClick={handleRegenerateImage} loading={regeneratingImage}>
+                {regeneratingImage ? "Generating…" : editing.featured_image_url ? "Regenerate image" : "Generate image"}
+              </Button>
             </div>
-          )}
-        </div>
-        {editing.content ? (
-          <textarea
-            value={editing.content}
-            onChange={(e) =>
-              setEditing((prev) => ({ ...prev, content: e.target.value }))
-            }
-            style={{
-              width: "100%",
-              minHeight: 400,
-              padding: 16,
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-              color: D.text,
-              fontSize: 13,
-              lineHeight: 1.7,
-              fontFamily: "'Roboto', Arial, sans-serif",
-              resize: "vertical",
-            }}
-          />
-        ) : (
-          <div
-            style={{
-              padding: 40,
-              textAlign: "center",
-              color: D.muted,
-              fontSize: 14,
-            }}
-          >
-            No content yet. Click "Generate Content" to create the blog post
-            with AI.
-          </div>
-        )}
-        {editing.content && (
-          <div
-            style={{
-              display: "flex",
-              gap: 16,
-              marginTop: 8,
-              fontSize: 12,
-              color: D.muted,
-            }}
-          >
-            {" "}
-            <span>
-              {(editing.content || "").split(/\s+/).filter(Boolean).length}{" "}
-              words
-            </span>{" "}
-            <span>
-              {Math.ceil(
-                (editing.content || "").split(/\s+/).filter(Boolean).length /
-                  250,
-              )}{" "}
-              min read
-            </span>
-            {editing.seo_score != null && (
-              <span style={{ color: seoColor(editing.seo_score) }}>
-                SEO: {editing.seo_score}/100
-              </span>
+            {editing.featured_image_url ? (
+              <img src={editing.featured_image_url} alt={editing.hero_image_alt || "Featured blog image"} className="max-h-80 w-full rounded-md border-hairline border-zinc-200 object-cover" />
+            ) : (
+              <ActionFeedback error={Boolean(imageError)}>
+                {imageError ? `Image generation failed: ${imageError}` : "No hero image yet. Generate one before publishing to Astro."}
+              </ActionFeedback>
             )}
           </div>
-        )}
+          {editing.content ? (
+            <Field label="Post content">
+              <Textarea className="min-h-[400px] leading-relaxed" value={editing.content} onChange={(e) => setEditing((prev) => ({ ...prev, content: e.target.value }))} />
+            </Field>
+          ) : (
+            <ActionFeedback>No content yet. Generate content to create the blog post with AI.</ActionFeedback>
+          )}
+          {editing.content && (
+            <div className="flex flex-wrap gap-4 text-ui-body text-ink-secondary">
+              <span>{(editing.content || "").split(/\s+/).filter(Boolean).length} words</span>
+              <span>{Math.ceil((editing.content || "").split(/\s+/).filter(Boolean).length / 250)} min read</span>
+              {editing.seo_score != null && <Badge tone={seoTone(editing.seo_score)}>SEO: {editing.seo_score}/100</Badge>}
+            </div>
+          )}
+        </CardBody>
       </Card>
-      {/* Optimization Suggestions */}
+
       {optimization && !optimization.parse_error && (
         <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.amber,
-              marginBottom: 12,
-            }}
-          >
-            Optimization Suggestions
-          </div>
-          {optimization.suggested_title && (
-            <div
-              style={{
-                padding: "8px 12px",
-                background: D.bg,
-                borderRadius: 6,
-                marginBottom: 8,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Suggested Title
-              </div>{" "}
-              <div style={{ fontSize: 13, color: D.heading }}>
-                {optimization.suggested_title}
-              </div>{" "}
-            </div>
-          )}
-          {optimization.suggested_meta && (
-            <div
-              style={{
-                padding: "8px 12px",
-                background: D.bg,
-                borderRadius: 6,
-                marginBottom: 8,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Suggested Meta
-              </div>{" "}
-              <div style={{ fontSize: 13, color: D.text }}>
-                {optimization.suggested_meta}
-              </div>{" "}
-            </div>
-          )}
-          {optimization.suggested_keyword && (
-            <div
-              style={{
-                padding: "8px 12px",
-                background: D.bg,
-                borderRadius: 6,
-                marginBottom: 8,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Suggested Keyword
-              </div>{" "}
-              <div style={{ fontSize: 13, color: D.teal }}>
-                {optimization.suggested_keyword}
-              </div>{" "}
-            </div>
-          )}
-          {(optimization.seo_improvements || []).length > 0 && (
-            <div
-              style={{
-                padding: "8px 12px",
-                background: D.bg,
-                borderRadius: 6,
-                marginBottom: 8,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                SEO Improvements
-              </div>
-              {optimization.seo_improvements.map((s, i) => (
-                <div
-                  key={i}
-                  style={{ fontSize: 12, color: D.text, marginBottom: 2 }}
-                >
-                  {"•"} {s}
-                </div>
-              ))}
-            </div>
-          )}
-          {(optimization.missing_internal_links || []).length > 0 && (
-            <div
-              style={{
-                padding: "8px 12px",
-                background: D.bg,
-                borderRadius: 6,
-                marginBottom: 8,
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                Add Internal Links
-              </div>
-              {optimization.missing_internal_links.map((l, i) => (
-                <div
-                  key={i}
-                  style={{ fontSize: 12, color: D.text, marginBottom: 2 }}
-                >
-                  "<span style={{ color: D.teal }}>{l.anchor_text}</span>" →{" "}
-                  {l.url}
-                </div>
-              ))}
-            </div>
-          )}
-          {optimization.estimated_new_score && (
-            <div
-              style={{
-                fontSize: 13,
-                color: D.green,
-                marginTop: 8,
-                fontWeight: 500,
-              }}
-            >
-              Estimated new SEO score: {optimization.estimated_new_score}/100
-            </div>
-          )}
-          <button
-            onClick={applyOptimization}
-            style={{
-              padding: "8px 16px",
-              borderRadius: 6,
-              border: "none",
-              background: D.amber,
-              color: D.bg,
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              marginTop: 12,
-            }}
-          >
-            Apply Meta + Keyword to Draft
-          </button>{" "}
+          <CardHeader><CardTitle>Optimization suggestions</CardTitle></CardHeader>
+          <CardBody className="space-y-3">
+            {optimization.suggested_title && <Suggestion label="Suggested title">{optimization.suggested_title}</Suggestion>}
+            {optimization.suggested_meta && <Suggestion label="Suggested meta description">{optimization.suggested_meta}</Suggestion>}
+            {optimization.suggested_keyword && <Suggestion label="Suggested keyword">{optimization.suggested_keyword}</Suggestion>}
+            {(optimization.seo_improvements || []).length > 0 && (
+              <Suggestion label="SEO improvements">
+                <ul className="list-disc space-y-1 pl-5">{optimization.seo_improvements.map((item, index) => <li key={index}>{item}</li>)}</ul>
+              </Suggestion>
+            )}
+            {(optimization.missing_internal_links || []).length > 0 && (
+              <Suggestion label="Add internal links">
+                <ul className="space-y-1">{optimization.missing_internal_links.map((link, index) => <li key={index}><span className="font-medium text-ink-primary">“{link.anchor_text}”</span> → {link.url}</li>)}</ul>
+              </Suggestion>
+            )}
+            {optimization.estimated_new_score && <Badge tone="strong">Estimated SEO score: {optimization.estimated_new_score}/100</Badge>}
+          </CardBody>
+          <CardFooter><Button onClick={applyOptimization}>Apply meta and keyword to draft</Button></CardFooter>
         </Card>
       )}
-      {/* Astro publish state + actions */}
+
       {editing.content && (
         <AstroPublishPanel
           post={editing}
@@ -1628,47 +755,22 @@ function PostEditor({ post, onBack, onUpdate }) {
           unpublishing={astroUnpublishing}
         />
       )}
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {" "}
-        <button
-          onClick={handleSave}
-          style={{
-            padding: "10px 20px",
-            borderRadius: 8,
-            border: "none",
-            background: D.teal,
-            color: D.white,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
-        >
-          Save Draft
-        </button>
-        {/* Share only for LIVE posts — the server enforces the same gate
-            (409 otherwise): sharing a draft/pending post publishes a dead
-            404 link to every enabled platform. */}
+
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={handleSave}>Save draft</Button>
         {editing.astro_status === "live" && (
-          <button
-            onClick={() => handleShareSocial()}
-            disabled={sharing}
-            style={{
-              padding: "10px 20px",
-              borderRadius: 8,
-              border: `1px solid ${D.purple}`,
-              background: "transparent",
-              color: D.purple,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: sharing ? 0.5 : 1,
-            }}
-          >
-            {sharing ? "Sharing..." : "Share to Social Media"}
-          </button>
+          <Button variant="secondary" onClick={() => handleShareSocial()} loading={sharing}>{sharing ? "Sharing…" : "Share to social media"}</Button>
         )}
-      </div>{" "}
+      </div>
+    </div>
+  );
+}
+
+function Suggestion({ label, children }) {
+  return (
+    <div className="rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
+      <div className="mb-1 font-medium text-ink-primary">{label}</div>
+      {children}
     </div>
   );
 }
@@ -1690,354 +792,63 @@ function AstroPublishPanel({
 }) {
   const status = post.astro_status || "draft";
   const pill = ASTRO_PILLS[status] || ASTRO_PILLS.draft;
+  const previewable = status === "pr_open" || status === "build_failed";
 
   return (
     <Card>
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 6,
-            padding: "4px 10px",
-            borderRadius: 999,
-            fontSize: 11,
-            fontWeight: 500,
-            background: pill.bg,
-            color: pill.fg,
-            border: `1px solid ${pill.border}`,
-          }}
-        >
-          {" "}
-          <span
-            style={{
-              width: 6,
-              height: 6,
-              borderRadius: 999,
-              background: pill.fg,
-              display: "inline-block",
-            }}
-          />
-          {pill.label}
-        </div>
-        {post.astro_pr_number && (
-          <div style={{ fontSize: 11, color: D.muted }}>
-            PR #{post.astro_pr_number}
-          </div>
-        )}
-        {post.astro_branch_name && (
-          <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>
-            {post.astro_branch_name}
-          </div>
-        )}
-        <div style={{ flex: 1 }} />
-        {status === "draft" && (
-          <button
-            onClick={onPublish}
-            disabled={publishing}
-            style={{
-              padding: "10px 18px",
-              borderRadius: 8,
-              border: "none",
-              background: D.green,
-              color: D.white,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: publishing ? 0.5 : 1,
-            }}
-          >
-            {publishing ? "Opening PR…" : "Publish to Astro (preview)"}
-          </button>
-        )}
-        {(status === "pr_open" || status === "build_failed") && (
+      <CardHeader className="flex flex-wrap items-center gap-3">
+        <CardTitle>Publishing</CardTitle>
+        <Badge tone={pill.tone}>{pill.label}</Badge>
+        {post.astro_pr_number && <span className="text-ui-body text-ink-secondary">PR #{post.astro_pr_number}</span>}
+        {post.astro_branch_name && <span className="break-all text-ui-body text-ink-secondary">{post.astro_branch_name}</span>}
+      </CardHeader>
+      <CardBody className="flex flex-wrap items-center gap-2">
+        {status === "draft" && <Button onClick={onPublish} loading={publishing}>{publishing ? "Opening PR…" : "Publish to Astro preview"}</Button>}
+        {previewable && (
           <>
-            {post.astro_preview_url && (
-              <a
-                href={post.astro_preview_url}
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  padding: "8px 14px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.border}`,
-                  color: D.text,
-                  fontSize: 12,
-                  textDecoration: "none",
-                }}
-              >
-                Open Preview
-              </a>
-            )}
-            <button
-              onClick={onRefresh}
-              disabled={refreshing}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: "transparent",
-                color: D.muted,
-                fontSize: 12,
-                cursor: "pointer",
-                opacity: refreshing ? 0.5 : 1,
-              }}
-            >
-              {refreshing ? "Checking…" : "Refresh status"}
-            </button>
-            {status === "pr_open" && (
-              <button
-                onClick={onMerge}
-                disabled={merging}
-                style={{
-                  padding: "10px 18px",
-                  borderRadius: 8,
-                  border: "none",
-                  background: D.green,
-                  color: D.white,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  opacity: merging ? 0.5 : 1,
-                }}
-              >
-                {merging ? "Merging…" : "Approve & Go Live"}
-              </button>
-            )}
-            {status === "build_failed" && (
-              <button
-                onClick={onPublish}
-                disabled={publishing}
-                style={{
-                  padding: "10px 18px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.red}`,
-                  background: "transparent",
-                  color: D.red,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                  opacity: publishing ? 0.5 : 1,
-                }}
-              >
-                {publishing ? "Retrying…" : "Retry publish"}
-              </button>
-            )}
+            {post.astro_preview_url && <a href={post.astro_preview_url} target="_blank" rel="noreferrer" className={buttonStyles({ variant: "secondary", density: "comfortable" })}>Open preview</a>}
+            <Button variant="secondary" onClick={onRefresh} loading={refreshing}>{refreshing ? "Checking…" : "Refresh status"}</Button>
+            {status === "pr_open" && <Button onClick={onMerge} loading={merging}>{merging ? "Merging…" : "Approve and go live"}</Button>}
+            {status === "build_failed" && <Button variant="danger" onClick={onPublish} loading={publishing}>{publishing ? "Retrying…" : "Retry publish"}</Button>}
           </>
         )}
         {status === "merged" && (
           <>
-            {" "}
-            <div style={{ fontSize: 12, color: D.muted }}>
-              Merged. Live build in progress.
-            </div>
-            {post.astro_live_url && (
-              <a
-                href={post.astro_live_url}
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  padding: "8px 14px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.green}`,
-                  color: D.green,
-                  fontSize: 12,
-                  textDecoration: "none",
-                  fontWeight: 500,
-                }}
-              >
-                Expected Live URL
-              </a>
-            )}
-            <button
-              onClick={onRefresh}
-              disabled={refreshing}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: "transparent",
-                color: D.muted,
-                fontSize: 12,
-                cursor: "pointer",
-                opacity: refreshing ? 0.5 : 1,
-              }}
-            >
-              Refresh
-            </button>{" "}
-            <button
-              onClick={onUnpublish}
-              disabled={unpublishing}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: "1px solid #d6d3d1",
-                background: "#fafaf9",
-                color: "#991B1B",
-                fontSize: 12,
-                fontWeight: 500,
-                cursor: "pointer",
-                opacity: unpublishing ? 0.5 : 1,
-              }}
-            >
-              {unpublishing ? "Opening revert PR…" : "Unpublish"}
-            </button>{" "}
+            <span className="text-ui-body text-ink-secondary">Merged. Live build in progress.</span>
+            {post.astro_live_url && <a href={post.astro_live_url} target="_blank" rel="noreferrer" className={buttonStyles({ variant: "secondary", density: "comfortable" })}>Expected live URL</a>}
+            <Button variant="secondary" onClick={onRefresh} loading={refreshing}>Refresh</Button>
+            <Button variant="danger" onClick={onUnpublish} loading={unpublishing}>{unpublishing ? "Opening revert PR…" : "Unpublish"}</Button>
           </>
         )}
         {status === "live" && (
           <>
-            {post.astro_live_url && (
-              <a
-                href={post.astro_live_url}
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  padding: "8px 14px",
-                  borderRadius: 8,
-                  border: `1px solid ${D.green}`,
-                  color: D.green,
-                  fontSize: 12,
-                  textDecoration: "none",
-                  fontWeight: 500,
-                }}
-              >
-                View Live
-              </a>
-            )}
-            <button
-              onClick={onUnpublish}
-              disabled={unpublishing}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: "1px solid #d6d3d1",
-                background: "#fafaf9",
-                color: "#991B1B",
-                fontSize: 12,
-                fontWeight: 500,
-                cursor: "pointer",
-                opacity: unpublishing ? 0.5 : 1,
-              }}
-            >
-              {unpublishing ? "Opening revert PR…" : "Unpublish"}
-            </button>{" "}
+            {post.astro_live_url && <a href={post.astro_live_url} target="_blank" rel="noreferrer" className={buttonStyles({ variant: "secondary", density: "comfortable" })}>View live</a>}
+            <Button variant="danger" onClick={onUnpublish} loading={unpublishing}>{unpublishing ? "Opening revert PR…" : "Unpublish"}</Button>
           </>
         )}
         {status === "unpublish_pending" && (
           <>
-            {" "}
-            <button
-              onClick={onRefresh}
-              disabled={refreshing}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: "transparent",
-                color: D.muted,
-                fontSize: 12,
-                cursor: "pointer",
-                opacity: refreshing ? 0.5 : 1,
-              }}
-            >
-              {refreshing ? "Checking…" : "Refresh status"}
-            </button>{" "}
-            <button
-              onClick={onMerge}
-              disabled={merging}
-              style={{
-                padding: "10px 18px",
-                borderRadius: 8,
-                border: "none",
-                background: "#991B1B",
-                color: D.white,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-                opacity: merging ? 0.5 : 1,
-              }}
-            >
-              {merging ? "Removing…" : "Approve & Remove"}
-            </button>{" "}
+            <Button variant="secondary" onClick={onRefresh} loading={refreshing}>{refreshing ? "Checking…" : "Refresh status"}</Button>
+            <Button variant="danger" onClick={onMerge} loading={merging}>{merging ? "Removing…" : "Approve and remove"}</Button>
           </>
         )}
-        {status === "publish_failed" && (
-          <button
-            onClick={onPublish}
-            disabled={publishing}
-            style={{
-              padding: "10px 18px",
-              borderRadius: 8,
-              border: "none",
-              background: D.red,
-              color: D.white,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: publishing ? 0.5 : 1,
-            }}
-          >
-            {publishing ? "Retrying…" : "Retry publish"}
-          </button>
-        )}
-      </div>
-      {post.astro_publish_error &&
-        (status === "publish_failed" || status === "build_failed") && (
-          <div
-            style={{
-              marginTop: 10,
-              padding: 10,
-              borderRadius: 6,
-              background: "#FEF2F2",
-              color: D.red,
-              fontSize: 11,
-              fontFamily: MONO,
-            }}
-          >
-            {post.astro_publish_error}
-          </div>
-        )}
+        {status === "publish_failed" && <Button variant="danger" onClick={onPublish} loading={publishing}>{publishing ? "Retrying…" : "Retry publish"}</Button>}
+      </CardBody>
+      {post.astro_publish_error && (status === "publish_failed" || status === "build_failed") && (
+        <CardFooter><ActionFeedback error>{post.astro_publish_error}</ActionFeedback></CardFooter>
+      )}
     </Card>
   );
 }
 
 const ASTRO_PILLS = {
-  draft: { label: "DRAFT", bg: "#f5f5f4", fg: "#57534e", border: "#e7e5e4" },
-  pr_open: {
-    label: "PREVIEW OPEN",
-    bg: "#EFF6FF",
-    fg: "#1D4ED8",
-    border: "#BFDBFE",
-  },
-  build_failed: {
-    label: "BUILD FAILED",
-    bg: "#FEF2F2",
-    fg: "#991B1B",
-    border: "#FECACA",
-  },
-  merged: { label: "MERGED", bg: "#ECFDF5", fg: "#065F46", border: "#A7F3D0" },
-  live: { label: "LIVE", bg: "#ECFDF5", fg: "#15803D", border: "#86EFAC" },
-  publish_failed: {
-    label: "PUBLISH FAILED",
-    bg: "#FEF2F2",
-    fg: "#991B1B",
-    border: "#FECACA",
-  },
-  unpublish_pending: {
-    label: "UNPUBLISH PENDING",
-    bg: "#fafaf9",
-    fg: "#991B1B",
-    border: "#e7e5e4",
-  },
+  draft: { label: "Draft", tone: "neutral" },
+  pr_open: { label: "Preview open", tone: "strong" },
+  build_failed: { label: "Build failed", tone: "alert" },
+  merged: { label: "Merged", tone: "strong" },
+  live: { label: "Live", tone: "strong" },
+  publish_failed: { label: "Publish failed", tone: "alert" },
+  unpublish_pending: { label: "Unpublish pending", tone: "alert" },
 };
 
 // =========================================================================
@@ -2049,379 +860,96 @@ function AuditTab() {
 
   useEffect(() => {
     adminFetch("/admin/content/blog/audit")
-      .then((d) => {
-        setAudit(d.audit);
-        setLoading(false);
-      })
+      .then((data) => { setAudit(data.audit); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Running blog audit...
-      </div>
-    );
-  if (!audit)
-    return (
-      <Card style={{ padding: 40, textAlign: "center" }}>
-        <div style={{ color: D.muted }}>Unable to load audit</div>
-      </Card>
-    );
-
-  const barStyle = (count, max, color) => ({
-    height: 14,
-    borderRadius: 3,
-    background: color,
-    width: `${Math.min((count / Math.max(max, 1)) * 100, 100)}%`,
-    minWidth: count > 0 ? 4 : 0,
-  });
-
-  const maxTag = Math.max(
-    ...Object.values(audit.topicDistribution?.counts || { x: 1 }),
-  );
-  const maxCity = Math.max(
-    ...Object.values(audit.cityDistribution?.counts || { x: 1 }),
-  );
+  if (loading) return <ActionFeedback loading>Running blog audit...</ActionFeedback>;
+  if (!audit) return <ActionFeedback error>Unable to load audit.</ActionFeedback>;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Summary */}
+    <div className="space-y-4">
       <Card>
-        {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 700,
-            color: D.heading,
-            marginBottom: 12,
-          }}
-        >
-          Content Health Scorecard
-        </div>{" "}
-        <div style={{ fontSize: 14, color: D.text, marginBottom: 16 }}>
-          Total posts:{" "}
-          <span style={{ fontFamily: MONO, color: D.teal }}>{audit.total}</span>{" "}
-          ({audit.published} published + {audit.drafts} drafts + {audit.queued}{" "}
-          queued + {audit.ideas} ideas)
-        </div>
-        {/* Recommendations */}
-        {(audit.recommendations || []).map((rec, i) => {
-          const prioColor =
-            rec.priority === "critical"
-              ? D.red
-              : rec.priority === "high"
-                ? D.orange
-                : D.amber;
-          const prioLabel =
-            rec.priority === "critical"
-              ? "CRITICAL"
-              : rec.priority === "high"
-                ? "HIGH"
-                : "MEDIUM";
-          return (
-            <div
-              key={i}
-              style={{
-                padding: "12px 16px",
-                background: D.bg,
-                borderRadius: 8,
-                marginBottom: 8,
-                borderLeft: `3px solid ${prioColor}`,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: prioColor,
-                  fontWeight: 700,
-                  marginBottom: 2,
-                }}
-              >
-                {prioLabel}
-              </div>{" "}
-              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
-                {rec.title}
-              </div>{" "}
-              <div style={{ fontSize: 12, color: D.muted }}>
-                {rec.action}
-              </div>{" "}
-            </div>
-          );
-        })}
-      </Card>
-      {/* Topic Distribution */}
-      <Card>
-        {" "}
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
-          By Topic
-        </div>
-        {Object.entries(audit.topicDistribution?.counts || {})
-          .sort((a, b) => b[1] - a[1])
-          .map(([tag, count]) => {
-            const isLow = count < 5;
-            return (
-              <div
-                key={tag}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  marginBottom: 6,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    width: 120,
-                    fontSize: 12,
-                    color: isLow ? D.amber : D.text,
-                    textAlign: "right",
-                  }}
-                >
-                  {tag}
-                </div>{" "}
-                <div
-                  style={{
-                    flex: 1,
-                    height: 14,
-                    background: D.bg,
-                    borderRadius: 3,
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={barStyle(count, maxTag, isLow ? D.amber : D.teal)}
-                  />{" "}
-                </div>{" "}
-                <div
-                  style={{
-                    width: 30,
-                    fontSize: 12,
-                    color: D.muted,
-                    fontFamily: MONO,
-                  }}
-                >
-                  {count}
-                </div>
-                {isLow && (
-                  <span
-                    style={{ fontSize: 10, color: D.amber, fontWeight: 500 }}
-                  >
-                    LOW
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        {(audit.topicDistribution?.gaps || []).length > 0 && (
-          <div
-            style={{
-              marginTop: 12,
-              padding: 12,
-              background: D.bg,
-              borderRadius: 8,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 500,
-                color: D.amber,
-                marginBottom: 6,
-              }}
-            >
-              Content Gaps
-            </div>
-            {audit.topicDistribution.gaps.map((g, i) => (
-              <div
-                key={i}
-                style={{ fontSize: 12, color: D.text, marginBottom: 2 }}
-              >
-                {"•"} {g}
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-      {/* City Distribution */}
-      <Card>
-        {" "}
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
-          By City
-        </div>
-        {Object.entries(audit.cityDistribution?.counts || {})
-          .sort((a, b) => b[1] - a[1])
-          .map(([city, count]) => {
-            const isHigh = audit.cityDistribution.overrepresented?.some(
-              (o) => o.city === city,
-            );
-            const isLow = count === 0;
-            return (
-              <div
-                key={city}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  marginBottom: 6,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    width: 130,
-                    fontSize: 12,
-                    color: isHigh ? D.amber : D.text,
-                    textAlign: "right",
-                  }}
-                >
-                  {city}
-                </div>{" "}
-                <div
-                  style={{
-                    flex: 1,
-                    height: 14,
-                    background: D.bg,
-                    borderRadius: 3,
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={barStyle(count, maxCity, isHigh ? D.amber : D.green)}
-                  />{" "}
-                </div>{" "}
-                <div
-                  style={{
-                    width: 30,
-                    fontSize: 12,
-                    color: D.muted,
-                    fontFamily: MONO,
-                  }}
-                >
-                  {count}
-                </div>
-                {isHigh && (
-                  <span
-                    style={{ fontSize: 10, color: D.amber, fontWeight: 500 }}
-                  >
-                    overweight
-                  </span>
-                )}
-                {isLow && (
-                  <span style={{ fontSize: 10, color: D.red, fontWeight: 500 }}>
-                    LOW
-                  </span>
-                )}
-              </div>
-            );
-          })}
-      </Card>
-      {/* Duplicates */}
-      {(audit.duplicates || []).length > 0 && (
-        <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.red,
-              marginBottom: 12,
-            }}
-          >
-            Duplicates Found ({audit.duplicates.length})
-          </div>
-          {audit.duplicates.map((d, i) => (
-            <div
-              key={i}
-              style={{
-                padding: "8px 12px",
-                background: D.bg,
-                borderRadius: 6,
-                marginBottom: 6,
-                fontSize: 12,
-              }}
-            >
-              {" "}
-              <div style={{ color: D.text }}>
-                1. "{d.post1.title}"{" "}
-                <span style={{ color: D.muted }}>({d.post1.status})</span>
-              </div>{" "}
-              <div style={{ color: D.text }}>
-                2. "{d.post2.title}"{" "}
-                <span style={{ color: D.muted }}>({d.post2.status})</span>
-              </div>{" "}
-              <div style={{ color: D.amber, fontSize: 11 }}>
-                Match: {d.matchType}
-              </div>{" "}
+        <CardHeader><CardTitle>Content health scorecard</CardTitle></CardHeader>
+        <CardBody className="space-y-3">
+          <p className="text-ui-body text-ink-secondary">
+            Total posts: <span className="font-medium text-ink-primary">{audit.total}</span> ({audit.published} published, {audit.drafts} drafts, {audit.queued} queued, and {audit.ideas} ideas)
+          </p>
+          {(audit.recommendations || []).map((recommendation, index) => (
+            <div key={index} className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3">
+              <Badge tone={recommendation.priority === "critical" ? "alert" : recommendation.priority === "high" ? "strong" : "neutral"}>{recommendation.priority}</Badge>
+              <div className="mt-2 text-ui-body font-medium text-ink-primary">{recommendation.title}</div>
+              <div className="mt-1 text-ui-body text-ink-secondary">{recommendation.action}</div>
             </div>
           ))}
+        </CardBody>
+      </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DistributionCard title="By topic" entries={audit.topicDistribution?.counts || {}} flagged={(name, count) => count < 5 ? "Low" : ""} />
+        <DistributionCard
+          title="By city"
+          entries={audit.cityDistribution?.counts || {}}
+          flagged={(name, count) => audit.cityDistribution?.overrepresented?.some((item) => item.city === name) ? "Overrepresented" : count === 0 ? "Low" : ""}
+        />
+      </div>
+
+      {(audit.topicDistribution?.gaps || []).length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Content gaps</CardTitle></CardHeader>
+          <CardBody><ul className="list-disc space-y-1 pl-5 text-ui-body text-ink-secondary">{audit.topicDistribution.gaps.map((gap, index) => <li key={index}>{gap}</li>)}</ul></CardBody>
         </Card>
       )}
 
-      {/* Top Performers */}
+      {(audit.duplicates || []).length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Duplicates found ({audit.duplicates.length})</CardTitle></CardHeader>
+          <CardBody className="space-y-2">
+            {audit.duplicates.map((duplicate, index) => (
+              <div key={index} className="rounded-md bg-zinc-50 p-3 text-ui-body text-ink-secondary">
+                <div>1. “{duplicate.post1.title}” ({duplicate.post1.status})</div>
+                <div>2. “{duplicate.post2.title}” ({duplicate.post2.status})</div>
+                <Badge className="mt-2">Match: {duplicate.matchType}</Badge>
+              </div>
+            ))}
+          </CardBody>
+        </Card>
+      )}
+
       {(audit.topPerformers || []).length > 0 && (
         <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.green,
-              marginBottom: 12,
-            }}
-          >
-            Top Performing Posts
-          </div>
-          {audit.topPerformers.map((p, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "6px 0",
-                borderBottom:
-                  i < audit.topPerformers.length - 1
-                    ? `1px solid ${D.border}`
-                    : "none",
-              }}
-            >
-              {" "}
-              <span
-                style={{
-                  fontSize: 12,
-                  fontFamily: MONO,
-                  color: D.green,
-                  width: 50,
-                }}
-              >
-                {p.score}/100
-              </span>{" "}
-              <span style={{ fontSize: 12, color: D.text }}>
-                {p.title}
-              </span>{" "}
-            </div>
-          ))}
+          <CardHeader><CardTitle>Top performing posts</CardTitle></CardHeader>
+          <CardBody className="divide-y divide-zinc-200 p-0">
+            {audit.topPerformers.map((post, index) => (
+              <div key={index} className="flex items-center gap-3 px-4 py-3 text-ui-body">
+                <Badge tone="strong">{post.score}/100</Badge>
+                <span className="text-ink-primary">{post.title}</span>
+              </div>
+            ))}
+          </CardBody>
         </Card>
       )}
     </div>
+  );
+}
+
+function DistributionCard({ title, entries, flagged }) {
+  return (
+    <Card>
+      <CardHeader><CardTitle>{title}</CardTitle></CardHeader>
+      <CardBody className="divide-y divide-zinc-200 p-0">
+        {Object.entries(entries).sort((a, b) => b[1] - a[1]).map(([name, count]) => {
+          const warning = flagged(name, count);
+          return (
+            <div key={name} className="flex min-h-11 items-center gap-3 px-4 py-2 text-ui-body">
+              <span className="min-w-0 flex-1 text-ink-primary">{name}</span>
+              {warning && <Badge tone="alert">{warning}</Badge>}
+              <span className="tabular-nums text-ink-secondary">{count}</span>
+            </div>
+          );
+        })}
+      </CardBody>
+    </Card>
   );
 }
 
@@ -2550,332 +1078,191 @@ function GenerateTab({ onGenerated }) {
   const suggestions = SUGGESTIONS[contentType] || SUGGESTIONS.blog_post;
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "1fr 340px",
-        gap: 20,
-        alignItems: "start",
-      }}
-    >
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
       {/* Left — main form */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div className="space-y-4">
         {/* A) Content type selector */}
         <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
-            Content Type
-          </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)",
-              gap: 10,
-            }}
-          >
-            {CONTENT_TYPES.map((ct) => (
-              <div
-                key={ct.id}
-                onClick={() => setContentType(ct.id)}
-                style={{
-                  padding: "14px 16px",
-                  borderRadius: 10,
-                  cursor: "pointer",
-                  transition: "all 0.15s",
-                  background: contentType === ct.id ? D.teal + "18" : D.bg,
-                  border: `1px solid ${contentType === ct.id ? D.teal : D.border}`,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 500,
-                    color: contentType === ct.id ? D.teal : D.heading,
-                  }}
+          <CardHeader>
+            <CardTitle>Content type</CardTitle>
+          </CardHeader>
+          <CardBody className="grid gap-2 sm:grid-cols-2">
+            {CONTENT_TYPES.map((content) => {
+              const active = contentType === content.id;
+              return (
+                <button
+                  key={content.id}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setContentType(content.id)}
+                  className={`min-h-16 rounded-md border-hairline p-3 text-left text-ui-body transition-colors u-focus-ring ${
+                    active
+                      ? "border-zinc-900 bg-zinc-100"
+                      : "border-zinc-200 bg-white hover:bg-zinc-50"
+                  }`}
                 >
-                  {ct.label}
-                </div>{" "}
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                  {ct.desc}
-                </div>{" "}
-              </div>
-            ))}
-          </div>{" "}
+                  <span className="block text-ui-body font-medium text-ink-primary">
+                    {content.label}
+                  </span>
+                  <span className="mt-1 block text-ui-body text-ink-secondary">
+                    {content.desc}
+                  </span>
+                </button>
+              );
+            })}
+          </CardBody>
         </Card>
         {/* B) Topic input + suggestions */}
         <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 8,
-            }}
-          >
-            Topic
-          </div>{" "}
-          <textarea
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            placeholder="Describe the topic or paste a working title..."
-            rows={3}
-            style={{
-              width: "100%",
-              padding: "10px 12px",
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-              color: D.heading,
-              fontSize: 14,
-              lineHeight: 1.5,
-              fontFamily: "'Roboto', Arial, sans-serif",
-              resize: "vertical",
-              boxSizing: "border-box",
-            }}
-          />{" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              marginTop: 8,
-              marginBottom: 6,
-            }}
-          >
-            Suggestions — click to use
-          </div>{" "}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {suggestions.map((s, i) => (
-              <button
-                key={i}
-                onClick={() => setTopic(s)}
-                style={{
-                  padding: "5px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.border}`,
-                  background: topic === s ? D.teal + "22" : "transparent",
-                  color: topic === s ? D.teal : D.muted,
-                  fontSize: 11,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  lineHeight: 1.3,
-                }}
-              >
-                {s}
-              </button>
-            ))}
-          </div>{" "}
+          <CardHeader>
+            <CardTitle>Topic</CardTitle>
+          </CardHeader>
+          <CardBody className="space-y-3">
+            <Textarea
+              value={topic}
+              onChange={(e) => setTopic(e.target.value)}
+              placeholder="Describe the topic or paste a working title..."
+              rows={3}
+            />
+            <div>
+              <div className="ui-label mb-2">Suggestions — click to use</div>
+              <div className="flex flex-wrap gap-2">
+                {suggestions.map((suggestion) => (
+                  <Button
+                    key={suggestion}
+                    variant={topic === suggestion ? "primary" : "secondary"}
+                    onClick={() => setTopic(suggestion)}
+                    className="h-auto min-h-11 whitespace-normal py-2 text-left sm:h-auto sm:min-h-9"
+                  >
+                    {suggestion}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </CardBody>
         </Card>
         {/* C) City selector */}
         <Card>
-          {" "}
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            Target City
-          </div>{" "}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {CITIES.map((c) => (
-              <button
-                key={c}
-                onClick={() => setCity(c)}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 20,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  background: city === c ? D.teal : D.bg,
-                  color: city === c ? D.white : D.muted,
-                  transition: "all 0.15s",
-                }}
+          <CardHeader>
+            <CardTitle>Target city</CardTitle>
+          </CardHeader>
+          <CardBody className="flex flex-wrap gap-2">
+            {CITIES.map((targetCity) => (
+              <Button
+                key={targetCity}
+                variant={city === targetCity ? "primary" : "secondary"}
+                onClick={() => setCity(targetCity)}
               >
-                {c}
-              </button>
+                {targetCity}
+              </Button>
             ))}
-          </div>{" "}
+          </CardBody>
         </Card>
         {/* E) Generate button */}
-        <button
+        <Button
           onClick={handleGenerate}
           disabled={generating || !topic.trim()}
-          style={{
-            padding: "14px 24px",
-            borderRadius: 10,
-            border: "none",
-            background: generating ? D.border : D.teal,
-            color: D.heading,
-            fontSize: 15,
-            fontWeight: 700,
-            cursor: generating ? "default" : "pointer",
-            opacity: !topic.trim() ? 0.4 : 1,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 10,
-          }}
+          loading={generating}
+          className="w-full"
         >
-          {generating ? (
-            <>
-              {" "}
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 16,
-                  height: 16,
-                  border: `2px solid ${D.white}44`,
-                  borderTopColor: D.white,
-                  borderRadius: "50%",
-                  animation: "spin 0.8s linear infinite",
-                }}
-              />
-              Generating — pulling FAWN data, building prompt...
-            </>
-          ) : (
-            <>
-              Generate {CONTENT_TYPES.find((c) => c.id === contentType)?.label}
-            </>
-          )}
-        </button>{" "}
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>{" "}
+          {generating
+            ? "Generating — pulling FAWN data, building prompt..."
+            : `Generate ${CONTENT_TYPES.find((content) => content.id === contentType)?.label}`}
+        </Button>
       </div>
       {/* D) Right — info panel */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div className="space-y-4">
         {/* Weather snapshot */}
-        <Card style={{ padding: 16 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            FAWN Weather
-          </div>
-          {weather ? (
-            <div style={{ fontSize: 12, color: D.text, lineHeight: 1.7 }}>
-              {weather.temp && (
-                <div>
-                  Temp:{" "}
-                  <span style={{ color: D.teal, fontFamily: MONO }}>
-                    {weather.temp}F
-                  </span>
-                </div>
-              )}
-              {weather.humidity && (
-                <div>
-                  Humidity:{" "}
-                  <span style={{ fontFamily: MONO }}>{weather.humidity}%</span>
-                </div>
-              )}
-              {weather.rainfall && (
-                <div>
-                  Rainfall (7d):{" "}
-                  <span style={{ fontFamily: MONO }}>{weather.rainfall}"</span>
-                </div>
-              )}
-              {weather.soilTemp && (
-                <div>
-                  Soil temp:{" "}
-                  <span style={{ fontFamily: MONO }}>{weather.soilTemp}F</span>
-                </div>
-              )}
-              {weather.station && (
-                <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>
-                  Station: {weather.station}
-                </div>
-              )}
-              {!weather.temp && (
-                <div style={{ color: D.muted }}>
-                  Weather data will be fetched at generation time
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: D.muted }}>
-              Weather data loads when API is connected
-            </div>
-          )}
+        <Card>
+          <CardHeader>
+            <CardTitle>FAWN weather</CardTitle>
+          </CardHeader>
+          <CardBody>
+            {weather ? (
+              <dl className="space-y-2 text-ui-body text-ink-secondary">
+                {weather.temp && (
+                  <div className="flex justify-between gap-3">
+                    <dt>Temp</dt>
+                    <dd className="tabular-nums text-ink-primary">
+                      {weather.temp}F
+                    </dd>
+                  </div>
+                )}
+                {weather.humidity && (
+                  <div className="flex justify-between gap-3">
+                    <dt>Humidity</dt>
+                    <dd className="tabular-nums text-ink-primary">
+                      {weather.humidity}%
+                    </dd>
+                  </div>
+                )}
+                {weather.rainfall && (
+                  <div className="flex justify-between gap-3">
+                    <dt>Rainfall (7d)</dt>
+                    <dd className="tabular-nums text-ink-primary">
+                      {weather.rainfall}&quot;
+                    </dd>
+                  </div>
+                )}
+                {weather.soilTemp && (
+                  <div className="flex justify-between gap-3">
+                    <dt>Soil temp</dt>
+                    <dd className="tabular-nums text-ink-primary">
+                      {weather.soilTemp}F
+                    </dd>
+                  </div>
+                )}
+                {weather.station && (
+                  <div className="border-t border-hairline border-zinc-200 pt-2">
+                    <dt className="inline">Station: </dt>
+                    <dd className="inline text-ink-primary">
+                      {weather.station}
+                    </dd>
+                  </div>
+                )}
+                {!weather.temp && (
+                  <div>Weather data will be fetched at generation time</div>
+                )}
+              </dl>
+            ) : (
+              <ActionFeedback>
+                Weather data loads when API is connected
+              </ActionFeedback>
+            )}
+          </CardBody>
         </Card>
         {/* Active signals */}
         {signals.length > 0 && (
-          <Card style={{ padding: 16 }}>
-            {" "}
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 500,
-                color: D.amber,
-                marginBottom: 8,
-              }}
-            >
-              Active Signals
-            </div>
-            {signals.map((s, i) => (
-              <div
-                key={i}
-                style={{
-                  fontSize: 12,
-                  color: D.text,
-                  marginBottom: 4,
-                  paddingLeft: 8,
-                  borderLeft: `2px solid ${D.amber}`,
-                }}
-              >
-                {s}
-              </div>
-            ))}
+          <Card>
+            <CardHeader>
+              <CardTitle>Active signals</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-2">
+              {signals.map((signal, index) => (
+                <div
+                  key={index}
+                  className="border-l-2 border-zinc-400 pl-3 text-ui-body text-ink-secondary"
+                >
+                  {signal}
+                </div>
+              ))}
+            </CardBody>
           </Card>
         )}
         {/* Article checklist */}
-        <Card style={{ padding: 16 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            Every article includes
-          </div>
-          {ARTICLE_CHECKLIST.map((item, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: 6,
-              }}
-            >
-              {" "}
-              <span style={{ fontSize: 11, color: D.green, fontWeight: 500 }}>
-                </span>{" "}
-              <span style={{ fontSize: 11, color: D.text }}>
-                {item.label}
-              </span>{" "}
-            </div>
-          ))}
-        </Card>{" "}
-      </div>{" "}
+        <Card>
+          <CardHeader>
+            <CardTitle>Every article includes</CardTitle>
+          </CardHeader>
+          <CardBody>
+            <ul className="list-disc space-y-2 pl-5 text-ui-body text-ink-secondary">
+              {ARTICLE_CHECKLIST.map((item) => (
+                <li key={item.label}>{item.label}</li>
+              ))}
+            </ul>
+          </CardBody>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -2998,24 +1385,27 @@ export default function BlogPage() {
 
   if (selectedPost) {
     return (
-      <div>
-        {" "}
-        <AdminCommandHeader title="Content editor" icon={Newspaper} />{" "}
+      <UiSurface density="comfortable">
+        <AdminCommandHeader
+          variant="workspace"
+          title="Content editor"
+          icon={Newspaper}
+        />
         <PostEditor
           post={selectedPost}
           onBack={() => setSelectedPost(null)}
-          onUpdate={(p) => {
+          onUpdate={() => {
             setSelectedPost(null);
           }}
-        />{" "}
-      </div>
+        />
+      </UiSurface>
     );
   }
 
   return (
-    <div>
-      {" "}
+    <UiSurface density="comfortable">
       <AdminCommandHeader
+        variant="workspace"
         title="Blog"
         icon={Newspaper}
         sections={TABS}
@@ -3027,7 +1417,7 @@ export default function BlogPage() {
           tab === "autopilot" || tab === "registry"
             ? null
             : {
-                label: generatingIdeas ? "Generating..." : "Create Blog",
+                label: generatingIdeas ? "Generating..." : "Create blog",
                 icon: Plus,
                 onClick: handleGenerateIdeas,
                 disabled: generatingIdeas,
@@ -3041,9 +1431,7 @@ export default function BlogPage() {
       ) : tab === "calendar" ? (
         <Suspense
           fallback={
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading calendar...
-            </div>
+            <ActionFeedback loading>Loading calendar...</ActionFeedback>
           }
         >
           <ContentCalendar />
@@ -3051,9 +1439,7 @@ export default function BlogPage() {
       ) : tab === "autopilot" ? (
         <Suspense
           fallback={
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading autopilot...
-            </div>
+            <ActionFeedback loading>Loading autopilot...</ActionFeedback>
           }
         >
           <AutonomousContentReviewPage embedded />
@@ -3061,47 +1447,26 @@ export default function BlogPage() {
       ) : tab === "registry" ? (
         <Suspense
           fallback={
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading registry...
-            </div>
+            <ActionFeedback loading>Loading registry...</ActionFeedback>
           }
         >
           <ContentRegistryPage embedded />
         </Suspense>
       ) : (
         <>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 8,
-              marginBottom: 16,
-            }}
-          >
+          <div className="mb-4 flex flex-wrap gap-2" aria-label="Post status">
             {POST_STATUSES.map((s) => {
               const active = postStatus === s.key;
               return (
-                <button
+                <Button
                   key={s.key}
-                  type="button"
                   onClick={() => setPostStatus(s.key)}
-                  style={{
-                    height: 36,
-                    padding: "0 14px",
-                    borderRadius: 6,
-                    fontSize: 12,
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.04em",
-                    cursor: "pointer",
-                    border: `1px solid ${active ? D.heading : D.border}`,
-                    background: active ? D.heading : D.card,
-                    color: active ? "#fff" : D.text,
-                  }}
+                  variant={active ? "primary" : "secondary"}
+                  aria-pressed={active}
                 >
                   {s.label}
                   {counts[s.key] != null ? ` (${counts[s.key]})` : ""}
-                </button>
+                </Button>
               );
             })}
           </div>
@@ -3112,6 +1477,6 @@ export default function BlogPage() {
           />
         </>
       )}
-    </div>
+    </UiSurface>
   );
 }
