@@ -372,8 +372,14 @@ function CommercialProposalEditor() {
   // The save's revenue-side limits over the same itemization the sidebar
   // sums: the costing card withholds profit and margin while any of it
   // would be refused (GH codex P2 r8 on #4270).
+  // Every unpriced program row is refused by save() (it is dropped from
+  // the payload, so the reload would silently delete it), so any such row
+  // withholds the margin too, with the save's own message (GH codex P2
+  // r10 on #4270).
   const revenueIssue = useMemo(
-    () => proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState.filter(programRowIsPriced) }),
+    () => (programsState.some((row) => !programRowIsPriced(row))
+      ? 'Every program row needs a name, a per-application price of at least $0.01, and a whole-number frequency (1–52) — fix or remove it.'
+      : proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState })),
     [programsMode, buildings, correctiveWork, programsState],
   );
 

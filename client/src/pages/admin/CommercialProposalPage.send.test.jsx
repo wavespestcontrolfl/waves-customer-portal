@@ -184,3 +184,16 @@ it('refuses the export when a proposal edit lands while the pre-export save is i
   expect(calls.some((call) => call.url.endsWith('/bid-form.pdf'))).toBe(false);
   expect(calls.filter((call) => call.method === 'PUT').length).toBeGreaterThanOrEqual(2);
 });
+
+it('withholds the costing margin while any program row is incomplete, exactly as the save refuses it (GH codex P2 r10 on #4270)', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.click(screen.getByRole('button', { name: 'Add project cost' }));
+  fireEvent.change(screen.getByLabelText('Cost description'), { target: { value: 'Private crew hours' } });
+  fireEvent.change(screen.getByLabelText('Cost quantity', { exact: true }), { target: { value: '1' } });
+  fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '1' } });
+  expect(screen.getByText('$399.00')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  expect(screen.queryByText('$399.00')).not.toBeInTheDocument();
+  expect(screen.getByText(/Fix the quoted itemization before comparing costs: Every program row needs a name/)).toBeInTheDocument();
+});
