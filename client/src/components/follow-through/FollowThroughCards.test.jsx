@@ -28,7 +28,7 @@ describe('callback cards', () => {
     const onSummary = vi.fn();
     const { container } = render(<FollowThroughCards ui={ui} onSummary={onSummary} />);
     await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(1));
-    expect(onSummary).toHaveBeenLastCalledWith({ enabled: false, open: 0, overdue: 0, hasMore: false });
+    await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: false, open: 0, overdue: 0, hasMore: false }));
     expect(container).toBeEmptyDOMElement();
   });
   it('surfaces a callback whose snooze or deadline expires between polls', async () => {
@@ -66,17 +66,19 @@ describe('callback cards', () => {
     render(<FollowThroughCards ui={ui} hints={false} onSummary={onSummary} />);
     await screen.findByText('Late callback');
     expect(adminFetch).toHaveBeenCalledWith(LIST.replace('&limit', '&hints=0&limit'));
-    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 1, hasMore: false });
+    await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 1, hasMore: false }));
   });
   it('drops the previous filter\'s rows and pagination when the hints filter changes', async () => {
     adminFetch.mockImplementation(async (url) => {
       if (url.includes('hints=0')) throw new Error('Could not load follow-through.');
       return { ...feed, has_more: true, next_offset: 100 };
     });
-    const { rerender } = render(<FollowThroughCards ui={ui} hints />);
+    const onSummary = vi.fn();
+    const { rerender } = render(<FollowThroughCards ui={ui} hints onSummary={onSummary} />);
     await screen.findByText('Load more');
-    rerender(<FollowThroughCards ui={ui} hints={false} />);
+    rerender(<FollowThroughCards ui={ui} hints={false} onSummary={onSummary} />);
     await screen.findByText('Could not load follow-through.');
+    await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: false, open: 0, overdue: 0, hasMore: false }));
     expect(screen.queryByText(row.description)).not.toBeInTheDocument();
     expect(screen.queryByText('Load more')).not.toBeInTheDocument();
     expect(screen.queryByText('No follow-through needs attention.')).not.toBeInTheDocument();
@@ -101,11 +103,11 @@ describe('callback cards', () => {
       .mockResolvedValueOnce({ ...feed, commitments: [{ ...row, id: 'callback-2', description: 'Second page callback' }] });
     render(<FollowThroughCards ui={ui} onSummary={onSummary} />);
     fireEvent.click(await screen.findByText('Load more'));
-    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 0, hasMore: true });
+    await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 0, hasMore: true }));
     await screen.findByText('Second page callback');
     expect(adminFetch).toHaveBeenLastCalledWith(LIST.replace('offset=0', 'offset=100'));
     expect(screen.getByText(row.description)).toBeInTheDocument();
-    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 0, hasMore: false });
+    await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 0, hasMore: false }));
   });
   it.each(['outbound', 'outbound-api', 'outbound-dial'])('shows and dials the customer side of a %s call', async (direction) => {
     adminFetch.mockResolvedValue({ ...feed, commitments: [{ ...row, direction, from_phone: '+15555550100', to_phone: '+15555550199' }] });

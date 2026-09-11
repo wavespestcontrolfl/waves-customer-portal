@@ -67,7 +67,13 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
         setData({ ...next, commitments: rows });
       }
       setError('');
-    } catch (err) { if (mounted.current && seq === request.current) setError(err.message || 'Could not load follow-through.'); }
+    } catch (err) {
+      if (!mounted.current || seq !== request.current) return;
+      // A failed replacement read reports the cards disabled: the host must
+      // not keep suppressing its own rows on a flag the cards no longer hold.
+      setData((old) => old?.pending ? null : old);
+      setError(err.message || 'Could not load follow-through.');
+    }
   }, [fetchPage]);
   const refresh = useCallback(() => load({ count: pages.current }), [load]);
   // Actions resolve their post-action refresh through the latest filter, not
