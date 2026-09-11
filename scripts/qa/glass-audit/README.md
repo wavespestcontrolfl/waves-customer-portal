@@ -24,7 +24,9 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
 - Exit status is non-zero when any capture failed (readiness timeout, HTTP >= 400
   on navigation, screenshot or metrics error, a contrast or focus probe that
   threw, an uncaught page error, or any failed interaction); the remaining
-  captures still run. `--engine` accepts only `chromium` or `webkit`. An
+  captures still run. `--engine` accepts only `chromium` or `webkit`, and a run
+  name holds one engine: a second engine into the same `--run` is refused
+  (capture files are named per state/width) — use a separate run per engine. An
   unknown `--only` id or `--family` fails before anything launches (no run
   directory, no server) instead of silently auditing less than was asked.
 - `server-html` scenarios are re-rendered by `render-server-html.cjs` on every run

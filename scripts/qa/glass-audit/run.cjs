@@ -256,6 +256,13 @@ async function main() {
   if (family && !registry.some((s) => s.family === family)) throw new Error(`unknown --family: ${family}`);
   const scenarios = registry.filter((s) => (!only || only.includes(s.id)) && (!family || s.family === family));
   if (!scenarios.length) throw new Error('no scenarios selected (the --only ids exist but none is in --family)');
+  // A run directory belongs to ONE engine: capture files are named <state>-<width>.*, so a WebKit
+  // pass into a run that already holds Chromium captures (or vice versa) would overwrite that
+  // engine's evidence. Refuse instead of silently replacing it; pick another --run name.
+  try {
+    const prev = JSON.parse(fs.readFileSync(path.join(outRoot, 'summary.json'), 'utf8'));
+    if (prev.engine && prev.engine !== engineName) throw new Error(`run "${runName}" already holds ${prev.engine} captures; use a different --run for ${engineName}`);
+  } catch (e) { if (e.code !== 'ENOENT') throw e; }
   fs.mkdirSync(outRoot, { recursive: true });
   console.log(`glass-audit: ${scenarios.length} scenarios → ${path.relative(root, outRoot)}`);
   ensureServerHtml(scenarios);
