@@ -95,3 +95,28 @@ test('unsafe numeric references cannot produce duplicate or nonnumeric technicia
   expect(technicianFindingIds([{ text: 'one' }, { text: 'two' }], [], 3)).toEqual({ ids: ['T4', 'T5'], highWater: 5 });
   expect(() => technicianFindingIds([{ text: 'new' }], [], Number.MAX_SAFE_INTEGER)).toThrow(/exhausted/);
 });
+
+test('products may only address IDs this run issued, so invented ids cannot poison the high-water mark', () => {
+  // Model findings (F1/F2) and persisted technician details (T1) are addressable.
+  expect(validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F2', 'T1'] }] }, run).errors).toEqual([]);
+
+  // A typo or client-invented id is rejected outright rather than silently
+  // dropped by buildTreatmentRationale as an unmapped treatment.
+  const invented = validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F1', 'T999'] }] }, run);
+  expect(invented.errors).toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T999']);
+  expect(invented.review.appliedProducts).toEqual([]);
+
+  // The exhaustion case: T<MAX_SAFE_INTEGER> is a safe integer, so before this
+  // guard it raised the high-water mark to the ceiling and every later detail
+  // threw 'Technician finding IDs exhausted'.
+  const ceiling = `T${Number.MAX_SAFE_INTEGER}`;
+  expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: [ceiling] }] }, run).errors)
+    .toEqual([`appliedProducts[0].addresses_findings is not a finding of this run: ${ceiling}`]);
+  expect(storedTechnicianHighWater({ products: [{ addresses_findings: [ceiling] }] })).toBe(Number.MAX_SAFE_INTEGER);
+  expect(() => technicianFindingIds([{ text: 'New detail', zone: null }], [], Number.MAX_SAFE_INTEGER))
+    .toThrow('Technician finding IDs exhausted');
+
+  // A run with no persisted details has no addressable technician ids at all.
+  expect(validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['T1'] }] }, { findings: run.findings }).errors)
+    .toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T1']);
+});
