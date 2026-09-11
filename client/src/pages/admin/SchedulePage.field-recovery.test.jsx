@@ -57,6 +57,25 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(localStorage.getItem(key)).toBeNull();
   });
 
+  it('never offers one admin\'s draft to the next operator on a shared browser', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-a' }));
+    const draft = { serviceId: service.id, owner: 'tech-a', draftId: 'draft-one', savedAt: '2099-01-01T12:00:00Z',
+      notes: 'Private note', generationPhotoCount: 1, servicePhotos: photos, sendSms: false };
+    const { servicePhotos: _photos, ...metadata } = draft;
+    localStorage.setItem(key, JSON.stringify(metadata));
+    await putCompletionDraft(service.id, draft, 'tech-a');
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-b' }));
+    const view = await mount();
+    expect(screen.queryByRole('button', { name: 'Restore', exact: true })).toBeNull();
+    expect(screen.queryByAltText('exterior.jpg')).toBeNull();
+    view.unmount();
+    // Tech A's draft is untouched for their next login.
+    expect(await getCompletionDraft(service.id, 'tech-a')).toMatchObject({ notes: 'Private note', servicePhotos: photos });
+    localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-a' }));
+    await mount();
+    expect(screen.getByRole('button', { name: 'Restore', exact: true })).toBeTruthy();
+  });
+
   it('deletes a discarded photo draft without letting pending writes resurrect it', async () => {
     await seed();
     const view = await mount();

@@ -12,6 +12,8 @@ import {
   putCompletionDraft,
   getCompletionDraft,
   deleteCompletionDraft,
+  pruneCompletionDrafts,
+  DRAFT_RETENTION_MS,
 } from "./completion-resume-store";
 import {
   clearCompletionResumeOwed,
@@ -60,6 +62,40 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await pruneCompletionResumeBodies(() => false, Date.now() + PRUNE_GRACE_MS + 1)).toBe(0);
     expect(await getCompletionDraft('svc-1')).toEqual({ servicePhotos: [photo(1)] });
   });
+  it("keeps each admin's draft for the same visit apart and never hands one to another scope", async () => {
+    await putCompletionDraft('svc-1', { servicePhotos: [photo(1)], notes: 'tech A' }, 'tech-a');
+    expect(await getCompletionDraft('svc-1', 'tech-b')).toBeNull();
+    expect(await getCompletionDraft('svc-1')).toBeNull();
+    await putCompletionDraft('svc-1', { servicePhotos: [photo(2)], notes: 'tech B' }, 'tech-b');
+    expect(await getCompletionDraft('svc-1', 'tech-a')).toMatchObject({ notes: 'tech A' });
+    expect(await deleteCompletionDraft('svc-1', 'tech-b')).toBe(true);
+    expect(await getCompletionDraft('svc-1', 'tech-b')).toBeNull();
+    expect(await getCompletionDraft('svc-1', 'tech-a')).toMatchObject({ notes: 'tech A' });
+  });
+
+  it("prunes drafts past the retention window across scopes, reports them, and keeps live ones", async () => {
+    const stale = Date.now() - DRAFT_RETENTION_MS - 1000;
+    await putCompletionDraft('svc-old', { servicePhotos: [photo(1)] }, 'tech-a', stale);
+    await putCompletionDraft('svc-old', { servicePhotos: [photo(2)] }, 'tech-b', stale);
+    await putCompletionDraft('svc-live', { servicePhotos: [photo(3)] }, 'tech-a');
+    const pruned = await pruneCompletionDrafts();
+    expect(pruned.sort((a, b) => a.scope.localeCompare(b.scope))).toEqual([
+      { serviceId: 'svc-old', scope: 'tech-a' }, { serviceId: 'svc-old', scope: 'tech-b' },
+    ]);
+    expect(await getCompletionDraft('svc-old', 'tech-a')).toBeNull();
+    expect(await getCompletionDraft('svc-live', 'tech-a')).toEqual({ servicePhotos: [photo(3)] });
+    expect(await pruneCompletionDrafts()).toEqual([]);
+  });
+
+  it("prune re-reads a draft behind its in-flight refresh instead of deleting the refreshed row", async () => {
+    await putCompletionDraft('svc-1', { servicePhotos: [photo(1)] }, 'tech-a', Date.now() - DRAFT_RETENTION_MS - 1000);
+    const refresh = putCompletionDraft('svc-1', { servicePhotos: [photo(1)], notes: 'reopened' }, 'tech-a');
+    const pruned = pruneCompletionDrafts();
+    await refresh;
+    expect(await pruned).toEqual([]);
+    expect(await getCompletionDraft('svc-1', 'tech-a')).toMatchObject({ notes: 'reopened' });
+  });
+
   it("round-trips a photo-bearing body byte-for-byte", async () => {
     const body = committedBody();
     expect(await putCompletionResumeBody("svc-1", body)).toBe(true);

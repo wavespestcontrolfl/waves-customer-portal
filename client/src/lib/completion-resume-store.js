@@ -22,6 +22,22 @@ const DB_VERSION = 1;
 const DRAFT_DB_NAME = "waves-completion-drafts";
 const draftOperations = new Map();
 
+// Drafts are private field work: photos, captions and notes a technician
+// has not submitted. On a shared tablet or browser profile the next operator
+// signing in must not be offered them, so every draft row is keyed by the
+// signed-in admin's id (`scope`) as well as the service (Codex P2). A
+// missing scope (no stored profile) shares one anonymous bucket.
+export function completionDraftScopeKey(serviceId, scope) {
+  return `${scope ? String(scope) : "anonymous"}:${String(serviceId)}`;
+}
+
+// A draft nobody has reopened for this long is abandoned: the visit was
+// cancelled, removed, or closed out elsewhere. Rows are otherwise deleted
+// only by that exact service's discard/complete, so without a sweep the
+// multi-megabyte photo rows would accumulate until the origin's IndexedDB
+// quota starves active drafts of photo durability (Codex P2).
+export const DRAFT_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+
 function indexedDbFactory() {
   try {
     return typeof indexedDB !== "undefined" ? indexedDB : null;
@@ -102,8 +118,7 @@ export function deleteCompletionResumeBody(serviceId) {
 
 // Order draft writes, reads and deletes across panel mounts. In particular,
 // a late autosave must never resurrect a discarded or completed draft.
-function withDraft(serviceId, operation) {
-  const key = String(serviceId);
+function withDraftKey(key, operation) {
   const pending = (draftOperations.get(key) || Promise.resolve()).then(() => operation(key));
   draftOperations.set(key, pending);
   void pending.finally(() => {
@@ -112,19 +127,46 @@ function withDraft(serviceId, operation) {
   return pending;
 }
 
-export function putCompletionDraft(serviceId, draft) {
-  return withDraft(serviceId, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.put(draft, key)))
+function withDraft(serviceId, scope, operation) {
+  return withDraftKey(completionDraftScopeKey(serviceId, scope), operation);
+}
+
+// Rows are { draft, storedAt, serviceId, scope }: storedAt ages the row for
+// the retention sweep independently of the draft's own fields; serviceId
+// and scope let the sweep report what it removed.
+export function putCompletionDraft(serviceId, draft, scope, now = Date.now()) {
+  const row = { draft, storedAt: now, serviceId: String(serviceId), scope: scope ? String(scope) : "" };
+  return withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.put(row, key)))
     .then((result) => result !== false);
 }
 
-export function getCompletionDraft(serviceId) {
-  return withDraft(serviceId, (key) => withStore(DRAFT_DB_NAME, "readonly", null, (store) => store.get(key)))
-    .then((draft) => draft || null);
+export function getCompletionDraft(serviceId, scope) {
+  return withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readonly", null, (store) => store.get(key)))
+    .then((row) => (row && typeof row.draft === "object" && row.draft ? row.draft : null));
 }
 
-export function deleteCompletionDraft(serviceId) {
-  return withDraft(serviceId, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(key)))
+export function deleteCompletionDraft(serviceId, scope) {
+  return withDraft(serviceId, scope, (key) => withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(key)))
     .then((result) => result !== false);
+}
+
+// Deletes every draft row older than `maxAgeMs` across all scopes and
+// resolves the [{ serviceId, scope }] it removed so the caller can drop the
+// matching localStorage metadata. Each row's age check and delete are
+// ordered behind that draft's in-flight writes, so a panel refreshing an
+// old draft right now is re-read after its refresh and kept.
+export function pruneCompletionDrafts(now = Date.now(), maxAgeMs = DRAFT_RETENTION_MS) {
+  return withStore(DRAFT_DB_NAME, "readonly", [], (store) => store.getAllKeys())
+    .then((keys) => Promise.all(
+      (Array.isArray(keys) ? keys : []).map((key) => withDraftKey(String(key), (k) => (
+        withStore(DRAFT_DB_NAME, "readonly", null, (store) => store.get(k)).then((row) => {
+          if (!row || now - Number(row.storedAt || 0) < maxAgeMs) return null;
+          return withStore(DRAFT_DB_NAME, "readwrite", false, (store) => store.delete(k))
+            .then((result) => (result === false ? null : { serviceId: row.serviceId, scope: row.scope }));
+        })
+      ))),
+    ))
+    .then((results) => results.filter(Boolean));
 }
 
 // A row younger than this is never pruned: persistCompletionResumeOwed

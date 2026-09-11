@@ -67,6 +67,7 @@ import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
   deleteCompletionResumeBody,
   getCompletionResumeBody,
+  pruneCompletionDrafts,
   pruneCompletionResumeBodies,
   putCompletionResumeBody,
   deleteCompletionDraft,
@@ -866,6 +867,20 @@ export function completionWillReview({
 // is never suppressed.
 function completionDraftTombstoneKey(serviceId) {
   return `${completionDraftKey(serviceId)}_discarded`;
+}
+
+// The signed-in admin's id. Unsubmitted drafts (photos, captions, notes) are
+// stored under it so a shared tablet never offers one operator's field work
+// to the next: the IndexedDB row is keyed by it and the localStorage
+// metadata carries it as `owner` (Codex #4091 P2). Read per call — logout
+// removes the stored profile and the next login writes a new one.
+function completionDraftScope() {
+  try {
+    const id = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.id;
+    return id ? String(id) : "";
+  } catch {
+    return "";
+  }
 }
 
 // A completed visit whose REQUIRED completion-invoice mint failed (503
@@ -11539,6 +11554,20 @@ export function CompletionPanel({
   // a success path but whose delete never ran (page killed in between).
   useEffect(() => {
     pruneCompletionResumeBodies(completionResumeOwed).catch(() => {});
+    // Abandoned drafts (no reopen within the retention window) go with their
+    // metadata; the row's scope guards another operator's live metadata for
+    // the same visit.
+    pruneCompletionDrafts().then((pruned) => {
+      pruned.forEach(({ serviceId, scope }) => {
+        try {
+          const metadata = JSON.parse(localStorage.getItem(completionDraftKey(serviceId)) || "null");
+          if (metadata && (metadata.owner || "") === (scope || "")) {
+            localStorage.removeItem(completionDraftKey(serviceId));
+            localStorage.removeItem(completionDraftTombstoneKey(serviceId));
+          }
+        } catch { /* unavailable */ }
+      });
+    }).catch(() => {});
   }, []);
   const [resumeBodyLoad] = useState(() => (
     sideEffectsCommittedRef.current
@@ -12696,7 +12725,7 @@ export function CompletionPanel({
     try {
       localStorage.setItem(completionDraftKey(draft.serviceId), JSON.stringify(metadata));
     } catch { /* IndexedDB can still preserve the full draft. */ }
-    return putCompletionDraft(draft.serviceId, draft).then((saved) => {
+    return putCompletionDraft(draft.serviceId, draft, completionDraftScope()).then((saved) => {
       if (draftSnapshotRef.current === draft && !completionPanelClosedRef.current) {
         setDraftStorageNotice(saved ? "" : "Draft storage is unavailable. Keep this panel open to retain your photos and latest edits.");
       }
@@ -12710,7 +12739,7 @@ export function CompletionPanel({
       localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
       localStorage.removeItem(completionDraftKey(service.id));
     } catch { /* unavailable */ }
-    void deleteCompletionDraft(service.id).then((deleted) => {
+    void deleteCompletionDraft(service.id, completionDraftScope()).then((deleted) => {
       if (!deleted) return;
       try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
     });
@@ -12743,14 +12772,18 @@ export function CompletionPanel({
     } catch { /* Fall back to the full IndexedDB draft. */ }
     let tombstone = null;
     try { tombstone = localStorage.getItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
-    void getCompletionDraft(service.id).then((loaded) => {
+    const scope = completionDraftScope();
+    // Metadata another operator left on this shared browser is theirs, not
+    // a draft for this session.
+    if (metadata && (metadata.owner || "") !== scope) metadata = null;
+    void getCompletionDraft(service.id, scope).then((loaded) => {
       if (cancelled) return;
       let stored = loaded;
       // A residual row whose delete never committed (page killed mid-discard)
       // is not a draft: drop it and finish the delete now.
       if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
         stored = null;
-        void deleteCompletionDraft(service.id).then((deleted) => {
+        void deleteCompletionDraft(service.id, scope).then((deleted) => {
           if (!deleted) return;
           try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
         });
@@ -12865,6 +12898,7 @@ export function CompletionPanel({
     const persistNow = photosChanged || draftSnapshotRef.current?.restoredFromStorage === true;
     const draft = {
         serviceId: service.id,
+        owner: completionDraftScope(),
         // Field-only edits must not invalidate photos already saved to IDB.
         draftId: photosChanged || !draftSnapshotRef.current.draftId
           ? crypto.randomUUID() : draftSnapshotRef.current.draftId,
@@ -14511,6 +14545,7 @@ export function CompletionPanel({
         && photos.every((photo, index) => photo.data === servicePhotos[index]?.data);
       const draft = {
         serviceId: service.id,
+        owner: completionDraftScope(),
         draftId: samePhotoSet ? prior.draftId : crypto.randomUUID(),
         savedAt: new Date().toISOString(),
         servicePhotos: photos,
