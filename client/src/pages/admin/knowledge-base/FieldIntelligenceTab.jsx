@@ -271,7 +271,12 @@ function FieldIntelligenceDirectory({
   );
 }
 
-export default function FieldIntelligenceTab({ showFeedback, isMobile, canRegenerate }) {
+export default function FieldIntelligenceTab({
+  showFeedback,
+  isMobile,
+  canRegenerate,
+  canReviewQueue = true,
+}) {
   const [queue, setQueue] = useState(EMPTY_QUEUE);
   const [pages, setPages] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -289,8 +294,16 @@ export default function FieldIntelligenceTab({ showFeedback, isMobile, canRegene
   const [busySlugs, setBusySlugs] = useState(new Set());
 
   const loadQueue = useCallback(async () => {
-    setQueueLoading(true);
     setQueueError("");
+    if (!canReviewQueue) {
+      // /admin/wiki/review/queue is requireAdmin on the server; a technician
+      // session would only ever get a 403, so the queue reads as empty for
+      // them (the pre-migration page swallowed that error the same way).
+      setQueue(EMPTY_QUEUE);
+      setQueueLoading(false);
+      return;
+    }
+    setQueueLoading(true);
     try {
       const data = await adminFetch("/admin/wiki/review/queue");
       setQueue({
@@ -304,7 +317,7 @@ export default function FieldIntelligenceTab({ showFeedback, isMobile, canRegene
     } finally {
       setQueueLoading(false);
     }
-  }, []);
+  }, [canReviewQueue]);
 
   const loadPages = useCallback(async () => {
     setPagesLoading(true);

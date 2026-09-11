@@ -395,9 +395,7 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
           {!loading && !loadError && entries.length === 0 ? (
             <Card>
               <CardBody className="py-10 text-center text-ink-secondary">
-                {searchQuery
-                  ? "No entries match this search. Try a different phrase or filter."
-                  : "No knowledge base entries yet. Create one from the New entry section."}
+                {searchQuery ? "No results found" : "No entries yet"}
               </CardBody>
             </Card>
           ) : (

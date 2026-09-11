@@ -162,6 +162,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
           showFeedback={showFeedback}
           isMobile={isMobile}
           canRegenerate={staffRole() === "admin"}
+          canReviewQueue={isAdminRole}
         />
       )}
       {tab === "audit" && (

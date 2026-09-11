@@ -128,6 +128,27 @@ describe("Knowledge base interactions", () => {
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
   });
 
+  it("skips the admin-only review queue for technician sessions", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/wiki?limit=200") return { pages: [WIKI_PAGE] };
+      throw new Error(`unexpected request ${path}`);
+    });
+    surface(
+      <FieldIntelligenceTab
+        showFeedback={vi.fn()}
+        isMobile={false}
+        canRegenerate={false}
+        canReviewQueue={false}
+      />,
+    );
+
+    expect(await screen.findByText("Nothing needs your judgment right now.")).toBeInTheDocument();
+    await screen.findByRole("button", { name: /Product: Celsius WG/ });
+    expect(adminFetch.mock.calls.some(([path]) => path === "/admin/wiki/review/queue")).toBe(false);
+    expect(screen.queryByText("The Field Intelligence review queue could not be loaded."))
+      .not.toBeInTheDocument();
+  });
+
   it("cancels a block without posting and omits empty review notes when confirmed", async () => {
     adminFetch.mockImplementation(async (path) => {
       if (path === "/admin/wiki/review/queue") {
