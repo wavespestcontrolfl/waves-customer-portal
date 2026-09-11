@@ -1889,8 +1889,10 @@ router.get('/:token', async (req, res, next) => {
       const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
       const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
       // Photo-set key component + render fence: closeout photo recovery can
-      // attach rows while this untracked render runs (Codex #4091 P1).
-      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db);
+      // attach rows while this untracked render runs (Codex #4091 P1). The
+      // parked-summary marker is derived from THIS loaded snapshot; the
+      // post-render re-read below sees live state (photo-set-signature.js).
+      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);

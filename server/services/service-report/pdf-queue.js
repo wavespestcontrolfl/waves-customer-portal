@@ -219,7 +219,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const reserviceTrendsBefore = await reserviceTrendsPdfSignature(service, knex);
   // Photo-set key component, same before/after contract: closeout photo
   // recovery can attach rows mid-render (Codex #4091 P1, photo-set-signature.js).
-  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex);
+  // The parked-summary marker comes from the snapshot this render uses
+  // (`service`, loaded above), never a fresh read — see the module doc.
+  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, { serviceData: service.service_data });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });

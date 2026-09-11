@@ -48,6 +48,31 @@ describe('reportPhotoSetPdfSignature', () => {
     expect(await reportPhotoSetPdfSignature('rec-1', knexWith([], parked))).toBe('-ps');
   });
 
+  test('options.serviceData derives the marker from the caller\'s loaded snapshot, not a fresh read (pre-push P1 on 3d69b662c)', async () => {
+    const rows = [{ id: 'p1' }, { id: 'p2' }];
+    let recordReads = 0;
+    const counting = (liveData) => (table) => {
+      const chain = knexWith(rows, liveData)(table);
+      const first = chain.first;
+      chain.first = async () => { recordReads += 1; return first(); };
+      return chain;
+    };
+    // Snapshot loaded while parked; the summary was restored before the
+    // BEFORE capture ran. The capture must still say "parked" (what the
+    // render will print), so the live AFTER re-read differs and the fence trips.
+    const before = await reportPhotoSetPdfSignature('rec-1', counting(restored), { serviceData: parked });
+    expect(before).toMatch(/-ps$/);
+    expect(recordReads).toBe(0);
+    const after = await reportPhotoSetPdfSignature('rec-1', counting(restored));
+    expect(after).not.toMatch(/-ps$/);
+    expect(recordReads).toBe(1);
+    expect(before).not.toBe(after);
+    // A snapshot with nothing parked (null / string jsonb) → no marker, no read.
+    expect(await reportPhotoSetPdfSignature('rec-1', counting(parked), { serviceData: null })).toMatch(/^-ph2-[0-9a-f]{8}$/);
+    expect(await reportPhotoSetPdfSignature('rec-1', counting(parked), { serviceData: JSON.stringify(parked) })).toBe(before);
+    expect(recordReads).toBe(1);
+  });
+
   test('a failed lookup is a UNIQUE token: never matches a stored key, trips the fence', async () => {
     const a = await reportPhotoSetPdfSignature('rec-1', knexWith('throw'));
     const b = await reportPhotoSetPdfSignature('rec-1', knexWith('throw'));

@@ -33,17 +33,32 @@ const { hasPendingPhotoSummary } = require('./photo-summary-recovery');
  * re-renders (and trips the fence) instead of serving or storing a possibly
  * stale document.
  */
-async function reportPhotoSetPdfSignature(serviceRecordId, knex = null) {
+/**
+ * `options.serviceData` — the service_data of the snapshot a render path
+ * already loaded. The BEFORE capture must derive the parked marker from that
+ * exact snapshot, not from a fresh read: the snapshot is loaded first, and a
+ * reconcile that restores the summary between that load and a fresh read
+ * would make before and after agree while the render used the summary-less
+ * snapshot — caching the stale PDF under the current key (pre-push Codex P1
+ * on 3d69b662c). The AFTER re-read passes nothing and sees live state, so a
+ * restore after the snapshot load moves the marker and trips the fence.
+ */
+async function reportPhotoSetPdfSignature(serviceRecordId, knex = null, options = {}) {
   if (!knex || !serviceRecordId) return '';
   try {
     const rows = await knex('service_photos')
       .where({ service_record_id: serviceRecordId })
       .orderBy('id', 'asc')
       .select('id');
-    const record = await knex('service_records')
-      .where({ id: serviceRecordId })
-      .first('service_data');
-    let serviceData = record ? record.service_data : null;
+    let serviceData;
+    if (Object.hasOwn(options || {}, 'serviceData')) {
+      serviceData = options.serviceData;
+    } else {
+      const record = await knex('service_records')
+        .where({ id: serviceRecordId })
+        .first('service_data');
+      serviceData = record ? record.service_data : null;
+    }
     if (typeof serviceData === 'string') {
       try { serviceData = JSON.parse(serviceData); } catch { serviceData = null; }
     }
