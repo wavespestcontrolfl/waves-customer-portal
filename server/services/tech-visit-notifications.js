@@ -532,9 +532,29 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
   if (!gateEnvValue('GATE_NOSHOW_DETECTOR') || !technicianId) return null;
   const tech = await trx('technicians').where({ id: technicianId }).first('id', 'employment_status', 'field_dispatchable');
   if (!isAssignable(tech)) return null;
-  const [row] = await trx('tech_notifications').insert({ technician_id: technicianId,
+  const [inserted] = await trx('tech_notifications').insert({ technician_id: technicianId,
     type: 'follow_through_tracking', dedupe_key: dedupeKey, message, payload })
     .onConflict('dedupe_key').ignore().returning('id');
+  let row = inserted;
+  if (!row) {
+    // dedupe_key carries a GLOBAL unique index (not scoped to dismissed_at
+    // like dispatch_alerts' partial one), so a DISMISSED row under this
+    // exact key permanently blocks a plain insert. trackingKey is
+    // deterministic, so an A -> B -> A visit reassignment across sweeps
+    // reuses A's original key — its own auto-dismissal from the B handover
+    // (sweep()'s reconcile loop below) must not silence a fresh occurrence
+    // forever. Revive that SAME row in place, but only when it was
+    // dismissed by OUR OWN reconcile (payload.superseded_at stamped there) —
+    // a row the tech actually acted on (routes/tech-notifications.js
+    // /dismiss, /confirm-start — no stamp) stays quiet. Same
+    // supersession-stamp discipline as the dispatch_alerts `already` check
+    // (codex P1, pre-push audit on f32a48e35).
+    const [revived] = await trx('tech_notifications').where({ dedupe_key: dedupeKey })
+      .whereNotNull('dismissed_at').whereRaw("payload->>'superseded_at' IS NOT NULL")
+      .update({ technician_id: technicianId, message, payload, read: false, dismissed_at: null, updated_at: new Date() })
+      .returning('id');
+    row = revived;
+  }
   const headline = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
   // Named on the push too (codex P1) — a tech with more than one open stop
   // can't tell which visit a bare headline is about until they open the app.

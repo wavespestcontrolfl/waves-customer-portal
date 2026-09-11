@@ -500,3 +500,78 @@ describe('formatPromisedWindow', () => {
     expect(formatPromisedWindow(null, '2026-09-10T15:00:00.000Z')).toBeNull();
   });
 });
+
+
+describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)', () => {
+  const { recordTrackingNotice } = notices;
+  const techRow = { id: 'tech-a', employment_status: 'active', field_dispatchable: true };
+
+  beforeAll(() => { process.env.GATE_NOSHOW_DETECTOR = 'true'; });
+  afterAll(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
+
+  // A -> B -> A across sweeps: trackingKey is deterministic (no-show-detector.js),
+  // so A's third-tick notice reuses the EXACT dedupe_key its own first-tick
+  // notice used. dedupe_key is a GLOBAL unique index (unlike dispatch_alerts'
+  // partial one), so once that row exists — dismissed or not — a plain insert
+  // always conflicts. The fix distinguishes the sweep's own auto-dismissal
+  // (payload.superseded_at stamped) from a tech's real Got-it tap (routes/
+  // tech-notifications.js /dismiss, /confirm-start — no stamp) and revives
+  // the same row only in the former case (codex P1, pre-push audit on
+  // f32a48e35).
+  function fakeTrx({ techResult = techRow, insertRows = [], reviveRows = [] } = {}) {
+    const first = jest.fn().mockResolvedValue(techResult);
+    const techWhere = jest.fn(() => ({ first }));
+    const technicians = { where: techWhere };
+
+    const insertReturning = jest.fn().mockResolvedValue(insertRows);
+    const insertIgnore = jest.fn(() => ({ returning: insertReturning }));
+    const onConflict = jest.fn(() => ({ ignore: insertIgnore }));
+    const insert = jest.fn(() => ({ onConflict }));
+
+    const reviveReturning = jest.fn().mockResolvedValue(reviveRows);
+    const reviveUpdate = jest.fn(() => ({ returning: reviveReturning }));
+    const reviveWhereRaw = jest.fn(() => ({ update: reviveUpdate }));
+    const reviveWhereNotNull = jest.fn(() => ({ whereRaw: reviveWhereRaw }));
+    const reviveWhere = jest.fn(() => ({ whereNotNull: reviveWhereNotNull }));
+    const techNotifications = { insert, where: reviveWhere };
+
+    const trx = jest.fn((name) => {
+      if (name === 'technicians') return technicians;
+      if (name === 'tech_notifications') return techNotifications;
+      throw new Error(`fake trx: unexpected table ${name}`);
+    });
+    trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    return {
+      trx, techWhere, first, insert, onConflict, insertIgnore, insertReturning,
+      reviveWhere, reviveWhereNotNull, reviveWhereRaw, reviveUpdate, reviveReturning,
+    };
+  }
+
+  const args = { visitId: 'visit-1', technicianId: 'tech-a', stage: 2, dedupeKey: 'tracking:visit-1:2026-09-10T13:00:00.000Z:2:tech_late:tech-a',
+    message: 'The promised window ended over 30 minutes ago; no arrival is recorded.', payload: { customer_name: 'Test Customer' } };
+
+  test('a plain insert (no conflict) never touches the revive path', async () => {
+    const mocks = fakeTrx({ insertRows: [{ id: 'row-1' }] });
+    const result = await recordTrackingNotice(mocks.trx, args);
+    expect(result).toMatchObject({ technicianId: 'tech-a', visitId: 'visit-1' });
+    expect(mocks.reviveWhere).not.toHaveBeenCalled();
+  });
+
+  test('a conflict with no matching dismissed+superseded row stays quiet (already active, or a human dismissed it)', async () => {
+    const mocks = fakeTrx({ insertRows: [], reviveRows: [] });
+    const result = await recordTrackingNotice(mocks.trx, args);
+    expect(result).toBeNull();
+    expect(mocks.reviveWhere).toHaveBeenCalledWith({ dedupe_key: args.dedupeKey });
+    expect(mocks.reviveWhereNotNull).toHaveBeenCalledWith('dismissed_at');
+    expect(mocks.reviveWhereRaw.mock.calls[0][0]).toMatch(/payload->>'superseded_at'.*IS NOT NULL/);
+  });
+
+  test('a conflict against an auto-superseded, dismissed row revives it in place', async () => {
+    const mocks = fakeTrx({ insertRows: [], reviveRows: [{ id: 'row-1' }] });
+    const result = await recordTrackingNotice(mocks.trx, args);
+    expect(result).toMatchObject({ technicianId: 'tech-a', visitId: 'visit-1' });
+    expect(mocks.reviveUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      technician_id: 'tech-a', message: args.message, payload: args.payload, read: false, dismissed_at: null,
+    }));
+  });
+});

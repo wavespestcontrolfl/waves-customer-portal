@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
-const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision } = require('../services/no-show-detector');
+const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert } = require('../services/no-show-detector');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
@@ -136,5 +136,128 @@ describe('resolveLegacyCollision (legacy alert handover)', () => {
     expect(resolveAlert).toHaveBeenNthCalledWith(1, { id: 'legacy-1', trx });
     expect(resolveAlert).toHaveBeenNthCalledWith(2, { id: 'legacy-2', trx });
     expect(count).toBe(2);
+  });
+});
+
+
+describe('alreadyHasOpenAlert (A -> B -> A reassignment does not silence recreation)', () => {
+  // trackingKey (no-show-detector.js) is deterministic from
+  // visitId+startAt+stage+type+recipient, so a visit reassigned A -> B -> A
+  // across sweeps reuses A's ORIGINAL key on the third tick. That row was
+  // auto-resolved (as a supersession) when B took over on tick 2 — it must
+  // not block A's fresh recreation on tick 3, while a row a dispatcher
+  // actually clicked Resolve on must still block it (codex P1, pre-push
+  // audit on f32a48e35).
+  function fakeAlreadyTable(finalRow) {
+    const first = jest.fn().mockResolvedValue(finalRow);
+    let capturedOrClause;
+    const nestedWhere = jest.fn((cb) => { capturedOrClause = cb; return { first }; });
+    const whereRaw = jest.fn(() => ({ where: nestedWhere }));
+    const where = jest.fn(() => ({ whereRaw }));
+    const trx = jest.fn((name) => { expect(name).toBe('dispatch_alerts'); return { where }; });
+    return { trx, where, whereRaw, nestedWhere, first, orClause: () => capturedOrClause };
+  }
+
+  test('queries by job_id, type, and the exact tracking_key', async () => {
+    const { trx, where, whereRaw } = fakeAlreadyTable(null);
+    await alreadyHasOpenAlert(trx, { jobId: 'visit-1', type: 'tech_late', key: 'tracking:visit-1:...:2:tech_late:tech-a' });
+    expect(where).toHaveBeenCalledWith({ job_id: 'visit-1', type: 'tech_late' });
+    expect(whereRaw.mock.calls[0][0]).toContain("payload->>'tracking_key'");
+    expect(whereRaw.mock.calls[0][1]).toEqual(['tracking:visit-1:...:2:tech_late:tech-a']);
+  });
+
+  test('the OR clause blocks on unresolved OR resolved-without-a-supersession-stamp', async () => {
+    const { trx, orClause } = fakeAlreadyTable(null);
+    await alreadyHasOpenAlert(trx, { jobId: 'visit-1', type: 'tech_late', key: 'k' });
+    const qb = { whereNull: jest.fn(() => qb), orWhereRaw: jest.fn(() => qb) };
+    orClause()(qb);
+    expect(qb.whereNull).toHaveBeenCalledWith('resolved_at');
+    expect(qb.orWhereRaw.mock.calls[0][0]).toMatch(/superseded_at.*IS NULL/);
+  });
+
+  test('resolves to the blocking row (still open, or a human resolved it) when present', async () => {
+    const { trx } = fakeAlreadyTable({ id: 'alert-1' });
+    const result = await alreadyHasOpenAlert(trx, { jobId: 'visit-1', type: 'tech_late', key: 'k' });
+    expect(result).toEqual({ id: 'alert-1' });
+  });
+
+  test('resolves to undefined when nothing blocks (auto-superseded row does not count)', async () => {
+    const { trx } = fakeAlreadyTable(undefined);
+    const result = await alreadyHasOpenAlert(trx, { jobId: 'visit-1', type: 'tech_late', key: 'k' });
+    expect(result).toBeUndefined();
+  });
+});
+
+describe('A -> B -> A reassignment lifecycle (trackingKey + alreadyHasOpenAlert together)', () => {
+  const base = { visitId: 'visit-1', startAt: '2026-09-10T13:00:00.000Z', stage: 2, type: 'tech_late' };
+
+  // Drives alreadyHasOpenAlert against a small in-memory dispatch_alerts
+  // table, honoring the SAME nested where()/orWhereRaw() shape the real
+  // query builds — this exercises the actual production predicate, not a
+  // reimplementation of it.
+  function trxOver(rows) {
+    return jest.fn((name) => {
+      expect(name).toBe('dispatch_alerts');
+      return {
+        where: (cond) => ({
+          whereRaw: (_sql, [key]) => ({
+            where: (orCb) => ({
+              first: async () => {
+                const candidates = rows.filter((r) => r.job_id === cond.job_id && r.type === cond.type
+                  && r.payload.tracking_key === key);
+                for (const row of candidates) {
+                  let matched = false;
+                  const qb = {
+                    whereNull: (col) => { if (col === 'resolved_at' && !row.resolved_at) matched = true; return qb; },
+                    orWhereRaw: (sql) => { if (/superseded_at/.test(sql) && row.payload.superseded_at == null) matched = true; return qb; },
+                  };
+                  orCb(qb);
+                  if (matched) return row;
+                }
+                return undefined;
+              },
+            }),
+          }),
+        }),
+      };
+    });
+  }
+
+  test('A -> B -> A: A gets a fresh alert on the third tick; B\'s handover freed A\'s original key', async () => {
+    const keyA = trackingKey({ ...base, recipient: 'tech-a' });
+    const keyB = trackingKey({ ...base, recipient: 'tech-b' });
+    const rows = [];
+
+    // Tick 1: A is overdue — nothing blocks, R1 created under keyA.
+    expect(await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key: keyA })).toBeUndefined();
+    rows.push({ id: 'R1', job_id: 'visit-1', type: 'tech_late', resolved_at: null, payload: { tracking_key: keyA } });
+
+    // Reassigned to B. Tick 2: R1's key (keyA) no longer matches the live
+    // key (keyB) — the sweep's existing-loop auto-resolves it AND stamps
+    // the supersession marker (mirrors no-show-detector.js sweep()).
+    rows[0].resolved_at = '2026-09-10T15:00:00.000Z';
+    rows[0].payload.superseded_at = rows[0].resolved_at;
+    expect(await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key: keyB })).toBeUndefined();
+    rows.push({ id: 'R2', job_id: 'visit-1', type: 'tech_late', resolved_at: null, payload: { tracking_key: keyB } });
+
+    // Reassigned back to A. Tick 3: live key is keyA again (trackingKey is
+    // deterministic) — R2 (keyB) gets superseded the same way, and R1
+    // (keyA), though resolved, carries its OWN supersession stamp from
+    // tick 2, so it does NOT block a fresh alert for A.
+    rows[1].resolved_at = '2026-09-10T16:00:00.000Z';
+    rows[1].payload.superseded_at = rows[1].resolved_at;
+    expect(await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key: keyA })).toBeUndefined();
+  });
+
+  test('a manually-resolved alert (no supersession stamp) is never recreated under the same key', async () => {
+    const keyA = trackingKey({ ...base, recipient: 'tech-a' });
+    const rows = [
+      // A dispatcher clicked Resolve — resolved_at set, but no
+      // payload.superseded_at (routes/admin-dispatch.js's resolve route
+      // never writes one).
+      { id: 'R1', job_id: 'visit-1', type: 'tech_late', resolved_at: '2026-09-10T14:00:00.000Z', payload: { tracking_key: keyA } },
+    ];
+    const blocking = await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key: keyA });
+    expect(blocking).toEqual(rows[0]);
   });
 });

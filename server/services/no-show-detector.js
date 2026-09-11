@@ -178,6 +178,22 @@ async function resolveLegacyCollision(trx, { jobId, type }) {
   return legacy.length;
 }
 
+// A row under this exact tracking_key blocks recreation only while it's
+// still OPEN, or it's resolved but NOT an automatic supersession (a human
+// clicked Resolve on the dispatch board — respect that, stay quiet). A
+// resolved row carrying the supersession stamp (set by sweep()'s own
+// resolve-on-key-mismatch loops, never by a human resolve) never blocks —
+// trackingKey is deterministic, so an A -> B -> A visit reassignment across
+// sweeps reuses A's original key, and A's own prior auto-resolution from
+// the B handover must not silence its own recreation on the third tick
+// (codex P1, pre-push audit on f32a48e35).
+async function alreadyHasOpenAlert(trx, { jobId, type, key }) {
+  return trx('dispatch_alerts').where({ job_id: jobId, type })
+    .whereRaw("payload->>'tracking_key' = ?", [key])
+    .where((qb) => qb.whereNull('resolved_at').orWhereRaw("payload->>'superseded_at' IS NULL"))
+    .first('id');
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -217,11 +233,27 @@ async function sweep(conn, { now = new Date() } = {}) {
       const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
         .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'");
       for (const alert of existing) {
-        if (!office || alert.payload?.tracking_key !== key) await dispatch.resolveAlert({ id: alert.id, trx });
+        if (!office || alert.payload?.tracking_key !== key) {
+          const resolved = await dispatch.resolveAlert({ id: alert.id, trx });
+          // Stamp the AUTOMATIC-supersession marker only when this call
+          // actually performed the resolve (never overwrite a row a human
+          // (or a racing tick) already resolved a moment earlier). trackingKey
+          // is deterministic, so an A -> B -> A reassignment across sweeps
+          // reuses A's original key — without this stamp, the `already`
+          // lookup right below finds THIS same auto-resolved row again on
+          // the third tick and refuses to recreate the alert, leaving the
+          // overdue visit with no open office card (codex P1, pre-push
+          // audit on f32a48e35). A row a dispatcher actually clicked Resolve
+          // on never gets this stamp, so it still stays quiet.
+          if (resolved) {
+            await trx('dispatch_alerts').where({ id: alert.id })
+              .update({ payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [now.toISOString()]) });
+          }
+        }
       }
       let created = false;
       if (office) {
-        const already = await trx('dispatch_alerts').where({ job_id: card.id, type }).whereRaw("payload->>'tracking_key' = ?", [key]).first('id');
+        const already = await alreadyHasOpenAlert(trx, { jobId: card.id, type, key });
         if (!already) {
           await resolveLegacyCollision(trx, { jobId: card.id, type });
           const result = await dispatch.createAlertOnce({ type, severity: live.stage === 2 ? 'critical' : 'warn',
@@ -258,7 +290,16 @@ async function sweep(conn, { now = new Date() } = {}) {
     const promise = latestPromises(await loadPromiseEvents(trx, [String(alert.job_id)], { now }), now).get(String(alert.job_id));
     const live = evaluateNoShow({ visit, promise, now });
     if (!live || live.stage !== alert.payload.stage || live.promised_window.start_at !== alert.payload.promised_window?.start_at) {
-      await dispatch.resolveAlert({ id: alert.id, trx });
+      const resolved = await dispatch.resolveAlert({ id: alert.id, trx });
+      // Same automatic-supersession stamp as the per-card loop above (codex
+      // P1) — this pass catches a visit that dropped out of `rows`
+      // entirely (arrived, completed, cancelled); if it later re-enters
+      // tracking under the exact same tracking_key, the `already` lookup
+      // must not treat this row as a human resolution.
+      if (resolved) {
+        await trx('dispatch_alerts').where({ id: alert.id })
+          .update({ payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [now.toISOString()]) });
+      }
     }
   });
   // Tech-side notices have no auto-resolve of their own (codex P1): a
@@ -279,11 +320,21 @@ async function sweep(conn, { now = new Date() } = {}) {
     const stillCurrent = live && visit.technician_id === notice.technician_id
       && live.stage === notice.payload?.stage && live.promised_window.start_at === notice.payload?.promised_window?.start_at;
     if (!stillCurrent) {
+      // Stamped as an AUTOMATIC dismissal (never a tech's own Got-it tap —
+      // routes/tech-notifications.js's /dismiss and /confirm-start never
+      // touch payload), so recordTrackingNotice can revive this same row
+      // for a later cycle under the same dedupe_key (a GLOBAL unique index,
+      // unlike dispatch_alerts' partial one) instead of staying silenced
+      // forever — same A -> B -> A reassignment case the dispatch_alerts
+      // supersession stamp above handles (codex P1, pre-push audit on
+      // f32a48e35).
+      const dismissedAt = new Date();
       await trx('tech_notifications').where({ id: notice.id }).whereNull('dismissed_at')
-        .update({ dismissed_at: new Date(), read: true, updated_at: new Date() });
+        .update({ dismissed_at: dismissedAt, read: true, updated_at: dismissedAt,
+          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [dismissedAt.toISOString()]) });
     }
   });
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision };
+module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert };
