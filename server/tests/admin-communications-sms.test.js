@@ -2049,6 +2049,23 @@ describe('Communications review ask serialization', () => {
     expect(reservationVisibleBeforeSecondAcquire).toBe(true);
   });
 
+  test('a claimed-link ask refused by the spacing check BEFORE provider entry hands its lock-held reservation back (pre-push codex P1 on #4331)', async () => {
+    // The claimed-link seam reserves sms_log evidence under the first lock
+    // hold; dispatchReviewAsk then refuses (another ask is inside the
+    // 72-hour window) without ever running sendAndSettle. Nothing settled
+    // the reservation — it must be released, or the customer is blocked for
+    // 72 hours by a row with no provider attempt behind it.
+    const reservations = wireReservationLedger();
+    history.lastManualAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const refused = await send(baseUrl, inline);
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).code).toBe('REVIEW_ASK_SPACING');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+  });
+
   test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
     let entered, release;
     const providerEntered = new Promise(resolve => { entered = resolve; });

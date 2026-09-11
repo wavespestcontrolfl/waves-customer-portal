@@ -1985,12 +1985,34 @@ const ReviewService = {
     let reservation = null;
     let providerStarted = false;
     let deliveryOutcome = null;
+    // The non-ask pre-send fence's original scheduled_for, restored by the
+    // definitive writes below.
+    let fencedFrom = null;
     try {
       const {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
       if (OUTREACH.isAskTemplate(request.template_key)) {
         reservation = await reserveReviewSms({ request, to: contact.phone, body });
+      } else {
+        // A non-ask template takes no sms_log reservation, so this pending
+        // row is the ONLY durable in-flight marker. Fence it BEFORE the
+        // provider call: push scheduled_for past the spacing window while
+        // status stays 'pending'. Every definitive branch below rewrites
+        // scheduled_for or status, so the fence only survives when THAT
+        // write fails after an accepted or uncertain handoff — and then it
+        // keeps processScheduled from resending the text next tick
+        // (pre-push codex P1 on #4331). A fence that cannot be stored
+        // refuses the send: nothing left, so the due row retries on its own.
+        let fenced = 0;
+        try {
+          fencedFrom = request.scheduled_for || null;
+          fenced = await db("review_requests").where({ id: requestId, status: "pending" })
+            .update({ scheduled_for: new Date(Date.now() + ASK_SPACING_MS) });
+        } catch (fenceErr) {
+          logger.warn(`[review] pre-send fence failed (requestId=${requestId} errType=${fenceErr?.name || "Error"})`);
+        }
+        if (!fenced) return { refused: "send_fence_unstored" };
       }
       providerStarted = true;
       try {
@@ -2013,6 +2035,8 @@ const ReviewService = {
         const stamped = await stampWithRetry(
           () => db("review_requests").where({ id: requestId }).update({
             sms_sent_at: new Date(), status: "sent",
+            // Clear the non-ask pre-send fence (a no-op for ask templates).
+            ...(reservation ? {} : { scheduled_for: fencedFrom }),
           }),
           `SMS sent stamp (requestId=${requestId})`,
         );
@@ -2046,6 +2070,7 @@ const ReviewService = {
           try {
             await db("review_requests").where({ id: requestId }).update({
               status: "deferred",
+              scheduled_for: fencedFrom,
             });
           } catch (bookErr) {
             // The provider outcome is known (uncertain) regardless of
