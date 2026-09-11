@@ -446,11 +446,32 @@ test('a reconciled row with a pending receipt still settles it, without re-parki
   // The late carrier confirmation still lands as accurate bookkeeping...
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'reconciled' },
     patch: expect.objectContaining({ status: 'delivered' }) }));
-  // ...but nothing about settling it reopens office work: no triage insert,
-  // no triage or call_log update — parkReview and settleDelivery's own
-  // transactional writes never ran for this row.
+  // ...and, being a genuine delivery, fulfils the commitment exactly as the
+  // normal settleDelivery path does (fulfilPromise, reused not copied) —
+  // but nothing about it REOPENS office work: no triage insert, and no
+  // triage_items update ever moves a card away from resolved. A call_log
+  // resync to review_status: 'resolved' is fulfilPromise's own
+  // clearPromiseException doing exactly what it always does; it is not a
+  // re-park.
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_commitments',
+    patch: expect.objectContaining({ status: 'fulfilled' }) }));
   expect(seen.inserts).toEqual([]);
+  expect(seen.updates.some((u) => u.table === 'triage_items')).toBe(false);
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
+});
+
+test('a failed receipt on a reconciled row stays bookkeeping — the commitment is not fulfilled', async () => {
+  const reconciled = promiseRow('reconciled', 'first', { status: 'review', provider_message_id: 'sid1',
+    payload: { link_used_reconciled_at: '2030-01-08T00:00:00.000Z' } });
+  const { seen, result } = await sweepWith({ outbox: [reconciled], selfServeVisitIds: [], smsLog: { status: 'failed' } });
+  expect(result.processed).toBe(1);
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'reconciled' },
+    patch: expect.objectContaining({ status: 'failed', last_error: 'failed' }) }));
+  // No fulfilment, no exception-card activity of any kind — a failed carrier
+  // outcome is bookkeeping only, exactly as it was before this fix.
+  expect(seen.updates.some((u) => u.table === 'call_commitments')).toBe(false);
   expect(seen.updates.some((u) => u.table === 'triage_items' || u.table === 'call_log')).toBe(false);
+  expect(seen.inserts).toEqual([]);
 });
 
 test('one call-level card speaks for every promise parked against the call', async () => {

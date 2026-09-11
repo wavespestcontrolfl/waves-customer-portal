@@ -478,23 +478,32 @@ async function reconcileAttempt(conn, row, now) {
 
 // A reconciled row (the customer already used this exact link to move
 // themselves) must never be re-planned, re-parked, or have its exception
-// card touched again from ANY path — not the context re-evaluation in
+// card REOPENED again from ANY path — not the context re-evaluation in
 // runOne, and not the ordinary receipt reconciliation either.
 // reconcileAttempt's own branches (delivery_failed, delivery_receipt_unavailable,
 // and settleDelivery's scope-changed escape hatch) all call parkReview, which
 // would recreate the very card markLinkUsed just closed — the sibling of the
 // contextFor re-plan bug, at the receipt path instead (codex #4293 P1 r5).
-// The receipt is still worth settling for accurate bookkeeping — a late
-// carrier confirmation should still land as delivered/failed — but nothing
-// about it may reopen office work, so this never calls parkReview and never
-// touches triage_items or call_log.
+// The receipt is still worth settling properly: a genuine delivery still
+// fulfils the linked call_commitments row exactly as the normal
+// settleDelivery path does (fulfilPromise, reused not copied — codex #4293
+// P1 r6), and a failed one stays bookkeeping only. Neither ever calls
+// parkReview, and neither ever creates or reopens a triage_items row.
 async function settleReconciledReceipt(conn, row) {
   if (!row.provider_message_id) return;
-  const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id }).first('status');
+  const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id }).first('id', 'status');
   if (!sms) return;
   if (['delivered', 'read'].includes(sms.status)) {
-    await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-      .update({ status: 'delivered', last_error: null, updated_at: new Date() });
+    // A delivered receipt still means the promise was KEPT — fulfilPromise
+    // is the one step of settleDelivery that belongs here too, reused
+    // rather than copied. Its own clearPromiseException call is a safe
+    // no-op (the exception card is already closed); it never re-parks.
+    await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, row.related_call_log_id);
+      const changed = await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+        .update({ status: 'delivered', last_error: null, updated_at: new Date() });
+      if (changed) await fulfilPromise(trx, row, sms, { id: row.related_call_log_id });
+    });
   } else if (['failed', 'undelivered'].includes(sms.status)) {
     await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
       .update({ status: 'failed', last_error: sms.status, updated_at: new Date() });
