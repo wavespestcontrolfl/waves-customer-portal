@@ -2907,18 +2907,42 @@ function moneyValuesDiffer(a, b) {
 // dollar credit instead of reconstructing a term that might be uncapped
 // when it shouldn't be (Codex #4405 r1 P2, escalated to P0 — an uncapped
 // reconstruction is a straight overcharge).
+//
+// Variable/custom presets (variable_percentage, variable_amount, and the
+// seeded custom_percent / custom_dollar rows) are a special case of the
+// above: they intentionally store the OPERATOR-ENTERED amount on the visit
+// while the catalog row's own `amount` stays 0 (or a placeholder), so
+// !moneyValuesDiffer(catalogRow.amount, existing.line_discount_amount)
+// above can never confirm them — a stored custom 10% would always fall
+// through to the frozen-dollar branch. Mirrors the canonical detection in
+// server/services/invoice.js lineItemDiscountTerm / this file's own
+// normalizeDiscountAmount. For these, confirm only the TYPE (still
+// required to match, so a retyped preset can't smuggle a new cap in) and
+// trust the STORED amount as-is (Codex #4405 r2 P1: a stored custom 10% on
+// $100 plus a new $30 fixed appointment discount must preview AND save
+// $63, not collapse to a frozen $10 credit and save $60).
+function isVariableOrCustomDiscountPreset(catalogRow) {
+  const dbAmount = Number(catalogRow?.amount);
+  return catalogRow?.discount_type === 'variable_amount'
+    || catalogRow?.discount_type === 'variable_percentage'
+    || (catalogRow?.discount_type === 'percentage'
+      && (catalogRow?.discount_key === 'custom_percent' || !(dbAmount > 0)))
+    || (catalogRow?.discount_type === 'fixed_amount'
+      && (catalogRow?.discount_key === 'custom_dollar' || !(dbAmount > 0)));
+}
 async function reconstructPrimaryLineSlot({ stacking, existing, conn = db }) {
   if (stacking && existing?.line_discount_type
     && existing.line_discount_amount != null && existing.line_discount_amount !== ''
     && Number(existing.line_discount_amount) > 0) {
     const catalogRow = existing.line_discount_id
       ? await conn('discounts').where({ id: existing.line_discount_id })
-        .first('discount_type', 'amount', 'max_discount_dollars')
+        .first('discount_type', 'amount', 'discount_key', 'max_discount_dollars')
         .catch(() => null)
       : null;
-    const capConfirmed = !!(catalogRow
-      && catalogRow.discount_type === existing.line_discount_type
-      && !moneyValuesDiffer(catalogRow.amount, existing.line_discount_amount));
+    const catalogTypeMatches = !!(catalogRow && catalogRow.discount_type === existing.line_discount_type);
+    const capConfirmed = catalogTypeMatches
+      && (isVariableOrCustomDiscountPreset(catalogRow)
+        || !moneyValuesDiffer(catalogRow.amount, existing.line_discount_amount));
     if (capConfirmed) {
       return {
         discountType: existing.line_discount_type,

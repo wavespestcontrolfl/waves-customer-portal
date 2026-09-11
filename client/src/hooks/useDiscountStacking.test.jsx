@@ -2,11 +2,26 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useDiscountStacking, __resetDiscountStackingCache } from './useDiscountStacking';
+import {
+  useDiscountStacking,
+  useDiscountStackingState,
+  __resetDiscountStackingCache,
+} from './useDiscountStacking';
 
 function Probe() {
   const enabled = useDiscountStacking();
   return <div data-testid="state">{enabled ? 'on' : 'off'}</div>;
+}
+
+function KnownProbe() {
+  const { enabled, known, retry } = useDiscountStackingState();
+  return (
+    <div>
+      <div data-testid="state">{enabled ? 'on' : 'off'}</div>
+      <div data-testid="known">{known ? 'known' : 'unknown'}</div>
+      <button type="button" onClick={retry}>retry</button>
+    </div>
+  );
 }
 
 beforeEach(() => {
@@ -58,5 +73,57 @@ describe('useDiscountStacking', () => {
     await waitFor(() => expect(screen.getAllByTestId('state')[2]).toHaveTextContent('on'));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/admin\/discounts\/stacking$/);
+  });
+
+  // Codex round-2 P1: a transient probe failure must not pin `false` for the
+  // rest of the SPA session — that would strand a surface previewing
+  // single-discount math while the real (unreachable) server gate is ON and
+  // compounds on save. `known` lets a money-submitting caller refuse to act
+  // on an unconfirmed answer instead of confidently computing the wrong one.
+  it('does not permanently cache a transient probe failure, and reports known:false meanwhile', async () => {
+    let now = 1_000_000;
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true }) });
+      vi.stubGlobal('fetch', fetchMock);
+
+      render(<KnownProbe />);
+      await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('unknown'));
+      expect(screen.getByTestId('state')).toHaveTextContent('off');
+      cleanup();
+
+      // Still inside the backoff window — a fresh mount must not hammer a
+      // hard-down API, but must also not have latched a permanent answer.
+      render(<KnownProbe />);
+      await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('unknown'));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      cleanup();
+
+      // Backoff elapsed: the regression under test is caching `false`
+      // forever, which would leave this stuck on off/unknown forever
+      // instead of re-probing and learning the real (true) answer.
+      now += 16000;
+      render(<KnownProbe />);
+      await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('on'));
+      expect(screen.getByTestId('known')).toHaveTextContent('known');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it('useDiscountStackingState reports known:true immediately once a value is cached from a prior probe', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ enabled: true }) })));
+    render(<KnownProbe />);
+    await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('known'));
+    cleanup();
+    // A second mount with the module cache already warm should read known
+    // synchronously on first render, no flash of "unknown".
+    render(<KnownProbe />);
+    expect(screen.getByTestId('known')).toHaveTextContent('known');
+    expect(screen.getByTestId('state')).toHaveTextContent('on');
   });
 });

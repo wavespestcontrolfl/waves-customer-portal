@@ -502,6 +502,32 @@ function stackLineItemDiscounts(entries, compound) {
 // stackLineItemDiscounts + the independent-against-subtotal manual math,
 // unchanged, in create() itself — see the `stackingEnabled` branch there.
 //
+// Classify one negative invoice line item for the discount stack: does its
+// `discount_for` name a specific service line, or does it reach the WHOLE
+// document? A no-parent item is document-wide ONLY when it also carries
+// `document_discount: true` — set by buildDiscountLineItem's no-
+// parentClientId branch, i.e. a scheduled service's stored appointment-
+// level discount stamp. buildScheduledServiceInvoiceLines' own "Scheduled
+// price adjustment" replay row also has no `discount_for` but is a pure
+// arithmetic top-up (never built through buildDiscountLineItem, so it
+// never gets the flag) and must not be swept into the stack by this check.
+// Shared by create() and calculateUpdateFinancials (Codex #4405 r2 P1,
+// finding 3) so a stored appointment-level stamp gets ONE classification
+// on both paths: it (a) joins stackInvoiceDocumentDiscounts as a frozen
+// document term instead of being summed independently outside it (finding
+// 2), and (b) carries spansAll:true into the one-tier conflict check
+// instead of the per-line 'line' scope a discount_for value would give it.
+function classifyInvoiceDiscountItem(item, serviceLineByClientId) {
+  if (item.discount_for) {
+    return {
+      parent: serviceLineByClientId.get(String(item.discount_for)) || null,
+      spansAll: false,
+      scope: String(item.discount_for),
+    };
+  }
+  return { parent: null, spansAll: !!item.document_discount, scope: "line" };
+}
+
 // serviceLines: EVERY positive service line, discounted or not (Codex
 // pre-push P0: seeding groups only from lines a negative discount item
 // points at drops every undiscounted line from the document-level pool —
@@ -509,10 +535,24 @@ function stackLineItemDiscounts(entries, compound) {
 // takes $0 off, and a mixed invoice shorts the pool by every undiscounted
 // line's gross). A line with no discount terms of its own still occupies a
 // group here, contributes its full amount to the pool, and gets a
-// pro-rata share of any fixed document credit like every other line.
+// pro-rata share of any fixed document credit like every other line. This
+// must be EVERY positive line, not just ones keyed by client_id (Codex
+// #4405 r2 P1, finding 4) — normalizeInvoiceLineItems accepts a positive
+// service line with no client_id, and such a line still needs its gross in
+// the pool or a document-wide discountIds pick resolves to $0 against it.
+//
+// documentDiscountEntries: no-parent STORED discount items (classifyInvoiceDiscountItem
+// spansAll — a scheduled service's appointment-level stamp), which reach
+// every line the same way a manual invoice-level pick does. Frozen ahead
+// of any fresh manual term (same "stamps before fresh picks" convention as
+// the per-line groups below) so a fresh line/manual discount compounds on
+// what the stamp left (Codex #4405 r2 P1, finding 2) rather than the full
+// gross. Their own dollars are read back by the caller directly off the
+// item (never recomputed here, same as a stored LINE entry below) — so
+// they contribute terms to the stack but no `manualDiscounts` output row.
 // Returns { lineItemMap: Map(item -> {amount, dollars}), manualDiscounts:
 // [{row, dollars}] }.
-function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows) {
+function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows, documentDiscountEntries = []) {
   const entriesByParent = new Map();
   for (const entry of entries) {
     const key = String(entry.parent.client_id);
@@ -532,11 +572,16 @@ function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows
       : lineItemDiscountTerm(row, item)));
     return { ordered, terms, parentAmount };
   });
-  const documentTerms = manualDiscountRows.map((d) => ({
+  const documentStoredTerms = documentDiscountEntries.map(({ item }) => ({
+    discountType: "fixed_amount",
+    amount: storedDiscountDollars(item),
+  }));
+  const documentManualTerms = manualDiscountRows.map((d) => ({
     discountType: d.discount_type,
     amount: Number(d.amount) || 0,
     maxDiscountDollars: d.max_discount_dollars,
   }));
+  const documentTerms = [...documentStoredTerms, ...documentManualTerms];
 
   const stacked = stackDocumentDiscounts({
     lines: groups.map((group) => ({ gross: group.parentAmount, terms: group.terms })),
@@ -555,9 +600,13 @@ function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows
       });
     });
   });
+  // manualDiscounts stays parallel to manualDiscountRows alone — the
+  // stored document terms above are offset FIRST in documentTerms, so
+  // their dollars (already double-counted by the caller's direct
+  // storedDiscountDollars(item) resolution) never leak into this output.
   const manualDiscounts = manualDiscountRows.map((d, i) => ({
     row: d,
-    dollars: stacked.documentTerms[i].dollars,
+    dollars: stacked.documentTerms[documentStoredTerms.length + i].dollars,
   }));
   return { lineItemMap, manualDiscounts };
 }
@@ -625,6 +674,13 @@ function buildDiscountLineItem({
     _kind: "discount",
     discount_id: discountId || null,
     discount_for: parentClientId || null,
+    // No parentClientId => an appointment-level discount stamp, which
+    // reaches the WHOLE document (see classifyInvoiceDiscountItem) —
+    // unlike buildScheduledServiceInvoiceLines' own "Scheduled price
+    // adjustment" replay row, which also has no discount_for but is a
+    // pure arithmetic top-up, not a discount term, and is built inline
+    // rather than through this function (so it never gets this flag).
+    document_discount: !parentClientId,
     description: discountName || "Line item discount",
     quantity: 1,
     unit_price: -dollars,
@@ -6914,6 +6970,11 @@ InvoiceService._internals = {
   // Pure per-parent discount stacking — exercised directly so the
   // GATE_DISCOUNT_STACKING dark path has a real assertion, not a source scan.
   stackLineItemDiscounts,
+  // The document-wide stack (create() and calculateUpdateFinancials share
+  // this ONE helper — Codex #4405 r2 P1) and the classifier that decides
+  // whether a no-parent stored discount item reaches the whole document.
+  stackInvoiceDocumentDiscounts,
+  classifyInvoiceDiscountItem,
 };
 
 // Invoice statuses that need NO further money handling when their linked
