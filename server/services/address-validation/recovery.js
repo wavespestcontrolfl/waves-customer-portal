@@ -71,6 +71,14 @@ const RECOVERABLE_STATUSES = new Set([
   STATUSES.CONFIRM_NEEDED,
 ]);
 
+// Version of the phonetic re-hearing PROMPT, stamped onto every recovery card.
+// Changing the prompt changes which garbles recover, and therefore which calls
+// route as address-validated — v2-promotion-readiness reconstructs that verdict
+// from the card, so without this it would pool decisions made under different
+// recovery behavior into one cohort. Bump on ANY change to the prompt text.
+// r2 (2026-09-11): added the numbered/ordinal garble class.
+const RECOVERY_PROMPT_VERSION = 'recovery-r2-ordinal';
+
 const MAX_CANDIDATES = 5; // phonetic re-hearings per call
 const MAX_CONFIRMATIONS = 3; // AV confirmation calls per recovery
 
@@ -98,12 +106,23 @@ async function fetchAutocompletePredictions(input, { deadline = newDeadline() } 
 /**
  * Gemini phonetic re-hearing: street names that sound like the garbled one.
  * Returns [] on any model failure — recovery just proceeds with nothing.
+ *
+ * The prompt names BOTH garble classes on purpose. Asking only for "real words
+ * or proper names" made the model structurally blind to numbered grids: on
+ * 2026-09-10 a caller's spoken ordinal ("<Nth> Avenue East") transcribed as a
+ * similar-sounding word and every re-hearing came back word-shaped, because an
+ * ordinal was never in the hypothesis space. A tech drove to a street that
+ * does not exist (call c3c27b01). Numbered streets are most of the local grid
+ * and callers SPEAK the ordinal, so the transcriber writes whatever word it
+ * sounded like.
  */
 async function fetchPhoneticStreetCandidates({ streetName, city, state, zip, deadline = newDeadline() }) {
   if (!process.env.GEMINI_API_KEY) return [];
   const prompt = `A phone-call transcription mis-heard a street name. The transcriber wrote the street name as "${streetName}" for an address in ${[city, state, zip].filter(Boolean).join(', ')}.
-Street names are usually real words or proper names; transcription errors are PHONETIC (the written words sound like the real street when read aloud — e.g. "C Phone" is how "Seafoam" sounds, "Amber Crick" is "Amber Creek").
-List up to ${MAX_CANDIDATES} plausible real street names (with their suffix, e.g. "Trail", "Drive") that "${streetName}" could be a mis-hearing of. Order by phonetic closeness. Do NOT include house numbers, cities, or the garbled name itself.
+Transcription errors are PHONETIC — the written words sound like the real street when read aloud. Two kinds are common:
+1. A word mis-heard as another word: "C Phone" is how "Seafoam" sounds, "Amber Crick" is "Amber Creek".
+2. A NUMBERED street mis-heard as a word. Many towns are laid out as numbered grids ("4th Avenue East", "72nd Street North"). Callers SPEAK the number ("fourth", "seventy-second"), so the transcriber can write a word that merely sounds like it — "Port"/"Fort"/"Ford" for "Fourth", "Sex" for "Sixth", "Tent" for "Tenth". A suffix carrying a compass direction ("Avenue East", "Street North") is a strong hint the town uses a numbered grid.
+List up to ${MAX_CANDIDATES} plausible real street names (with their suffix, e.g. "Trail", "Drive", "Avenue East") that "${streetName}" could be a mis-hearing of. Include numbered/ordinal streets among the candidates whenever the mis-heard word could plausibly be a spoken number. Order by phonetic closeness. Do NOT include house numbers, cities, or the garbled name itself.
 Return ONLY JSON: {"candidates": ["...", "..."]}`;
   try {
     const res = await fetch(
@@ -277,6 +296,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
 }
 
 module.exports = {
+  RECOVERY_PROMPT_VERSION,
   recoverStreetAddress,
   fetchAutocompletePredictions,
   fetchPhoneticStreetCandidates,

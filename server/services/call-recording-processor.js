@@ -100,7 +100,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
-const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+const { recoverStreetAddress, RECOVERABLE_STATUSES, RECOVERY_PROMPT_VERSION } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
@@ -8259,6 +8259,12 @@ const CallRecordingProcessor = {
     const recoveryPassStamp = {
       extraction_model: v2Result?.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
       extraction_prompt_version: v2PromptVersion,
+      // The extractor cohort does NOT identify recovery behavior: the phonetic
+      // prompt decides which garbles recover at all, and the readiness audit
+      // reconstructs an accepting verdict from this card. Same extractor with a
+      // changed recovery prompt is a DIFFERENT routing cohort, so it is stamped
+      // separately (codex #4437 r1 P1).
+      recovery_prompt_version: RECOVERY_PROMPT_VERSION,
     };
     // Model + prompt identifies an extractor COHORT, not an individual pass
     // (codex round-18 P2): reprocess the same call on the same extractor with
@@ -8286,6 +8292,43 @@ const CallRecordingProcessor = {
         updated_at: new Date(),
       })
       .catch((e) => logger.warn(`[call-proc] recovery-marker reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+
+    // The near-miss predictions recovery could not PROVE unique are the most
+    // useful thing an address card can carry — they are the street the caller
+    // most likely said, already house-number- and ZIP-matched. The shadow
+    // bridge has always attached them; the ENFORCE sites did not, so on the
+    // live path the reviewer saw only the garble (2026-09-10, call c3c27b01: a
+    // card carrying the mis-heard street while recovery had the ordinal street
+    // in hand and no site wrote it down). Same shape the bridge files, so one card
+    // reads identically whichever site won the onConflict race.
+    const addressRecoveryPayload = (flag) => (
+      (flag === 'address_unverified' || flag === 'address_recovered') && addressRecovery?.attempted
+        ? {
+          address_as_heard: rawStreetBeforeAdopt,
+          address_candidates: addressRecovery.candidates || [],
+          recovery_method: addressRecovery.method || null,
+        }
+        : null);
+
+    // `.ignore()` on the open-card conflict keeps the FIRST pass's payload, so
+    // reprocessing an already-triaged call leaves the card showing only the
+    // garble while THIS pass holds the candidates — including the live cards
+    // that motivated the change (codex #4437 r1 P2). Merge the recovery
+    // evidence into whatever card is still open: `||` overwrites exactly these
+    // keys and leaves the operator-facing fields of the payload alone.
+    // Best-effort; the insert above is what must not fail.
+    const mergeAddressRecoveryEvidence = async (flag) => {
+      const evidence = addressRecoveryPayload(flag);
+      if (!evidence) return;
+      await db('triage_items')
+        .where({ call_log_id: call.id, reason_code: flag })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({
+          payload: db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
+          updated_at: new Date(),
+        })
+        .catch((e) => logger.warn(`[call-proc] address-evidence merge failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+    };
 
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
     // the secondary-contact fan-out at the send site requires it even when V2
@@ -8410,10 +8453,11 @@ const CallRecordingProcessor = {
                 // writes onto the record (codex r18 P1).
                 ...(flag === 'missing_last_name'
                   ? { extraPayload: { heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null } } }
-                  : {}),
+                  : { extraPayload: addressRecoveryPayload(flag) }),
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+            await mergeAddressRecoveryEvidence(flag);
           }
 
           // A recovered street auto-routes on the recovered verdict above, but
@@ -8510,8 +8554,12 @@ const CallRecordingProcessor = {
             // cancellation, two reschedules and a re-treat with no owner).
             if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
-              const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
+              const triageItem = buildTriageItem({
+                callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
+                extraPayload: addressRecoveryPayload(flag),
+              });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+              await mergeAddressRecoveryEvidence(flag);
             }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
             // P2): an agent-committed call held on e.g. address_unverified

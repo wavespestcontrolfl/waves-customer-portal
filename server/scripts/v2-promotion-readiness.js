@@ -31,6 +31,7 @@ const {
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const { RECOVERY_PROMPT_VERSION } = require('../services/address-validation/recovery');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -173,6 +174,7 @@ async function main() {
   const recoveredCallIds = new Set();
   let unstampedRecoveryCards = 0;
   let staleRecoveryCards = 0;
+  let staleRecoveryPromptCards = 0;
   for (const card of recoveryCards) {
     // Card payloads are operator-visible jsonb; a malformed one must not
     // crash the whole readiness run — it just fails to prove its pass.
@@ -182,6 +184,12 @@ async function main() {
     if (!p.extraction_model || !p.extraction_prompt_version) { unstampedRecoveryCards++; continue; }
     if (p.extraction_model !== row?.ai_extraction_model
       || p.extraction_prompt_version !== row?.ai_extraction_prompt_version) { staleRecoveryCards++; continue; }
+    // The extractor cohort does not pin recovery behavior: the phonetic prompt
+    // decides which garbles recover at all. A card written under a different
+    // recovery prompt reconstructs a verdict this cohort would not reach, so it
+    // is excluded the same fail-closed way an unstamped card is. Cards from
+    // before the recovery prompt was versioned have no key and are excluded too.
+    if (p.recovery_prompt_version !== RECOVERY_PROMPT_VERSION) { staleRecoveryPromptCards++; continue; }
     recoveredCallIds.add(card.call_log_id);
   }
 
@@ -404,8 +412,8 @@ async function main() {
   if (failOpenRoutes.length) {
     console.log(`   ↳ ${failOpenRoutes.length} auto-route(s) excluded as on-file fail-open dispatches (not phantom — listed below).`);
   }
-  if (unstampedRecoveryCards || staleRecoveryCards) {
-    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass.`);
+  if (unstampedRecoveryCards || staleRecoveryCards || staleRecoveryPromptCards) {
+    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass, ${staleRecoveryPromptCards} from a different recovery prompt (current: ${RECOVERY_PROMPT_VERSION}).`);
   }
   console.log(`6. Disagreements reviewed           : ${disagreements.length === 0 ? 'none ✅' : disagreements.length + ' need manual review ⚠️'}`);
 
