@@ -156,8 +156,9 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
         { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visits_per_year: 9, billing_unit: 'monthly', per_application: null, ...noRows, quote_required: true },
       ] },
       { key: 'commercial_pest', label: 'Commercial Pest', default_frequency_key: 'monthly', frequencies: [
-        // per_application is null: the page shows the RANGE and no exact per-application headline (PriceCard perAppNet rule, Codex r7 P1)
-        { key: 'monthly', label: 'Monthly', monthly: 200, annual: 2400, visits_per_year: 12, billing_unit: 'per_application', per_application: null, ...noRows,
+        // per_application is null: the page shows the RANGE and no exact per-application headline (PriceCard perAppNet rule, Codex r7 P1).
+        // monthly/annual are also null: PriceCard's headline renders the range string, never the raw monthly figure (pre-push audit P1).
+        { key: 'monthly', label: 'Monthly', monthly: null, annual: null, visits_per_year: 12, billing_unit: 'per_application', per_application: null, ...noRows,
           // price ± price × fraction × pct (PriceCard): 200 × 0.5 × 0.2 = 20
           low_confidence_range: { pct: 0.2, fraction: 0.5, range_unit: 'monthly', cadence: [180, 220], annual: [2160, 2640] } },
       ] },
@@ -316,7 +317,9 @@ test('a ranged LOW-confidence cadence reports the range and NO exact per-applica
   ] });
   const [ranged, rangedQuote, zero, quoteOnly] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
   // key 'monthly' → interval ×1, so the cadence band equals the raw monthly band.
-  expect(ranged).toMatchObject({ per_application: null, low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [160, 240], annual: [1920, 2880] } });
+  // monthly/annual are also null: PriceCard's headline shows the range string,
+  // never the raw $200 figure the bundle carries (pre-push audit P1).
+  expect(ranged).toMatchObject({ monthly: null, annual: null, per_application: null, low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [160, 240], annual: [1920, 2880] } });
   // treatment rows on a ranged cadence: PriceCard hides them, so no exact amount rides here either (Codex r8 P1)
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [
     { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2,
@@ -325,6 +328,8 @@ test('a ranged LOW-confidence cadence reports the range and NO exact per-applica
   const [withheld] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
   expect(withheld.per_service_treatments).toEqual([{ service: 'commercial_pest', label: 'Commercial Pest', visits_per_year: 12, prices_withheld: 'low_confidence_range' }]);
   expect(JSON.stringify(withheld.per_service_treatments)).not.toMatch(/200|210/);
+  expect(withheld.monthly).toBeNull();
+  expect(withheld.annual).toBeNull();
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [
     { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2 },
     { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, quoteRequired: true },

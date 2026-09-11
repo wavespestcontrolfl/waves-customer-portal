@@ -153,8 +153,13 @@ function frequencyEntry(f) {
   const entry = {
     key: f.key || null,
     label: f.label || null,
-    monthly: money(f.monthly),
-    annual: money(f.annual),
+    // A ranged LOW-confidence cadence has no exact monthly/annual figure on
+    // the customer page either — PriceCard's headline renders the range
+    // string, never frequency.monthly or the interval-scaled cadencePrice —
+    // so the bar must not quote a midpoint the page itself withholds
+    // (pre-push audit P1).
+    monthly: range ? null : money(f.monthly),
+    annual: range ? null : money(f.annual),
     visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
     billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
     // PriceCard's perAppNet rule: a ranged (or quote-required) cadence shows
