@@ -122,6 +122,17 @@ async function sendYellowDigestIfDue(opts = {}) {
 }
 
 async function sendYellowDigestLocked(opts = {}) {
+  // The six-day marker suppresses ANOTHER digest, not the clean-state check:
+  // a queue that empties during those days must still retire the standing
+  // bell (codex P1 on #4397), so the queue is evaluated before the guard.
+  const wiki = opts.wiki || require('./agronomic-wiki');
+  const queue = await wiki.getReviewQueue();
+  const composed = composeYellowDigest(queue);
+  if (!composed) {
+    await retireIfClean('wiki-yellow-digest'); // fall-off: review queue empty
+    return { skipped: 'empty' };
+  }
+
   try {
     const recentRun = await db('knowledge_update_log')
       .where({ trigger_type: GUARD_TRIGGER })
@@ -130,14 +141,6 @@ async function sendYellowDigestLocked(opts = {}) {
     if (recentRun) return { skipped: true };
   } catch (err) {
     logger.error(`[yellow-digest] guard query failed: ${err.message}`);
-  }
-
-  const wiki = opts.wiki || require('./agronomic-wiki');
-  const queue = await wiki.getReviewQueue();
-  const composed = composeYellowDigest(queue);
-  if (!composed) {
-    await retireIfClean('wiki-yellow-digest'); // fall-off: review queue empty
-    return { skipped: 'empty' };
   }
 
   if (!digestEnabled()) {

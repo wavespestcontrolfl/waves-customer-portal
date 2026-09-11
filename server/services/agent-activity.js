@@ -393,7 +393,8 @@ function clampWindowHours(value) {
 // and a single ORDER BY DESC + LIMIT over the union would silently drop
 // the oldest pinned rows once enough newer ones exist (pre-push P1 on
 // #4397). "Has a resolution path" = metadata.source = 'ops-crons' (retired
-// by POST /api/ops/digest/resolve) — the only resolver this PR ships. A
+// by POST /api/ops/digest/resolve) or metadata.fallOff = true (a sender
+// that calls retireIfClean on its clean run — ops-digest-fall-off.js). A
 // FIX row nothing can ever resolve keeps the older read-or-window rule, or
 // it would sit as "failed" forever (codex P1 r2 on #4392). The windowed
 // set fills the rest and ALSO admits rows resolved inside the window
@@ -414,7 +415,7 @@ async function loadDigestRows(db, since) {
       q.where((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'"))
         .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
           .andWhereRaw("title ~* '^FIX:'")
-          .andWhereRaw("metadata->>'source' = 'ops-crons'"))
+          .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))
         .orWhere((legacy) => legacy.whereNull('read_at').andWhereRaw("title ~* '^FIX:'")))
     .orderBy('created_at', 'desc')
     .limit(PINNED_CAP);
