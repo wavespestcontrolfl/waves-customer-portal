@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionFeedback, Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
 import { adminFetch, isForbiddenError } from "../../../utils/admin-fetch";
 
@@ -35,11 +35,99 @@ function LoadingState({ children }) {
   );
 }
 
+
+// Wiki articles are Markdown stored as text. The reader keeps the body as
+// pre-wrapped text (no Markdown renderer on this route) but lifts ATX
+// headings into real heading elements so the §5.7 in-page TOC has targets.
+const HEADING_LINE = /^(#{1,3})\s+(.+?)\s*#*\s*$/;
+
+function slugify(text, index) {
+  const base = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `article-${index}-${base || "section"}`;
+}
+
+export function splitArticleSections(content) {
+  const sections = [];
+  let text = [];
+  const flush = () => {
+    if (text.length > 0) sections.push({ kind: "text", body: text.join("\n") });
+    text = [];
+  };
+  String(content || "").split(/\r?\n/).forEach((line) => {
+    const match = HEADING_LINE.exec(line);
+    if (!match) {
+      text.push(line);
+      return;
+    }
+    flush();
+    const index = sections.filter((section) => section.kind === "heading").length;
+    sections.push({ kind: "heading", level: match[1].length, title: match[2], id: slugify(match[2], index) });
+  });
+  flush();
+  return sections;
+}
+
+function ArticleTableOfContents({ headings, onJump }) {
+  if (headings.length === 0) return null;
+  return (
+    <nav aria-label="Article contents" className="rounded-md border-hairline border-zinc-200 bg-white p-4">
+      <p className="text-ui-caption font-medium uppercase tracking-label text-ink-secondary">Contents</p>
+      <ul className="mt-2 space-y-1">
+        {headings.map((heading) => (
+          <li key={heading.id} className={heading.level > 1 ? "pl-4" : ""}>
+            <button
+              type="button"
+              onClick={() => onJump(heading.id)}
+              className="min-h-11 w-full break-words text-left text-ui-body text-zinc-900 underline-offset-2 hover:underline"
+            >
+              {heading.title}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+function ArticleBody({ sections }) {
+  return sections.map((section, index) => {
+    if (section.kind === "heading") {
+      const Tag = section.level === 1 ? "h2" : "h3";
+      return (
+        <Tag
+          key={section.id}
+          id={section.id}
+          tabIndex={-1}
+          className={`scroll-mt-4 break-words font-medium text-zinc-900 ${
+            section.level === 1 ? "text-18 mt-6 first:mt-0" : "text-16 mt-4 first:mt-0"
+          }`}
+        >
+          {section.title}
+        </Tag>
+      );
+    }
+    return (
+      <p key={`text-${index}`} className="mt-2 break-words whitespace-pre-wrap text-[15px] leading-[1.8] text-zinc-800 first:mt-0">
+        {section.body}
+      </p>
+    );
+  });
+}
+
 export function ArticleViewer({ articleId }) {
   const [article, setArticle] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const bodyRef = useRef(null);
+  const sections = useMemo(() => splitArticleSections(article?.content), [article]);
+  const headings = useMemo(() => sections.filter((section) => section.kind === "heading"), [sections]);
+  const jumpTo = (id) => {
+    const target = bodyRef.current?.querySelector(`[id="${id}"]`);
+    if (!target) return;
+    target.scrollIntoView({ block: "start" });
+    target.focus({ preventScroll: true });
+  };
 
   useEffect(() => {
     let active = true;
@@ -118,9 +206,12 @@ export function ArticleViewer({ articleId }) {
           )}
         </CardBody>
       </Card>
+      <ArticleTableOfContents headings={headings} onJump={jumpTo} />
       <Card>
-        <CardBody className="break-words whitespace-pre-wrap text-[15px] leading-[1.8] text-zinc-800">
-          {article.content}
+        <CardBody>
+          <div ref={bodyRef} className="max-w-[720px]">
+            <ArticleBody sections={sections} />
+          </div>
         </CardBody>
       </Card>
     </UiSurface>

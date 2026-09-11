@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -253,6 +254,29 @@ describe("KnowledgePage embedded navigation", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
     expect(screen.queryByText("Admin access required")).not.toBeInTheDocument();
+  });
+
+  it("builds an in-page table of contents from article headings", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const content = "Intro line\n# Termite basics\nBody one\n## Bait stations\nBody two\n# Not a heading? #\nTail";
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/knowledge/article/fixture")
+        ? response({ article: { title: "Fixture article", content, tags: [] } })
+        : response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] })
+    ));
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    renderWiki("/admin/knowledge?wikiTab=articles");
+    fireEvent.click(await screen.findByText("Fixture article"));
+
+    const toc = await screen.findByRole("navigation", { name: "Article contents" });
+    const entries = within(toc).getAllByRole("button").map((button) => button.textContent);
+    expect(entries).toEqual(["Termite basics", "Bait stations", "Not a heading?"]);
+    expect(screen.getByRole("heading", { level: 2, name: "Termite basics" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Bait stations" })).toBeInTheDocument();
+    expect(screen.getByText("Body two")).toBeInTheDocument();
+
+    fireEvent.click(within(toc).getByRole("button", { name: "Bait stations" }));
+    expect(screen.getByRole("heading", { level: 3, name: "Bait stations" })).toHaveFocus();
   });
 
   it("renders only string tags so malformed tag elements cannot crash the reader", async () => {
