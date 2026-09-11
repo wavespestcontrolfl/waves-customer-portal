@@ -160,6 +160,9 @@ async function closeOutVisitsForStatement(statementId, { trigger, actorTechnicia
 }
 
 const CLOSEOUT_AUDIT_ACTIONS = ['visit.completed_on_invoice_issued', 'visit.completion_on_invoice_issued_refused'];
+// This closeout's own completion attempt for the child invoice, committed but
+// not finished (the canonical completion parks it under invoice-issued:<id>).
+const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key = 'invoice-issued:' || i.id::text AND a.status NOT IN ('succeeded', 'failed'))";
 
 // The durable retry for settlement closeouts (GitHub r10 P2 #4127). A
 // statement settled with no prior delivery closeout (a finalized statement
@@ -174,11 +177,15 @@ const CLOSEOUT_AUDIT_ACTIONS = ['visit.completed_on_invoice_issued', 'visit.comp
 // not in the future — or already COMPLETED with this closeout's own attempt
 // still parked (the canonical completion commits status='completed' before
 // its post-commit work; a crash there leaves the attempt resumable and the
-// tracker / snapshot work owed; pre-push P1 r10) — AND whose latest
-// paid-trigger closeout audit is missing or an error. A child refused for a
-// real reason (grouped, packet-owned, project-backed, moved) carries a
-// non-error refusal row and is left alone — the sweep never re-audits an
-// intentional no-op. System actor: nobody is behind a retry.
+// tracker / snapshot work owed; pre-push P1 r10). An OPEN visit is retried
+// only when its latest paid-trigger closeout audit is missing or an error: a
+// child refused for a real reason (grouped, packet-owned, project-backed,
+// moved) carries a non-error refusal row and is left alone — the sweep never
+// re-audits an intentional no-op. An owned parked attempt outranks that
+// filter (pre-push P1 r10 ×2): a settlement that ran while the delivery
+// closeout was still running audited `visit_completed`, and if that worker
+// then died the parked attempt is the truth, not the audit row. System
+// actor: nobody is behind a retry.
 async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
   let rows = [];
@@ -190,14 +197,9 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
       .where((q) => q
         .where((open) => open.whereIn('s.status', OPEN_VISIT_STATUSES).where('s.scheduled_date', '<=', today))
-        .orWhere((done) => done.where('s.status', 'completed').whereExists(function ownParkedAttempt() {
-          this.select(1).from('service_completion_attempts as a')
-            .whereRaw('a.service_id = s.id')
-            .whereRaw("a.idempotency_key = 'invoice-issued:' || i.id::text")
-            .whereNotIn('a.status', ['succeeded', 'failed']);
-        })))
+        .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy(['ps.id', 'i.id'])
-      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id');
+      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
@@ -205,8 +207,8 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
   let retried = 0;
   let closed = 0;
   for (const row of rows) {
-    let last;
-    try {
+    let last = null;
+    if (!row.own_attempt_parked) try {
       last = await conn('audit_log')
         .where({ resource_type: 'scheduled_services', resource_id: row.visit_id })
         .whereIn('action', CLOSEOUT_AUDIT_ACTIONS)
