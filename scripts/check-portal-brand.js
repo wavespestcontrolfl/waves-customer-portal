@@ -49,11 +49,14 @@ const EXCLUDED_FILES = new Set([
   'EstimateProposalDocument.jsx',
   'AdminLoginPage.jsx', // admin surface that happens to live in pages/
   'TechCapturePreview.jsx', // tech-portal preview harness in pages/
-  // The token module the rules point AT. It declares the palette that
-  // `local-palette` tells every other file to import, and carries the
-  // admin/marketing weights and sizes those surfaces legitimately use.
-  'theme-brand.js',
 ]);
+// theme-brand.js is NOT excluded. It exports customer tokens — BUTTON_BASE is
+// spread into portal controls, GOLD_CTA into the estimate slot picker — so a
+// wholesale exclusion would hide a weight regression in the shared tokens from
+// the very gate that exists to catch it. Only `local-palette` is exempt there,
+// because that file IS the palette every other file is told to import; every
+// other rule applies, and what it carries today is in LEGACY_BASELINE.
+const PALETTE_RULE_EXEMPT = 'client/src/theme-brand.js';
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject
 // to the customer brand rules this script enforces.
@@ -94,27 +97,33 @@ const EXCLUDED_DIR_HINTS = [
 //   artwork reproduced as inline SVG — fixed proportions, not page type.
 // - ServiceRecapModal and Icon carry emoji the Icon sweep has not reached.
 const LEGACY_BASELINE = {
-  'client/src/App.jsx': 9,
-  'client/src/components/ActivityCard.jsx': 1,
-  'client/src/components/BrandFooter.jsx': 2,
-  'client/src/components/GlassNewsletterCard.jsx': 2,
-  'client/src/components/Icon.jsx': 1,
-  'client/src/components/InstallPrompt.jsx': 1,
-  'client/src/components/NewsletterSignup.jsx': 3,
-  'client/src/components/NotificationBell.jsx': 11,
-  'client/src/components/PestPressureCard.jsx': 6,
-  'client/src/components/ServiceRecapModal.jsx': 8,
-  'client/src/components/StationMapCard.jsx': 4,
-  'client/src/components/VanScene.jsx': 1,
-  'client/src/components/estimate/AppShowcaseCard.jsx': 2,
-  'client/src/components/estimate/CustomerReviews.jsx': 1,
-  'client/src/components/estimate/GoogleProfilesCard.jsx': 1,
-  'client/src/components/estimate/InlineAutoPayCapture.jsx': 2,
-  'client/src/components/estimate/PriceCard.jsx': 1,
-  'client/src/components/estimate/ProposalDetailCard.jsx': 1,
-  'client/src/components/estimate/ReportShowcaseCard.jsx': 14,
-  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': 4,
-  'client/src/components/estimate/tokens.js': 1,
+  'client/src/App.jsx': { 'banned-font-size': 2, 'heavy-weight': 7 },
+  'client/src/components/ActivityCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
+  'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1, 'heavy-weight': 1 },
+  'client/src/components/Icon.jsx': { 'emoji': 1 },
+  'client/src/components/InstallPrompt.jsx': { 'heavy-weight': 1 },
+  'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2, 'heavy-weight': 1 },
+  'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9, 'heavy-weight': 2 },
+  'client/src/components/PestPressureCard.jsx': { 'banned-font-size': 6 },
+  'client/src/components/ServiceRecapModal.jsx': { 'emoji': 8 },
+  'client/src/components/StationMapCard.jsx': { 'banned-font-size': 3, 'heavy-weight': 1 },
+  'client/src/components/VanScene.jsx': { 'heavy-weight': 1 },
+  'client/src/components/estimate/AppShowcaseCard.jsx': { 'banned-font-size': 2 },
+  'client/src/components/estimate/CustomerReviews.jsx': { 'emoji': 1 },
+  'client/src/components/estimate/GoogleProfilesCard.jsx': { 'emoji': 1 },
+  'client/src/components/estimate/InlineAutoPayCapture.jsx': { 'emoji': 1, 'font-family-literal': 1 },
+  'client/src/components/estimate/PriceCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/estimate/ProposalDetailCard.jsx': { 'banned-font-size': 1 },
+  'client/src/components/estimate/ReportShowcaseCard.jsx': { 'banned-font-size': 14 },
+  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 4 },
+  'client/src/components/estimate/glass/glass-components.css': { 'banned-font-size': 3 },
+  'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
+  'client/src/index.css': { 'banned-font-size': 2, 'heavy-weight': 1 },
+  'client/src/pages/ServiceOutlinePage.jsx': { 'banned-font-size': 3 },
+  'client/src/styles/buttons.css': { 'banned-font-size': 4, 'heavy-weight': 2 },
+  'client/src/styles/tokens.css': { 'banned-font-size': 1 },
+  'client/src/theme-brand.js': { 'banned-font-size': 3, 'heavy-weight': 5 },
 };
 
 // =========================================================================
@@ -142,6 +151,11 @@ const BANNED_FONT_SIZE_RX = /fontSize:\s*[^,}\n]*?(?<![\w.-])(?<![*/+-]\s*)((?:[
 // Token spellings of the same sizes (FS.micro / FS.caption were 11 / 12 until
 // #3892 deleted them) — a live page must not reach under the floor by name.
 const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;
+// Tailwind utilities reach the same sizes by class name. `text-xs` is 12px and
+// `text-[13px]` is a literal; the public service-outline page renders several.
+// text-sm is 14 and stays legal. A responsive variant is still a render, so
+// `md:text-xs` is matched the same as the bare class.
+const BANNED_TW_CLASS_RX = /(?:^|[\s"'`])(?:[a-z]{2}:)?text-(xs|\[(?:[1-9]|1[0-3])(?:\.\d+)?px\])(?=$|[\s"'`])/;
 // Customer glass sheet (owner 2026-09-03/05): weights stop at 700. 800/850/900
 // literals render heavier on iPhone than on the Inter/Segoe fallbacks and read
 // as a different face next to the sheet's 600/700; 650/750 are variable-font
@@ -171,7 +185,11 @@ function walk(dir) {
       continue;
     }
     if (!entry.isFile()) continue;
-    if (!/\.(jsx?|tsx?)$/.test(entry.name)) continue;
+    // CSS too: `buttons.css` is imported globally by index.css and carried
+    // `font-weight: 800` and a 13px `.btn-nav` past a gate that called itself
+    // repo-wide. The kebab-case rules below already exist for CSS authored
+    // inside <style> templates and apply unchanged to a real stylesheet.
+    if (!/\.(jsx?|tsx?|css)$/.test(entry.name)) continue;
     if (EXCLUDED_FILES.has(entry.name)) continue;
     // Test fixtures style stub components; they are not customer surfaces.
     if (/\.test\.[jt]sx?$/.test(entry.name)) continue;
@@ -185,8 +203,16 @@ function walk(dir) {
 // =========================================================================
 // Check
 // =========================================================================
+// Baseline keys and report paths are repository-style, forward-slash. On
+// Windows `path.relative` hands back `client\\src\\...`, which matches no
+// entry, so every baselined file would be treated as zero-tolerance and the
+// gate would fail on a clean tree. Normalise at both boundaries.
+function relKey(filePath) {
+  return path.relative(ROOT, filePath).split(path.sep).join('/');
+}
+
 function checkFile(filePath) {
-  const rel = path.relative(ROOT, filePath);
+  const rel = relKey(filePath);
   const text = fs.readFileSync(filePath, 'utf8');
   const lines = text.split('\n');
   const violations = [];
@@ -211,7 +237,7 @@ function checkFile(filePath) {
         snippet: line.trim().slice(0, 140),
       });
     }
-    if (LOCAL_PALETTE_RX.test(line)) {
+    if (LOCAL_PALETTE_RX.test(line) && rel !== PALETTE_RULE_EXEMPT) {
       violations.push({
         rule: 'local-palette',
         line: n,
@@ -225,6 +251,16 @@ function checkFile(filePath) {
         rule: 'banned-font-size',
         line: n,
         msg: `fontSize: ${m[1]} — nothing under 14px on a customer surface (labels 14, body 16; owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_TW_CLASS_RX.test(line)) {
+      const m = line.match(BANNED_TW_CLASS_RX);
+      const label = m[1] === 'xs' ? 'text-xs (12px)' : `text-${m[1]}`;
+      violations.push({
+        rule: 'banned-font-size',
+        line: n,
+        msg: `${label} — nothing under 14px on a customer surface; text-sm (14px) is the floor (owner sheet 2026-09-03)`,
         snippet: line.trim().slice(0, 140),
       });
     }
@@ -290,12 +326,21 @@ function checkFile(filePath) {
 // =========================================================================
 // Main
 // =========================================================================
+function tally(violations) {
+  const byRule = {};
+  for (const v of violations) byRule[v.rule] = (byRule[v.rule] || 0) + 1;
+  return byRule;
+}
+
 function reportRegressions(regressions) {
-  const total = regressions.reduce((a, e) => a + e.violations.length, 0);
-  console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} across ${regressions.length} file${regressions.length === 1 ? '' : 's'} over baseline:\n`);
-  for (const { file, violations, allowed } of regressions) {
-    console.error(`  ${file}  (${violations.length} found, ${allowed} allowed)`);
-    for (const v of violations) {
+  const total = regressions.reduce((a, e) => a + e.over, 0);
+  console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} over baseline across ${regressions.length} file${regressions.length === 1 ? '' : 's'}:\n`);
+  for (const { file, violations, allowed, rules } of regressions) {
+    console.error(`  ${file}`);
+    for (const rule of rules) {
+      console.error(`    ${rule}: ${tally(violations)[rule] || 0} found, ${(allowed[rule] || 0)} allowed`);
+    }
+    for (const v of violations.filter((x) => rules.includes(x.rule))) {
       console.error(`    ${file}:${v.line}  [${v.rule}]  ${v.msg}`);
       console.error(`      > ${v.snippet}`);
     }
@@ -308,9 +353,12 @@ function reportRegressions(regressions) {
 function reportSlack(slack) {
   console.error(`\n[check-portal-brand] baseline is behind the code — ${slack.length} entr${slack.length === 1 ? 'y has' : 'ies have'} fewer violations than allowed. Lower the allowance to what is actually left, or delete the line at zero:`);
   for (const { file, found, allowed } of slack) {
-    console.error(found === 0
-      ? `  delete  '${file}',            (was ${allowed}, now clean)`
-      : `  lower   '${file}': ${found},   (was ${allowed})`);
+    const shape = Object.keys(found).length
+      ? `{ ${Object.keys(found).sort().map((r) => `${r}: ${found[r]}`).join(', ')} }`
+      : null;
+    console.error(shape
+      ? `  lower   '${file}': ${shape},   (was { ${Object.keys(allowed).sort().map((r) => `${r}: ${allowed[r]}`).join(', ')} })`
+      : `  delete  '${file}',            (was allowed, now clean)`);
   }
 }
 
@@ -318,42 +366,54 @@ function main() {
   let files = [];
   for (const d of SCAN_DIRS) files = files.concat(walk(d));
 
-  const counts = new Map();
-  const perFile = [];
+  const found = new Map();
   for (const f of files) {
     const v = checkFile(f);
-    const rel = path.relative(ROOT, f);
-    counts.set(rel, v.length);
-    if (v.length) perFile.push({ file: rel, violations: v });
+    if (v.length) found.set(relKey(f), v);
   }
 
-  // A file's allowance is its baseline entry, or zero if it has none. Over the
-  // allowance is a regression and fails.
+  // The allowance is per RULE, not a single total. A total lets a change swap
+  // one violation for another of a different kind and stay green — clear an
+  // undersized label in NotificationBell, add an 800-weight control, count
+  // unchanged, nothing fires. Per-rule counts make that a heavy-weight
+  // regression. (A same-rule swap inside an already-dirty file still passes;
+  // the file is scheduled for cleanup and its count cannot grow.)
   const regressions = [];
   let carried = 0;
-  for (const entry of perFile) {
-    const allowed = LEGACY_BASELINE[entry.file] || 0;
-    if (entry.violations.length > allowed) regressions.push({ ...entry, allowed });
-    else carried += entry.violations.length;
+  for (const [file, violations] of found) {
+    const allowed = LEGACY_BASELINE[file] || {};
+    const counts = tally(violations);
+    const over = Object.keys(counts).filter((r) => counts[r] > (allowed[r] || 0));
+    if (over.length) {
+      regressions.push({
+        file,
+        violations,
+        allowed,
+        rules: over,
+        over: over.reduce((a, r) => a + (counts[r] - (allowed[r] || 0)), 0),
+      });
+    } else {
+      carried += violations.length;
+    }
   }
 
   // Under the allowance fails too. An allowance left above what the file
   // actually carries is headroom for the cleaned-up violations to come back
-  // silently — drop NotificationBell from 11 to 1 and the entry would still
-  // wave ten through. The number has to follow the code down, and the line has
-  // to go at zero, which is what keeps this list a ratchet rather than a
-  // permanent exemption list.
+  // silently — drop NotificationBell's undersized labels from 11 to 1 and the
+  // entry would still wave ten through. The numbers have to follow the code
+  // down, and the line has to go once the file is clean, which is what keeps
+  // this a ratchet rather than a permanent exemption list.
   const slack = [];
   for (const [file, allowed] of Object.entries(LEGACY_BASELINE)) {
-    const found = counts.has(file) ? counts.get(file) : 0;
-    if (found < allowed) slack.push({ file, found, allowed });
+    const counts = found.has(file) ? tally(found.get(file)) : {};
+    if (Object.keys(allowed).some((r) => (counts[r] || 0) < allowed[r])) {
+      slack.push({ file, found: counts, allowed });
+    }
   }
 
   if (!regressions.length && !slack.length) {
-    const files_n = Object.keys(LEGACY_BASELINE).length;
-    const debt = carried
-      ? ` — ${carried} baselined violation${carried === 1 ? '' : 's'} in ${files_n} legacy file${files_n === 1 ? '' : 's'} still to clear`
-      : '';
+    const n = Object.keys(LEGACY_BASELINE).length;
+    const debt = carried ? ` — ${carried} baselined violation${carried === 1 ? '' : 's'} in ${n} legacy file${n === 1 ? '' : 's'} still to clear` : '';
     console.log(`[check-portal-brand] clean — scanned ${files.length} files, no new violations${debt}.`);
     process.exit(0);
   }
