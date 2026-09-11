@@ -395,12 +395,31 @@ persist_ref_artifacts() {
 }
 
 # ── Fallback auditor: Claude ─────────────────────────────────────────────
-# Same prompt, same schema, same P0 gate. Runs with NO tools: the diff is
-# already inline in the prompt, and a toolless child cannot prompt for
-# permission, edit a file, or run a command from inside a push hook. Codex
-# gets the schema via --output-schema; claude has no such flag, so the
-# contract goes in the prompt and the result is validated here.
+# Same prompt, same schema, same P0 gate. Codex gets the schema via
+# --output-schema; claude has no such flag, so the contract goes in the
+# prompt and the result is validated here.
 # Returns 0 with schema-shaped JSON in $2, non-zero otherwise.
+#
+# ── Sandbox (this is a security boundary, not a tidiness preference) ──────
+# The prompt contains a diff the hook did not write: a pulled branch, a
+# contributed PR, a compromised dependency commit. That is untrusted text
+# going into an authenticated local CLI on every push, so the auditor runs
+# with NO tools at all and no way to acquire any:
+#   --restricted          removes Bash/REPL/code-running tools and WebFetch,
+#                         skips project+local settings, and confines file
+#                         tools to the working directory
+#   --strict-mcp-config   with no --mcp-config, loads ZERO MCP servers, so
+#                         the railway/stripe/cloudflare tools are absent
+#   --disallowedTools     names the rest explicitly, INCLUDING ToolSearch —
+#                         without it the model can load a deferred tool's
+#                         schema and call it, which makes every other entry
+#                         in this list bypassable
+# Verified empirically, not inferred from --help: scripts/verify-fallback-auditor-sandbox.sh
+# runs functional probes (ask for Bash, ToolSearch, WebFetch) and asserts
+# the tools are absent. A control run without these flags has Bash, Edit,
+# Write and Read present, so the probes are measuring the flags and not the
+# model's own reluctance. Re-run that script after any CLI upgrade.
+CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
   # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
   local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5"
@@ -428,7 +447,9 @@ run_claude_audit() {
   claude -p \
          --model "$CLAUDE_MODEL" \
          --output-format json \
-         --disallowedTools "Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob" \
+         --restricted \
+         --strict-mcp-config \
+         --disallowedTools "$CLAUDE_DISALLOWED_TOOLS" \
          < "$claude_prompt" >"$envelope" 2>"$TMPDIR_RUN/claude-$idx.stderr" &
   child_pid=$!
   (
