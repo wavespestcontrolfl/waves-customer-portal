@@ -314,6 +314,15 @@ function chooseWindowSafeOrder({
   const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
   const simStart = startMin == null ? 8 * 60 : startMin;
   const guardStops = relaxElapsedWindows(sourceStops, startMin);
+  // Every guard AND every figure below reads windows through this, never
+  // through effectiveWindowRange directly: a stop whose promise already
+  // elapsed was accepted under the relaxed range, so re-simulating it under
+  // its true (unreachable) deadline would return null for an order the same
+  // function just declared legal — and a null afterSeconds is summed as zero
+  // by the multi-tech caller, silently under-reporting a truck's drive time
+  // (round-0 fallback audit P1).
+  const relaxedById = new Map(guardStops.map((s) => [s.id, s]));
+  const guardRange = (s) => effectiveWindowRange(relaxedById.get(s.id) || s);
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
@@ -324,7 +333,7 @@ function chooseWindowSafeOrder({
     // a single-tech caller that wants Google's own reported numbers for an
     // unrepaired day keeps using its own `result.*` fields, unaffected by
     // these — see admin-schedule.js's two callers.
-    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, googleOrder, { startMin: simStart });
+    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, googleOrder, { startMin: simStart });
     return {
       orderedStops: googleOrder,
       source: googleSource,
@@ -348,7 +357,7 @@ function chooseWindowSafeOrder({
     return { orderedStops: null, reason: 'COORDLESS_STOPS', conflict, beforeMeters };
   }
   const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
-    effectiveWindowStart, effectiveWindowRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
+    effectiveWindowStart, effectiveWindowRange: guardRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
   }, { startMin: simStart });
   if (!fallback) {
     return { orderedStops: null, reason: 'NO_FEASIBLE_IMPROVEMENT', conflict, beforeMeters };
