@@ -65,11 +65,28 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereBetween('a.sent_at', [since, now]).whereNull('a.blocked_code').whereNull('a.provider_error')
       .where(function delivered() { this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read']); })
       .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at'),
-    () => conn('customer_interactions').where('interaction_type', 'email_outbound').whereBetween('created_at', [since, now])
-      .whereRaw("metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
-      .whereRaw("metadata->>'status' IN ('sent','delivered')")
-      .whereRaw("metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
-      .select('id', 'metadata', 'created_at'),
+    // appointment-email.js's own send-time customer_interactions row is
+    // never updated afterward (it stays status:'sent' forever) — the LIVE
+    // delivery state lands on email_messages via the SendGrid webhook
+    // (webhooks-sendgrid.js's computeEmailMessageEventUpdates), joined
+    // through provider_message_id the same identifier both writers use.
+    // A row this webhook later marked bounced/dropped/blocked/failed must
+    // not count as promise evidence — the customer never actually got the
+    // window — same live-status discipline as the sms_log.status check
+    // above (codex P1). No matched email_messages row (em.id IS NULL) is
+    // NOT treated as bad evidence — that's an unlinked/legacy send, not a
+    // known-bad one, and this exclusion is about excluding a CONFIRMED
+    // bounce, not requiring positive proof of delivery.
+    () => conn('customer_interactions as ci')
+      .leftJoin('email_messages as em', function joinOnProviderMessageId() {
+        this.on(conn.raw("em.provider_message_id = (ci.metadata->>'provider_message_id')"));
+      })
+      .where('ci.interaction_type', 'email_outbound').whereBetween('ci.created_at', [since, now])
+      .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
+      .whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
+      .whereRaw("ci.metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
+      .where((qb) => qb.whereNull('em.id').orWhereNotIn('em.status', ['bounced', 'dropped', 'blocked', 'failed']))
+      .select('ci.id', 'ci.metadata', 'ci.created_at'),
     () => conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
       .whereIn('resource_id', visitIds).whereBetween('created_at', [since, now]).select('id', 'resource_id', 'metadata', 'created_at'),
   ];
