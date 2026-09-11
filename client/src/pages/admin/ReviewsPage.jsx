@@ -413,9 +413,9 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
             <div className="flex items-center gap-[8px] mt-[2px]">
               {" "}
               <Stars count={review.starRating} size={14} />{" "}
-              <span className="text-ui-body text-white rounded-md">
+              <Badge tone="neutral">
                 {LOCATION_LABELS[review.locationId] || review.locationId}
-              </span>{" "}
+              </Badge>{" "}
               {review.missingSince && (
                 <span
                   title={`No longer returned by Google as of ${new Date(
@@ -429,12 +429,12 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                 </span>
               )}{" "}
               {autoReply && !review.missingSince && (
-                <span
+                <Badge
                   title={autoReplyTitle(autoReply)}
-                  className="text-ui-body font-medium text-white rounded-md"
+                  tone="neutral"
                 >
                   {autoReplyLabel(autoReply)}
-                </span>
+                </Badge>
               )}{" "}
             </div>{" "}
           </div>{" "}
@@ -1099,7 +1099,7 @@ function ReviewIncentivesPanel() {
           </div>
         </div>
         <div className="flex gap-[8px] items-center flex-wrap">
-          <UiSelect
+          <ReviewSelect
             value={days}
             onChange={setDays}
             options={[

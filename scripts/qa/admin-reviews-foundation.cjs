@@ -61,6 +61,7 @@ const review = {
   locationId: "sarasota",
   locationName: "Sarasota",
   reply: null,
+  autoReply: { status: "parked", reason: "low_rating" },
 };
 
 function visibleTypography() {
@@ -255,6 +256,9 @@ async function main() {
         report.scenarios.push({ width, name });
       };
       await capture("reviews");
+      const pipelineBadge = page.getByText("Needs you (low rating)", { exact: true });
+      await pipelineBadge.waitFor();
+      assert.notEqual(await pipelineBadge.evaluate((node) => getComputedStyle(node).color), "rgb(255, 255, 255)");
 
       await page.getByRole("button", { name: "Outreach", exact: true }).click();
       await page
@@ -304,6 +308,10 @@ async function main() {
         .getByText("No eligible post-launch Google reviews yet.")
         .waitFor();
       await capture("incentives");
+      await Promise.all([
+        page.waitForResponse((res) => res.url().endsWith("/incentives?days=7")),
+        page.getByRole("combobox").selectOption("7"),
+      ]);
       await page.getByRole("button", { name: "GBP", exact: true }).click();
       await page.getByText("Waves Pest Control", { exact: true }).waitFor();
       await capture("gbp");

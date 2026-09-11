@@ -57,6 +57,22 @@ describe("Reviews workspace foundation", () => {
       ).toBe(true),
     );
 
+    const period = screen.getByRole("combobox");
+    expect(period).toHaveValue("30");
+    for (const days of ["7", "90"]) {
+      fireEvent.change(period, { target: { value: days } });
+      await waitFor(() => {
+        expect(fetch).toHaveBeenCalledWith(
+          `/api/admin/reviews/incentives?days=${days}`,
+          expect.any(Object),
+        );
+        expect(fetch).toHaveBeenCalledWith(
+          `/api/admin/reviews/incentives/attribution-queue?days=${days}`,
+          expect.any(Object),
+        );
+      });
+    }
+
     fireEvent.click(screen.getByRole("button", { name: "GBP" }));
     expect(screen.getByText("GBP workspace")).toBeInTheDocument();
   });
