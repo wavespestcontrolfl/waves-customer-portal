@@ -234,15 +234,19 @@ const DEFAULT_DURATION_MINUTES = 60;
 //   services/rain-out.js — computes the batch and delegates EVERY write to
 //     rebooker.rescheduleVisit, so its moves take rungs 1+3 there.
 //   services/call-recording-processor.js booking txn — the ONE writer whose
-//     COMMIT is exempt by owner rule (book + flag, never block), so its
-//     in-txn conflict read stays advisory and lock-free. Deliberately so:
-//     taking rung 1 means WAITING on whoever holds the date, and this
-//     booking must never fail or stall on a lock. (Historically the
-//     exemption also dodged a real inversion — the estimate-accept txn used
-//     to row-lock these same leads/customers/estimates tables before
-//     reaching rung 1 inside commitReservation; that residual is closed by
-//     the accept txn's rung-1 pre-lock above, but the owner rule stands on
-//     its own.) Reliable DETECTION is restored post-commit: a
+//     COMMIT is exempt by owner rule (book + flag, never block). Since the
+//     2026-09-11 capacity activation ruling it TRIES rungs 1 + 3 through
+//     fenceBookingDay (bounded non-blocking polling, ~1.5s cap) before its
+//     conflict read and each INSERT; a granted fence makes the phone row
+//     visible to a concurrent capacity certification (arrival-route.js
+//     verifyArrivalCapacity's FOR UPDATE cannot see a phantom INSERT under
+//     READ COMMITTED, and its route certification holds rung 1 through
+//     commit — so a phone writer holding rung 1 has either committed before
+//     that read or waits until after that commit). A missed fence falls back
+//     to today's unfenced insert: the booking never fails or stalls on a
+//     lock. try-locks never wait, so the phone txn can never be a deadlock
+//     participant even though it row-locks leads/customers/estimates after
+//     the fence. Reliable DETECTION stays post-commit: a
 //     dedicated short rung-1 transaction (date locks — one per distinct
 //     date, sorted ascending — + one findConflictingVisits read PER ROW the
 //     call created, the primary and its follow-up child each against its
@@ -281,6 +285,51 @@ async function tryAcquireOccupancyLock(trx, dateStr) {
   );
   const row = result?.rows ? result.rows[0] : (Array.isArray(result) ? result[0] : result);
   return row?.locked === true;
+}
+
+// Bounded, NON-BLOCKING fence for the phone-booking writer (owner ruling
+// 2026-09-11, option 1): try rung 1 (`occupancy:<date>`) then rung 3
+// (`<techId|unassigned>:<date>`, tech-day-lock.js) with pg_try_advisory_xact_lock,
+// re-trying every `pollMs` until `waitMs` elapses. A capacity certification
+// holds these for milliseconds, so the caller effectively never waits; when
+// the cap expires the caller books exactly as before (unfenced + post-commit
+// conflict flag). Never throws for a lock miss — only for a query failure the
+// caller already treats as best-effort. Any key granted stays held through
+// the transaction (xact advisory locks cannot be released early); `acquired`
+// is true only when EVERY key was granted, so a partial grant reports as a
+// missed fence. Sleeps happen in Node, not in Postgres (no pg_sleep on the
+// connection).
+const CALL_BOOKING_FENCE_WAIT_MS = 1500;
+const CALL_BOOKING_FENCE_POLL_MS = 50;
+
+function bookingFenceWaitMs() {
+  const raw = Number(process.env.CALL_BOOKING_FENCE_WAIT_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : CALL_BOOKING_FENCE_WAIT_MS;
+}
+
+async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFenceWaitMs(),
+  pollMs = CALL_BOOKING_FENCE_POLL_MS, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now = () => Date.now() } = {}) {
+  const dateStr = String(date || '').split('T')[0];
+  if (!dateStr) return { acquired: false, keys: [], reason: 'no_date' };
+  const { lockTechDays } = require('./tech-day-lock');
+  const deadline = now() + Math.max(0, waitMs);
+  const keys = [];
+  let haveOccupancy = false;
+  for (;;) {
+    // Canonical order: rung 1 before rung 3, exactly like every blocking
+    // writer. A granted rung is kept (xact-scoped) and not re-requested.
+    if (!haveOccupancy) {
+      haveOccupancy = await tryAcquireOccupancyLock(trx, dateStr);
+      if (haveOccupancy) keys.push(occupancyLockKey(dateStr));
+    }
+    if (haveOccupancy) {
+      const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
+      if (techKeys) return { acquired: true, keys: keys.concat(techKeys) };
+    }
+    if (now() >= deadline) return { acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy' };
+    await sleep(Math.max(1, pollMs));
+  }
 }
 
 // Acquire the date-wide occupancy lock for MANY dates in one transaction
@@ -592,6 +641,8 @@ module.exports = {
   acquireOccupancyLock,
   acquireOccupancyLocks,
   tryAcquireOccupancyLock,
+  fenceBookingDay,
+  CALL_BOOKING_FENCE_WAIT_MS,
   DEFAULT_DURATION_MINUTES,
   DEFAULT_EXCLUDE_STATUSES,
   _internals: { timeToMinutes, normalizeDate, occupancyLockKey },
