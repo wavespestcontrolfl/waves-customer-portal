@@ -48,16 +48,42 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.lastDeliveredAskAt(customerId, { excludeRequestId: row.id })).toBeNull();
   });
 
-  test('a delivered legacy follow-up is included and outranks the original ask time', async () => {
+  async function auditRow(reviewRequestId, values = {}) {
+    return trx('messaging_audit_log').insert({
+      to_hash: 'fixture-hash', to_last4: '0102', audience: 'customer', purpose: 'review_request',
+      channel: 'sms', entry_point: 'review_request_followup', body_hash: 'fixture-body-hash',
+      metadata: JSON.stringify({ original_message_type: 'review_followup', review_request_id: reviewRequestId }),
+      ...values,
+    });
+  }
+
+  test('a genuinely delivered legacy follow-up is included and outranks the original ask time', async () => {
     // Mirrors processFollowups (review-request.js): the original ask stamps
-    // sms_sent_at, and the separate review_request_followup SMS stamps
-    // followup_sent_at on the SAME row days later.
+    // sms_sent_at on review_requests, and the separate review_request_followup
+    // SMS is delivered days later — recorded with a real sent_at in
+    // messaging_audit_log, keyed back to this row via metadata.review_request_id.
     const followupAt = new Date(at.getTime() + 4 * 86400000);
-    await request({ sms_sent_at: at, followup_sent_at: followupAt });
+    const row = await request({ sms_sent_at: at, followup_sent_at: followupAt });
+    await auditRow(row.id, { sent_at: followupAt });
     expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(followupAt);
     const rows = await history.deliveredAskRows(customerId);
     expect(rows).toHaveLength(1);
-    expect(rows[0].followup_sent_at.toISOString()).toEqual(followupAt.toISOString());
+    expect(rows[0].followup_delivered_at.toISOString()).toEqual(followupAt.toISOString());
+  });
+
+  test('a review_requests.followup_sent_at "handled" marker with no genuine send does not count', async () => {
+    // processFollowups also stamps followup_sent_at for paths that never
+    // reached the customer — dedup'd siblings, no-consent contacts,
+    // soft-deleted customers, and blocked/failed sends — with NO
+    // messaging_audit_log row at all (a blocked/pre-send attempt still
+    // writes an audit row, but with sent_at left null). Either way, this
+    // column alone must not be trusted as delivery evidence.
+    const markerAt = new Date(at.getTime() + 4 * 86400000);
+    const row = await request({ sms_sent_at: at, followup_sent_at: markerAt });
+    const since = new Date(at.getTime() - 1);
+    expect(await history.lastDeliveredAskAt(customerId, { since })).toEqual(at);
+    await auditRow(row.id, { sent_at: null, blocked_code: 'CONSENT_LOOKUP_FAILED' });
+    expect(await history.lastDeliveredAskAt(customerId, { since })).toEqual(at);
   });
 
   test('single-channel deliveries survive nulls and customer scoping', async () => {

@@ -3952,21 +3952,26 @@ describe('shared ask history foundation', () => {
     expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
   });
 
-  // codex #4326 finding 3: processFollowups (review-request.js) records the
-  // separate review_request_followup SMS delivery only in followup_sent_at
-  // on the same row — the reducer must consider it too, or a caller enforcing
+  // codex #4326 finding 3: processFollowups (review-request.js) delivers the
+  // separate review_request_followup SMS several days after the original
+  // ask. The reducer must count that delivery too, or a caller enforcing
   // ASK_SPACING_MS from this shared history under-counts the elapsed time
-  // and can fire the next ask too soon.
+  // and can fire the next ask too soon. (followup_delivered_at is what
+  // deliveredAskRows resolves from messaging_audit_log — see its postgres
+  // coverage in review-ask-history-postgres.test.js for why the raw
+  // review_requests.followup_sent_at column is NOT used directly: it is
+  // also stamped for dedup/no-consent/blocked paths that never reached the
+  // customer.)
   test('a delivered legacy follow-up outranks the original ask timestamp', () => {
     expect(history.latestDeliveredAt([
-      { sms_sent_at: new Date(base), sent_at: null, followup_sent_at: new Date(base + 4 * 86400000) },
+      { sms_sent_at: new Date(base), sent_at: null, followup_delivered_at: new Date(base + 4 * 86400000) },
     ])).toEqual(new Date(base + 4 * 86400000));
   });
 
   test('a row with only a follow-up timestamp still counts', () => {
     expect(history.latestDeliveredAt([
-      { sms_sent_at: null, sent_at: null, followup_sent_at: new Date(base) },
+      { sms_sent_at: null, sent_at: null, followup_delivered_at: new Date(base) },
     ])).toEqual(new Date(base));
-    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null, followup_sent_at: null }])).toBeNull();
+    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null, followup_delivered_at: null }])).toBeNull();
   });
 });

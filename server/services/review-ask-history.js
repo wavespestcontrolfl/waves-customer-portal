@@ -44,25 +44,40 @@ function looksLikeReviewAsk(body) {
     || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i.test(text));
 }
 
+// review_requests.followup_sent_at is NOT reliable delivery evidence: besides
+// the genuine review_request_followup SMS (review-request.js ~3024),
+// processFollowups also stamps it as a plain "handled" marker for
+// soft-deleted customers, dedup'd siblings, no-consent contacts, and
+// blocked/failed sends (review-request.js:2810,2875,2930,2953,3015) — none
+// of those reached the customer. The real delivery timestamp instead lives
+// in messaging_audit_log.sent_at (set only once the provider actually
+// dispatches), correlated back to this row via the review_request_id the
+// followup send stamps into its metadata.
+const FOLLOWUP_DELIVERED_SUBQUERY = `(
+  SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
+  FROM messaging_audit_log
+  WHERE entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+  GROUP BY metadata->>'review_request_id'
+) followups`;
+
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
   const q = db('review_requests')
-    .where({ customer_id: customerId })
-    // followup_sent_at is the separate review_request_followup SMS
-    // (review-request.js processFollowups) delivered on this same row days
-    // after the original ask — a genuine, later customer-facing review ask.
-    .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL OR followup_sent_at IS NOT NULL)')
+    .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`)
+    .where({ 'review_requests.customer_id': customerId })
+    .whereRaw('(review_requests.sms_sent_at IS NOT NULL OR review_requests.sent_at IS NOT NULL OR followups.followup_delivered_at IS NOT NULL)')
     .whereRaw(ASK_TOUCH_SQL)
-    .select('id', 'sequence_id', 'template_key', 'sms_sent_at', 'sent_at', 'followup_sent_at');
-  if (since) q.whereRaw('GREATEST(sms_sent_at, sent_at, followup_sent_at) > ?', [since]);
-  if (excludeRequestId) q.where('id', '!=', excludeRequestId);
+    .select('review_requests.id', 'review_requests.sequence_id', 'review_requests.template_key',
+      'review_requests.sms_sent_at', 'review_requests.sent_at', 'followups.followup_delivered_at');
+  if (since) q.whereRaw('GREATEST(review_requests.sms_sent_at, review_requests.sent_at, followups.followup_delivered_at) > ?', [since]);
+  if (excludeRequestId) q.where('review_requests.id', '!=', excludeRequestId);
   return q;
 }
 
-// A retried email leg, or the separate legacy follow-up SMS, can be later
-// than the original ask's own sms_sent_at/sent_at on the same request row.
+// A retried email leg, or the genuinely delivered legacy follow-up SMS, can
+// be later than the original ask's own sms_sent_at/sent_at on the same row.
 function latestDeliveredAt(rows) {
   return rows.reduce((latest, row) => {
-    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_sent_at].map(value => value ? new Date(value).getTime() : 0));
+    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at].map(value => value ? new Date(value).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
   }, null);
 }
