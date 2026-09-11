@@ -4774,7 +4774,11 @@ function termiteAnnualPlanFeeForStations(stations, plan = resolveTermiteAnnualPl
 // pricer carries no per-field plan/quarterly branching.
 //   quarterly:         install (or $0 on a rental) + bracketed station checks × 4
 //   annual_protection: station SETUP fee + prepaid annual fee × 1 (ruling A-1 = P1)
-function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, ownership }) {
+// Margin on what is actually BILLED for the hardware — the outright install
+// on the quarterly program, the station setup fee on the annual plan (ruling
+// A-1 accepts its ≈ −10 %), 0 on a rental (nothing billed).
+const billedMargin = (billed, cost) => (billed > 0 ? (billed - cost) / billed : 0);
+function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, installCost, ownership }) {
   if (isAnnualPlan) {
     const setupFee = Math.round(stations * annualPlan.setupPerStation);
     const annualFee = termiteAnnualPlanFeeForStations(stations, annualPlan);
@@ -4785,6 +4789,7 @@ function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPric
       stationsOwnedBy: 'waves',
       installKind: 'setup',
       billedInstallPrice: setupFee,
+      billedInstallMargin: billedMargin(setupFee, installCost),
       visitsPerYear: annualPlan.visitsPerYear,
       monitoringMonthly: Math.round((annualFee / 12) * 100) / 100,
       monitoringAnnual: annualFee,
@@ -4808,6 +4813,7 @@ function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPric
     stationsOwnedBy: isRentedStations ? 'waves' : 'customer',
     installKind: 'install',
     billedInstallPrice: isRentedStations ? 0 : installPrice,
+    billedInstallMargin: billedMargin(isRentedStations ? 0 : installPrice, installCost),
     visitsPerYear: TERMITE.monitoringVisitsPerYear,
     monitoringMonthly,
     monitoringAnnual: monitoringMonthly * 12,
@@ -5044,12 +5050,8 @@ function priceTermiteBait(property, options = {}) {
   // The billed program: today's quarterly station checks (install, or $0 on
   // a rental) or the annual protection plan (station SETUP fee + prepaid
   // annual fee, one inspection a year; rental / bond have no meaning there).
-  const program = resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, ownership });
-  const { billedInstallPrice, visitsPerYear, monitoringMonthly, monitoringAnnual } = program;
-  // Margin on what is actually BILLED for the hardware — the outright install
-  // on the quarterly program, the station setup fee on the annual plan
-  // (ruling A-1 accepts its ≈ −10 %), 0 on a rental (nothing billed).
-  const billedInstallMargin = billedInstallPrice > 0 ? (billedInstallPrice - installCost) / billedInstallPrice : 0;
+  const program = resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, installCost, ownership });
+  const { billedInstallPrice, billedInstallMargin, visitsPerYear, monitoringMonthly, monitoringAnnual } = program;
   const costs = termiteProgramCostModel({
     stations,
     installMaterialCost,
