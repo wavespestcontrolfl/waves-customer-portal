@@ -16,7 +16,7 @@ const {
   revokeRefreshSession,
   rotateRefreshSession,
 } = require('../middleware/auth');
-const { accountSavedProperties, appPropertyScopeEnabled } = require('../services/account-properties');
+const { accountSavedProperties, appPropertyScopeEnabled, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 const logger = require('../services/logger');
 
 // =========================================================================
@@ -474,6 +474,16 @@ router.get('/me', authenticate, async (req, res, next) => {
       smsEnabled: prefs.sms_enabled,
       emailEnabled: prefs.email_enabled,
     } : null,
+    // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the selection the
+    // middleware HONORED for this session — null when the token's claim was
+    // ignored (retired / foreign property, gate off, cancelled session).
+    // The selection the server RESOLVED for this session — the claim when
+    // honored, else the fallback it chose (a lone secondary after the primary
+    // was retired), else `closed` (every property retired) — never the raw
+    // claim alone (uncapped codex r1w P1): the client trusts this when the
+    // property list cannot be read, so it must name the same house every
+    // scoped read is about to use.
+    propertyScope: resolvedScopePayload(await resolveSessionScope(req)),
   });
   } catch (err) { next(err); }
 });
@@ -507,7 +517,10 @@ router.put('/credit-preference', authenticate, async (req, res, next) => {
 // simply gets the profile list it already understands.
 router.get('/properties', authenticate, async (req, res, next) => {
   try {
-    if (req.query?.scope === 'saved' && appPropertyScopeEnabled()) {
+    // A C4 cancelled read-only session is UNSCOPED end to end (its reads are
+    // customer-wide, /auth/me reports the scope disabled) — it keeps the
+    // profile list so no saved-property label dresses customer-wide visits.
+    if (req.query?.scope === 'saved' && appPropertyScopeEnabled() && req.customerInactive !== true) {
       const { properties, selected } = await accountSavedProperties(req);
       return res.json({ scope: 'saved', properties, selected });
     }

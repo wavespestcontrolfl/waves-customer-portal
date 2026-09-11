@@ -341,7 +341,7 @@ const FU_EXPECTED_SEND = {
   customerId: 'cust-1',
   invoiceId: 'inv-1',
   entryPoint: 'invoice_followup_sequence',
-  metadata: { original_message_type: 'invoice_followup' },
+  metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
 };
 
 const FU_LIVE_SEQ = {

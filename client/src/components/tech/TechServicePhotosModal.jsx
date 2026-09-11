@@ -18,7 +18,10 @@
 // upload so photos categorize correctly for the missed_photo
 // detector / customer-track view downstream.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { DVH } from '../../lib/viewportUnits';
 import TechPhotoMarksModal from './TechPhotoMarksModal';
 
 const DARK = {
@@ -39,6 +42,7 @@ const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
 const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
+  const isMobile = useIsMobile();
   const [photos, setPhotos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [photoType, setPhotoType] = useState('after');
@@ -137,11 +141,11 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     setUploading(false);
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+        position: 'fixed', inset: 0, fontFamily: "'DM Sans', sans-serif", background: 'rgba(0,0,0,0.7)',
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
         zIndex: 1000,
       }}
@@ -149,24 +153,30 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: DARK.bg, width: '100%', maxWidth: 480,
-          borderTopLeftRadius: 16, borderTopRightRadius: 16,
-          boxSizing: 'border-box', padding: 16, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))', maxHeight: '90vh', overflowY: 'auto',
+          background: DARK.bg, width: '100%', maxWidth: isMobile ? 'none' : 480,
+          borderTopLeftRadius: isMobile ? 0 : 16, borderTopRightRadius: isMobile ? 0 : 16,
+          boxSizing: 'border-box', height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : `90${DVH}`,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          paddingTop: 'calc(16px + env(safe-area-inset-top, 0px))',
+          paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
+          paddingLeft: 'calc(16px + env(safe-area-inset-left, 0px))',
+          paddingRight: 'calc(16px + env(safe-area-inset-right, 0px))',
           border: `1px solid ${DARK.border}`,
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexShrink: 0 }}>
           <h2 style={{
             margin: 0, fontSize: 18, fontWeight: 700, color: DARK.text,
             fontFamily: "'Montserrat', sans-serif",
           }}>
             Service Photos
           </h2>
-          <button onClick={onClose} style={{
+          <button type="button" aria-label="Close service photos" onClick={onClose} style={{
             background: 'transparent', border: 'none', color: DARK.muted,
-            fontSize: 24, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
+            fontSize: 24, cursor: 'pointer', padding: '0 4px', lineHeight: 1, minWidth: 44, minHeight: 44,
           }}>×</button>
         </div>
+        <div style={{ minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
         {customerName && (
           <p style={{ margin: '0 0 14px', fontSize: 13, color: DARK.muted }}>{customerName}</p>
         )}
@@ -320,6 +330,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             ))}
           </div>
         )}
+        </div>
       </div>
       {markTarget && (
         <TechPhotoMarksModal
@@ -328,6 +339,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
           onClose={() => setMarkTarget(null)}
         />
       )}
-    </div>
+    </div>,
+    document.body
   );
 }

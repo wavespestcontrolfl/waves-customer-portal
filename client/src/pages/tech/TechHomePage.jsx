@@ -24,9 +24,9 @@
 //   pending -> en_route -> on_site -> completed
 //                                \--> skipped (with reason)
 //
-// Mobile rule (CLAUDE.md): tech portal stays Montserrat headings +
-// dark palette ('#0f1923' bg, '#1e293b' card). DO NOT apply admin
-// monochrome or customer-facing warm-tone rules to this surface.
+// The shell's tech-field-workspace flag selects the approved light field
+// surface. Existing embedded forms retain their own dark palette; the
+// flag-off route remains available during the staged integration.
 //
 // Audit focus:
 // - State transitions: confirm a tech can't accidentally skip an
@@ -40,10 +40,12 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { lazy, Suspense, useCallback, useEffect, useState, useRef } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
-import { useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
+import TechFieldHome from './TechFieldHome';
+import TechFieldVisit from './TechFieldVisit';
 import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
@@ -188,8 +190,12 @@ const QUICK_ACTIONS = [
   { icon: '🗂️', label: 'Project Report', action: 'create-project' },
 ];
 
-export default function TechHomePage() {
+export default function TechHomePage({ section = 'today' }) {
   const navigate = useNavigate();
+  const { fieldWorkspace = false, documentsAvailable = false, setNavigationBusy } = useOutletContext() || {};
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
+  const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
   const [schedule, setSchedule] = useState([]);
   // The tech's own Twilio line, if they hold one (GET /api/tech/line):
   // the brief panel's Call/Text then go through the line. Null = personal
@@ -318,7 +324,7 @@ export default function TechHomePage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const msg = data.alreadyEnRoute ? 'Already en route' : 'Marked en route';
-      setEnRouteState({ pendingId: null, message: msg, isError: false });
+      setEnRouteState({ pendingId: null, serviceId, message: msg, isError: false });
       // Belt + suspenders refresh: the dispatch:job_update broadcast
       // is the primary path, but if the socket is mid-reconnect the
       // event can be missed, leaving the card stale. A retry then
@@ -329,7 +335,7 @@ export default function TechHomePage() {
       fetchSchedule();
       setTimeout(() => setEnRouteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
-      setEnRouteState({ pendingId: null, message: err.message || 'Failed to mark en route', isError: true });
+      setEnRouteState({ pendingId: null, serviceId, message: err.message || 'Failed to mark en route', isError: true });
     }
   }, [enRouteState.pendingId, fetchSchedule]);
 
@@ -345,11 +351,11 @@ export default function TechHomePage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const msg = data.alreadyOnSite ? 'Already marked on site' : 'Marked on site';
-      setOnSiteState({ pendingId: null, message: msg, isError: false });
+      setOnSiteState({ pendingId: null, serviceId, message: msg, isError: false });
       fetchSchedule();
       setTimeout(() => setOnSiteState((s) => s.message === msg ? { pendingId: null, message: '', isError: false } : s), 3000);
     } catch (err) {
-      setOnSiteState({ pendingId: null, message: err.message || 'Failed to mark on site', isError: true });
+      setOnSiteState({ pendingId: null, serviceId, message: err.message || 'Failed to mark on site', isError: true });
     }
   }, [fetchSchedule, onSiteState.pendingId]);
 
@@ -407,6 +413,10 @@ export default function TechHomePage() {
   // siblings). Ungrouped rows are their own stop, exactly as before.
   const stops = groupServicesIntoStops(myServices);
   const nextVisitStop = nextStopOf(stops);
+  const selectedVisit = stops.find((stop) => stop.key === selectedVisitKey);
+  const fieldNextStop = stops.find((stop) => stop.services.some((service) => service.status === 'on_site'))
+    || stops.find((stop) => stop.services.some((service) => service.status === 'en_route'))
+    || nextVisitStop;
   const nextStop = nextVisitStop ? nextVisitStop.primary : undefined;
   const nextStopSummary = stopSummaryLabel(nextVisitStop);
   // Grouped stop: window = union of members; alerts = every member's, deduped.
@@ -431,13 +441,13 @@ export default function TechHomePage() {
   // Reconcile FORWARD to the most advanced live member (codex r4): a sibling
   // that an admin/GPS signal already put on site pulls the whole stop to
   // on_site; the server's on-site path accepts an en_route primary.
-  const handleSyncStop = () => {
-    if (!nextStop || !nextVisitStop) return;
-    const live = nextVisitStop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
+  const handleSyncStop = (stop) => {
+    if (!stop) return;
+    const live = stop.services.filter((s) => !TERMINAL_STATUSES_VISIT.has(s.status));
     const target = live.some((s) => s.status === 'on_site') ? 'on_site'
       : live.some((s) => s.status === 'en_route') ? 'en_route' : null;
-    if (target === 'on_site') handleOnSite(nextStop.id);
-    else if (target === 'en_route') handleEnRoute(nextStop.id);
+    if (target === 'on_site') handleOnSite(stop.primary.id);
+    else if (target === 'en_route') handleEnRoute(stop.primary.id);
   };
   // Visit Brief detail loader — one estimate-source + one visit-brief
   // fetch per MEMBER service of the stop (grouped siblings keep their own
@@ -493,6 +503,11 @@ export default function TechHomePage() {
   // lock timer before it could release (codex #4072 r19 P2). No header
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
+  const navigationBusy = Boolean(busyStopId || enRouteState.pendingId || onSiteState.pendingId);
+  useLayoutEffect(() => {
+    setNavigationBusy?.(navigationBusy);
+    return () => setNavigationBusy?.(false);
+  }, [navigationBusy, setNavigationBusy]);
   const onStopBusyChange = useCallback((stop, busy) => {
     setBusyStopId((cur) => (busy ? stop.primary.id : (cur === stop.primary.id ? null : cur)));
   }, []);
@@ -506,6 +521,10 @@ export default function TechHomePage() {
     // reopen — the previous data stays rendered while the refresh loads.
     if (expanding) loadStopDetail(stop);
   }, [busyStopId, expandedStopId, loadStopDetail]);
+  useEffect(() => {
+    if (section === 'today' && selectedVisit && !scheduleError) void loadStopDetail(selectedVisit);
+  }, [section, selectedVisitKey, schedule, scheduleError, loadStopDetail]);
+
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -557,9 +576,12 @@ export default function TechHomePage() {
     }
     openProjectForService(service);
   }, [openProjectForService]);
+  const projectServices = fieldWorkspace
+    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status) && !['sent', 'closed'].includes(service.linkedProject?.status))
+    : myServices;
   const handleProjectQuickAction = useCallback(() => {
-    if (myServices.length === 1) {
-      const only = myServices[0];
+    if (projectServices.length === 1) {
+      const only = projectServices[0];
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
       if (isTypedFindingsService(only)) {
@@ -572,10 +594,33 @@ export default function TechHomePage() {
       return;
     }
     setShowProjectPicker(true);
-  }, [myServices, openProjectOrContinue]);
+  }, [projectServices, openProjectOrContinue]);
+
+  const openFieldVisit = (stop) => {
+    if (navigationBusy) return;
+    navigate(`/tech?visit=${encodeURIComponent(stop.key)}`);
+  };
+  const closeFieldVisit = () => {
+    if (navigationBusy) return;
+    setSearchParams((params) => { params.delete('visit'); return params; });
+  };
+  const openServiceReport = (service) => {
+    if (TERMINAL_STATUSES_VISIT.has(service.status)) return;
+    if (isTypedFindingsService(service)) openTypedCompletion(service);
+    else if (isPestControlService(service)) setRecapService(service);
+    else openProjectOrContinue(service);
+  };
+  const fieldTools = [
+    { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`/tech/protocols${visitSearch}`) },
+    { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`/tech/lawn-diagnostic${visitSearch}`) },
+    { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
+    ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate('/tech/estimate') }] : []),
+    ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`/tech/social-post${visitSearch}`) }] : []),
+  ];
+  if (!fieldWorkspace && section !== 'today') return <Navigate to="/tech" replace />;
 
   return (
-    <div style={{ maxWidth: 480, margin: '0 auto' }}>
+    <div style={{ maxWidth: fieldWorkspace ? undefined : 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
@@ -590,6 +635,41 @@ export default function TechHomePage() {
           });
         }}
       />
+      {fieldWorkspace ? (
+        <TechFieldHome
+          section={section} stops={stops} nextStop={fieldNextStop}
+          loading={loading} error={scheduleError} rainChance={rainChance}
+          onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
+          tools={fieldTools}
+          timekeeping={<>
+            <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
+            <div className="tf-existing"><TechIntelligenceBar /></div>
+            {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
+          </>}
+          visit={selectedVisitKey && section === 'today' ? (
+            <TechFieldVisit
+              stop={selectedVisit} loading={loading} error={scheduleError}
+              onBack={closeFieldVisit} onRetry={fetchSchedule} busy={navigationBusy}
+              enRouteState={enRouteState} onSiteState={onSiteState}
+              onEnRoute={handleEnRoute} onSite={handleOnSite} onSync={handleSyncStop}
+              onMove={setRainOutService}
+            >
+              {selectedVisit && <div className="tf-existing"><VisitBriefPanel
+                stop={selectedVisit} detail={stopDetail[selectedVisit.primary.id]}
+                onRetry={() => loadStopDetail(selectedVisit)}
+                onPhotos={(service) => setPhotoTarget({ id: service.id, customerName: service.customerName || service.customer_name || 'Customer' })}
+                onProject={openServiceReport} onZone={setZoneTarget} onLead={setLeadTarget}
+                techLine={techLine} request={techRequest}
+                onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
+              /></div>}
+              {selectedVisit?.primary.status === 'on_site' && <>
+                {visualServiceNotesEnabled && <VisualNotesPanel service={selectedVisit.primary} />}
+                {recapCaptureEnabled && isPestControlService(selectedVisit.primary) && <TechRecapCapture service={selectedVisit.primary} request={techRequest} />}
+              </>}
+            </TechFieldVisit>
+          ) : null}
+        />
+      ) : <>
       {/* Greeting */}
       <h1 style={{
         fontSize: 22, fontWeight: 700, margin: '0 0 4px',
@@ -792,7 +872,7 @@ export default function TechHomePage() {
                 icon="🔁"
                 primary
                 disabled={Boolean(onSiteState.pendingId || enRouteState.pendingId)}
-                onClick={handleSyncStop}
+                onClick={() => handleSyncStop(nextVisitStop)}
               />
             )}
           </div>
@@ -875,6 +955,7 @@ export default function TechHomePage() {
       )}
 
       <TimecardSignoffCard techName={techName} />
+      </>}
 
       {showCreateProject && (
         <CreateProjectModal
@@ -928,7 +1009,7 @@ export default function TechHomePage() {
 
       {showProjectPicker && (
         <ProjectServicePicker
-          services={myServices}
+          services={projectServices}
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);

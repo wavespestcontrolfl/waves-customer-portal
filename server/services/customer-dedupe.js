@@ -445,7 +445,9 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 // repointing would import components the winner's scalar knows nothing
 // about (and same-family rows would abort the merge on the unique
 // constraint). The loser's rows are explicitly deleted instead.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates']);
+// Field credit allocations retain the account that supplied the accepted
+// value. Their append-only guard must not abort an unrelated account merge.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
@@ -484,7 +486,7 @@ const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
 // Everything else: empty winner fields fill from the loser, then the loser's
 // row is removed. Anything not copied survives in the journal snapshot.
 const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_preferences: 'or' };
-const CHANNEL_RESTRICTIVENESS = { email: 2, sms: 1, both: 0 };
+const CHANNEL_RESTRICTIVENESS = { email: 3, push: 2, sms: 1, both: 0 };
 // Column defaults that mean "never filled in", not a real choice — a winner
 // holding one of these must still take the loser's actual value (pet details,
 // preferred day) before the loser's row is deleted.
@@ -521,6 +523,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   const updates = {};
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
+    // Choice provenance follows its channel below; it is not SMS consent
+    // and must not pass through the generic boolean AND rule.
+    if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -529,13 +534,29 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
       table === 'notification_prefs' && col.endsWith('_channel')
       && CHANNEL_RESTRICTIVENESS[winnerVal] !== undefined && CHANNEL_RESTRICTIVENESS[loserVal] !== undefined
     ) {
-      if (CHANNEL_RESTRICTIVENESS[loserVal] > CHANNEL_RESTRICTIVENESS[winnerVal]) updates[col] = loserVal;
+      // A known untouched request Email default must not erase an App
+      // choice. Explicit and historically unknown Email still win.
+      const winnerRank = col === 'request_channel' && winnerVal === 'email' && loserVal === 'push'
+        && winnerRow.request_channel_explicit === false ? -1 : CHANNEL_RESTRICTIVENESS[winnerVal];
+      const loserRank = col === 'request_channel' && loserVal === 'email' && winnerVal === 'push'
+        && loserRow.request_channel_explicit === false ? -1 : CHANNEL_RESTRICTIVENESS[loserVal];
+      if (loserRank > winnerRank) updates[col] = loserVal;
     } else if (isDefaultish(winnerVal) && !isDefaultish(loserVal)) {
       updates[col] = forUpdate(loserVal);
     }
   }
+  if (table === 'notification_prefs' && Object.hasOwn(winnerRow, 'request_channel_explicit')) {
+    const channel = updates.request_channel || winnerRow.request_channel;
+    const matching = [winnerRow, loserRow].filter((row) => row.request_channel === channel);
+    const explicit = matching.some((row) => row.request_channel_explicit === true) ? true
+      : matching.some((row) => row.request_channel_explicit !== false) ? null : false;
+    if (winnerRow.request_channel_explicit !== explicit) updates.request_channel_explicit = explicit;
+  }
   if (Object.keys(updates).length) {
-    await trx(table).where(column, winnerId).update({ ...updates, updated_at: trx.fn.now() });
+    const requestOnly = table === 'notification_prefs'
+      && Object.keys(updates).every((col) => ['request_channel', 'request_channel_explicit'].includes(col));
+    await trx(table).where(column, winnerId).update({ ...updates,
+      ...(!requestOnly ? { updated_at: trx.fn.now() } : {}) });
   }
   await trx(table).where(column, loserId).del();
   return `merged ${Object.keys(updates).length} fields into winner row, dropped loser row`;
@@ -609,6 +630,9 @@ async function repointCustomerProperties(trx, table, column, winnerId, loserId) 
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId, ...demote });
+        // Per-property appointment toggles follow the property to its new
+        // owner (app property scope, PR 3).
+        if (table === 'customer_properties') await require('./property-notification-prefs').repointPropertyPrefs(id, winnerId, sp);
       });
       moved += 1;
     } catch (e) {

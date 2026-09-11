@@ -62,7 +62,7 @@ import {
 } from "../../lib/customerFormOptions";
 import CustomerHealthGrade from "../../components/admin/CustomerHealthGrade";
 import CustomerHealthFilters from "../../components/admin/CustomerHealthFilters";
-import {
+import { Select, Textarea,
   Button,
   Badge,
   Card,
@@ -73,6 +73,9 @@ import {
   DialogBody,
   DialogFooter,
   Input,
+  inputStyles,
+  UiSurface,
+  useUiDensity,
   cn,
 } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
@@ -131,13 +134,13 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 
   if (loadError) {
     return (
-      <div className="p-6 text-13 text-alert-fg">
+      <div className="p-6 text-ui-body text-alert-fg">
         Could not load this panel: {loadError.message}
       </div>
     );
   }
   if (!Component) {
-    return <div className="p-6 text-13 text-ink-tertiary">Loading...</div>;
+    return <div className="p-6 text-ui-body text-ink-tertiary">Loading...</div>;
   }
   return <Component {...props} />;
 }
@@ -146,7 +149,7 @@ function LegacyCustomersPanel({ exportName, props = {} }) {
 // render neutral. No-plan ("Bronze" default with no services) renders as
 // plain text to de-emphasize.
 function TierBadgeV2({ tier }) {
-  if (!tier) return <span className="text-11 text-ink-tertiary">—</span>;
+  if (!tier) return <span className="text-ui-caption text-ink-tertiary">—</span>;
   return <Badge tone="neutral">{tier}</Badge>;
 }
 
@@ -193,11 +196,11 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
       {" "}
       <div className="flex justify-between items-start mb-1">
         {" "}
-        <div className="text-13 font-medium text-ink-primary tracking-tight">
+        <div className="text-ui-body font-medium text-ink-primary tracking-tight">
           {customer.firstName} {customer.lastName}
         </div>
         {canDelete && (
-          <button
+          <button data-ui-text-action
             onClick={(e) => {
               e.stopPropagation();
               setConfirming(!confirming);
@@ -212,7 +215,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
       {confirming && (
         <div className="bg-alert-bg border border-hairline border-alert-fg/30 rounded p-2 mb-2">
           {" "}
-          <div className="text-12 text-alert-fg mb-2">
+          <div className="text-ui-label text-alert-fg mb-2">
             Delete {customer.firstName} {customer.lastName}?
           </div>{" "}
           <div className="flex gap-1.5">
@@ -254,7 +257,7 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
         </div>
       )}
       {addressLine && (
-        <div className="text-12 text-ink-tertiary mb-2 truncate">
+        <div className="text-ui-label text-ink-tertiary mb-2 truncate">
           {addressLine}
         </div>
       )}
@@ -263,13 +266,13 @@ function PipelineCardV2({ customer, onDelete, canDelete = false }) {
         <CustomerHealthGrade score={customer.leadScore} label="Lead score" />
         {tier && <TierBadgeV2 tier={tier} />}
         {customer.monthlyRate > 0 && (
-          <span className="font-mono u-nums text-12 text-ink-primary">
+          <span className="font-mono u-nums text-ui-label text-ink-primary">
             ${customer.monthlyRate}/mo
           </span>
         )}
       </div>
       {daysInStage != null && (
-        <div className="text-11 text-ink-tertiary u-label mt-1.5">
+        <div className="text-ui-caption text-ink-tertiary ui-label mt-1.5">
           {daysInStage === 0 ? "Today" : `${daysInStage}d in stage`}
         </div>
       )}
@@ -305,27 +308,27 @@ function PipelineColumnV2({
           {" "}
           <div className="flex items-center gap-2">
             {" "}
-            <span className="text-13 font-medium text-ink-primary">
+            <span className="text-ui-body font-medium text-ink-primary">
               {stage.label}
             </span>
             {isAlertStage && (
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-alert-fg" />
             )}
           </div>{" "}
-          <div className="text-11 font-mono u-nums text-ink-tertiary mt-0.5">
+          <div className="text-ui-caption font-mono u-nums text-ink-tertiary mt-0.5">
             {customers.length}{" "}
             {customers.length === 1 ? "customer" : "customers"}
           </div>{" "}
         </div>
         {monthlyTotal > 0 && (
-          <span className="font-mono u-nums text-12 text-ink-primary font-medium">
+          <span className="font-mono u-nums text-ui-label text-ink-primary font-medium">
             ${monthlyTotal.toLocaleString()}/mo
           </span>
         )}
       </div>{" "}
       <div className="p-2 overflow-y-auto flex-1">
         {customers.length === 0 ? (
-          <div className="text-ink-tertiary text-12 text-center py-5">
+          <div className="text-ink-tertiary text-ui-label text-center py-5">
             No customers
           </div>
         ) : (
@@ -410,6 +413,7 @@ function QuickAddModalV2({
   initialValues = null,
   title = "Add customer",
 }) {
+  const density = useUiDensity();
   const formId = useId();
   const [form, setForm] = useState(() =>
     normalizeQuickAddInitialValues(initialValues),
@@ -517,9 +521,9 @@ function QuickAddModalV2({
   };
 
   const INPUT_CLS =
-    "block w-full bg-white text-13 text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 " +
+    "block w-full bg-white text-ui-body text-zinc-900 border-hairline border-zinc-300 rounded-sm h-9 px-3 " +
     "focus:outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900";
-  const LABEL_CLS = "block u-label text-zinc-900 mb-1";
+  const LABEL_CLS = "block ui-label text-zinc-900 mb-1";
   const FORM_FONT = { fontFamily: "Roboto, Arial, sans-serif" };
 
   return (
@@ -538,7 +542,7 @@ function QuickAddModalV2({
               className="rounded-sm border-hairline border-zinc-300 bg-zinc-50 p-3 flex flex-col gap-2"
               role="status"
             >
-              <div className="text-13 text-zinc-900">
+              <div className="text-ui-body text-zinc-900">
                 This phone belongs to{" "}
                 <strong>{phoneMatch.match?.name || "an existing customer"}</strong>
                 {phoneMatch.match?.address
@@ -597,7 +601,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-firstName`} className={LABEL_CLS}>First name *</label>{" "}
-              <input
+              <Input
                 id={`${formId}-firstName`}
                 value={form.firstName}
                 onChange={(e) => set("firstName", e.target.value)}
@@ -608,7 +612,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-lastName`} className={LABEL_CLS}>Last name</label>{" "}
-              <input
+              <Input
                 id={`${formId}-lastName`}
                 value={form.lastName}
                 onChange={(e) => set("lastName", e.target.value)}
@@ -621,7 +625,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-phone`} className={LABEL_CLS}>Phone *</label>{" "}
-              <input
+              <Input
                 id={`${formId}-phone`}
                 value={form.phone}
                 onChange={(e) => set("phone", e.target.value)}
@@ -633,7 +637,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-email`} className={LABEL_CLS}>Email</label>{" "}
-              <input
+              <Input
                 type="email"
                 id={`${formId}-email`}
                 value={form.email}
@@ -660,13 +664,13 @@ function QuickAddModalV2({
                   zip: parts.zip || p.zip,
                 }));
               }}
-              className={INPUT_CLS}
+              className={inputStyles({ density, className: INPUT_CLS })}
               style={{ height: 36 }}
             />{" "}
           </div>{" "}
           <div>
             <label htmlFor={`${formId}-addressLine2`} className={LABEL_CLS}>Address line 2</label>
-            <input
+            <Input
               id={`${formId}-addressLine2`}
               value={form.addressLine2}
               onChange={(e) => set("addressLine2", e.target.value)}
@@ -680,7 +684,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-city`} className={LABEL_CLS}>City</label>{" "}
-              <input
+              <Input
                 id={`${formId}-city`}
                 value={form.city}
                 onChange={(e) => set("city", e.target.value)}
@@ -690,7 +694,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-state`} className={LABEL_CLS}>State</label>{" "}
-              <input
+              <Input
                 id={`${formId}-state`}
                 value={form.state}
                 onChange={(e) =>
@@ -702,7 +706,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-zip`} className={LABEL_CLS}>ZIP</label>{" "}
-              <input
+              <Input
                 id={`${formId}-zip`}
                 value={form.zip}
                 onChange={(e) => set("zip", e.target.value)}
@@ -714,7 +718,7 @@ function QuickAddModalV2({
           <div>
             {" "}
             <label htmlFor={`${formId}-profileLabel`} className={LABEL_CLS}>Property label</label>{" "}
-            <select
+            <Select
               id={`${formId}-profileLabel`}
               value={form.profileLabel}
               onChange={(e) => set("profileLabel", e.target.value)}
@@ -725,9 +729,9 @@ function QuickAddModalV2({
                   {option.label}
                 </option>
               ))}
-            </select>
+            </Select>
             {form.profileLabel === "__custom__" && (
-              <input
+              <Input
                 aria-label="Custom property label"
                 value={form.customProfileLabel}
                 onChange={(e) => set("customProfileLabel", e.target.value)}
@@ -741,7 +745,7 @@ function QuickAddModalV2({
             <div>
               {" "}
               <label htmlFor={`${formId}-leadSource`} className={LABEL_CLS}>Lead source</label>{" "}
-              <select
+              <Select
                 id={`${formId}-leadSource`}
                 value={form.leadSource}
                 onChange={(e) => set("leadSource", e.target.value)}
@@ -752,12 +756,12 @@ function QuickAddModalV2({
                     {s.replace(/_/g, " ")}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
             <div>
               {" "}
               <label htmlFor={`${formId}-pipelineStage`} className={LABEL_CLS}>Pipeline stage</label>{" "}
-              <select
+              <Select
                 id={`${formId}-pipelineStage`}
                 value={form.pipelineStage}
                 onChange={(e) => set("pipelineStage", e.target.value)}
@@ -768,7 +772,7 @@ function QuickAddModalV2({
                     {s.label}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </div>{" "}
           </div>{" "}
           <div>
@@ -776,7 +780,7 @@ function QuickAddModalV2({
             <label htmlFor={`${formId}-tags`} className={LABEL_CLS}>Tags</label>{" "}
             <div className="flex gap-2">
               {" "}
-              <select
+              <Select
                 id={`${formId}-tags`}
                 value=""
                 onChange={(e) => addTag(e.target.value)}
@@ -789,8 +793,8 @@ function QuickAddModalV2({
                     {option.label}
                   </option>
                 ))}
-              </select>{" "}
-              <input
+              </Select>{" "}
+              <Input
                 aria-label="Custom tag"
                 value={form.customTag}
                 onChange={(e) => set("customTag", e.target.value)}
@@ -808,11 +812,11 @@ function QuickAddModalV2({
             {selectedTags.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {selectedTags.map((tag) => (
-                  <button
+                  <button data-ui-text-action
                     key={tag}
                     type="button"
                     onClick={() => removeTag(tag)}
-                    className="inline-flex items-center h-6 px-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-11 text-ink-secondary hover:bg-zinc-100"
+                    className="inline-flex items-center h-6 px-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-ui-caption text-ink-secondary hover:bg-zinc-100"
                     title="Remove tag"
                   >
                     {tag.replace(/_/g, " ")} ×
@@ -824,7 +828,7 @@ function QuickAddModalV2({
           <div>
             {" "}
             <label htmlFor={`${formId}-notes`} className={LABEL_CLS}>Notes</label>{" "}
-            <textarea
+            <Textarea
               rows={3}
               id={`${formId}-notes`}
               value={form.notes}
@@ -863,18 +867,18 @@ function SortHeaderV2({
 }) {
   const active = currentSort === sortKey;
   return (
-    <button
+    <button data-ui-text-action
       type="button"
       onClick={() => onSort(sortKey)}
       style={{ fontWeight: 700 }}
       className={cn(
-        "inline-flex items-center gap-1 text-11 uppercase tracking-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none",
+        "inline-flex items-center gap-1 text-ui-caption ui-label text-zinc-900 bg-transparent border-0 p-0 focus:outline-none",
         className,
       )}
     >
       {label}
       {active && (
-        <span className="text-11">{currentDir === "asc" ? "↑" : "↓"}</span>
+        <span className="text-ui-caption">{currentDir === "asc" ? "↑" : "↓"}</span>
       )}
     </button>
   );
@@ -888,10 +892,12 @@ const VIEWS = [
 ];
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
+  const density = useUiDensity();
   const activeConfig = VIEWS.find((v) => v.key === view) || VIEWS[0];
 
   return (
     <AdminCommandHeader
+      variant={density === 'legacy' ? 'framed' : 'workspace'}
       title="Customers"
       icon={activeConfig.Icon}
       sections={VIEWS}
@@ -914,7 +920,7 @@ function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {
 // --- Filter pill ---
 function FilterPill({ active, onClick, alert = false, children }) {
   return (
-    <button
+    <button data-ui-text-action
       type="button"
       onClick={onClick}
       aria-pressed={active}
@@ -1030,13 +1036,13 @@ function CustomerDirectoryView({
     view === "directory" && (
       <>
         {" "}
-        <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
+        <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
           {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
         </div>
         {/* Desktop table header */}
         {!workspaceMode && !isMobile && (
           <div
-            className="grid gap-1.5 px-4 py-2.5 mb-1 text-11 uppercase tracking-label text-zinc-900"
+            className="grid gap-1.5 px-4 py-2.5 mb-1 text-ui-caption ui-label text-zinc-900"
             style={{ gridTemplateColumns: TABLE_COLS, fontWeight: 700 }}
           >
             {" "}
@@ -1064,7 +1070,7 @@ function CustomerDirectoryView({
                   ? "Too many requests"
                   : "Failed to load customers"}
               </div>
-              <div className="text-13 text-ink-tertiary mb-4">
+              <div className="text-ui-body text-ink-tertiary mb-4">
                 {isRateLimitError(error)
                   ? "Wait a few seconds and try again."
                   : error?.message || String(error)}
@@ -1082,7 +1088,7 @@ function CustomerDirectoryView({
               <div className="text-14 text-ink-primary mb-1">
                 No customers found
               </div>{" "}
-              <div className="text-13 text-ink-tertiary">
+              <div className="text-ui-body text-ink-tertiary">
                 Try adjusting your filters or add a new customer
               </div>{" "}
             </CardBody>{" "}
@@ -1121,7 +1127,7 @@ function CustomerDirectoryView({
                         <CustomerHealthGrade score={c.healthScore} />{" "}
                         <div className="flex-1 min-w-0 flex flex-col gap-0.5">
                           {" "}
-                          <button
+                          <button data-ui-text-action
                             type="button"
                             onClick={() => openCustomerProfile(c.id)}
                             aria-label={`Open ${c.firstName || ""} ${c.lastName || ""} customer profile`.trim()}
@@ -1135,16 +1141,16 @@ function CustomerDirectoryView({
                               target="_blank"
                               rel="noopener noreferrer"
                               onClick={(e) => e.stopPropagation()}
-                              className="text-11 text-ink-tertiary truncate no-underline hover:text-ink-primary"
+                              className="text-ui-caption text-ink-tertiary truncate no-underline hover:text-ink-primary"
                             >
                               {addr}
                             </a>
                           ) : (
-                            <div className="text-11 text-ink-tertiary">—</div>
+                            <div className="text-ui-caption text-ink-tertiary">—</div>
                           )}
                         </div>
                         {c.phone && (
-                          <button
+                          <button data-ui-text-action
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
@@ -1189,15 +1195,15 @@ function CustomerDirectoryView({
                     style={{ gridTemplateColumns: TABLE_COLS }}
                   >
                     {" "}
-                    <div className="text-13 font-medium text-ink-primary text-center">
+                    <div className="text-ui-body font-medium text-ink-primary text-center">
                       {c.firstName} {c.lastName}
                       {c.profileLabel && c.profileLabel !== "Primary" && (
-                        <span className="ml-1 text-11 font-normal text-ink-tertiary">
+                        <span className="ml-1 text-ui-caption font-normal text-ink-tertiary">
                           · {c.profileLabel}
                         </span>
                       )}
                     </div>{" "}
-                    <div className="text-12 text-ink-secondary truncate text-center">
+                    <div className="text-ui-label text-ink-secondary truncate text-center">
                       {(() => {
                         const full = formatCustomerAddress(c.address);
                         if (!full)
@@ -1219,7 +1225,7 @@ function CustomerDirectoryView({
                       {" "}
                       <CustomerHealthGrade score={c.healthScore} />{" "}
                     </div>{" "}
-                    <div className="u-nums text-11 text-ink-secondary text-center">
+                    <div className="u-nums text-ui-caption text-ink-secondary text-center">
                       {c.nextServiceDate ? (
                         formatETDateOnly(c.nextServiceDate, {
                           month: "short",
@@ -1231,7 +1237,7 @@ function CustomerDirectoryView({
                     </div>{" "}
                     <div className="flex gap-1 justify-end">
                       {c.phone && (
-                        <button
+                        <button data-ui-text-action
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1258,19 +1264,19 @@ function CustomerDirectoryView({
                         </a>
                       )}
                       {isAdmin && (
-                        <button
+                        <button data-ui-text-action
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             startEdit(c);
                           }}
-                          className="h-6 px-2 u-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
+                          className="h-6 px-2 ui-label border-hairline border-zinc-300 rounded-xs text-ink-secondary bg-white hover:bg-zinc-50"
                         >
                           Edit
                         </button>
                       )}
                       {isAdmin && (
-                        <button
+                        <button data-ui-text-action
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1311,7 +1317,7 @@ function CustomerDirectoryView({
             >
               ← Previous
             </Button>{" "}
-            <span className="u-nums text-13 text-ink-secondary">
+            <span className="u-nums text-ui-body text-ink-secondary">
               Page {page} of {totalPages} ({totalCustomers} total)
             </span>{" "}
             <Button
@@ -1351,7 +1357,7 @@ function CustomerMapView({
                   ? "Too many requests"
                   : "Failed to load customers"}
               </div>
-              <div className="text-13 text-ink-tertiary mb-4">
+              <div className="text-ui-body text-ink-tertiary mb-4">
                 {isRateLimitError(error)
                   ? "Wait a few seconds and try again."
                   : error?.message || String(error)}
@@ -1386,7 +1392,7 @@ function CustomerPipelineView({
     view === "pipeline" && (
       <>
         {pipelineLoading && (
-          <div className="p-6 text-center text-13 text-ink-secondary">
+          <div className="p-6 text-center text-ui-body text-ink-secondary">
             Loading pipeline…
           </div>
         )}
@@ -1396,7 +1402,7 @@ function CustomerPipelineView({
             <div className="text-14 text-alert-fg mb-3">
               Failed to load pipeline
             </div>{" "}
-            <div className="text-13 text-ink-tertiary mb-4">
+            <div className="text-ui-body text-ink-tertiary mb-4">
               {pipelineError.message || String(pipelineError)}
             </div>{" "}
             <Button variant="primary" onClick={() => loadPipeline()}>
@@ -1623,7 +1629,7 @@ function CustomersWorkspacePage({
   overlays,
 }) {
   return (
-    <div className={selectedId ? "c360-workspace-page" : "c360-directory-page"}>
+    <UiSurface density="comfortable" className={selectedId ? "c360-workspace-page" : "c360-directory-page"}>
       {selectedId ? (
         <Customer360Workspace
           key={`${selectedId}:${tabKey}`}
@@ -1636,7 +1642,7 @@ function CustomersWorkspacePage({
         children
       )}
       {overlays}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -1650,7 +1656,7 @@ function CustomersOverlayPage({
   overlays,
 }) {
   return (
-    <div>
+    <UiSurface density="legacy">
       {children}
       {overlays}
       {selectedId && (
@@ -1662,9 +1668,11 @@ function CustomersOverlayPage({
           onClose={onClose}
         />
       )}
-    </div>
+    </UiSurface>
   );
 }
+
+const CUSTOMER_PAGE_PRESENTATIONS = { true: CustomersWorkspacePage, false: CustomersOverlayPage };
 
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
@@ -1731,9 +1739,7 @@ export default function CustomersPageV2() {
   // Customers defaults to the workspace; ?customer360=overlay is the rollback.
   // Profile sheets on other surfaces keep their current presentation.
   const workspaceMode = searchParams.get("customer360") !== "overlay";
-  const PagePresentation = workspaceMode
-    ? CustomersWorkspacePage
-    : CustomersOverlayPage;
+  const PagePresentation = CUSTOMER_PAGE_PRESENTATIONS[workspaceMode];
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
@@ -2016,7 +2022,7 @@ export default function CustomersPageV2() {
 
   if (view !== "pipeline" && loading && !hasLoadedRef.current) {
     return (
-      <div className="p-16 text-center text-13 text-ink-secondary">
+      <div className="p-16 text-center text-ui-body text-ink-secondary">
         Loading customers…
       </div>
     );
@@ -2080,7 +2086,7 @@ export default function CustomersPageV2() {
           {attachNotice && (
             <div
               role="status"
-              className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[130] rounded-sm bg-zinc-900 text-white text-13 px-4 py-2 shadow-lg"
+              className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[130] rounded-sm bg-zinc-900 text-white text-ui-body px-4 py-2 shadow-lg"
             >
               {attachNotice}
             </div>
@@ -2132,7 +2138,7 @@ export default function CustomersPageV2() {
         {view === "pipeline" && (
           <>
             {" "}
-            <h2 className="text-12 font-medium text-ink-primary mb-1.5">
+            <h2 className="text-ui-label font-medium text-ink-primary mb-1.5">
               Stage
             </h2>{" "}
             <div className="grid grid-cols-2 gap-1.5">
@@ -2141,12 +2147,12 @@ export default function CustomersPageV2() {
                 const count = (pipelineGroups[key] || []).length;
                 const active = pipelineStageMobile === key;
                 return (
-                  <button
+                  <button data-ui-text-action
                     key={key}
                     type="button"
                     onClick={() => setPipelineStageMobile(key)}
                     className={cn(
-                      "inline-flex items-center justify-between gap-2 u-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
+                      "inline-flex items-center justify-between gap-2 ui-label px-3 h-11 rounded-sm border-hairline transition-colors u-focus-ring",
                       active
                         ? "bg-zinc-900 text-white border-zinc-900"
                         : "bg-white text-ink-secondary border-zinc-300",
@@ -2156,7 +2162,7 @@ export default function CustomersPageV2() {
                     <span className="truncate">{stage.label}</span>{" "}
                     <span
                       className={cn(
-                        "u-nums text-11 flex-shrink-0",
+                        "u-nums text-ui-caption flex-shrink-0",
                         active ? "text-white/80" : "text-ink-tertiary",
                       )}
                     >

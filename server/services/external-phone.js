@@ -27,4 +27,4 @@ function firstExternalPhone(...candidates) {
   return null;
 }
 
-module.exports = { firstExternalPhone, isSentinelPhone, last10 };
+module.exports = { firstExternalPhone, isSentinelPhone, last10, PHONE_SENTINELS };

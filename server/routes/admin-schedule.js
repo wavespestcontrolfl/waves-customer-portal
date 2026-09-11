@@ -99,6 +99,7 @@ const PREPAID_STAMP_REFUSALS = [
 ];
 const {
   auditRecurringScheduleAnomalies,
+  auditRecurringScheduleCoverage,
 } = require('../services/recurring-schedule-audit');
 const {
   detectWaveGuardPlanKeys,
@@ -1169,8 +1170,11 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
       // sentinel) — safeSendAppointment then treats the primary as opted
       // out rather than texting past a possibly-stored explicit opt-out.
-      const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
-      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+      // Visit-aware (app property scope, PR 3): a NON-primary saved property
+      // owns notify-primary, so the recipient list follows it. Same sentinel
+      // on a failed read or an unreadable property under enforcement.
+      const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
+      const noticeOutcome = {};
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
       const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -1211,6 +1215,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
         // Final recheck at the provider handoff: a concurrent move or a
         // terminal transition (cancel/complete/skip/no-show) means this
         // message is stale — abort; the winning writer owns the messaging.
+        sendOutcome: noticeOutcome,
         preDispatchCheck: async () => {
           const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status', 'visit_id');
           if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
@@ -1232,7 +1237,11 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
             : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
         },
       });
-      if (!sent) error = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+      if (!sent) {
+        error = noticeOutcome.retryable === true
+          ? 'customer was not notified: notification preferences could not be read — send the reschedule notice again'
+          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+      }
     }
   } catch (e) {
     error = e.message;
@@ -2492,18 +2501,8 @@ async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
 // below are the whole contract: nothing outside them is ever propagated or
 // overlaid, so a corrupted jsonb value can't rewrite dates, status, or
 // ownership on spawned rows.
-const PRICE_SERVICE_SERVICE_KEYS = [
-  'service_type', 'service_id', 'service_key_snapshot', 'service_category_snapshot', 'is_callback',
-];
-const PRICE_SERVICE_PRICE_KEYS = [
-  'estimated_price', 'primary_line_price',
-  'discount_type', 'discount_amount', 'discount_dollars',
-  'discount_id', 'discount_name',
-  'discount_service_key_filter', 'discount_service_category_filter', 'discount_max_dollars',
-  'line_discount_id', 'line_discount_name', 'line_discount_type',
-  'line_discount_amount', 'line_discount_dollars',
-];
-const PRICE_SERVICE_OVERRIDE_KEYS = new Set([...PRICE_SERVICE_SERVICE_KEYS, ...PRICE_SERVICE_PRICE_KEYS]);
+const { PRICE_SERVICE_SERVICE_KEYS, PRICE_SERVICE_PRICE_KEYS, PRICE_SERVICE_OVERRIDE_KEYS,
+  parseTemplateOverrides, overlayRecurringTemplateOverrides } = require('../services/recurring-template-overrides');
 
 function normalizePriceServiceScope(scope) {
   return scope === 'following' ? 'following' : 'this_only';
@@ -2576,30 +2575,6 @@ function readProvenanceOverrides(raw) {
   const out = {};
   for (const key of PROVENANCE_OVERRIDE_KEYS) if (value[key] !== undefined) out[key] = value[key];
   return out;
-}
-
-function parseTemplateOverrides(raw) {
-  let value = raw;
-  if (typeof value === 'string') {
-    try { value = JSON.parse(value); } catch { return null; }
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const filtered = {};
-  for (const [key, val] of Object.entries(value)) {
-    if (PRICE_SERVICE_OVERRIDE_KEYS.has(key)) filtered[key] = val;
-  }
-  return Object.keys(filtered).length > 0 ? filtered : null;
-}
-
-// The row every extension writer should COPY from: the parent overlaid with
-// its stamped template overrides. Gate off = the parent verbatim, so the
-// kill switch restores today's copy-the-parent behavior byte-for-byte.
-function overlayRecurringTemplateOverrides(parent, cols) {
-  if (!parent || !cols?.recurring_template_overrides) return parent;
-  if (!isEnabled('editApptPriceServiceScope')) return parent;
-  const overrides = parseTemplateOverrides(parent.recurring_template_overrides);
-  if (!overrides) return parent;
-  return { ...parent, ...overrides };
 }
 
 // Merge (never replace wholesale) so a later price-only edit keeps an
@@ -6160,6 +6135,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
         const acceptResult = await markEstimateManuallyAccepted({
           estimateId: linkedEstimateId,
+          bookedAppointmentIds: createdAppointments.map((appointment) => appointment.id),
           adminUserId: req.technicianId || null,
           source: bookingBillingTermEffective === 'prepay_annual' ? 'verbal_annual_prepay_booking' : 'verbal_yes_booking',
           billingTerm: bookingBillingTermEffective,
@@ -6221,6 +6197,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
             const { markEstimateManuallyAccepted } = require('../services/estimate-manual-acceptance');
             const retryResult = await markEstimateManuallyAccepted({
               estimateId: linkedEstimateId,
+              bookedAppointmentIds: createdAppointments.map((appointment) => appointment.id),
               adminUserId: req.technicianId || null,
               source: 'verbal_yes_booking',
               billingTerm: 'standard',
@@ -12934,6 +12911,9 @@ router.put('/:id/status', async (req, res, next) => {
             preferenceKey: 'tech_en_route',
             push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'tech_en_route'),
             dedupeKey: trackTransitions.enRouteNotificationKey(svc, enRouteResult.enRouteAt),
+            // The visit this bell is about — its saved property qualifies the
+            // link (GATE_APP_PROPERTY_SCOPE) so the app opens THAT house.
+            appointmentId: svc.id,
             metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
           });
         } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }
@@ -13034,6 +13014,7 @@ router.put('/:id/status', async (req, res, next) => {
           icon: '\u{1F3E0}',
           link: '/?tab=documents',
           preferenceKey: 'service_completed',
+          appointmentId: svc.id,
           push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'service_complete'),
           dedupeKey: `scheduled-service:${svc.id}:completed`,
           metadata: { scheduledServiceId: svc.id },
@@ -16896,6 +16877,11 @@ router.get('/recurring-anomalies', requireAdmin, async (req, res, next) => {
       includeCompleted,
       limit: req.query.limit,
     });
+    // Opt-in read-only measurements; the existing anomaly response stays
+    // unchanged unless the caller asks for series coverage.
+    if (req.query.includeCoverage === 'true') {
+      audit.coverage = await auditRecurringScheduleCoverage({ limit: req.query.limit, offset: req.query.coverageOffset });
+    }
     res.json({ success: true, ...audit });
   } catch (err) { next(err); }
 });
@@ -17703,16 +17689,24 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
     const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
       .sort((a, b) => a - b);
-    const { WEEKLY_DAYS_OFF_KEY } = require('../services/scheduling/blackout-dates');
-    await db('system_settings')
-      .insert({
-        key: WEEKLY_DAYS_OFF_KEY,
-        value: JSON.stringify(days),
-        category: 'scheduling',
-        description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
-      })
-      .onConflict('key')
-      .merge({ value: JSON.stringify(days), updated_at: db.fn.now() });
+    const { WEEKLY_DAYS_OFF_KEY, lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — serializes against a
+    // capacity reservation transaction's shared read (arrival-route.js
+    // assertCapacityEligibility) so a hold cannot commit for a day this
+    // write is about to close (codex #4346 P2). See blackout-dates.js for
+    // lock order.
+    await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      await trx('system_settings')
+        .insert({
+          key: WEEKLY_DAYS_OFF_KEY,
+          value: JSON.stringify(days),
+          category: 'scheduling',
+          description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
+        })
+        .onConflict('key')
+        .merge({ value: JSON.stringify(days), updated_at: trx.fn.now() });
+    });
     logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
     flushEstimateSlotCaches();
     res.json({ success: true, weeklyDaysOff: days });
@@ -17728,11 +17722,18 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     }
     // Upsert keeps the button idempotent — re-adding a date just updates
     // the reason instead of tripping the unique constraint.
-    const [row] = await db('schedule_blackout_dates')
-      .insert({ date, reason: reason || null })
-      .onConflict('date')
-      .merge({ reason: reason || null })
-      .returning(['id', 'date', 'reason']);
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const row = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      const [inserted] = await trx('schedule_blackout_dates')
+        .insert({ date, reason: reason || null })
+        .onConflict('date')
+        .merge({ reason: reason || null })
+        .returning(['id', 'date', 'reason']);
+      return inserted;
+    });
     // Reason is free-form admin text — never log it (PII rule): a staffer
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
@@ -17743,7 +17744,13 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
 
 router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
-    const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const deleted = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      return trx('schedule_blackout_dates').where({ id: req.params.id }).del();
+    });
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     flushEstimateSlotCaches();
     res.json({ success: true });

@@ -48,11 +48,13 @@ describe('per-system spacing', () => {
     expect(tre.perimeter).toBe(adv.perimeter);
     expect(tre.stations).toBe(Math.max(TERMITE.minStations, Math.ceil(tre.perimeter / 15)));
     expect(adv.stations).toBe(Math.max(TERMITE.minStations, Math.ceil(adv.perimeter / 10)));
-    // The 2000 sqft reference home: 15 vs 23 stations, $610 vs $639 install,
-    // $24/mo vs $34/mo — wider spacing is what makes Trelona-only sellable.
+    // The 2000 sqft reference home: 15 vs 23 stations, $653 vs $639 install
+    // (Trelona $24.00/station since 2026-09-09 — $384 / 16-station box; it
+    // was $610 at the retired $22.05), $24/mo vs $34/mo — wider spacing is
+    // what makes Trelona-only sellable.
     expect(tre.stations).toBe(15);
     expect(adv.stations).toBe(23);
-    expect(tre.installation.price).toBe(610);
+    expect(tre.installation.price).toBe(653);
     expect(adv.installation.price).toBe(639);
     expect(tre.monthly).toBe(24);
     expect(adv.monthly).toBe(34);

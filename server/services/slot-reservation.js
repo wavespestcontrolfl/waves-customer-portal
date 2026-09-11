@@ -35,13 +35,17 @@ const logger = require('./logger');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
-const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
+const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
 // scheduling/occupancy.js for why both write paths here take it first, and
 // why each also runs the tech-blind global probe (findConflictingVisits)
 // under it before committing.
 const { acquireOccupancyLock, findConflictingVisits } = require('./scheduling/occupancy');
+const { capacityEnabled, placementFitsShift } = require('./scheduling/policy');
+const { lockTechDays } = require('./scheduling/tech-day-lock');
+const { capacityError, prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder } = require('./scheduling/arrival-route');
+const { serviceDurationMinutes } = require('./service-library');
 
 // Business bounds shared with the slot generators (see the exporting module
 // for provenance): 8:00 day start (find-time DAY_START_HOUR), 17:00 day end,
@@ -336,9 +340,25 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
   return null;
 }
 
-async function catalogLinkForProfile(conn, serviceProfile = {}) {
+async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false, validateAllowance = false } = {}) {
+  const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
+  const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
+    ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
   const primary = services.find((svc) => svc?.service === 'pest_control') || services[0] || null;
+  const validatedLink = (link) => {
+    // A missing match locks no row: activation/mapping can happen after the
+    // duration read. Validate the actual identity before stamping it, while
+    // its shared row lock protects this allowance through the outer commit.
+    if (validateAllowance && link) {
+      const allocatedMinutes = Number(primary?.durationMinutes);
+      if (!Number.isFinite(allocatedMinutes) || allocatedMinutes <= 0
+        || serviceDurationMinutes(link, DEFAULT_DURATION_MINUTES, { preserveCapacity }) > allocatedMinutes) {
+        throw capacityError('service_duration_changed');
+      }
+    }
+    return link;
+  };
   // `service` is the DISPLAY CATEGORY — pest specialties (german_roach,
   // stinging_insect) all collapse to 'pest_control', which is keyed to nothing
   // in the catalog. `engineKey` is the row's RAW pricing-engine key, carried
@@ -382,14 +402,20 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         const rows = await sp('services')
           .where({ service_key: catalogKey })
           .limit(2)
-          .select('id', 'name', 'service_key');
+          .select(...catalogColumns)
+          .modify(query => { if (lockCatalog) query.forShare(); });
         if (rows.length === 1) byKey = rows[0];
-        else if (rows.length > 1) logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
+        else if (rows.length > 1) {
+          logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
+          if (strictAllowanceRead || validateAllowance) throw capacityError('catalog_unavailable');
+        }
       });
     } catch (err) {
       logger.warn(`[slot-reservation] catalog lookup failed for catalog key "${catalogKey}": ${err.message}`);
+      if (validateAllowance) throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
+      if (strictAllowanceRead) throw err;
     }
-    return byKey;
+    return validatedLink(byKey);
   }
   const isOneTime = serviceProfile?.serviceMode === 'one_time';
   const cadenceKey = cadenceCatalogKeyForProfile(primary, isOneTime);
@@ -428,30 +454,37 @@ async function catalogLinkForProfile(conn, serviceProfile = {}) {
         const cadenceRows = await sp('services')
           .where({ service_key: cadenceKey, is_active: true })
           .limit(2)
-          .select('id', 'name', 'service_key');
+          .select(...catalogColumns)
+          .modify(query => { if (lockCatalog) query.forShare(); });
         if (cadenceRows.length === 1) resolved = cadenceRows[0];
+        else if (cadenceRows.length > 1 && (strictAllowanceRead || validateAllowance)) throw capacityError('catalog_unavailable');
         return;
       }
       const rows = await sp('services')
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select('id', 'name', 'service_key');
+        .select(...catalogColumns)
+        .modify(query => { if (lockCatalog) query.forShare(); });
       if (rows.length === 1) {
         resolved = rows[0];
       } else if (rows.length > 1) {
         logger.error(`[slot-reservation] engine key "${engineKey}" is claimed by MULTIPLE active catalog rows — refusing to stamp service_id (fix the duplicate engine_keys)`);
+        // Ambiguity is not an absent catalog: a duration authority cannot
+        // certify fallback work while matching rows require unknown work.
+        if (strictAllowanceRead || validateAllowance) throw capacityError('catalog_unavailable');
       }
     });
   } catch (err) {
-    // The savepoint rolled back; the caller's transaction is still healthy and
-    // the accept MUST still commit. An unresolved link is recoverable (the
-    // visit books, completion falls back to the generic profile exactly as it
-    // did before this change); a broken accept is not.
+    // The savepoint rolled back, so the caller's transaction is still healthy.
+    // Identity-only callers retain the legacy fail-open behavior; duration
+    // authorities opt into a strict read so a stale allowance cannot book.
     logger.warn(`[slot-reservation] catalog lookup failed for engine key "${engineKey}": ${err.message}`);
+    if (validateAllowance) throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
+    if (strictAllowanceRead) throw err;
     return null;
   }
-  return resolved;
+  return validatedLink(resolved);
 }
 
 
@@ -476,19 +509,47 @@ function notesWithServiceMix(existingNotes, serviceProfile = {}, fallback = '') 
 }
 
 async function resolveReservationServiceProfile(client, row, opts = {}) {
-  if (!estimateSlotAvailability.resolveEstimateSlotProfile) return null;
   let estimate = opts.estimate || null;
   if (!estimate && row?.source_estimate_id) {
     estimate = await client('estimates').where({ id: row.source_estimate_id }).first();
   }
   if (!estimate) return null;
-  return estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+  const profileOptions = {
     serviceMode: opts.serviceMode,
     selectedFrequency: opts.selectedFrequency,
     serviceCadences: opts.serviceCadences,
     durationMinutes: opts.durationMinutes,
     preserveCombinedCapacity: opts.preserveCombinedCapacity,
-  });
+    preserveCapacity: row?.reservation_policy_version === 2,
+  };
+  const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, profileOptions, client);
+  const held = require('./combined-visit-capacity').capacityFromReservation(row);
+  if (held) {
+    const selected = profile.services.map(service => service.service);
+    if (selected.length !== held.services.length || held.services.some(key => !selected.includes(key))) {
+      throw capacityError('service_selection_changed');
+    }
+    if (held.version === 2 && held.services.some((key, index) =>
+      profile.services.find(service => service.service === key).durationMinutes !== held.durations[index])) {
+      throw capacityError('service_duration_changed');
+    }
+    // Existing version-1 holds keep 60 minutes per member. Version-2 holds
+    // retain their resolved allowances even when the release gate is killed.
+    return { ...profile, reservationServiceMix: held, durationMinutes: held.durationMinutes,
+      services: held.services.map((key, index) => ({ ...profile.services.find(service => service.service === key),
+        durationMinutes: held.version === 1 ? 60 : held.durations[index] })) };
+  }
+  if (row?.reservation_policy_version === 2) {
+    const heldDuration = Number(row.estimated_duration_minutes);
+    if (profile.durationMinutes !== heldDuration) {
+      throw capacityError('service_duration_changed');
+    }
+    profile.durationMinutes = heldDuration;
+  } else if (capacityEnabled() && row?.reservation_expires_at) {
+    profile.durationMinutes = Math.max(Number(row.estimated_duration_minutes) || 0,
+      profile.durationMinutes);
+  }
+  return profile;
 }
 
 /**
@@ -508,6 +569,7 @@ async function reserveSlot({
   selectedFrequency = '',
   serviceCadences = null,
 }) {
+  const useCapacity = capacityEnabled();
   const parsed = parseSlotId(slotId);
   if (!parsed) {
     const err = new Error('invalid slotId format');
@@ -519,8 +581,8 @@ async function reserveSlot({
   // Signed-offer gate (booking-audit round 2): every slot the generator
   // returns carries `.exp.sig` inside its slotId — a bare/hand-crafted id
   // (including a crafted `_unassigned` one) was never offered. Presence and
-  // expiry are checked here before any DB work; the HMAC itself is verified
-  // in-txn once the effective duration is known. Rejected with the same
+  // expiry are checked here before any DB work; capacity mode verifies the
+  // HMAC before route traffic, then both modes verify the locked profile. Rejected with the same
   // SLOT_UNAVAILABLE the client already recovers from by refreshing slots —
   // which is also exactly what a customer holding a pre-deploy (unsigned)
   // slot list needs: one 409, then the refreshed list is signed.
@@ -645,6 +707,24 @@ async function reserveSlot({
   }
 
   try {
+    let preparedCapacity = null;
+    if (useCapacity) {
+      const estimateForCapacity = await db('estimates').where({ id: estimateId }).first();
+      if (!estimateForCapacity || !holdCoords) throw capacityError('missing_coordinates');
+      const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimateForCapacity, {
+        serviceMode, selectedFrequency, serviceCadences, durationMinutes,
+      });
+      // Authenticate the offered tuple before spending the shared traffic budget.
+      // The transaction repeats this check against the locked estimate profile.
+      if (!verifySlotOffer({ surface: 'estimate', scopeId: String(estimateId), date,
+        startMinutes: slotStartMinutes, technicianId: techId, durationMinutes: profile.durationMinutes,
+        exp: offerExp, policy: CAPACITY_OFFER_POLICY }, offerSig)) throw capacityError('invalid_offer');
+      preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
+        prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
+          service_type: profile.services.map(service => service.service).join(' ') },
+        windowStart, windowEnd: addMinutesToTime(windowStart, profile.durationMinutes), durationMinutes: profile.durationMinutes });
+    }
+
     const reserved = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST, before ANY row lock this
       // txn takes (ORDERING CONTRACT, scheduling/occupancy.js — the
@@ -659,6 +739,10 @@ async function reserveSlot({
       // holds, so this path is a real occupancy writer and owes the date
       // lock regardless.
       await acquireOccupancyLock(trx, date);
+      // Fence selected and unassigned membership together in canonical order.
+      // Dispatch can move another technician's visit into the unassigned route.
+      // Acquire these before estimate/technician rows and the fingerprint check.
+      await lockTechDays(trx, [{ techId, date }, ...(useCapacity ? [{ techId: null, date }] : [])]);
 
       // SELECT … FOR UPDATE on the estimate row serializes concurrent
       // reserves/accepts/declines for this estimate. Without this lock,
@@ -747,14 +831,12 @@ async function reserveSlot({
         }
       }
 
-      const serviceProfile = estimateSlotAvailability.resolveEstimateSlotProfile
-        ? estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
+      const serviceProfile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimate, {
           serviceMode,
           selectedFrequency,
           serviceCadences,
           durationMinutes,
-        })
-        : null;
+        }, trx);
       // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
       // is season-filtered for a seasonal mosquito selection, but the offer
       // HMAC does not bind the frequency — a list fetched under monthly12
@@ -809,9 +891,9 @@ async function reserveSlot({
       // very slots getAvailableSlots returned. A token holder can no longer
       // reserve any tuple the generator never offered; a legitimately offered
       // `_unassigned` slot verifies like any other, while an UNSIGNED
-      // unassigned id died at the presence gate above. Verified here (not
-      // pre-txn) because the duration needs the estimate's profile — the
-      // coarse policy checks below stay as defense-in-depth.
+      // unassigned id died at the presence gate above. Recheck the locked
+      // profile here even after capacity mode authenticated before traffic;
+      // the coarse policy checks below stay as defense-in-depth.
       if (!verifySlotOffer({
         surface: 'estimate',
         scopeId: String(estimateId),
@@ -820,6 +902,7 @@ async function reserveSlot({
         technicianId: techId,
         durationMinutes: effectiveDurationMinutes,
         exp: offerExp,
+        policy: useCapacity ? CAPACITY_OFFER_POLICY : undefined,
       }, offerSig)) {
         const err = new Error('slot was not offered for this estimate');
         err.code = 'SLOT_UNAVAILABLE';
@@ -832,7 +915,8 @@ async function reserveSlot({
       // see ROUND_UP_GRACE_MINUTES. Needs the profile-resolved duration, so
       // it lives in-txn with the signature check rather than with the pre-txn
       // policy guards.
-      if (slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+      if (useCapacity ? !placementFitsShift(slotStartMinutes, slotStartMinutes + effectiveDurationMinutes)
+        : slotStartMinutes + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
         const err = new Error('slot runs past the end of the working day');
         err.code = 'SLOT_UNAVAILABLE';
         err.slotId = slotId;
@@ -840,6 +924,11 @@ async function reserveSlot({
       }
       const displayServiceLabel = cappedServiceType(serviceProfile?.serviceLabel || estimate.service_interest);
       const notes = notesWithServiceMix(null, serviceProfile, estimate.service_interest);
+      if (useCapacity && !holdPin) throw capacityError('address_changed');
+      const capacityFit = useCapacity ? await verifyArrivalCapacity(preparedCapacity, {
+        conn: trx, windowStart, windowEnd, durationMinutes: effectiveDurationMinutes,
+        serviceTypes: serviceProfile.services.map(service => service.label || service.service),
+      }) : null;
       // Catalog link — see catalogLinkForProfile. Stamped on the HOLD so the
       // graduated visit carries it even if the profile can't be re-resolved
       // at commit; commitReservation backfills it when this returns null.
@@ -848,7 +937,7 @@ async function reserveSlot({
       // whitelist; the whitelist handles cadence families whose shared engine
       // key can't resolve a single row, and unmapped keys keep the legacy
       // service_interest fallback.
-      const catalogLink = await catalogLinkForProfile(trx, serviceProfile);
+      const catalogLink = await catalogLinkForProfile(trx, serviceProfile, { validateAllowance: capacityEnabled() });
       const catalogServiceId = catalogLink ? catalogLink.id : null;
       const holdCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, estimate.service_interest, { serviceMode });
       const serviceType = catalogLink?.name
@@ -877,19 +966,7 @@ async function reserveSlot({
         }
       }
 
-      // RUNGS 3 + 4 (tech, then zone) — rung 1 was taken at the top of this
-      // txn. These stay REQUIRED even under the date lock: rung 1 alone only
-      // serializes writers that take it, while the narrow tech/zone conflict
-      // checks below also arbitrate hold-vs-hold coexistence, which the
-      // global probe deliberately leaves to them (includeHolds:false). The
-      // estimate FOR UPDATE above only serializes THIS estimate — two
-      // different customers' estimates reserving the same tech/date meet
-      // HERE. Serialize all reserves per tech+day (coarse but reserves are
-      // quick), released on commit/rollback.
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['slot-reserve', `${techId || 'unassigned'}:${date}`],
-      );
+      // The tech-day fence was acquired before all row locks above.
       // Also take the zone+day lock the self-booking writers
       // (availability.confirmBooking, /api/booking/confirm) use — without
       // it, a self-book confirm and an estimate hold for the same window
@@ -935,7 +1012,12 @@ async function reserveSlot({
       const sameSlotHold = (liveHolds || []).find((hold) => dateOnly(hold.scheduled_date) === date
         && String(hold.window_start).slice(0, 5) === String(windowStart).slice(0, 5)
         && (hold.technician_id || null) === (techId || null)
-        && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes);
+        && Number(hold.estimated_duration_minutes) === effectiveDurationMinutes
+        // Reselection under capacity must create a versioned promise even
+        // when a legacy hold happened to reserve the same number of minutes.
+        && (!capacityEnabled() || hold.reservation_policy_version === 2)
+        && require('node:util').isDeepStrictEqual(hold.reservation_service_mix || null,
+          serviceProfile?.reservationServiceMix || null));
       if (sameSlotHold) {
         const staleIds = liveHolds.filter((hold) => hold.id !== sameSlotHold.id).map((hold) => hold.id);
         if (staleIds.length) {
@@ -953,7 +1035,7 @@ async function reserveSlot({
         // visits only — hold-vs-hold semantics stay with the narrow checks,
         // and this idempotent retry keeps its designed no-409 behavior when
         // the window is still genuinely free.
-        const refreshClash = await findConflictingVisits({
+        const refreshClash = useCapacity ? [] : await findConflictingVisits({
           db: trx,
           date,
           windowStart,
@@ -994,6 +1076,7 @@ async function reserveSlot({
           .update({ reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`) })
           .returning(['id', 'reservation_expires_at']);
         const refreshedExpiresAt = refreshed?.reservation_expires_at || null;
+        if (capacityFit) await persistArrivalOrder(trx, capacityFit, sameSlotHold.id);
         logger.info('[slot-reservation] refreshed existing hold', {
           estimateId,
           slotId,
@@ -1012,7 +1095,7 @@ async function reserveSlot({
       // reclaims them, and the new reservation can overlap safely. Use
       // NOW() server-side instead of a JS-side `new Date()` to keep the
       // inequality consistent with the timestamp the INSERT will set.
-      const conflict = await trx('scheduled_services')
+      const conflict = useCapacity ? null : await trx('scheduled_services')
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
         .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
@@ -1034,7 +1117,7 @@ async function reserveSlot({
       // unassigned self-bookings (technician_id NULL) that occupy the
       // same zone/time — availability treats the zone as one capacity
       // pool, so an estimate hold must not stack on top of one.
-      if (reserveZone) {
+      if (reserveZone && !useCapacity) {
         const zoneSlug = zoneSlugOf(reserveZone);
         const zoneCities = reserveZone.cities || [];
         const zoneConflict = await trx('scheduled_services')
@@ -1084,7 +1167,7 @@ async function reserveSlot({
       // whichever GRADUATES second is stopped by commitReservation's own
       // probe. This estimate's stale holds were refreshed or deleted
       // above, inside this txn, so no self-exclusion is needed.
-      const committedClash = await findConflictingVisits({
+      const committedClash = useCapacity ? [] : await findConflictingVisits({
         db: trx,
         date,
         windowStart,
@@ -1124,6 +1207,7 @@ async function reserveSlot({
         reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`),
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
+        ...(useCapacity ? { reservation_policy_version: 2 } : {}),
         ...(serviceProfile?.reservationServiceMix
           ? { reservation_service_mix: serviceProfile.reservationServiceMix } : {}),
         notes,
@@ -1155,6 +1239,7 @@ async function reserveSlot({
       }).returning(['id', 'reservation_expires_at']);
 
       const scheduledServiceId = row.id || row;
+      if (capacityFit) await persistArrivalOrder(trx, capacityFit, scheduledServiceId);
       const expiresAt = row.reservation_expires_at || null;
       logger.info('[slot-reservation] reserved', {
         estimateId, slotId, scheduledServiceId,
@@ -1465,7 +1550,12 @@ async function commitReservation({
       // resolves to nothing, a stale specialty id must be CLEARED, not kept.
       // Same rule for the snapshot and the label: id, key, and label must
       // describe the same accepted service.
-      const commitLink = await catalogLinkForProfile(client, serviceProfile);
+      const commitLink = await catalogLinkForProfile(client, serviceProfile, {
+        preserveCapacity: row.reservation_policy_version === 2,
+        // Version-1 combined holds retain their promised hour per member.
+        validateAllowance: row.reservation_service_mix?.version !== 1
+          && (capacityEnabled() || row.reservation_policy_version === 2),
+      });
       const commitCanonicalLabel = canonicalServiceTypeForProfile(serviceProfile, row.service_type, { serviceMode });
       updates.service_id = commitLink ? commitLink.id : null;
       updates.service_key_snapshot = commitLink?.service_key || null;

@@ -125,8 +125,39 @@ function isInServiceAreaCounty(county) {
   return normalized !== null && SERVICE_AREA_COUNTIES_NORMALIZED.has(normalized);
 }
 
-const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
+// 0.5 is the prompt rubric's "very uncertain" boundary. The old 0.7 sat in
+// the "inferred with reasonable confidence" band and, combined with a rubric
+// that scored completeness rather than fidelity, flagged 19 clear calls in
+// the 2026-09-02..08 audit (short calls with no address to extract scored
+// 0.05-0.45). The rubric now scores only what was returned; this threshold
+// catches genuinely garbled extractions, not short ones.
+const DEFAULT_CONFIDENCE_THRESHOLD = 0.5;
 const DEFAULT_ADDRESS_CONFIDENCE_THRESHOLD = 0.6;
+
+// Relationships that make the caller a third party to the property. 'owner'
+// is the account holder; 'unknown' is NOT non-owner (owner ruling
+// 2026-07-31, call a771fa15) — most homeowners never state "it's my house",
+// so the model returns 'unknown' plus on_site_authorization=false and the
+// pair used to hard-block every ordinary call (31 of 65 processed calls in
+// the 2026-09-02..08 audit, none of them a real third party). A spouse or
+// partner on the household is an authorized party for pest service, not a
+// stranger arranging it for someone else, so it is owner-equivalent here.
+const OWNER_EQUIVALENT_RELATIONSHIPS = new Set(['owner', 'spouse_partner', 'unknown']);
+function isExplicitlyNonOwner(relationship) {
+  const r = String(relationship || 'unknown').trim().toLowerCase() || 'unknown';
+  return !OWNER_EQUIVALENT_RELATIONSHIPS.has(r);
+}
+
+// The model emits triage_flags of its own (same vocabulary). A model-emitted
+// caller_not_authorized is only as good as the relationship it rests on:
+// when the caller is not explicitly a third party, drop it so the merge
+// cannot reintroduce the block the deterministic pass no longer raises.
+function suppressUnsupportedModelFlags(modelFlags, extraction) {
+  const flags = Array.isArray(modelFlags) ? modelFlags : [];
+  if (!flags.includes('caller_not_authorized')) return flags;
+  if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return flags;
+  return flags.filter((f) => f !== 'caller_not_authorized');
+}
 
 function computeDeterministicTriageFlags(extraction, opts = {}) {
   if (!extraction || !extraction.meta) return [];
@@ -264,7 +295,7 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('low_extraction_confidence');
   }
 
-  if (caller.on_site_authorization === false && caller.relationship_to_property !== 'owner') {
+  if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)) {
     flags.push('caller_not_authorized');
   }
 
@@ -361,6 +392,11 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
 // known set now demote to failedOpenFlags in canAutoRoute — advisory card
 // files, booking proceeds. Sources of truth: the deterministic emitters
 // above + the model-output schema triage_flags enum.
+// Blocking flags that mean "someone must act on an existing visit". The
+// enforce path opens call_log.review_status when one of these holds the
+// call, so the change has a visible owner and not just a triage card.
+const SCHEDULING_CHANGE_REVIEW_FLAGS = ['cancellation_request', 'reschedule_or_cancel', 'existing_appointment_coordination'];
+
 const BLOCKING_TRIAGE_FLAGS = new Set([
   'out_of_service_area',
   'hoa_common_area_requires_approval',
@@ -1000,7 +1036,7 @@ function confirmedStartOnTheHour(confirmedStartAt) {
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
-  const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
+  const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(extraction.triage_flags, extraction), opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
   // Allowlist, not blocklist (owner ruling 2026-07-31): only flags in
@@ -1071,50 +1107,23 @@ function canAutoRoute(extraction, opts = {}) {
   const startOnTheHour = confirmedStartOnTheHour(extraction.scheduling?.confirmed_start_at);
 
   // A POSITIVE Address Validation verdict — Google accepted (or corrected)
-  // the stated address AND placed it in the service area. Required before
-  // the authorization demotion below (codex round-3 P1): when AV is disabled
-  // or returns not_attempted, computeDeterministicTriageFlags raises NO
-  // address flag for a populated, high-confidence address, so
-  // caller_not_authorized was the incidental last block standing between an
-  // unvalidated address and an auto-dispatch. Demoting it unconditionally
-  // would let an unknown-relationship call book against an address nobody
-  // ever validated (AGENTS.md L367-370: never silent auto-route).
+  // the stated address AND placed it in the service area. One of the two
+  // ways the central address-trust gate below is satisfied (codex round-3
+  // P1): when AV is disabled or returns not_attempted,
+  // computeDeterministicTriageFlags raises NO address flag for a populated,
+  // high-confidence address, so without this gate nothing would stand
+  // between an unvalidated address and an auto-dispatch (AGENTS.md
+  // L367-370: never silent auto-route).
   const avPositivelyValidated = !!opts.addressValidation
     && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
     && opts.addressValidation.inServiceArea === true;
 
-  // Unknown relationship is NOT non-owner (owner ruling 2026-07-31, call
-  // log a771fa15): most homeowners never STATE "it's my house", so
-  // relationship_to_property arrives 'unknown' and on_site_authorization
-  // false — and the hard block held a caller who requested service, gave
-  // their info, and agreed a start time. The hard block now applies only
-  // when the caller is EXPLICITLY a non-owner (tenant/realtor/
-  // property_manager/...) — those still route through the agent-commitment
-  // demotion below. The flag moves to failedOpenFlags so the office still
-  // gets the "confirm the account holder" advisory card — book-and-flag,
-  // never book-and-hide.
-  //
-  // Guarded on a confirmed, on-the-hour start AND a positively validated
-  // address: this is the last block on the path, so everything it used to
-  // backstop has to be satisfied some other way before it lifts.
-  const callerRelationship = String(extraction.caller?.relationship_to_property || 'unknown').trim() || 'unknown';
-  const explicitlyNonOwner = callerRelationship !== 'owner' && callerRelationship !== 'unknown';
-  // What the guard actually needs is a TRUSTED dispatch address, and the
-  // central address-trust gate below recognises exactly two ways to have one:
-  // a positive AV verdict, or a known customer's on-file address they did not
-  // restate (verified when it was saved). Demanding only the first blocked the
-  // commonest shape of the very call this ruling exists for (codex round-20
-  // P1) — a returning customer says "same place as always", so nothing is
-  // stated, no AV runs, no address flag fires, and caller_not_authorized was
-  // left as the incidental last block. Same predicate as the central gate, so
-  // the two can never disagree about what "trusted" means.
-  const trustedDispatchAddress = avPositivelyValidated || dispatchesToOnFileAddress(extraction, opts);
-  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour && trustedDispatchAddress) {
-    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
-      if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
-      return true;
-    });
-  }
+  // caller_not_authorized now fires only for an EXPLICIT third party
+  // (isExplicitlyNonOwner) — an 'unknown' relationship never raises it and a
+  // model-emitted copy is dropped above — so the unknown-relationship
+  // demotion that used to live here (owner ruling 2026-07-31) is satisfied
+  // at derivation time. Explicit third parties still route through the
+  // agent-commitment demotion below.
 
   // Agent-commitment authorization (opts.agentCommitFailOpen ←
   // GATE_CALL_AGENT_COMMIT_BOOKING): when OUR agent explicitly committed to
@@ -1401,7 +1410,12 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   }
 
   const flags = Array.isArray(v2TriageFlags) ? v2TriageFlags : [];
-  if (flags.includes('caller_not_authorized')) needsConfirmation.push('caller_not_authorized');
+  // Same relationship rule as routing (codex r1 P2): in shadow mode the
+  // processor hands the RAW V2 flags here, so a model-emitted
+  // caller_not_authorized on an unknown / spouse caller would still open
+  // the review card enforce mode no longer raises. Only an explicit third
+  // party (tenant, agent, manager, other) carries the ask.
+  if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)) needsConfirmation.push('caller_not_authorized');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -1627,6 +1641,8 @@ function dispatchesToOnFileAddress(extraction, opts = {}) {
 }
 
 module.exports = {
+  SCHEDULING_CHANGE_REVIEW_FLAGS,
+  isExplicitlyNonOwner,
   computeDeterministicTriageFlags,
   statesNewAddress,
   dispatchesToOnFileAddress,

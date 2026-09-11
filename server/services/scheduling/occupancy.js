@@ -39,6 +39,7 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
+const { occupiedRows } = require('./visit-capacity');
 
 const DEFAULT_DURATION_MINUTES = 60;
 
@@ -190,6 +191,9 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     the same rung-1 lock BEFORE extending the hold's expiry — a hold
 //     whose window a committed visit has since taken is superseded
 //     (released, delete-only) and the reserve throws instead of refreshing.
+//     Capacity holds also take selected-technician and unassigned day fences
+//     in canonical order before any row lock. This fences dispatch membership
+//     changes from another technician to unassigned through certification.
 //   services/slot-reservation.js commitReservation  1
 //     Keys rung 1 off an UNLOCKED read of the hold row's date; its
 //     FOR UPDATE follows the lock, and a date moved in between fails into
@@ -298,6 +302,7 @@ const CONFLICT_COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date',
   'window_start', 'window_end', 'status', 'service_type',
   'estimated_duration_minutes', 'reservation_expires_at', 'source_estimate_id',
+  'reservation_service_mix',
   // Seeded-placeholder identity (recurring child, still pending, never
   // customer-confirmed) — the rebooker's beyond-horizon series check reads
   // these to tell a disposable seeded row from a real booking.
@@ -395,7 +400,7 @@ async function findConflictingVisits({
     // no end) — same predicate as slot-reservation/rebooker/createSelfBooking.
     // window_start-NULL placeholder rows evaluate NULL here and stay inert.
     .whereRaw(
-      "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time",
+      "((window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time) OR reservation_service_mix->>'version' = '2')",
       [windowEnd, DEFAULT_DURATION_MINUTES, windowStart],
     );
   if (excludeIds.length) query.whereNotIn('id', excludeIds);
@@ -414,7 +419,13 @@ async function findConflictingVisits({
     });
   }
   const rows = await query.select(CONFLICT_COLUMNS).orderBy('window_start', 'asc');
-  return Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(rows)) return [];
+  // SQL already filters ordinary visits. Combined members need the full
+  // allocation span, while callers still receive the original database rows.
+  const occupied = occupiedRows(rows);
+  return rows.filter((row, index) => row.reservation_service_mix?.version !== 2
+    || (occupied[index].startMin != null && windowsOverlap(timeToMinutes(windowStart), timeToMinutes(windowEnd),
+      occupied[index].startMin, occupied[index].endMin)));
 }
 
 /**
@@ -460,7 +471,7 @@ async function findConflictingVisitsWithTravel({
   if (!Array.isArray(rows)) return [];
 
   const stops = [];
-  for (const row of rows) {
+  for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
     if (startMin == null) continue;
     const explicitEnd = timeToMinutes(row.window_end);
@@ -469,7 +480,7 @@ async function findConflictingVisitsWithTravel({
       : DEFAULT_DURATION_MINUTES;
     stops.push({
       startMin,
-      endMin: explicitEnd != null ? explicitEnd : startMin + durationMin,
+      endMin: row.endMin ?? (explicitEnd != null ? explicitEnd : startMin + durationMin),
       lat: row.lat,
       lng: row.lng,
       // A live hold never shadows a committed neighbour (travel-gap.js).
@@ -477,9 +488,9 @@ async function findConflictingVisitsWithTravel({
       row,
     });
   }
-  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row, reason]));
+  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row.id, reason]));
   // Query order (window_start asc), not conflict order.
-  return rows.filter((row) => reasonByRow.has(row)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row) }));
+  return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
 }
 
 /**
@@ -533,7 +544,7 @@ async function listOccupiedWindows({
   if (!Array.isArray(rows)) return [];
 
   const out = [];
-  for (const row of rows) {
+  for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
     if (startMin == null) continue;
     const endMin = timeToMinutes(row.window_end);
@@ -544,7 +555,7 @@ async function listOccupiedWindows({
       ...row,
       date: normalizeDate(row.scheduled_date),
       startMin,
-      endMin: endMin != null ? endMin : startMin + durationMin,
+      endMin: row.endMin ?? (endMin != null ? endMin : startMin + durationMin),
     });
   }
   return out;

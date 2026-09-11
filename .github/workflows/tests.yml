@@ -80,11 +80,27 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Request App receipt transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/request-app-receipts-postgres.test.js
       - name: Grouped closeout transaction tests
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js
+      - name: Historical invoice repair transaction tests
+        working-directory: server
+        env:
+          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/link-unlinked-visit-invoices-postgres.test.js tests/execute-visit-invoice-plan-postgres.test.js
+      - name: Visit summary identity transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
+        run: npx jest --ci --silent --runInBand tests/visit-summary-identity-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2
@@ -94,6 +110,11 @@ jobs:
         # above still runs every server test; this step adds the coverage gate.
         working-directory: server
         run: npm run test:customer-coverage
+      - name: Customer App preference and delivery transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/customer-app-notifications-postgres.test.js
       - name: DB-gated suites (serial, against the migrated database)
         working-directory: server
         env:
@@ -118,6 +139,11 @@ jobs:
         env:
           COMBINED_VISIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js
+      - name: Catalog allowance transaction tests
+        working-directory: server
+        env:
+          SCHEDULING_CAPACITY_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js tests/scheduling-capacity-holds-postgres.test.js
       - name: Shared reservation arrival transaction tests
         working-directory: server
         env:
@@ -142,7 +168,12 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-validation-db.test.js tests/intelligence-bar-target-context-db.test.js
+      - name: Intelligence Bar task recovery transaction tests
+        working-directory: server
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
@@ -151,6 +182,10 @@ jobs:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         working-directory: .
         run: npm run test:contracts
+      - name: Intelligence Bar real-database outcome regressions (scripted model)
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js
 
   client:
     runs-on: ubuntu-latest
@@ -182,10 +217,13 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:qa-workflow
       - name: Portal, payment, report and completion previews
         run: npm run qa:previews
+      - name: Email workspace synthetic scenarios
+        if: ${{ !cancelled() }}
+        run: node scripts/qa/admin-email-workspace.cjs
       - name: Estimate interaction and PDF previews
         if: ${{ !cancelled() }}
         env:
@@ -197,7 +235,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-qa-${{ github.sha }}
-          path: .tmp/qa/
+          path: |
+            .tmp/qa/
+            .tmp/email-workspace/
+          # Both paths live under a dot-directory, which upload-artifact@v4
+          # skips unless hidden files are opted in.
+          include-hidden-files: true
           retention-days: 7
 
   application-qa:

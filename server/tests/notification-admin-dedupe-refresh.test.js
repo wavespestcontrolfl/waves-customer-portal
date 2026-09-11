@@ -89,3 +89,17 @@ test('a content refresh without a supplied link preserves the existing destinati
   await NotificationService.notifyAdmin('alert', 'SMS needs follow-up', 'After', opts);
   expect(mockRows.notifications[0].link).toBe('/admin/customers?customerId=fixture');
 });
+
+test('a changed backlog version refreshes the same bell once even when the count and wording stay the same', async () => {
+  const opts = { dedupeKey: 'callback-backlog', refreshOnDedupe: true, dedupeVersion: 'initial' };
+  const first = await NotificationService.notifyAdmin('alert', '6 callbacks are due', 'Open the callbacks', opts);
+  mockRows.notifications[0].read_at = new Date();
+  const changed = await NotificationService.notifyAdmin('alert', '6 callbacks are due', 'Open the callbacks', { ...opts, dedupeVersion: 'reopened' });
+  expect(changed).toMatchObject({ id: first.id, refreshed: true, read_at: null });
+  mockRows.notifications[0].read_at = new Date();
+  const repeat = await NotificationService.notifyAdmin('alert', '6 callbacks are due', 'Open the callbacks', { ...opts, dedupeVersion: 'reopened' });
+  expect(repeat.refreshed).toBeUndefined();
+  expect(repeat.read_at).not.toBeNull();
+  expect(mockRows.notifications).toHaveLength(1);
+  expect(mockUpdates).toHaveLength(1);
+});
