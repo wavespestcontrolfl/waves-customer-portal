@@ -1304,10 +1304,15 @@ router.post('/sms', async (req, res) => {
         const claimed = await claimUnknownSenderAlertWindow(From);
         if (claimed) {
           // Secondary guard: a row stamped sms_reply_alerted by any other
-          // writer (or one that predates this claims table) still counts.
+          // writer (e.g. the loud-reaction path, which never claims) still
+          // counts — but this claim was just freshly stamped expiring 4h
+          // from NOW, not from that receipt's actual timestamp. Release it
+          // rather than leave an over-long hold: the real expiry already
+          // lives on the receipt itself, so the next message's windowHeld()
+          // keeps reading the correct (possibly much sooner) cutoff instead
+          // of this claim's inflated one (codex pre-push audit P1).
           if (await windowHeld()) {
-            // Already alerted through some other path — leave the claim
-            // held for the rest of the window rather than releasing it.
+            await releaseUnknownSenderAlertClaim(From);
           } else if (!(await ringNow())) {
             // Nothing actually delivered — release so a later message in
             // this window gets another chance (mirrors the voicemail/

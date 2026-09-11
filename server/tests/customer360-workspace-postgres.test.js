@@ -240,4 +240,48 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);
+
+  test('the retarget follows the sender across the business numbers they texted, not just one conversation (pre-push audit P1)', async () => {
+    const firstConversationId = randomUUID();
+    const secondConversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-alerted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // The SAME unknown sender texted two different business numbers —
+      // conversations are keyed by (contact_phone, channel, our_endpoint_id),
+      // so this is two conversation rows, but the throttle/claim that rang
+      // the one bell is keyed on the raw phone across both.
+      await mockPg('conversations').insert([
+        { id: firstConversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' },
+        { id: secondConversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550191' },
+      ]);
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: firstConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text, first number', created_at: new Date(Date.now() - 120000) },
+        // Same sender, a DIFFERENT conversation (second business number) —
+        // throttled: the 4h per-sender window suppressed its own bell.
+        { id: laterMessageId, conversation_id: secondConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, second number', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Reading the alerted message in the FIRST conversation must retarget
+      // to the unread message in the SECOND — a conversation-scoped check
+      // would find nothing remaining in the first conversation and wrongly
+      // clear the sender's only bell.
+      await markInboundSmsRead({ messageIds: [alertedMessageId], role: 'admin' });
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').whereIn('id', [firstConversationId, secondConversationId]).delete();
+    }
+  }, 30000);
 });

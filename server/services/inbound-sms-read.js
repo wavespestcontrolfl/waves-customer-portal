@@ -80,27 +80,36 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       // Retarget an unknown-sender bell BEFORE clearing (codex #4210
       // head-round P2): the throttle rings once per 4h window, so a
       // single-message read of exactly that alerted SID would otherwise
-      // clear the thread's only bell while a later throttled message in the
-      // SAME conversation is still unread — and that later message's own
+      // clear the thread's only bell while a later throttled message from
+      // the SAME sender is still unread — and that later message's own
       // read, in a future call, can never match the bell (it's keyed to
-      // the SID that just cleared). Point the bell at a still-unread SID in
-      // the conversation first, mirroring the customer-scoped
+      // the SID that just cleared). Point the bell at a still-unread SID
+      // from that sender first, mirroring the customer-scoped
       // nothing-left-unread check below for threads that have no
-      // customer_id to key that check on.
+      // customer_id to key that check on. Scoped by contact_phone, not
+      // conversation_id: the throttle and the claim are keyed on the raw
+      // sender phone across every conversation it owns (one per
+      // our_endpoint_id it has texted), so a sender who has texted two
+      // business numbers within the window shares ONE bell across both
+      // conversations (pre-push audit P1).
       const unknownReadRows = await db('messages as m')
         .join('conversations as c', 'c.id', 'm.conversation_id')
         .whereNull('c.customer_id')
         .whereIn('m.twilio_sid', mirrorSids)
-        .select('m.twilio_sid', 'm.conversation_id');
-      const readSidsByConversation = {};
-      for (const row of unknownReadRows) (readSidsByConversation[row.conversation_id] ??= []).push(row.twilio_sid);
-      for (const [conversationId, readSids] of Object.entries(readSidsByConversation)) {
-        const remaining = await db('messages')
-          .where({ conversation_id: conversationId, channel: 'sms', direction: 'inbound' })
-          .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
-          .whereNotNull('twilio_sid')
-          .orderBy('created_at', 'asc')
-          .first('twilio_sid');
+        .select('m.twilio_sid', 'c.contact_phone');
+      const readSidsByPhone = {};
+      for (const row of unknownReadRows) {
+        if (row.contact_phone) (readSidsByPhone[row.contact_phone] ??= []).push(row.twilio_sid);
+      }
+      for (const [phone, readSids] of Object.entries(readSidsByPhone)) {
+        const remaining = await db('messages as m')
+          .join('conversations as c', 'c.id', 'm.conversation_id')
+          .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
+          .whereNull('c.customer_id')
+          .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+          .whereNotNull('m.twilio_sid')
+          .orderBy('m.created_at', 'asc')
+          .first('m.twilio_sid');
         if (!remaining?.twilio_sid) continue; // nothing left unread — leave the bell keyed to a SID that will clear normally below
         await db('notifications')
           .where({ recipient_type: 'admin', category: 'inbound_sms' })

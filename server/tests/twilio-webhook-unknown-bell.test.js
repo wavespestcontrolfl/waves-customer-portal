@@ -234,6 +234,25 @@ test('a claim write failure rings unfenced rather than dropping first contact', 
   expect(triggerNotification).toHaveBeenCalledTimes(1);
 });
 
+test('a claim is released, not extended, when a prior receipt (rung outside the claim path) already covers the window', async () => {
+  // A loud reaction rings ringSmsReplyBell directly without ever claiming
+  // (twilio-webhook.js's reaction branch), so its receipt has no matching
+  // claims-table row — only the sms_log stamp windowHeld() reads.
+  const priorReceiptAt = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3h ago — still inside the 4h window
+  const row = { direction: 'inbound', from_phone: sender, to_phone: numbers.locations.parrish.number,
+    message_type: 'inbound', created_at: priorReceiptAt, twilio_sid: 'SM-prior-reaction',
+    metadata: JSON.stringify({ sms_reply_alerted: true }) };
+  if (mockPg) await mockPg('sms_log').insert(row);
+  else mockState.sms.push(row);
+  mockState.ai = false;
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).not.toHaveBeenCalled();
+  // Fixed (pre-push audit P1): the fresh claim this message took is
+  // released rather than left with a 4h-from-now expiry that would
+  // outlive the real receipt's own (much sooner) cutoff.
+  expect(mockState.claims.has(sender)).toBe(false);
+});
+
 test('a claimed window that never delivers is released for the next message to retry', async () => {
   mockState.ai = false;
   triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 } });
