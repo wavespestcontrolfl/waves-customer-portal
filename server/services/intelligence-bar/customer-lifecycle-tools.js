@@ -13,8 +13,9 @@
  * untouched — same transaction, same FK repoint, same journal, same revert
  * path as the admin duplicates-queue route
  * (routes/admin-customer-duplicates.js). The card's pins (both customer
- * versions and the disclosed effects fingerprint) are validated by the
- * executor UNDER its row locks, never in a caller-side preflight.
+ * versions and the engine's effect fingerprint, describeMergeEffects) are
+ * validated by the executor UNDER its row locks, never in a caller-side
+ * preflight; the final duplicate-queue eligibility decision runs there too.
  *
  * archive_customer (retire a record outright) was split out of this module:
  * it ships separately on a shared archive service with the DELETE
@@ -25,66 +26,21 @@ const db = require('../../models/db');
 const logger = require('../logger');
 
 // The transferred columns executeMerge backfills between winner and loser
-// (customer-dedupe.js ~1680-1810: stripe_customer_id/billing_mode/payer_id/
-// autopay_enabled/is_primary_profile, the three service-contact slots, and
-// their consent stamp) — disclosed both-sided, null-safe, in the preview so
-// the confirmation card shows exactly what the merge would carry over.
+// (customer-dedupe.js predictWinnerBackfills: stripe_customer_id/billing_mode/
+// payer_id/autopay_enabled/is_primary_profile, the three service-contact
+// slots and their consent stamp, the money and restriction inputs) —
+// disclosed both-sided, null-safe, in the preview so the confirmation card
+// shows the inputs beside the engine's own predicted outcome.
 const BILLING_CONTACT_COLUMNS = [
   'stripe_customer_id', 'billing_mode', 'payer_id', 'autopay_enabled', 'is_primary_profile',
   'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role',
   'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role',
   'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role',
   'service_contacts_consent_at', 'service_contacts_consent_source', 'service_contacts_consent_text_version',
-  // Money the executor moves or adopts: cached credit balance (added to the
-  // winner), per-application fee (rides along with a loser-only billing mode).
   'per_application_fee', 'account_credits',
-  // The most-restrictive settings the winner inherits (customer-dedupe.js
-  // inheritedAutopayRestrictions): disclosed both-sided AND as the resulting
-  // restriction set in financial_effects.
   'autopay_paused_until', 'autopay_pause_reason', 'auto_apply_account_credit',
+  'address_line1', 'address_line2', 'city', 'state', 'zip',
 ];
-
-// The executor's special-case money effects, stated as amounts the card can
-// show — not inferable from FK row counts: the loser's cached credit balance
-// is added to the winner; a loser-only per-application billing mode (and its
-// fee) is adopted when the winner has none; the loser's plan-rate rows are
-// DELETED, not repointed (customer_plan_rates is excluded from the generic
-// FK repoint — the ledger is rebuilt on the winner); a loser referral
-// enrollment is folded into the winner's (balances added, promoter-keyed
-// rows repointed) — that fold is read by the engine's own effect reader;
-// the winner inherits the loser's more restrictive autopay / credit
-// settings (the engine's own rule, never re-derived here). A referral fold
-// into an existing winner enrollment is a collision handler: the journal
-// records it and the duplicates-queue revert refuses such merges (restore
-// by hand from the snapshot) — disclosed up front as predicted_collision_
-// handlers + revertible_from_queue, and pinned in the fingerprint. Other
-// collision folds (e.g. duplicate customer_tags) are only knowable inside
-// the executor's sweep, so the card states the limitation rather than a
-// false "revertible" promise.
-async function financialEffects(database, winner, loser, referral) {
-  const { inheritedAutopayRestrictions } = require('../customer-dedupe');
-  const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
-  const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
-  const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
-    && loser.per_application_fee != null && loser.per_application_fee !== '';
-  let loserPlanRates = 0;
-  try {
-    const row = await database('customer_plan_rates').where({ customer_id: loser.id }).count({ n: '*' }).first();
-    loserPlanRates = Number(row?.n || 0);
-  } catch {
-    loserPlanRates = 'unknown';
-  }
-  return {
-    account_credits_moved_to_winner: credits,
-    billing_mode_adopted_from_loser: adoptsBillingMode ? loser.billing_mode : null,
-    per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
-    loser_plan_rate_rows_deleted: loserPlanRates,
-    referral_fold: referral,
-    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser),
-    predicted_collision_handlers: referral?.folded_into_winner_promoter ? ['referral_promoters'] : [],
-    revertible_from_queue: referral?.folded_into_winner_promoter ? false : 'unless the sweep has to fold colliding rows (journaled)',
-  };
-}
 
 function billingSnapshot(row) {
   const snapshot = {};
@@ -92,27 +48,15 @@ function billingSnapshot(row) {
   return snapshot;
 }
 
-// The card's disclosed effect set as one stable string: per-table moving
-// counts (FK sweep + polymorphic pointers) + the money effects (credits,
-// billing mode, plan rates, referral fold), key-sorted. The route pins the
-// preview's fingerprint on the approved card; the confirmed path recomputes
-// it UNDER executeMerge's row locks and refuses on any difference — a child
-// row (invoice, visit, message) added or removed on the loser since the card
-// was shown never rides silently into the merge (pre-push Codex P1: related-
-// row effects were only sampled unlocked).
-function effectsFingerprint(moving, financialEffects) {
-  const sortKeys = (obj) => Object.fromEntries(Object.entries(obj || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-  return JSON.stringify({ moving: sortKeys(moving), financial_effects: sortKeys(financialEffects) });
-}
-
 function customerName(row) {
   return `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
 }
 
 async function loadMergePair(winnerId, loserId) {
+  // Whole rows: the engine's effect reader and backfill rule read every
+  // column the executor's own locked select(*) sees.
   const rows = await db('customers').whereIn('id', [winnerId, loserId])
-    .select('id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at',
-      ...BILLING_CONTACT_COLUMNS, db.raw('updated_at::text AS version'));
+    .select('*', db.raw('updated_at::text AS version'));
   return {
     winner: rows.find((r) => String(r.id) === String(winnerId)) || null,
     loser: rows.find((r) => String(r.id) === String(loserId)) || null,
@@ -137,11 +81,14 @@ async function loadMergeEligibility(winnerId, loserId) {
   const { duplicatePairEligibility } = require('../customer-dedupe');
   const eligibility = await duplicatePairEligibility(winnerId, loserId);
   if (!eligibility.eligible) {
+    // Refusals never carry names: the route runs this preview BEFORE
+    // validateRecordTarget, so a failure on a foreign pair must read the
+    // same as any other refusal (Codex r3 P1).
     if (eligibility.code === 'address_conflict') {
       return {
         ok: false,
         code: 'address_conflict',
-        error: `${customerName(loser)} has a different service address than ${customerName(winner)} — merge this pair from the admin duplicates queue using "Merge + keep address" instead (the Intelligence Bar does not support keeping a second address).`,
+        error: 'The two records have different service addresses — merge this pair from the admin duplicates queue using "Merge + keep address" instead (the Intelligence Bar does not support keeping a second address).',
       };
     }
     return { ok: false, error: eligibility.reason, code: eligibility.code };
@@ -153,9 +100,8 @@ async function previewMergeCustomers(winnerId, loserId) {
   const check = await loadMergeEligibility(winnerId, loserId);
   if (!check.ok) return { error: check.error, code: check.code };
   const { winner, loser, eligibility } = check;
-  const { previewMergeEffects } = require('../customer-dedupe');
-  const { moving, referral } = await previewMergeEffects(db, winnerId, loserId);
-  const financial_effects = await financialEffects(db, winner, loser, referral);
+  const { describeMergeEffects } = require('../customer-dedupe');
+  const { moving, financial_effects, fingerprint } = await describeMergeEffects(db, winner, loser);
   const winnerName = customerName(winner);
   const loserName = customerName(loser);
   return {
@@ -174,7 +120,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     billing_and_contacts: { winner: billingSnapshot(winner), loser: billingSnapshot(loser) },
     financial_effects,
     moving,
-    effects_fingerprint: effectsFingerprint(moving, financial_effects),
+    effects_fingerprint: fingerprint,
     note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
@@ -207,20 +153,13 @@ async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVe
       // preview) — the preflight sample above is only the fallback for a
       // direct call with no card, never a substitute for the approved pin.
       expectedVersions: approvedVersions || { winner: before.winner.version, loser: before.loser.version },
-      // Related-row effects validated under the SAME locks: the approved
-      // card's fingerprint (route pin) against a recount through the
-      // executor's transaction. Without a pin (direct call, no card) the
-      // effects are not asserted — the version check above still holds.
-      underLock: approvedEffects ? async (trx, { winner, loser }) => {
-        const { previewMergeEffects } = require('../customer-dedupe');
-        const { moving: lockedMoving, referral } = await previewMergeEffects(trx, winnerId, loserId);
-        const lockedEffects = await financialEffects(trx, winner, loser, referral);
-        if (effectsFingerprint(lockedMoving, lockedEffects) !== approvedEffects) {
-          const e = new Error('The rows that would move changed after the card was shown — ask again for a fresh confirmation card.');
-          e.previewChanged = true;
-          throw e;
-        }
-      } : null,
+      // The approved card's effect fingerprint (route pin) is recomputed by
+      // the executor over the LOCKED rows, and the final queue-eligibility
+      // decision runs there too under the pair's adjudication lock. Without
+      // a pin (direct call, no card) the effects are not asserted — the
+      // version check above still holds.
+      expectedEffectsFingerprint: approvedEffects || null,
+      requireQueueEligibility: true,
     });
     logger.info(`[intelligence-bar] merge_customers committed loser=${loserId} -> winner=${winnerId} (journal ${result.journalId})`);
     return {
@@ -292,5 +231,5 @@ module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   executeCustomerLifecycleTool,
   // exported for tests
-  _test: { customerName, effectsFingerprint },
+  _test: { customerName },
 };

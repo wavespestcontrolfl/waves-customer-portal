@@ -676,7 +676,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // an outbound message (customer texts on a notifying move, the tax
     // advisor's admin SMS) or spends externally (price research) cannot be
     // undone from the portal.
-    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup',
+    // Input-dependent irreversibility rides on the preview: a merge whose
+    // fold the duplicates-queue undo refuses says revertible_from_queue:false.
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+      || preview?.financial_effects?.revertible_from_queue === false,
     notifies_customer: notifiesCustomer,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),

@@ -759,6 +759,34 @@ describe('executeMerge', () => {
     await expect(drift).rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/loser customer changed since this merge was approved/) });
   });
 
+  it('validates an approved effect fingerprint (expectedEffectsFingerprint) over the LOCKED rows and refuses drift with previewChanged', async () => {
+    const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', account_credits: '0' };
+    const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', account_credits: '5' };
+    const build = () => buildTrx({ winner, loser, fkRows: FK_ROWS });
+    const approved = (await dedupe.describeMergeEffects(build().trx, winner, loser)).fingerprint;
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', expectedEffectsFingerprint: approved }))
+      .resolves.toBeTruthy();
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', expectedEffectsFingerprint: 'stale-card' }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/rows that would move changed since this merge was approved/) });
+  });
+
+  it('requireQueueEligibility re-decides duplicate eligibility INSIDE the transaction under the pair adjudication lock and refuses a pair that is no longer in the queue', async () => {
+    const { trx } = buildTrx({
+      winner: { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003' },
+      loser: { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003' },
+      fkRows: FK_ROWS,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    // The harness serves no queue rows to the unlocked customers read → not_in_queue.
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
+    const lockCall = trx.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql)));
+    expect(lockCall).toBeTruthy();
+    expect(lockCall[1]).toEqual([`customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`]);
+  });
+
   it('refuses when both rows have Stripe profiles', async () => {
     const { trx } = buildTrx({
       winner: { id: WINNER, stripe_customer_id: 'cus_a', phone: '+19995550003' },
@@ -2128,6 +2156,85 @@ describe('inheritedAutopayRestrictions (pure rule shared by executeMerge and the
   it('a shorter or expired loser pause does not shorten the winner\'s', () => {
     expect(dedupe.inheritedAutopayRestrictions({ autopay_paused_until: '2026-12-01T00:00:00Z' }, { autopay_paused_until: '2026-10-01T00:00:00Z' }, NOW)).toEqual({});
     expect(dedupe.inheritedAutopayRestrictions({}, { autopay_paused_until: '2026-01-01T00:00:00Z', autopay_pause_reason: 'old' }, NOW)).toEqual({});
+  });
+});
+
+describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by the IB preview)', () => {
+  it('fills empty identity fields, replaces a partial address as a TUPLE and journals the overwritten prior values', () => {
+    const winner = { id: 'W', first_name: 'Real', last_name: null, email: null, address_line1: null, city: 'Bradenton', state: 'FL', zip: '34207' };
+    const loser = { id: 'L', first_name: 'Unknown', last_name: 'Customer', email: 'stub@example.com', address_line1: '100 Test St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231' };
+    const { backfills, winnerPriorValues } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills).toMatchObject({ last_name: 'Customer', email: 'stub@example.com', address_line1: '100 Test St', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231' });
+    expect(backfills.first_name).toBeUndefined();
+    expect(winnerPriorValues).toEqual({ city: 'Bradenton', state: 'FL', zip: '34207' });
+  });
+
+  it('a street-only winner absorbing a same-street unit-bearing loser keeps the unit; loser-only billing mode + fee and payer transfer', () => {
+    const winner = { id: 'W', address_line1: '100 Test St', address_line2: null, billing_mode: null, per_application_fee: null, payer_id: null };
+    const loser = { id: 'L', address_line1: '100 Test St Apt 4B', address_line2: null, billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' };
+    const { backfills } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills.address_line1).toBeUndefined();
+    expect(backfills.address_line2).toMatch(/4B/);
+    expect(backfills).toMatchObject({ billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' });
+  });
+
+  it('a loser-only Stripe profile (or the executor\'s saved-card derivation) transfers; contact slots move slot-wise with their consent stamp only when the winner had none', () => {
+    const winner = { id: 'W', stripe_customer_id: null, service_contact_name: null, service_contact_phone: null, service_contact_email: null, service_contact_role: null, service_contacts_consent_at: null };
+    const loser = { id: 'L', stripe_customer_id: null, service_contact_name: 'Pat', service_contact_phone: '9415550199', service_contact_email: null, service_contact_role: 'tenant', service_contacts_consent_at: '2026-08-01T00:00:00Z', service_contacts_consent_source: 'portal', service_contacts_consent_text_version: 'v3' };
+    const rowOnly = dedupe.predictWinnerBackfills(winner, loser).backfills;
+    expect(rowOnly.stripe_customer_id).toBeUndefined();
+    expect(rowOnly).toMatchObject({ service_contact_name: 'Pat', service_contact_phone: '9415550199', service_contact_role: 'tenant', service_contacts_consent_at: '2026-08-01T00:00:00Z', service_contacts_consent_source: 'portal', service_contacts_consent_text_version: 'v3' });
+    const derived = dedupe.predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: 'cus_derived' }).backfills;
+    expect(derived.stripe_customer_id).toBe('cus_derived');
+    expect(dedupe.predictWinnerBackfills(winner, { ...loser, stripe_customer_id: 'cus_loser' }).backfills.stripe_customer_id).toBe('cus_loser');
+  });
+
+  it('same-account primary handoff promotes the winner; a newer accepted-terms version is absorbed', () => {
+    const winner = { id: 'W', account_id: 'acct', is_primary_profile: false, accepted_terms_version: 'v2026-01' };
+    const loser = { id: 'L', account_id: 'acct', is_primary_profile: true, accepted_terms_version: 'v2026-08' };
+    const { backfills, winnerPriorValues } = dedupe.predictWinnerBackfills(winner, loser);
+    expect(backfills).toMatchObject({ is_primary_profile: true, accepted_terms_version: 'v2026-08' });
+    expect(winnerPriorValues).toEqual({ accepted_terms_version: 'v2026-01' });
+  });
+});
+
+describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-owned)', () => {
+  const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
+  const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', billing_mode: null, per_application_fee: null, account_credits: '0', address_line1: '100 Test St', email: null };
+  const loser = { id: 'L', first_name: 'Unknown', last_name: '', billing_mode: 'per_application', per_application_fee: '85.00', account_credits: '12.50', address_line1: null, email: 'stub@example.com', autopay_enabled: false };
+  function install(counts = {}) {
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return null;
+      if (table === 'customer_plan_rates') return { n: counts.customer_plan_rates || 0 };
+      return { n: counts[table] || 0 };
+    });
+  }
+  it('states moving counts, money effects, inherited restrictions, predicted backfills (row-derived, with the Stripe caveat) and the undo state, key-sorted in one fingerprint', async () => {
+    install({ invoices: 2, customer_plan_rates: 1 });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.moving).toEqual({ invoices: 2, total_rows: 2 });
+    expect(out.financial_effects).toEqual({
+      account_credits_moved_to_winner: 12.5,
+      billing_mode_adopted_from_loser: 'per_application',
+      per_application_fee_adopted_from_loser: 85,
+      loser_plan_rate_rows_deleted: 1,
+      referral_fold: { loser_enrolled: false },
+      autopay_restrictions_inherited: { autopay_enabled: false },
+      winner_backfills: { email: 'stub@example.com', billing_mode: 'per_application', per_application_fee: '85.00' },
+      winner_backfills_caveat: expect.stringMatching(/Stripe profile derived from saved cards/),
+      predicted_collision_handlers: [],
+      revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
+    });
+    const parsed = JSON.parse(out.fingerprint);
+    expect(parsed).toEqual({ moving: out.moving, financial_effects: out.financial_effects });
+    expect(Object.keys(parsed.financial_effects)).toEqual([...Object.keys(parsed.financial_effects)].sort());
+    // Same rows, same answer: the executor recomputes this over its locked rows and compares strings.
+    install({ invoices: 2, customer_plan_rates: 1 });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).toBe(out.fingerprint);
+    // One more invoice on the loser → a different fingerprint.
+    install({ invoices: 3, customer_plan_rates: 1 });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
   });
 });
 

@@ -18,7 +18,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
-  findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty,
+  findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
   countActivityRows, activityColumnsFor,
 } = require('../services/customer-dedupe');
@@ -594,15 +594,21 @@ router.post('/dismiss', async (req, res) => {
   }
   const [a, b] = customerIdA < customerIdB ? [customerIdA, customerIdB] : [customerIdB, customerIdA];
   try {
-    await db('customer_duplicate_dismissals')
-      .insert({
-        customer_id_a: a,
-        customer_id_b: b,
-        reason: reason ? String(reason).slice(0, 500) : null,
-        created_by: performedBy(req),
-      })
-      .onConflict(['customer_id_a', 'customer_id_b'])
-      .ignore();
+    // Under the pair's adjudication lock: a confirmed-card merge of this
+    // pair re-decides eligibility under the same lock, so a verdict here
+    // and a merge there cannot interleave (customer-dedupe.js).
+    await db.transaction(async (trx) => {
+      await acquirePairAdjudicationLock(trx, a, b);
+      await trx('customer_duplicate_dismissals')
+        .insert({
+          customer_id_a: a,
+          customer_id_b: b,
+          reason: reason ? String(reason).slice(0, 500) : null,
+          created_by: performedBy(req),
+        })
+        .onConflict(['customer_id_a', 'customer_id_b'])
+        .ignore();
+    });
     res.json({ ok: true });
   } catch (err) {
     logger.error(`[admin-customer-duplicates] dismiss failed: ${err.message}`);

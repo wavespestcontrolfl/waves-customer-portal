@@ -916,6 +916,156 @@ function inheritedAutopayRestrictions(winner, loser, now = Date.now()) {
   return restrictions;
 }
 
+// ---------------------------------------------------------------------------
+// Winner backfill prediction (pure) — what executeMerge copies onto the
+// surviving row from the retired one. ONE rule, used by the executor under
+// its locks and by the IB merge preview (disclosed + pinned on the card), so
+// a preview can never describe a different backfill than the merge applies.
+// `derivedStripeCustomerId` is the executor's saved-card derivation (needs
+// payment_methods reads); previews pass null and disclose that caveat.
+// ---------------------------------------------------------------------------
+function promoteWinnerAsPrimaryRule(winner, loser) {
+  return Boolean(
+    loser.is_primary_profile
+    && loser.account_id
+    && loser.account_id === winner.account_id
+    && !winner.is_primary_profile,
+  );
+}
+
+function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
+  const winnerPriorValues = {};
+  const backfills = {};
+  for (const field of BACKFILL_FIELDS) {
+    if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
+  }
+  // An address backfills as a TUPLE: a winner with no street but a stale
+  // city/ZIP absorbing the loser's real service address must not mint a
+  // mixed address (dispatch and report fallbacks read these columns
+  // together). When the street comes from the loser, the whole tuple does.
+  if (backfills.address_line1) {
+    // The tuple REPLACES the winner's partial address wholesale — journal
+    // any non-empty prior value being overwritten (e.g. the winner's
+    // original ZIP) so the undo can put it back. Empty priors need no
+    // record: the generic backfill-clear already vacates those to null.
+    for (const field of ['address_line2', 'city', 'state', 'zip']) {
+      if (!isEmptyValue(winner[field])) winnerPriorValues[field] = winner[field];
+    }
+    backfills.address_line2 = loser.address_line2 || null;
+    backfills.city = loser.city || null;
+    backfills.state = loser.state || null;
+    backfills.zip = loser.zip || null;
+  }
+  // A loser-only Stripe profile must move with its payment methods: the
+  // repointed payment_methods rows live on THAT Stripe customer, and a
+  // later ensureStripeCustomer(winner) would mint a fresh profile and
+  // strand every saved card. (Both-have-Stripe was refused above.)
+  if (!winner.stripe_customer_id && (loser.stripe_customer_id || derivedStripeCustomerId)) {
+    backfills.stripe_customer_id = loser.stripe_customer_id || derivedStripeCustomerId;
+  }
+  // A loser-only third-party payer default transfers the same way —
+  // without it the merged account self-pays and bills the homeowner
+  // instead of the AP payer. (Different-payers was refused above.)
+  if (!winner.payer_id && loser.payer_id) {
+    backfills.payer_id = loser.payer_id;
+  }
+  // A loser-only billing mode transfers the same way; per_application_fee
+  // rides along when the winner has none (the completion biller reads it
+  // with the mode).
+  if (!winner.billing_mode && loser.billing_mode) {
+    backfills.billing_mode = loser.billing_mode;
+    if (isEmptyValue(winner.per_application_fee) && !isEmptyValue(loser.per_application_fee)) {
+      backfills.per_application_fee = loser.per_application_fee;
+    }
+  }
+  // A street-only winner absorbing a unit-bearing loser (same street key,
+  // one-sided unit = a compatible match) must keep the unit — it is the
+  // only piece of the service address that distinguishes the apartment.
+  // The loser's line2 copies as-is; a unit embedded in the loser's line1
+  // is re-extracted with case preserved.
+  const winnerKey = normalizeStreetKey(winner.address_line1);
+  const loserKey = normalizeStreetKey(loser.address_line1);
+  const winnerHasUnit = Boolean((winnerKey && winnerKey.unit) || unitFromLine2(winner.address_line2));
+  const loserUnitText = loser.address_line2
+    || rawUnitText(loser.address_line1)
+    || null;
+  if (!winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
+    && ((loserKey && loserKey.unit) || unitFromLine2(loser.address_line2))
+    && isEmptyValue(winner.address_line2) && loserUnitText) {
+    backfills.address_line2 = loserUnitText;
+  }
+  if (promoteWinnerAsPrimaryRule(winner, loser)) {
+    backfills.is_primary_profile = true;
+  }
+  // On-location service contacts route appointment/service-report comms
+  // (customer-contact.js): copy slot-WISE, never field-wise — mixing one
+  // slot's name with another's phone would invent a contact that doesn't
+  // exist. A slot moves only when the winner's whole slot is empty.
+  const CONTACT_SLOTS = [
+    ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
+    ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
+    ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
+  ];
+  let movedContactSlot = false;
+  let movedContactPhone = false;
+  const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
+  for (const slot of CONTACT_SLOTS) {
+    const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
+    if (!winnerSlotEmpty) continue;
+    for (const f of slot) {
+      if (!isEmptyValue(loser[f])) {
+        backfills[f] = loser[f];
+        movedContactSlot = true;
+        // slot[1] is the phone column — only a moved TEXTING target can
+        // invalidate the winner's SMS-consent stamp below.
+        if (f === slot[1]) movedContactPhone = true;
+      }
+    }
+  }
+  // Consent artifact travels WITH the contacts it describes (#2948) — but
+  // ONLY when the resulting contact list is exactly the loser's (winner
+  // had no contacts at all and no stamp). If the winner already held any
+  // contact — including one whose stamp an admin edit cleared — carrying
+  // the loser's stamp would re-authorize texting people it never
+  // described; leave it cleared and require re-attestation instead.
+  if (movedContactSlot
+    && !winnerHadAnyContact
+    && isEmptyValue(winner.service_contacts_consent_at)
+    && !isEmptyValue(loser.service_contacts_consent_at)) {
+    backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
+    backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
+    backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
+  } else if (movedContactPhone && winnerHadAnyContact
+    && !isEmptyValue(winner.service_contacts_consent_at)) {
+    // Mixed list: the winner's stamp described only the winner's own
+    // contacts; loser slots just joined the row, so the stamp no longer
+    // describes the stored list — clear it and require re-attestation.
+    backfills.service_contacts_consent_at = null;
+    backfills.service_contacts_consent_source = null;
+    backfills.service_contacts_consent_text_version = null;
+    // winner_backfills records the APPLIED value (null) — journal the
+    // winner's PRIOR stamps separately so an undo can restore them once
+    // the appended loser contacts are gone (the stamp describes the
+    // winner's own list again). Pre-upgrade journals lack this key and
+    // keep today's behavior (stamp stays cleared; re-attest by hand).
+    winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
+    winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
+    winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
+  }
+  // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
+  // estimate_acceptances rows repoint to the winner below, so the winner's
+  // customer-level "latest version accepted on any estimate" must absorb a
+  // newer (or only) loser version. Versions are 'vYYYY-MM' — string order is
+  // chronological. The winner's prior value is journaled for the undo.
+  if (!isEmptyValue(loser.accepted_terms_version)
+    && (isEmptyValue(winner.accepted_terms_version)
+      || String(loser.accepted_terms_version) > String(winner.accepted_terms_version))) {
+    if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
+    backfills.accepted_terms_version = loser.accepted_terms_version;
+  }
+  return { backfills, winnerPriorValues };
+}
+
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
@@ -977,7 +1127,7 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, underLock = null }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -1059,11 +1209,33 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw err;
       }
     }
-    // Caller-supplied assertion that runs INSIDE the executor's transaction
-    // with both customer rows locked (the IB merge tool recounts the card's
-    // disclosed related-row effects here). It throws to refuse; a
-    // previewChanged error means "ask for a fresh card", nothing committed.
-    if (typeof underLock === 'function') await underLock(trx, { winner, loser });
+    // Confirmed-card merges (the Intelligence Bar): the final duplicate-queue
+    // eligibility decision runs INSIDE this transaction, after the row locks
+    // and under the pair's adjudication lock — the same lock the dismissal
+    // writers take — so a "not a duplicate" verdict or a queue regrouping
+    // landing between the card and this point refuses the merge instead of
+    // racing past it.
+    if (requireQueueEligibility) {
+      await acquirePairAdjudicationLock(trx, winnerId, loserId);
+      const eligibility = await duplicatePairEligibility(winnerId, loserId, trx);
+      if (!eligibility.eligible) {
+        const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
+        err.previewChanged = true;
+        throw err;
+      }
+    }
+    // The approved card's effect fingerprint (describeMergeEffects over the
+    // rows at card time) recomputed HERE over the locked rows: a child row
+    // added or removed, a balance, a backfill, a fold that differs from what
+    // the operator saw refuses with previewChanged, nothing committed.
+    if (expectedEffectsFingerprint) {
+      const effects = await describeMergeEffects(trx, winner, loser);
+      if (effects.fingerprint !== expectedEffectsFingerprint) {
+        const err = new Error('executeMerge: the rows that would move changed since this merge was approved — review a fresh proposal');
+        err.previewChanged = true;
+        throw err;
+      }
+    }
     // The surviving row must be live: retiring an active customer into an
     // inactive winner would hide them from every live-customer surface.
     if (winner.active === false) throw new Error('executeMerge: winner is inactive — reactivate it first or keep the other row');
@@ -1174,12 +1346,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // resolve via (account_id, is_primary_profile=true) — retiring the
     // account's primary without promoting the survivor would leave sibling
     // properties falling back to their own/default prefs.
-    const promoteWinnerAsPrimary = Boolean(
-      loser.is_primary_profile
-      && loser.account_id
-      && loser.account_id === winner.account_id
-      && !winner.is_primary_profile,
-    );
+    const promoteWinnerAsPrimary = promoteWinnerAsPrimaryRule(winner, loser);
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
@@ -1727,134 +1894,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       updated_at: trx.fn.now(),
     });
 
-    const backfills = {};
-    for (const field of BACKFILL_FIELDS) {
-      if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
-    }
-    // An address backfills as a TUPLE: a winner with no street but a stale
-    // city/ZIP absorbing the loser's real service address must not mint a
-    // mixed address (dispatch and report fallbacks read these columns
-    // together). When the street comes from the loser, the whole tuple does.
-    if (backfills.address_line1) {
-      // The tuple REPLACES the winner's partial address wholesale — journal
-      // any non-empty prior value being overwritten (e.g. the winner's
-      // original ZIP) so the undo can put it back. Empty priors need no
-      // record: the generic backfill-clear already vacates those to null.
-      for (const field of ['address_line2', 'city', 'state', 'zip']) {
-        if (!isEmptyValue(winner[field])) winnerPriorValues[field] = winner[field];
-      }
-      backfills.address_line2 = loser.address_line2 || null;
-      backfills.city = loser.city || null;
-      backfills.state = loser.state || null;
-      backfills.zip = loser.zip || null;
-    }
-    // A loser-only Stripe profile must move with its payment methods: the
-    // repointed payment_methods rows live on THAT Stripe customer, and a
-    // later ensureStripeCustomer(winner) would mint a fresh profile and
-    // strand every saved card. (Both-have-Stripe was refused above.)
-    if (!winner.stripe_customer_id && (loser.stripe_customer_id || derivedStripeCustomerId)) {
-      backfills.stripe_customer_id = loser.stripe_customer_id || derivedStripeCustomerId;
-    }
-    // A loser-only third-party payer default transfers the same way —
-    // without it the merged account self-pays and bills the homeowner
-    // instead of the AP payer. (Different-payers was refused above.)
-    if (!winner.payer_id && loser.payer_id) {
-      backfills.payer_id = loser.payer_id;
-    }
-    // A loser-only billing mode transfers the same way; per_application_fee
-    // rides along when the winner has none (the completion biller reads it
-    // with the mode).
-    if (!winner.billing_mode && loser.billing_mode) {
-      backfills.billing_mode = loser.billing_mode;
-      if (isEmptyValue(winner.per_application_fee) && !isEmptyValue(loser.per_application_fee)) {
-        backfills.per_application_fee = loser.per_application_fee;
-      }
-    }
-    // A street-only winner absorbing a unit-bearing loser (same street key,
-    // one-sided unit = a compatible match) must keep the unit — it is the
-    // only piece of the service address that distinguishes the apartment.
-    // The loser's line2 copies as-is; a unit embedded in the loser's line1
-    // is re-extracted with case preserved.
-    const winnerKey = normalizeStreetKey(winner.address_line1);
-    const loserKey = normalizeStreetKey(loser.address_line1);
-    const winnerHasUnit = Boolean((winnerKey && winnerKey.unit) || unitFromLine2(winner.address_line2));
-    const loserUnitText = loser.address_line2
-      || rawUnitText(loser.address_line1)
-      || null;
-    if (!winnerHasUnit && winnerKey && loserKey && winnerKey.key === loserKey.key
-      && ((loserKey && loserKey.unit) || unitFromLine2(loser.address_line2))
-      && isEmptyValue(winner.address_line2) && loserUnitText) {
-      backfills.address_line2 = loserUnitText;
-    }
-    if (promoteWinnerAsPrimary) {
-      backfills.is_primary_profile = true;
-    }
-    // On-location service contacts route appointment/service-report comms
-    // (customer-contact.js): copy slot-WISE, never field-wise — mixing one
-    // slot's name with another's phone would invent a contact that doesn't
-    // exist. A slot moves only when the winner's whole slot is empty.
-    const CONTACT_SLOTS = [
-      ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
-      ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
-      ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
-    ];
-    let movedContactSlot = false;
-    let movedContactPhone = false;
-    const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
-    for (const slot of CONTACT_SLOTS) {
-      const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
-      if (!winnerSlotEmpty) continue;
-      for (const f of slot) {
-        if (!isEmptyValue(loser[f])) {
-          backfills[f] = loser[f];
-          movedContactSlot = true;
-          // slot[1] is the phone column — only a moved TEXTING target can
-          // invalidate the winner's SMS-consent stamp below.
-          if (f === slot[1]) movedContactPhone = true;
-        }
-      }
-    }
-    // Consent artifact travels WITH the contacts it describes (#2948) — but
-    // ONLY when the resulting contact list is exactly the loser's (winner
-    // had no contacts at all and no stamp). If the winner already held any
-    // contact — including one whose stamp an admin edit cleared — carrying
-    // the loser's stamp would re-authorize texting people it never
-    // described; leave it cleared and require re-attestation instead.
-    if (movedContactSlot
-      && !winnerHadAnyContact
-      && isEmptyValue(winner.service_contacts_consent_at)
-      && !isEmptyValue(loser.service_contacts_consent_at)) {
-      backfills.service_contacts_consent_at = loser.service_contacts_consent_at;
-      backfills.service_contacts_consent_source = loser.service_contacts_consent_source;
-      backfills.service_contacts_consent_text_version = loser.service_contacts_consent_text_version;
-    } else if (movedContactPhone && winnerHadAnyContact
-      && !isEmptyValue(winner.service_contacts_consent_at)) {
-      // Mixed list: the winner's stamp described only the winner's own
-      // contacts; loser slots just joined the row, so the stamp no longer
-      // describes the stored list — clear it and require re-attestation.
-      backfills.service_contacts_consent_at = null;
-      backfills.service_contacts_consent_source = null;
-      backfills.service_contacts_consent_text_version = null;
-      // winner_backfills records the APPLIED value (null) — journal the
-      // winner's PRIOR stamps separately so an undo can restore them once
-      // the appended loser contacts are gone (the stamp describes the
-      // winner's own list again). Pre-upgrade journals lack this key and
-      // keep today's behavior (stamp stays cleared; re-attest by hand).
-      winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
-      winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
-      winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
-    }
-    // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
-    // estimate_acceptances rows repoint to the winner below, so the winner's
-    // customer-level "latest version accepted on any estimate" must absorb a
-    // newer (or only) loser version. Versions are 'vYYYY-MM' — string order is
-    // chronological. The winner's prior value is journaled for the undo.
-    if (!isEmptyValue(loser.accepted_terms_version)
-      && (isEmptyValue(winner.accepted_terms_version)
-        || String(loser.accepted_terms_version) > String(winner.accepted_terms_version))) {
-      if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
-      backfills.accepted_terms_version = loser.accepted_terms_version;
-    }
+    const predictedBackfills = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId });
+    const backfills = predictedBackfills.backfills;
+    Object.assign(winnerPriorValues, predictedBackfills.winnerPriorValues);
     // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
     // widened r24 P1): the payer case is the sharpest hazard (every
     // invoice starts resolving to the effective winner payer), but a
@@ -2103,6 +2145,7 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
           // Idempotent by the ordered-pair unique constraint — a re-run or a
           // race with a manual dismissal is an ignored conflict, never an
           // error.
+          await acquirePairAdjudicationLock(trx, a, b);
           await trx('customer_duplicate_dismissals')
             .insert({
               customer_id_a: a,
@@ -4471,6 +4514,58 @@ async function referralFoldEffects(database, winnerId, loserId) {
   return { loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: loserPromoter.id, winner_promoter_id: winnerPromoter.id, balances_added, promoter_rows };
 }
 
+// One advisory lock per unordered pair, transaction-scoped: taken by the
+// dismissal writers (admin route, red-pair auto-dismiss sweep) and by a
+// confirmed-card merge's final eligibility recheck, so the two verdicts
+// cannot interleave.
+async function acquirePairAdjudicationLock(trx, aId, bId) {
+  const key = `customer-duplicate-pair:${[String(aId), String(bId)].sort().join(':')}`;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+}
+
+// EVERYTHING a merge of (winner, loser) would do beyond the row retire,
+// stated as the IB confirmation card discloses it, plus one stable
+// fingerprint of it all (key-sorted JSON). Read over any knex handle: the
+// preview reads it unlocked at card time, executeMerge recomputes it over
+// the locked rows and refuses on any difference (expectedEffectsFingerprint).
+// `winner` / `loser` are full customer rows (select *).
+async function describeMergeEffects(database, winner, loser) {
+  const { moving, referral } = await previewMergeEffects(database, winner.id, loser.id);
+  const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
+  const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
+  const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
+    && loser.per_application_fee != null && loser.per_application_fee !== '';
+  let loserPlanRates = 0;
+  try {
+    const row = await database('customer_plan_rates').where({ customer_id: loser.id }).count({ n: '*' }).first();
+    loserPlanRates = Number(row?.n || 0);
+  } catch {
+    loserPlanRates = 'unknown';
+  }
+  // Row-derived prediction only: the saved-card Stripe derivation needs the
+  // executor's payment_methods reads, so it is disclosed as a caveat, never
+  // guessed (a guessed value would also make the fingerprint drift).
+  const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: null });
+  const predictedCollisionHandlers = referral?.folded_into_winner_promoter ? ['referral_promoters'] : [];
+  const financial_effects = {
+    account_credits_moved_to_winner: credits,
+    billing_mode_adopted_from_loser: adoptsBillingMode ? loser.billing_mode : null,
+    per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
+    loser_plan_rate_rows_deleted: loserPlanRates,
+    referral_fold: referral,
+    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser),
+    // Fill-if-empty identity/address/contact/billing values the winner takes
+    // from the loser (predictWinnerBackfills — the executor's own rule).
+    winner_backfills: backfills,
+    winner_backfills_caveat: 'a Stripe profile derived from saved cards may also be adopted when neither row names one',
+    predicted_collision_handlers: predictedCollisionHandlers,
+    revertible_from_queue: predictedCollisionHandlers.length ? false : 'unless the sweep has to fold colliding rows (journaled)',
+  };
+  const sortKeys = (obj) => Object.fromEntries(Object.entries(obj || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  const fingerprint = JSON.stringify({ moving: sortKeys(moving), financial_effects: sortKeys(financial_effects) });
+  return { moving, financial_effects, fingerprint };
+}
+
 module.exports = {
   findDuplicateGroups,
   duplicatePairEligibility,
@@ -4484,7 +4579,10 @@ module.exports = {
   // polymorphic-pointer, and referral-fold sets the executor acts on — never
   // a hand-picked subset that could omit a table or a fold.
   previewMergeEffects,
+  describeMergeEffects,
+  predictWinnerBackfills,
   inheritedAutopayRestrictions,
+  acquirePairAdjudicationLock,
   REFERRAL_FOLD_COUNTERS,
   // Refuse-policy sets, exported so GET /merges' revertible mirror can never
   // drift from the revert endpoint's own count-only refusals.

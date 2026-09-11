@@ -14,7 +14,9 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 const mockEligibility = jest.fn();
 const mockExecuteMerge = jest.fn();
+const mockAcquirePairLock = jest.fn(async () => undefined);
 jest.mock('../services/customer-dedupe', () => ({
+  acquirePairAdjudicationLock: (...args) => mockAcquirePairLock(...args),
   findDuplicateGroups: jest.fn(),
   duplicatePairEligibility: (...args) => mockEligibility(...args),
   executeMerge: (...args) => mockExecuteMerge(...args),
@@ -89,5 +91,22 @@ describe('merge eligibility gate', () => {
     const res = await post('/merge', body);
     expect(res.status).toBe(200);
     expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ winnerId: WINNER, loserId: LOSER, mode: 'manual', performedBy: 'admin:Admin', performedById: 'admin-1' }));
+  });
+});
+
+describe('dismiss', () => {
+  test('records the verdict inside a transaction under the pair adjudication lock (the confirmed-card merge re-decides eligibility under the same lock)', async () => {
+    const db = require('../models/db');
+    const chain = {};
+    for (const m of ['insert', 'onConflict']) chain[m] = jest.fn(() => chain);
+    chain.ignore = jest.fn(async () => 1);
+    const trx = jest.fn(() => chain);
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    const res = await post('/dismiss', { customerIdA: LOSER, customerIdB: WINNER, reason: 'two tenants' });
+    expect(res.status).toBe(200);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(mockAcquirePairLock).toHaveBeenCalledWith(trx, WINNER, LOSER); // ordered pair, same key the merge locks
+    expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id_a: WINNER, customer_id_b: LOSER, reason: 'two tenants' }));
+    expect(mockAcquirePairLock.mock.invocationCallOrder[0]).toBeLessThan(chain.insert.mock.invocationCallOrder[0]);
   });
 });

@@ -41,13 +41,11 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const mockExecuteMerge = jest.fn();
 const mockDuplicatePairEligibility = jest.fn();
-const mockPreviewMergeEffects = jest.fn();
-const mockInheritedAutopayRestrictions = jest.fn(() => ({}));
+const mockDescribeMergeEffects = jest.fn();
 jest.mock('../services/customer-dedupe', () => ({
   executeMerge: (...args) => mockExecuteMerge(...args),
   duplicatePairEligibility: (...args) => mockDuplicatePairEligibility(...args),
-  previewMergeEffects: (...args) => mockPreviewMergeEffects(...args),
-  inheritedAutopayRestrictions: (...args) => mockInheritedAutopayRestrictions(...args),
+  describeMergeEffects: (...args) => mockDescribeMergeEffects(...args),
 }));
 
 const db = require('../models/db');
@@ -61,19 +59,25 @@ const loserRow = { id: LOSER_ID, first_name: 'Unknown', last_name: '', phone: '9
 
 const ELIGIBLE = { eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: ['name_conflict'] } };
 
-// The engine's shared effect reader (customer-dedupe.js previewMergeEffects)
-// is mocked: the preview discloses whatever IT reports — FK sweep,
-// polymorphic pointers, and the referral fold — never a local table list.
+// The engine's effect disclosure (customer-dedupe.js describeMergeEffects)
+// is mocked: the preview discloses whatever IT reports — moving counts,
+// money effects, backfills, fold, restrictions — and pins ITS fingerprint;
+// the tool never derives an effect of its own.
 const NOT_ENROLLED = { loser_enrolled: false };
-const EFFECTS = { moving: { scheduled_services: 3, sms_log: 5, 'notifications.recipient_id': 2, total_rows: 10 }, referral: NOT_ENROLLED };
+const FINANCIAL = {
+  account_credits_moved_to_winner: 12.5, billing_mode_adopted_from_loser: 'per_application', per_application_fee_adopted_from_loser: 85,
+  loser_plan_rate_rows_deleted: 0, referral_fold: NOT_ENROLLED, autopay_restrictions_inherited: {},
+  winner_backfills: { email: 'stub@example.com' }, winner_backfills_caveat: 'a Stripe profile derived from saved cards may also be adopted when neither row names one',
+  predicted_collision_handlers: [], revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)',
+};
+const EFFECTS = { moving: { scheduled_services: 3, sms_log: 5, 'notifications.recipient_id': 2, total_rows: 10 }, financial_effects: FINANCIAL, fingerprint: 'fp-card-1' };
 
 beforeEach(() => {
   jest.clearAllMocks();
   db.transaction.mockImplementation(async (cb) => cb(db));
   db.__qb.update.mockResolvedValue(1);
   mockDuplicatePairEligibility.mockResolvedValue(ELIGIBLE);
-  mockPreviewMergeEffects.mockResolvedValue(EFFECTS);
-  mockInheritedAutopayRestrictions.mockReturnValue({});
+  mockDescribeMergeEffects.mockResolvedValue(EFFECTS);
 });
 
 describe('merge_customers', () => {
@@ -85,7 +89,6 @@ describe('merge_customers', () => {
 
   test('preview names both customers, discloses full moving counts, billing/contacts, pair, and versions, and mutates nothing', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]); // loadMergePair
-    db.__qb.first.mockResolvedValueOnce({ n: 0 }); // customer_plan_rates
 
     const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
 
@@ -98,50 +101,28 @@ describe('merge_customers', () => {
       pair: { tier: 'yellow', reasons: ['name_conflict'] },
       moving: EFFECTS.moving,
     });
-    expect(mockPreviewMergeEffects).toHaveBeenCalledWith(db, WINNER_ID, LOSER_ID);
+    expect(mockDescribeMergeEffects).toHaveBeenCalledWith(db, winnerRow, loserRow);
+    expect(db.__qb.select).toHaveBeenCalledWith('*', expect.anything()); // whole rows: the engine's rule reads what its own locked select(*) sees
     expect(result.billing_and_contacts).toEqual({
       winner: expect.objectContaining({ stripe_customer_id: null, billing_mode: null, per_application_fee: null, account_credits: '0' }),
       loser: expect.objectContaining({ stripe_customer_id: null, billing_mode: 'per_application', per_application_fee: '85.00', account_credits: '12.50' }),
     });
-    // The executor's special-case money effects, as amounts (pre-push Codex P1).
-    expect(result.financial_effects).toEqual({
-      account_credits_moved_to_winner: 12.5,
-      billing_mode_adopted_from_loser: 'per_application',
-      per_application_fee_adopted_from_loser: 85,
-      loser_plan_rate_rows_deleted: 0,
-      referral_fold: NOT_ENROLLED,
-      autopay_restrictions_inherited: {},
-      predicted_collision_handlers: [],
-      revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
-    });
-    expect(mockInheritedAutopayRestrictions).toHaveBeenCalledWith(winnerRow, loserRow);
-    expect(result.billing_and_contacts.loser).toEqual(expect.objectContaining({ autopay_paused_until: null, autopay_pause_reason: null, auto_apply_account_credit: null }));
+    // The engine's disclosure rides verbatim, and its fingerprint is what the route pins.
+    expect(result.financial_effects).toEqual(FINANCIAL);
+    expect(result.effects_fingerprint).toBe('fp-card-1');
+    expect(result.billing_and_contacts.loser).toEqual(expect.objectContaining({ autopay_paused_until: null, auto_apply_account_credit: null, address_line1: null }));
     expect(result.note_to_operator).toMatch(/archived/);
     expect(result.note_to_operator).toMatch(/revertible from there unless the sweep has to fold colliding rows/);
     expect(db.__qb.update).not.toHaveBeenCalled();
     expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 
-  test('preview discloses the referral fold the engine reports (pre-push Codex P1: non-FK effects)', async () => {
+  test('a predicted collision fold (referral enrollment) is named in the operator note as the undo exception', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
-    db.__qb.first.mockResolvedValueOnce({ n: 0 });
-    const fold = { loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: 'p-loser', winner_promoter_id: 'p-winner', balances_added: { available_balance_cents: 2500 }, promoter_rows: { referrals: 1, referral_invites: 0, referral_clicks: 4, referral_payouts: 0 } };
-    mockPreviewMergeEffects.mockResolvedValueOnce({ moving: { total_rows: 0 }, referral: fold });
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, predicted_collision_handlers: ['referral_promoters'], revertible_from_queue: false } });
     const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
-    expect(result.financial_effects.referral_fold).toEqual(fold);
-    expect(JSON.parse(result.effects_fingerprint).financial_effects.referral_fold).toEqual(fold);
-    // A fold into an existing winner enrollment is a collision handler the queue undo refuses — said up front, pinned in the fingerprint.
     expect(result.financial_effects).toMatchObject({ predicted_collision_handlers: ['referral_promoters'], revertible_from_queue: false });
     expect(result.note_to_operator).toMatch(/EXCEPT that this merge folds referral_promoters/);
-  });
-
-  test('preview discloses the autopay / credit restrictions the winner inherits, through the engine\'s own rule (pre-push Codex P1)', async () => {
-    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
-    db.__qb.first.mockResolvedValueOnce({ n: 0 });
-    mockInheritedAutopayRestrictions.mockReturnValueOnce({ auto_apply_account_credit: false, autopay_paused_until: '2027-01-01T00:00:00.000Z', autopay_pause_reason: 'disputed charge' });
-    const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
-    expect(result.financial_effects.autopay_restrictions_inherited).toEqual({ auto_apply_account_credit: false, autopay_paused_until: '2027-01-01T00:00:00.000Z', autopay_pause_reason: 'disputed charge' });
-    expect(JSON.parse(result.effects_fingerprint).financial_effects.autopay_restrictions_inherited).toEqual(result.financial_effects.autopay_restrictions_inherited);
   });
 
   test('preview refuses not_in_queue with the canonical message', async () => {
@@ -163,6 +144,9 @@ describe('merge_customers', () => {
     mockDuplicatePairEligibility.mockResolvedValueOnce({ eligible: false, code: 'address_conflict', reason: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost", candidate: { tier: 'yellow', reasons: ['address_different'] } });
     const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
     expect(result.code).toBe('address_conflict');
+    // Refusals carry no PII: the route runs the preview before validateRecordTarget (Codex r3 P1).
+    expect(result.error).not.toMatch(/Real|Unknown|Customer/);
+    expect(result.error).toMatch(/Merge \+ keep address/);
     expect(result.error).toMatch(/admin duplicates queue/);
     expect(result.error).toMatch(/Merge \+ keep address/);
     expect(result.error).toMatch(/does not support/i);
@@ -201,7 +185,8 @@ describe('merge_customers', () => {
       mode: 'intelligence_bar',
       evidence: { via: 'intelligence_bar' },
       expectedVersions: { winner: winnerRow.version, loser: loserRow.version },
-      underLock: null, // no card pin on a direct call — nothing to assert under the locks
+      expectedEffectsFingerprint: null, // no card pin on a direct call — the effects are not asserted
+      requireQueueEligibility: true, // the final queue decision always runs inside the executor's transaction
     });
     expect(result).toMatchObject({ success: true, journal_id: 'journal-1' });
   });
@@ -250,51 +235,44 @@ describe('merge_customers', () => {
     expect(drift).toMatchObject({ preview_changed: true });
   });
 
-  test('preview carries an effects fingerprint (key-sorted moving counts + money effects) the route pins on the card', async () => {
+  test('the preview never computes an effect of its own — moving, money effects and fingerprint are the engine\'s', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
-    db.__qb.first.mockResolvedValueOnce({ n: 0 });
-    mockPreviewMergeEffects.mockResolvedValueOnce({ moving: { sms_log: 1, invoices: 2, total_rows: 3 }, referral: NOT_ENROLLED });
+    mockDescribeMergeEffects.mockResolvedValueOnce({ moving: { sms_log: 1, total_rows: 1 }, financial_effects: { ...FINANCIAL, account_credits_moved_to_winner: 0 }, fingerprint: 'fp-x' });
     const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
-    expect(typeof result.effects_fingerprint).toBe('string');
-    const parsed = JSON.parse(result.effects_fingerprint);
-    expect(parsed).toEqual({ moving: result.moving, financial_effects: result.financial_effects });
-    expect(Object.keys(parsed.moving)).toEqual([...Object.keys(parsed.moving)].sort());
+    expect(result.moving).toEqual({ sms_log: 1, total_rows: 1 });
+    expect(result.financial_effects.account_credits_moved_to_winner).toBe(0);
+    expect(result.effects_fingerprint).toBe('fp-x');
+    expect(db.__qb.first).not.toHaveBeenCalled(); // no local counting
   });
 
-  test('confirmed call with an approved effects pin recounts UNDER executeMerge\'s locks and refuses on drift (pre-push Codex P1)', async () => {
+  test('confirmed call hands the APPROVED fingerprint to the executor (validated under its locks, with the final queue decision) and relays its drift refusal', async () => {
     db.__qb.select.mockResolvedValue([winnerRow, loserRow]);
-    // Card showed 3 scheduled_services + 5 sms_log + 2 notifications, 12.50 credits, 0 plan-rate rows, no enrollment.
-    const approved = JSON.stringify({
-      moving: { 'notifications.recipient_id': 2, scheduled_services: 3, sms_log: 5, total_rows: 10 },
-      financial_effects: { account_credits_moved_to_winner: 12.5, autopay_restrictions_inherited: {}, billing_mode_adopted_from_loser: 'per_application', loser_plan_rate_rows_deleted: 0, per_application_fee_adopted_from_loser: 85, predicted_collision_handlers: [], referral_fold: NOT_ENROLLED, revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)' },
-    });
-    mockExecuteMerge.mockImplementation(async ({ underLock }) => {
-      await underLock(db, { winner: winnerRow, loser: loserRow });
-      return { journalId: 'journal-3', repointed: {}, backfills: {} };
-    });
-    // Under the lock: same effects → proceeds (the reader is asked through the locked trx).
-    db.__qb.first.mockReset();
-    db.__qb.first.mockResolvedValueOnce({ n: 0 });
+    mockExecuteMerge.mockResolvedValueOnce({ journalId: 'journal-3', repointed: {}, backfills: {} });
     const ok = await executeCustomerLifecycleTool(
       'merge_customers',
-      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version }, _approved_effects: approved },
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version }, _approved_effects: 'fp-card-1' },
       { confirmed: true, technicianId: 'tech-42' },
     );
     expect(ok).toMatchObject({ success: true, journal_id: 'journal-3' });
-    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ underLock: expect.any(Function) }));
-    expect(mockPreviewMergeEffects).toHaveBeenLastCalledWith(db, WINNER_ID, LOSER_ID);
-    // Under the lock: the loser got enrolled in referrals since the card → preview_changed, nothing committed.
-    db.__qb.first.mockReset();
-    db.__qb.first.mockResolvedValueOnce({ n: 0 });
-    mockPreviewMergeEffects.mockResolvedValueOnce({ ...EFFECTS, referral: { loser_enrolled: true, folded_into_winner_promoter: false, loser_promoter_id: 'p1', winner_promoter_id: null, balances_added: {}, promoter_rows: { referrals: 0, referral_invites: 0, referral_clicks: 0, referral_payouts: 0 } } });
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ expectedEffectsFingerprint: 'fp-card-1', requireQueueEligibility: true }));
+    expect(mockDescribeMergeEffects).not.toHaveBeenCalled(); // the recount is the executor's, over ITS locked rows
+    // The executor's under-lock refusals (effects drifted / pair adjudicated) surface as preview_changed, nothing committed.
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: the rows that would move changed since this merge was approved — review a fresh proposal'), { previewChanged: true }));
     const drift = await executeCustomerLifecycleTool(
       'merge_customers',
-      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version }, _approved_effects: approved },
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version }, _approved_effects: 'fp-card-1' },
       { confirmed: true, technicianId: 'tech-42' },
     );
     expect(drift).toMatchObject({ preview_changed: true });
     expect(drift.error).toMatch(/rows that would move changed/);
     expect(drift.success).toBeUndefined();
+    mockExecuteMerge.mockRejectedValueOnce(Object.assign(new Error('executeMerge: the pair is no longer mergeable (not_in_queue) — review a fresh proposal'), { previewChanged: true }));
+    const adjudicated = await executeCustomerLifecycleTool(
+      'merge_customers',
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_effects: 'fp-card-1' },
+      { confirmed: true, technicianId: 'tech-42' },
+    );
+    expect(adjudicated).toMatchObject({ preview_changed: true, error: expect.stringMatching(/no longer mergeable/) });
   });
 
   test('confirmed call relays an executeMerge refusal without a partial write', async () => {
