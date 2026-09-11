@@ -157,6 +157,27 @@ function trackingKey({ visitId, startAt, stage, type, recipient }) {
   return `tracking:${visitId}:${startAt}:${stage}:${type}:${recipient || 'unassigned'}`;
 }
 
+// A legacy tech_late/unassigned_overdue row (the older tech-late-detector.js
+// / unassigned-overdue-detector.js cron, or any other future non-detector
+// source) for this exact (type, job_id) blocks createAlertOnce's insert:
+// the partial unique index (idx_dispatch_alerts_tech_late_one_unresolved /
+// ..._unassigned_overdue_one_unresolved) is scoped to (job_id) WHERE type=…
+// AND resolved_at IS NULL, with no payload.source condition, and
+// createAlertOnce's `ON CONFLICT DO NOTHING` has no explicit target — so it
+// no-ops against ANY unresolved row of that type+job, not just this
+// detector's own. The cleanup loop above is deliberately scoped to
+// payload.source = 'no_show_detector' so it never auto-resolves an alert it
+// didn't create; this is the explicit handover for the one case that
+// blocks it — resolve the legacy row in the SAME transaction, immediately
+// before the insert it would otherwise starve forever (codex P1, pre-push
+// audit on 4bd251cfc). Rows of other types or other jobs are never touched.
+async function resolveLegacyCollision(trx, { jobId, type }) {
+  const legacy = await trx('dispatch_alerts').where({ job_id: jobId, type }).whereNull('resolved_at')
+    .whereRaw("COALESCE(payload->>'source', '') != 'no_show_detector'");
+  for (const alert of legacy) await require('./dispatch-alerts').resolveAlert({ id: alert.id, trx });
+  return legacy.length;
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -202,6 +223,7 @@ async function sweep(conn, { now = new Date() } = {}) {
       if (office) {
         const already = await trx('dispatch_alerts').where({ job_id: card.id, type }).whereRaw("payload->>'tracking_key' = ?", [key]).first('id');
         if (!already) {
+          await resolveLegacyCollision(trx, { jobId: card.id, type });
           const result = await dispatch.createAlertOnce({ type, severity: live.stage === 2 ? 'critical' : 'warn',
             techId: recipient, jobId: card.id, trx, payload: { source: 'no_show_detector', tracking_key: key, ...live,
               scheduled_date: visit.scheduled_date, window_start: visit.window_start, window_end: visit.window_end,
@@ -264,4 +286,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey };
+module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision };

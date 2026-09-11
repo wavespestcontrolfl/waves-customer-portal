@@ -1,6 +1,8 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { evaluateNoShow, latestPromises, trackingKey } = require('../services/no-show-detector');
+jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
+const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision } = require('../services/no-show-detector');
+const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
 describe('missing tracking stages', () => {
@@ -77,5 +79,62 @@ describe('tracking key (reassignment refreshes the office alert)', () => {
   });
   test('identical inputs are stable (no spurious resolve/recreate churn on an unchanged visit)', () => {
     expect(trackingKey({ ...base, recipient: 'tech-a' })).toBe(trackingKey({ ...base, recipient: 'tech-a' }));
+  });
+});
+
+describe('resolveLegacyCollision (legacy alert handover)', () => {
+  // The partial unique index behind createAlertOnce
+  // (idx_dispatch_alerts_tech_late_one_unresolved /
+  // ..._unassigned_overdue_one_unresolved) has no payload.source condition,
+  // so an unresolved LEGACY tech_late/unassigned_overdue row (the older
+  // cron detectors, no payload.source) blocks the detector's own insert for
+  // the same (type, job_id) forever, even though the sweep's cleanup loop
+  // deliberately never auto-resolves a non-detector-sourced row (codex P1).
+  function fakeAlertsTable(rows) {
+    const whereRaw = jest.fn().mockResolvedValue(rows);
+    const whereNull = jest.fn(() => ({ whereRaw }));
+    const where = jest.fn(() => ({ whereNull }));
+    const trx = jest.fn((name) => { expect(name).toBe('dispatch_alerts'); return { where }; });
+    return { trx, where, whereNull, whereRaw };
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('an unresolved legacy tech_late row (no payload.source) is resolved so the handover can insert', async () => {
+    const legacyRow = { id: 'legacy-1', job_id: 'visit-1', type: 'tech_late', payload: { delay_minutes: 12 } };
+    const { trx, where, whereNull, whereRaw } = fakeAlertsTable([legacyRow]);
+
+    const count = await resolveLegacyCollision(trx, { jobId: 'visit-1', type: 'tech_late' });
+
+    expect(where).toHaveBeenCalledWith({ job_id: 'visit-1', type: 'tech_late' });
+    expect(whereNull).toHaveBeenCalledWith('resolved_at');
+    expect(whereRaw.mock.calls[0][0]).toMatch(/payload->>'source'.*!=\s*'no_show_detector'/);
+    expect(resolveAlert).toHaveBeenCalledTimes(1);
+    expect(resolveAlert).toHaveBeenCalledWith({ id: 'legacy-1', trx });
+    expect(count).toBe(1);
+  });
+
+  test('no unresolved legacy row → nothing to resolve, no-op', async () => {
+    const { trx } = fakeAlertsTable([]);
+    const count = await resolveLegacyCollision(trx, { jobId: 'visit-2', type: 'unassigned_overdue' });
+    expect(resolveAlert).not.toHaveBeenCalled();
+    expect(count).toBe(0);
+  });
+
+  test('every matching legacy row is resolved, not just the first', async () => {
+    const rows = [
+      { id: 'legacy-1', job_id: 'visit-3', type: 'unassigned_overdue', payload: null },
+      { id: 'legacy-2', job_id: 'visit-3', type: 'unassigned_overdue', payload: {} },
+    ];
+    const { trx } = fakeAlertsTable(rows);
+
+    const count = await resolveLegacyCollision(trx, { jobId: 'visit-3', type: 'unassigned_overdue' });
+
+    expect(resolveAlert).toHaveBeenCalledTimes(2);
+    expect(resolveAlert).toHaveBeenNthCalledWith(1, { id: 'legacy-1', trx });
+    expect(resolveAlert).toHaveBeenNthCalledWith(2, { id: 'legacy-2', trx });
+    expect(count).toBe(2);
   });
 });
