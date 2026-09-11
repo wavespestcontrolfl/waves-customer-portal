@@ -91,7 +91,7 @@ function section(title, getter, fmt, limitPer = 12, source = withMetrics) {
 section('Text under 14px', (r) => r.metrics.text.under14, (t) => `${t.sel} ${t.size}px/${t.weight} “${t.text.slice(0, 30)}”`);
 section('Weights above 700', (r) => r.metrics.text.over700, (t) => `${t.sel} ${t.size}px/${t.weight} “${t.text.slice(0, 30)}”`);
 section('Off-scale sizes (not 14/15/16/18/20/26/32–40)', (r) => r.metrics.text.offScale, (t) => `${t.sel} ${t.size}px “${t.text.slice(0, 30)}”`);
-section('Controls under 44px (non-inline)', (r) => r.metrics.controls.small, (c) => `${c.sel} ${c.h}px “${c.name.slice(0, 24)}”`);
+section('Controls under 44px (non-inline)', (r) => r.metrics.controls.small, (c) => `${c.sel} ${c.w}×${c.h}px “${c.name.slice(0, 24)}”`);
 section('Inputs (height / font / radius / placeholder)', (r) => r.metrics.controls.inputs, (i) => `${i.sel} h${i.h} ${i.size}px r${i.radius} ph:${i.placeholder ? i.placeholder.size + ' ' + i.placeholder.color : '-'} labelled:${i.labelled}`);
 section('Heading sizes ≠ sheet', (r) => r.metrics.headingIssues, (h) => `${h.why} “${h.text.slice(0, 30)}”`);
 section('Nested backdrop-filter (glass inside glass)', (r) => r.metrics.glass.nestedBlur, (g) => `${g.sel}`);

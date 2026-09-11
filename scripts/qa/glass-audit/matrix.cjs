@@ -9,11 +9,15 @@ const { loadScenarios } = require('./scenarios/index.cjs');
 
 const root = path.resolve(__dirname, '../../..');
 const runs = process.argv.slice(2);
+// The output replaces the committed coverage matrix via shell redirection, so a misspelled or deleted
+// run must fail loudly instead of quietly producing a thinner (or all-NOT VERIFIED) document.
+if (!runs.length) { console.error('usage: matrix.cjs <run> [<run>…]  (names under .tmp/glass-audit)'); process.exit(1); }
+const missingRuns = runs.filter((run) => !fs.existsSync(path.join(root, '.tmp/glass-audit', run)));
+if (missingRuns.length) { console.error(`matrix.cjs: run directory not found: ${missingRuns.join(', ')}`); process.exit(1); }
 const captures = [];
 for (const run of runs) {
   // Read every per-capture JSON (a later --only run overwrites summary.json, the capture files survive).
   const dir = path.join(root, '.tmp/glass-audit', run);
-  if (!fs.existsSync(dir)) continue;
   let engine = 'chromium';
   try { engine = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8')).engine || engine; } catch (e) { /* no summary */ }
   for (const sc of fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory())) {

@@ -81,11 +81,14 @@
     "node": ">=20.9"
   },
   "devDependencies": {
+    "acorn": "^8.18.0",
+    "acorn-walk": "^8.3.5",
     "concurrently": "^8.2.2",
     "eslint": "^9.39.5",
     "eslint-plugin-react": "^7.37.5",
     "globals": "^17.7.0",
-    "lint-staged": "^15.5.2"
+    "lint-staged": "^15.5.2",
+    "pngjs": "^5.0.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

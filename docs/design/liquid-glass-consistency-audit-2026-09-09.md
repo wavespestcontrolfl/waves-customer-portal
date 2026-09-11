@@ -215,9 +215,9 @@ Severity: **P1** = breaks a documented rule on a primary surface or blocks the "
 
 ### G-11 · P2 · Server twins drift from the sheet (email + newsletter landing)
 
-- **Measured.** Gold CTA ink `#1B2C5B` on every email and landing CTA (C2); landing `h1` **30px** (sheet 32–40) on all nine landing branches including the quiz and feedback pages; email `h2` **22px** (sheet 26); the feedback needs-work form renders five native `<input type="checkbox">` at **13×13** with no styled hit area (touch floor 44); landing frosted `.box` uses `blur(14px)` with no `data-glass` attributes and its own fallback; footer social icons 28×28 and store badges 38–40px with empty accessible names in `universalWavesFooterHtml`.
+- **Measured.** Gold CTA ink `#1B2C5B` on every email and landing CTA (C2); landing `h1` **30px** (sheet 32–40) on all nine landing branches including the quiz and feedback pages; email `h2` **22px** (sheet 26); the feedback needs-work form renders five native `<input type="checkbox">` at **13×13** with no styled hit area (touch floor 44); landing frosted `.box` uses `blur(14px)` with no `data-glass` attributes and its own fallback; footer social icons 28×28 and store badges 38–40px in `universalWavesFooterHtml` (each link IS named by its image's `alt`; only the hit size is a finding).
 - **Root cause (shared).** `email-template.js GLASS_THEME` and `public-newsletter.js renderConfirmPage` are hand-maintained copies of the tokens.
-- **Correction.** Generate `GLASS_THEME` from one token module shared with `theme-doc.js` (ink, accent, radii, type scale), or at minimum fix the two comments/values so the twin matches (`ctaText` → `#04395E`, landing h1 32, email h2 26), give the footer icons `aria-label`s, and wrap the feedback checkboxes in a 44px `<label>` hit area. Emails stay opaque by ruling.
+- **Correction.** Generate `GLASS_THEME` from one token module shared with `theme-doc.js` (ink, accent, radii, type scale), or at minimum fix the two comments/values so the twin matches (`ctaText` → `#04395E`, landing h1 32, email h2 26), and wrap the feedback checkboxes in a 44px `<label>` hit area. Emails stay opaque by ruling.
 
 ### G-12 · P2 · The estimate's `.gc-*` recipes keep blur under forced colours and duplicate the tiers
 

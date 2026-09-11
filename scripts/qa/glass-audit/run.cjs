@@ -132,7 +132,7 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
           let n; const seen = new Set();
           while ((n = walker.nextNode())) {
             const el = n.parentElement; if (!el || seen.has(el) || !n.textContent.trim()) continue; if (el.closest('svg, script, style, [aria-hidden="true"], .glass-scene-orbs')) continue; if (!vis(el)) continue; seen.add(el);
-            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue; // large-text (3:1) threshold applies from 24px; 18.66+/700 handled below
+            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); // large text (24px+, or 18.66px+ bold) is screened at 3:1 below, never skipped
             const r = el.getBoundingClientRect();
             out.push({ sel: d.tag + el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height } });
           }
@@ -140,7 +140,7 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
           // ::placeholder (login, booking, quote, payment fields) are sampled explicitly.
           for (const el of d.doc.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=range]):not([type=color]), textarea, select')) {
             if (!vis(el) || el.closest('[aria-hidden="true"]')) continue;
-            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue;
+            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize);
             const r = el.getBoundingClientRect();
             const box = { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height };
             const tag = d.tag + el.tagName.toLowerCase() + (el.type ? `[type=${el.type}]` : '');

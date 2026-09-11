@@ -202,7 +202,7 @@ const OUTLINE_PACKET = {
   title: 'Lawn Care Program Overview',
   status: 'sent',
   noindex: true,
-  expiresAt: '2026-12-31T00:00:00.000Z',
+  expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(), // service-outlines-public.js expires the token; stay 30 days past the run
   summary: {},
   content: {
     title: 'Your Lawn Care Program',

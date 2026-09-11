@@ -268,7 +268,8 @@ const contractRow = (overrides = {}) => ({
   documentTemplateCategory: 'agreements',
   documentTemplateDocumentType: 'service_agreement',
   requiresSignature: true,
-  shareTokenExpiresAt: '2026-10-08T12:00:00.000Z',
+  // contracts-public.js answers 410 for an expired share token; keep it 30 days past the run.
+  shareTokenExpiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
   sharedAt: '2026-09-08T12:00:00.000Z',
   viewedAt: '2026-09-09T15:04:00.000Z',
   signedAt: null,
