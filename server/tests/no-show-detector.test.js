@@ -98,6 +98,30 @@ describe('missing tracking stages', () => {
 
 });
 
+describe('the offline replay never loads the database module (audit P1)', () => {
+  // ops/agents/replay-no-show-detector.js advertises READ-ONLY, no database
+  // access, and imports this module for its pure helpers. Every service
+  // dependency here is therefore required at CALL time — a module-scope
+  // require of audit-log or technician-eligibility pulls in ../models/db and
+  // builds a connection module for an operator running the CLI with no
+  // DATABASE_URL. This test fails the moment one of them moves back to the
+  // top of the file.
+  // Checked in a REAL node process, not this one: jest.mock('../models/db')
+  // at the top of this file makes an in-process require.cache assertion
+  // vacuous, and the CLI's guarantee is about plain node with no DATABASE_URL.
+  test('importing the detector in a plain node process loads no models/db', () => {
+    const { execFileSync } = require('child_process');
+    const path = require('path');
+    const detector = path.join(__dirname, '..', 'services', 'no-show-detector.js');
+    const probe = `require(${JSON.stringify(detector)});`
+      + 'process.stdout.write(String(Object.keys(require.cache).some((f) => /[\\\\/]models[\\\\/]db\\.js$/.test(f))));';
+    const env = { ...process.env };
+    delete env.DATABASE_URL;
+    delete env.DATABASE_PUBLIC_URL;
+    expect(execFileSync(process.execPath, ['-e', probe], { env, encoding: 'utf8' })).toBe('false');
+  });
+});
+
 describe('tracking key (reassignment refreshes the office alert)', () => {
   const base = { visitId: 'visit', startAt: '2026-09-10T13:00:00.000Z', stage: 2, type: 'tech_late' };
   test('a different recipient tech changes the key, even with promise/stage/type unchanged', () => {

@@ -13,7 +13,14 @@ const recordAuditEvent = (...args) => require('./audit-log').recordAuditEvent(..
 const { phoneMatchDigits } = require('../utils/phone');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
-const { isAssignable } = require('./technician-eligibility');
+// Call-time, for the same reason as recordAuditEvent above:
+// technician-eligibility.js requires ../models/db at module scope, and every
+// other service dependency of this file is already lazy so that
+// ops/agents/replay-no-show-detector.js — which imports this module for its
+// pure helpers alone — never loads the database module (pre-push audit,
+// round 5). With this one, the replay's entire module-scope require chain is
+// config/feature-gates + utils only.
+const isAssignable = (...args) => require('./technician-eligibility').isAssignable(...args);
 
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
