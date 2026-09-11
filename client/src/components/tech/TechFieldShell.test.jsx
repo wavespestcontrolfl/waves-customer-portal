@@ -80,7 +80,7 @@ it('keeps a busy visit mounted on browser Back and permits Back after settlement
   fireEvent.click(screen.getByRole('button', { name: 'Settle contact' }));
   await act(async () => { window.history.back(); });
   expect(await screen.findByRole('link', { name: 'Open visit' })).toBeInTheDocument();
-  expect(unmounted).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(unmounted).toHaveBeenCalledTimes(1));
 });
 
 it('protects document departure without a router history index only while busy', () => {

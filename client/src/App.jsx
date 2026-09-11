@@ -371,6 +371,7 @@ const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPag
 const AdminAgentEstimatePage = lazyWithRetry(() => import('./pages/admin/AgentEstimatePage'));
 const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
+const PayGrowth = lazyWithRetry(() => import('./components/payGrowth/PayGrowth'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
@@ -699,6 +700,7 @@ export default function App() {
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
             <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
+            <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>
