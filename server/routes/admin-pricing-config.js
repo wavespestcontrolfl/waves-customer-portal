@@ -183,6 +183,19 @@ function normalizeIncomingConfigData(configKey, data) {
     RETIRED_PEST_FEATURE_KEYS.forEach((key) => delete normalized[key]);
     return normalized;
   }
+  if (configKey === 'termite_annual_plan' && data && typeof data === 'object' && !Array.isArray(data)) {
+    // One spelling in the row (snake_case): the bridge accepts both, but the
+    // client mirror and the audit read the row directly (codex #4424 r2 P1).
+    const aliases = { setupPerStation: 'setup_per_station', annualBase: 'annual_base', annualStep: 'annual_step', bracketStations: 'bracket_stations', bracketFloor: 'bracket_floor' };
+    const normalized = { ...data };
+    for (const [camel, snake] of Object.entries(aliases)) {
+      if (normalized[camel] !== undefined) {
+        if (normalized[snake] === undefined) normalized[snake] = normalized[camel];
+        delete normalized[camel];
+      }
+    }
+    return normalized;
+  }
   if (configKey === 'termite_install' && data && typeof data === 'object' && !Array.isArray(data)) {
     // station_spacing_ft is retired (owner 2026-07-28): spacing is
     // per-system label truth (Trelona 15 ft, Advance 10) and the bridge no
@@ -1494,4 +1507,5 @@ module.exports = router;
 // to the same billing-authoritative rows — it must run the SAME key-specific
 // validation on the prospective row before writing.
 module.exports.validatePricingConfigData = validatePricingConfigData;
+module.exports.normalizeIncomingConfigData = normalizeIncomingConfigData;
 module.exports.parseConfigData = parseConfigData;

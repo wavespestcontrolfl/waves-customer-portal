@@ -134,6 +134,22 @@ describe('annual plan — pricing (ruling A-1 = P1)', () => {
   });
 });
 
+describe('annual plan — an issued plan survives the gate being unset (codex r2 P0)', () => {
+  test('gate OFF + a stamped plan snapshot on the replay input keeps pricing the plan with its stamped constants', () => {
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    const sent = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } })));
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const signal = replay.termiteKnobSignalForReplay({ result: { lineItems: [sent] } });
+    const replayed = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } }, termitePricingKnobs: signal })));
+    expect(replayed.plan).toBe('annual_protection');
+    expect(replayed.installation).toMatchObject({ kind: 'setup', price: 450 });
+    expect(replayed).toMatchObject({ visitsPerYear: 1, annual: 299 });
+    // …while a FRESH selection with the gate off is still ignored.
+    const fresh = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } })));
+    expect(fresh.plan).toBe('quarterly');
+  });
+});
+
 describe('annual plan — DB overlay and admin validation', () => {
   function planDb(data) {
     const db = (table) => {
@@ -154,6 +170,12 @@ describe('annual plan — DB overlay and admin validation', () => {
     expect(termiteAnnualPlanFeeForStations(16)).toBe(279 + 2 * 60);
     await expect(syncConstantsFromDB(planDb({ annual_base: 259 }))).resolves.toBe(true);
     expect(constants.TERMITE.annualPlan).toMatchObject({ setupPerStation: 30, annualBase: 259, annualStep: 50, bracketStations: 5, bracketFloor: 10 });
+  });
+
+  test('the save path normalizes camelCase aliases to one snake_case spelling', () => {
+    const { normalizeIncomingConfigData } = require('../routes/admin-pricing-config');
+    expect(normalizeIncomingConfigData('termite_annual_plan', { setupPerStation: 35, annual_base: 259, annualStep: 60 }))
+      .toEqual({ setup_per_station: 35, annual_base: 259, annual_step: 60 });
   });
 
   test('admin validation bounds the plan knobs', () => {

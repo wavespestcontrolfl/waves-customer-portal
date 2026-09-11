@@ -622,17 +622,22 @@ export function applyServerTermiteInstallPricingConfig(config, effective = confi
 const TERMITE_ANNUAL_PLAN_DEFAULTS = Object.freeze({ setupPerStation: 30, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10, available: false });
 let TERMITE_ANNUAL_PLAN = { ...TERMITE_ANNUAL_PLAN_DEFAULTS };
 
+// Every alias the server bridge accepts (the save path normalizes to
+// snake_case, but a row written another way must still mirror).
+const TERMITE_ANNUAL_PLAN_KNOBS = [
+  { key: 'setupPerStation', aliases: ['setup_per_station', 'setupPerStation'], parse: positiveNumber },
+  { key: 'annualBase', aliases: ['annual_base', 'annualBase'], parse: positiveNumber },
+  { key: 'annualStep', aliases: ['annual_step', 'annualStep'], parse: nonNegativeNumber },
+  { key: 'bracketStations', aliases: ['bracket_stations', 'bracketStations'], parse: positiveNumber },
+  { key: 'bracketFloor', aliases: ['bracket_floor', 'bracketFloor'], parse: nonNegativeNumber },
+];
 export function applyServerTermiteAnnualPlanPricingConfig(config, featureAvailable = false) {
-  const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
-  const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
-  TERMITE_ANNUAL_PLAN = {
-    setupPerStation: Math.round(pos(config?.setup_per_station) ?? TERMITE_ANNUAL_PLAN_DEFAULTS.setupPerStation),
-    annualBase: Math.round(pos(config?.annual_base) ?? TERMITE_ANNUAL_PLAN_DEFAULTS.annualBase),
-    annualStep: Math.round(nonNeg(config?.annual_step) ?? TERMITE_ANNUAL_PLAN_DEFAULTS.annualStep),
-    bracketStations: pos(config?.bracket_stations) ? Math.round(Number(config.bracket_stations)) : TERMITE_ANNUAL_PLAN_DEFAULTS.bracketStations,
-    bracketFloor: nonNeg(config?.bracket_floor) != null ? Math.round(Number(config.bracket_floor)) : TERMITE_ANNUAL_PLAN_DEFAULTS.bracketFloor,
-    available: featureAvailable === true,
-  };
+  const next = { ...TERMITE_ANNUAL_PLAN_DEFAULTS, available: featureAvailable === true };
+  for (const knob of TERMITE_ANNUAL_PLAN_KNOBS) {
+    const v = firstParsed(knob.parse, config && typeof config === 'object' ? config : null, knob.aliases);
+    next[knob.key] = Math.round(v ?? TERMITE_ANNUAL_PLAN_DEFAULTS[knob.key]);
+  }
+  TERMITE_ANNUAL_PLAN = next;
   return { ...TERMITE_ANNUAL_PLAN };
 }
 

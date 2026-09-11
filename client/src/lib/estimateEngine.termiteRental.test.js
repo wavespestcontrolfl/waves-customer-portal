@@ -231,6 +231,11 @@ describe("annual protection plan mirror (ruling A-1 = P1; server gate word via f
       const adv = calculateEstimate(termiteInput({ termiteBaitSystem: "advance", termitePlan: "annual_protection" }));
       expect(adv.results.tmBait.system).toBe("trelona");
       expect(adv.results.tmBait.sta).toBe(sta);
+      // camelCase aliases the bridge accepts mirror too.
+      applyServerTermiteAnnualPlanPricingConfig({ setupPerStation: 35, annualBase: 259 }, true);
+      const alias = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" }));
+      expect(alias.results.tmBait.setupFee).toBe(alias.results.tmBait.sta * 35);
+      expect(alias.results.tmBait.annualFee).toBe(259 + Math.max(0, Math.ceil((alias.results.tmBait.sta - 10) / 5)) * 50);
       // A failed gate lookup fails closed.
       applyServerTermiteAnnualPlanPricingConfig(null, false);
       expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" })).results.tmBait.plan).toBe("quarterly");

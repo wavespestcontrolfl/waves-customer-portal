@@ -1064,7 +1064,14 @@ function generateEstimate(input) {
       // the program prices as today's quarterly program. Kill = unset the
       // var. On the plan, rental and the bond rider are retired (plan §A2).
       const planGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
-      const wantsAnnualPlan = planGateOn && String(termiteOptions.plan || '').toLowerCase() === 'annual_protection';
+      // An ALREADY-ISSUED plan keeps replaying as the plan after the gate is
+      // unset: the stamped snapshot (server-derived replay signal, never a
+      // browser value) is the evidence; the gate governs FRESH selections
+      // only. Unsetting the var stops new plan quotes, it does not reprice
+      // in-flight contracts to the quarterly program (codex #4424 r2 P0).
+      const replayedPlan = input.termitePricingKnobs && typeof input.termitePricingKnobs === 'object'
+        && input.termitePricingKnobs.plan === 'annual_protection';
+      const wantsAnnualPlan = (planGateOn || replayedPlan) && String(termiteOptions.plan || '').toLowerCase() === 'annual_protection';
       const wantsRental = !wantsAnnualPlan && rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
