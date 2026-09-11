@@ -1081,6 +1081,9 @@ async function runLlmDispatchDigest() {
   if (exceptions.length) {
     const sent = await emailExceptions(day, exceptions);
     if (!sent.ok) sendError = sent.error || 'unknown email error';
+  } else {
+    // Fall-off (2026-09-11): a clean day retires the standing exception bell.
+    await require('./ops-digest-fall-off').retireIfClean('llm-dispatch-exceptions');
   }
 
   // An undeliverable exception email must FAIL the job (retention pruning
