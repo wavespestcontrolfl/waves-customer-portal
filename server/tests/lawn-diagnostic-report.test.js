@@ -659,6 +659,7 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Dollar spot not spreading much', 'Large patch is not getting better; weeds absent',
     'Large patch cannot be ruled out', 'Chinch bugs have not been ruled out', 'Dollar spot not excluded', 'Chinch bugs aren\u2019t unlikely',
     'Fungal activity is not confirmed', 'Chinch bugs are unconfirmed', 'Chinch bugs cannot be confirmed',
+    'Not free of chinch bugs', 'Turf is not pest-free', 'Cannot be disease-free',
   ])('an unrecognized negation %s never earns the clean label and never maps a cause', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('a lawn condition we are monitoring');
     expect(safeConditionLabel(name, 'low')).toBe('a lawn condition we are monitoring');
@@ -687,6 +688,9 @@ describe('lawn diagnostic auto-release ladder', () => {
     // A "free of" list ends at its conjunction item or at a new statement.
     ['Free of chinch bugs and weeds, large patch present', 'large patch (fungal) activity'],
     ['Free of chinch bugs, weeds, large patch is spreading', 'large patch (fungal) activity'],
+    // A later segment with its own predicate is a new positive statement.
+    ['No weeds, large patch present', 'large patch (fungal) activity'],
+    ['No weeds: chinch bugs observed', 'chinch bug activity'],
     // Every sentence terminator splits clauses.
     ['No weeds! Large patch is visible', 'large patch (fungal) activity'],
     ['No weeds? Large patch is visible', 'large patch (fungal) activity'],

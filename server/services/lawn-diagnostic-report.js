@@ -669,7 +669,7 @@ function unrecognizedNegationRe() {
 // "not absent") is uncertainty, not absence.
 // Lack of confirmation ("not confirmed", "unconfirmed", "cannot be verified")
 // is uncertainty as well: it establishes neither presence nor absence.
-const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+\s+){0,2}?(?:ruled[\s‐‑‒–—-]+out|absent|excluded|unlikely|negative|free|confirmed|verified|established|certain|definite)\b|\bunconfirmed\b/;
+const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+[\s‐‑‒–—-]+){0,2}?(?:ruled[\s‐‑‒–—-]+out|absent|excluded|unlikely|negative|free|confirmed|verified|established|certain|definite)\b|\bunconfirmed\b/;
 // A generic symptom noun right after a forward negation ("no signs", "no
 // evidence observed", "without visible lesions") describes the cause that
 // precedes it, so the whole clause is negated rather than only the object.
@@ -684,6 +684,9 @@ function positiveClauses(lower) {
   for (const clause of stripNegatedRecovery(spaceJoinedNon(lower)).split(CLAUSE_SPLIT)) {
     let text = clause.trim();
     if (!text) continue;
+    // Checked before the "-free" strip so "Not free of chinch bugs" / "Turf is
+    // not pest-free" stay uncertain instead of becoming a clean lawn.
+    if (NEGATED_ABSENCE.test(text)) { uncertain = true; continue; }
     if (FREE_DIFFERENTIAL.test(text)) {
       FREE_DIFFERENTIAL.lastIndex = 0;
       negated = true;
@@ -693,7 +696,6 @@ function positiveClauses(lower) {
     }
     FREE_DIFFERENTIAL.lastIndex = 0;
     if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
-    if (NEGATED_ABSENCE.test(text)) { uncertain = true; continue; }
     if (!CLEAN_CLAUSE_LEAD.test(text) && !RECOGNIZED_MARKER.test(text) && unrecognizedNegationRe().test(text)) { uncertain = true; continue; }
     negated = true;
     const forward = FORWARD_NEGATION.exec(text);
@@ -707,6 +709,15 @@ function positiveClauses(lower) {
       // A whole-clause marker anywhere else in the clause still negates all of it.
       const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
       if (head && !wholeClauseMarker) positive.push(head);
+      // A later comma/colon segment that carries its own predicate and names a
+      // condition is a new positive statement, not a list item: "No weeds,
+      // large patch present" keeps large patch, while "No weeds, disease, or
+      // pests observed" stays one negated list.
+      for (const segment of rest.split(/[,:]/).slice(1)) {
+        const part = segment.trim();
+        if (!part || /^(?:and|or|nor)\b/.test(part) || NEGATION_MARKER.test(part)) continue;
+        if (SEGMENT_PREDICATE.test(part) && (SUMMARY_CAUSE_RE.test(part) || /\bweeds?\b/.test(part))) positive.push(part);
+      }
       continue;
     }
     // A postpositive marker ("weeds absent", "not present", "ruled out") negates
@@ -803,7 +814,21 @@ const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an
 // so the backstop does not depend on the grammar's finite suffix list.
 // A modal-hedged form ("may have been active", "might still be active") is the
 // downgrade's own output, not a definitive claim, so it is excluded here.
-const DEFINITIVE_PREDICATE = /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!\b(?:may|might|could)\s)(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\s+(?:\w+\s+){0,6}?active)\b/i;
+const DEFINITIVE_PREDICATE = /\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!\b(?:may|might|could)\s(?:\w+\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\s+(?:\w+\s+){0,6}?active)\b/i;
+// "and" joins two independent clauses only when each side has its own finite
+// verb ("The schedule was confirmed and large patch remains only a possibility");
+// a compound subject ("Large patch and dollar spot are confirmed") stays whole.
+const FINITE_VERB = /\b(?:is|are|was|were|has|have|had|remains?|remained|appears?|appeared|looks?|looked|stays?|stayed|seems?|seemed|continues?|continued|keeps?|kept|\w+ed)\b/i;
+function splitIndependentAnd(clause) {
+  const out = [];
+  let buffer = '';
+  for (const part of clause.split(/\s+and\s+/i)) {
+    if (buffer && FINITE_VERB.test(buffer) && FINITE_VERB.test(part)) { out.push(buffer); buffer = part; continue; }
+    buffer = buffer ? `${buffer} and ${part}` : part;
+  }
+  if (buffer) out.push(buffer);
+  return out;
+}
 function residualDefinitiveClaim(text) {
   // Clause-level, so "The schedule was confirmed with the customer, while large
   // patch remains only a possibility" is not read as a confirmed cause. A comma
@@ -817,8 +842,11 @@ function residualDefinitiveClaim(text) {
   // A heading-style "Confirmed:" attaches to the clause that follows it.
   const flattened = String(text || '')
     .replace(/(^|[.!?;]\s*)(confirmed|definite|certain)\s*[:—–-]\s*/gi, '$1$2 ')
+    // Cause-first headings: "Large patch: confirmed", "Chinch bugs — active".
+    .replace(/\s*[:—–-]\s*(?=(?:\w+\s+){0,2}?active\b)/gi, ' is ')
+    .replace(/\s*[:—–-]\s*(?=(?:\w+\s+){0,2}?(?:confirmed|definite(?:ly)?|certain(?:ly)?)\b)/gi, ' ')
     .replace(/,\s((?:which|that|who|where|as|especially|particularly|mostly|mainly|in|on|at|near|along|by|with|including|like|such as|now|still|again)\b[^,.!?;:]{0,80}),\s/gi, ' $1 ');
-  return flattened.split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).some((clause) => (
+  return flattened.split(/[.!?;,:]\s*|\s+(?:while|but|although|though|whereas|however)\s+/i).flatMap(splitIndependentAnd).some((clause) => (
     DEFINITIVE_PREDICATE.test(clause) && SUMMARY_CAUSE_RE.test(clause)
   ));
 }
