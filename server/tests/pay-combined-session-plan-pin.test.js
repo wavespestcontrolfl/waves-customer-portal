@@ -11,7 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/stripe', () => ({ retrievePaymentIntent: jest.fn(async () => null), cancelPaymentIntent: jest.fn() }));
 beforeEach(() => { jest.clearAllMocks(); });
 
-const { listUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessionsForCustomer } = require('../services/pay-combined');
+const { listUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessions } = require('../services/pay-combined');
 
 function database(rowsByCustomer) {
   const fn = jest.fn((table) => {
@@ -136,4 +136,24 @@ test('the lock+pin step is separable from the Stripe release, so a caller can re
   const later = database({});
   await expect(releaseUnconfirmedCombinedSessions(later, rows)).resolves.toEqual({ released: 1, inFlight: 0 });
   expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_a');
+});
+
+
+test('an intent whose OUTCOME changed since the card refuses with previewChanged — the id pin alone would have let it through (Codex r10 P1)', async () => {
+  // Approved as `cancel`; the customer confirmed it with Stripe in the
+  // meantime, so it now reads `in_flight`. Same id, same stamp — only the
+  // outcome moved, which is exactly what the id pin cannot see.
+  StripeService.retrievePaymentIntent.mockImplementation(async () => ({ id: 'pi_a', status: 'processing', metadata: { combined_allocation: '{"x":1}' } }));
+  const rows = [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }];
+  const db = database({ L: rows });
+  await expect(releaseUnconfirmedCombinedSessions(db, rows, { expectedOutcomes: { pi_a: 'cancel' } }))
+    .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/the card said cancel, it is now in_flight/) });
+  expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+  // Unchanged outcome → released normally.
+  StripeService.retrievePaymentIntent.mockImplementation(async () => PI.pi_a);
+  await expect(releaseUnconfirmedCombinedSessions(database({ L: rows }), rows, { expectedOutcomes: { pi_a: 'cancel' } }))
+    .resolves.toEqual({ released: 1, inFlight: 0 });
+  // No pin at all (a direct call with no card) → the outcome is not asserted.
+  StripeService.retrievePaymentIntent.mockImplementation(async () => ({ id: 'pi_a', status: 'processing', metadata: { combined_allocation: '{"x":1}' } }));
+  await expect(releaseUnconfirmedCombinedSessions(database({ L: rows }), rows)).resolves.toEqual({ released: 0, inFlight: 1 });
 });

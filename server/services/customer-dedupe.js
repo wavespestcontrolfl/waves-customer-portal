@@ -2065,8 +2065,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // retired; and the winner's when the merge transfers a payer). Same
       // rule the card disclosed.
       const invalidatedSingle = singleInvoiceSessionsInvalidatedByMerge(winner, loser);
-      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.winner, { invalidatedSingleInvoice: invalidatedSingle.winner });
-      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.loser, { invalidatedSingleInvoice: invalidatedSingle.loser });
+      // The card pinned each intent's OUTCOME, not just its id: a checkout
+      // confirmed directly with Stripe since the locked check would flip
+      // cancel → in_flight, and the in-flight guards below only defer on a
+      // loser session or a payer-changing winner one — so an ordinary merge
+      // could commit having promised a cancellation it never performed
+      // (codex #4348 r10 P1). Re-asserted at the release boundary.
+      const pinnedOutcomes = (side) => (approvedEffects
+        ? Object.fromEntries(approvedEffects.combined_payment_sessions[side]
+          .filter((sess) => sess.outcome)
+          .map((sess) => [String(sess.payment_intent_id), sess.outcome]))
+        : null);
+      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.winner, { invalidatedSingleInvoice: invalidatedSingle.winner, expectedOutcomes: pinnedOutcomes('winner') });
+      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.loser, { invalidatedSingleInvoice: invalidatedSingle.loser, expectedOutcomes: pinnedOutcomes('loser') });
       if (loserRelease.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
       }
@@ -4720,10 +4731,29 @@ async function nonFkMergeRewrites(database, winner, loser) {
 }
 
 async function referralFoldEffects(database, winnerId, loserId) {
-  const loserPromoter = await database('referral_promoters').where({ customer_id: loserId }).first();
+  let loserPromoter = await database('referral_promoters').where({ customer_id: loserId }).first();
   if (!loserPromoter) return { loser_enrolled: false };
-  const winnerPromoter = await database('referral_promoters')
+  let winnerPromoter = await database('referral_promoters')
     .where({ customer_id: winnerId }).whereNot({ id: loserPromoter.id }).first();
+  // Under the executor's transaction (the locked recheck), LOCK both
+  // promoter rows and re-read them, so the balances this fingerprint states
+  // are the balances the fold will actually add up (codex #4348 r10 P1).
+  // Referral writes do not take the customer or pair locks — a unique click
+  // increments total_clicks straight off the promoter row
+  // (routes/referral-links.js) — so without this a click, reward or payout
+  // landing after the locked check folds counters nobody approved, and one
+  // landing after the executor's own reread is erased when the loser row is
+  // zeroed. pg_advisory locks do not cover rows; FOR UPDATE does, and it is
+  // an xact lock, so it is still held through the fold below. Locked in one
+  // id-ordered statement: two merges sharing a promoter (A+B and A+C) then
+  // queue instead of deadlocking.
+  if (database.isTransaction) {
+    const ids = [loserPromoter.id, winnerPromoter?.id].filter(Boolean);
+    await database('referral_promoters').whereIn('id', ids).orderBy('id').forUpdate().select('id');
+    loserPromoter = await database('referral_promoters').where({ id: loserPromoter.id }).first();
+    if (!loserPromoter) return { loser_enrolled: false };
+    if (winnerPromoter) winnerPromoter = await database('referral_promoters').where({ id: winnerPromoter.id }).first();
+  }
   const promoter_rows = {};
   for (const table of ['referrals', 'referral_invites', 'referral_clicks', 'referral_payouts']) {
     const row = await database(table).where({ promoter_id: loserPromoter.id }).count({ n: '*' }).first();
@@ -4747,7 +4777,14 @@ async function referralFoldEffects(database, winnerId, loserId) {
 // confirmed-card merge's final eligibility recheck, so the two verdicts
 // cannot interleave.
 async function acquirePairAdjudicationLock(trx, aId, bId) {
-  const key = `customer-duplicate-pair:${[String(aId), String(bId)].sort().join(':')}`;
+  // LOWERCASED before sorting and hashing (codex #4348 r10 P1). The
+  // dismissal routes accept case-insensitive UUIDs and Postgres canonicalizes
+  // what it stores, so an operator's uppercase "not a duplicate" and the
+  // Intelligence Bar's lowercase merge would otherwise hash to two DIFFERENT
+  // advisory keys — the two writers would not serialize, and a dismissal
+  // committing after the merge's eligibility read would not stop the merge.
+  // Case-folding is the whole point: these are the same pair.
+  const key = `customer-duplicate-pair:${[String(aId).toLowerCase(), String(bId).toLowerCase()].sort().join(':')}`;
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
 }
 

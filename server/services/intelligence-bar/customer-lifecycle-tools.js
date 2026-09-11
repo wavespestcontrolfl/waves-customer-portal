@@ -103,7 +103,19 @@ async function loadMergeEligibility(winnerId, loserId) {
 function paymentSessionsNote(sessions) {
   const all = [...(sessions?.winner || []), ...(sessions?.loser || [])];
   if (!all.length) return '';
-  const count = (outcome) => all.filter((s) => s.outcome === outcome).length;
+  // Counted by PaymentIntent, not by row: one combined intent is stamped
+  // onto EVERY invoice in its allocation, and the release deduplicates by
+  // payment_intent_id and cancels once — so counting rows told the operator
+  // three sessions would be cancelled when one would (codex #4348 r10 P2).
+  // The rows themselves stay listed above, per invoice, as before.
+  const seen = new Set();
+  const byIntent = all.filter((s) => {
+    const id = String(s.payment_intent_id);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  const count = (outcome) => byIntent.filter((s) => s.outcome === outcome).length;
   const parts = [];
   const cancel = count('cancel');
   if (cancel) parts.push(`${cancel} unconfirmed combined payment session(s) will be cancelled in Stripe first`);
@@ -121,7 +133,7 @@ function paymentSessionsNote(sessions) {
   if (inFlight) parts.push(`${inFlight} payment session(s) have money in flight (a merged-away one defers the merge until it settles)`);
   const kept = count('kept_single_invoice');
   if (kept) parts.push(`${kept} single-invoice checkout session(s) stay open and are NOT cancelled`);
-  return ` Payment sessions listed above: ${parts.join('; ')}.`;
+  return ` Payment sessions listed above (counted per payment session, not per invoice): ${parts.join('; ')}.`;
 }
 
 // The collection-case sentence states the reconcile the executor will run

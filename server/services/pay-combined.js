@@ -683,7 +683,18 @@ async function lockCombinedCustomerStable(database, invoiceId, snapshotCustomerI
   }
 }
 
-async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice = false } = {}) {
+/**
+ * `expectedOutcomes`: { [paymentIntentId]: outcome } approved on the card.
+ * The id pin (lockAndPinStampedSessionsForCustomer) only proves the SAME
+ * intents are still stamped; it says nothing about what they will do. A
+ * customer confirming a checkout directly with Stripe between the locked
+ * fingerprint check and this release flips `cancel` → `in_flight`, and the
+ * caller's own in-flight guards may not cover that side — so the approval
+ * would have promised a cancellation that never happens. Any intent whose
+ * outcome no longer matches its pin refuses with `previewChanged`
+ * (codex #4348 r10 P1).
+ */
+async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice = false, expectedOutcomes = null } = {}) {
   const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
   let released = 0;
   let inFlight = 0;
@@ -703,6 +714,11 @@ async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedS
       throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
     }
     const outcome = stampedSessionOutcome(pi, { invalidatedSingleInvoice });
+    if (expectedOutcomes && Object.prototype.hasOwnProperty.call(expectedOutcomes, piId) && expectedOutcomes[piId] !== outcome) {
+      const err = new Error(`Payment session ${piId} changed since this was approved (the card said ${expectedOutcomes[piId]}, it is now ${outcome}) — review a fresh proposal`);
+      err.previewChanged = true;
+      throw err;
+    }
     if (outcome === 'kept_single_invoice') continue;
     // Already canceled (codex r24 P2): a prior release's cancel succeeded
     // but the stamp cleanup failed — retry the cleanup instead of skipping.

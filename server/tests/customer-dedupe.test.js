@@ -2449,6 +2449,52 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(JSON.parse(first.fingerprint)).toEqual({ moving: first.moving, financial_effects: first.financial_effects });
   });
 
+  it('locks both promoter rows under the executor transaction before fingerprinting the fold, and re-reads them (Codex r10 P1)', async () => {
+    // Referral writes take neither the customer nor the pair lock (a unique
+    // click increments total_clicks straight off the row), so the balances
+    // the card states must be read under FOR UPDATE and held to the fold.
+    const promoters = {
+      'promo-L': { id: 'promo-L', customer_id: 'L', total_clicks: 4 },
+      'promo-W': { id: 'promo-W', customer_id: 'W', total_clicks: 9 },
+    };
+    const calls = [];
+    const trxDb = jest.fn((table) => {
+      const q = makeChain(table, (qq) => {
+        calls.push({ table, locked: qq.called('forUpdate'), where: qq.args('where')?.[0] });
+        if (table !== 'referral_promoters') return { n: 0 };
+        const w = qq.args('where')?.[0] || {};
+        if (qq.called('whereIn')) return [{ id: 'promo-L' }, { id: 'promo-W' }];
+        if (w.customer_id === 'L') return promoters['promo-L'];
+        if (w.customer_id === 'W') return promoters['promo-W'];
+        if (w.id) return promoters[w.id];
+        return null;
+      });
+      return q;
+    });
+    trxDb.isTransaction = true;
+    trxDb.raw = jest.fn(async () => FK_ROWS);
+    const out = await dedupe.previewMergeEffects(trxDb, 'W', 'L');
+    expect(out.referral).toMatchObject({ loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: 'promo-L', winner_promoter_id: 'promo-W' });
+    // Exactly one id-ordered FOR UPDATE over both promoter rows...
+    const locking = calls.filter((c) => c.table === 'referral_promoters' && c.locked);
+    expect(locking).toHaveLength(1);
+    // ...and the rows are re-read AFTER it, not trusted from before.
+    const lockIndex = calls.findIndex((c) => c.locked);
+    expect(calls.slice(lockIndex + 1).filter((c) => c.table === 'referral_promoters' && c.where?.id)).toHaveLength(2);
+  });
+
+  it('does not take row locks on the unlocked card read (no transaction, nothing to hold)', async () => {
+    install({});
+    const seen = [];
+    const plain = jest.fn((table) => makeChain(table, (q) => {
+      seen.push(q.called('forUpdate'));
+      return table === 'referral_promoters' ? null : { n: 0 };
+    }));
+    plain.raw = jest.fn(async () => FK_ROWS);
+    await dedupe.previewMergeEffects(plain, 'W', 'L');
+    expect(seen.some(Boolean)).toBe(false);
+  });
+
   it('discloses and pins the non-FK rewrites the row sweep cannot see (Codex r9 P2)', async () => {
     // jsonb-embedded ids and trigger-id identities: not FK columns, so the
     // sweep's counts never mention them, yet the executor rewrites them.
@@ -2556,6 +2602,17 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
       return { n: 0 };
     });
   }
+  it('the pair adjudication lock folds UUID case, so an uppercase dismissal and a lowercase merge take the SAME lock (Codex r10 P1)', async () => {
+    const keys = [];
+    const trx = { raw: jest.fn(async (_sql, bindings) => { keys.push(bindings[0]); return { rows: [] }; }) };
+    await dedupe.acquirePairAdjudicationLock(trx, 'A1B2C3D4-0000-4000-8000-00000000000F', 'b0000000-0000-4000-8000-000000000001');
+    await dedupe.acquirePairAdjudicationLock(trx, 'a1b2c3d4-0000-4000-8000-00000000000f', 'B0000000-0000-4000-8000-000000000001');
+    // ...and in the opposite argument order, since the key is sorted.
+    await dedupe.acquirePairAdjudicationLock(trx, 'b0000000-0000-4000-8000-000000000001', 'A1B2C3D4-0000-4000-8000-00000000000F');
+    expect(new Set(keys).size).toBe(1);
+    expect(keys[0]).toBe('customer-duplicate-pair:a1b2c3d4-0000-4000-8000-00000000000f:b0000000-0000-4000-8000-000000000001');
+  });
+
   it('surplusApprovedCollectionCases is the executor rule: newest approval survives, all revert beside a dialing/held row', () => {
     const a1 = { id: 'c1', current_state: 'approved', case_version: 3 };
     const a2 = { id: 'c2', current_state: 'approved', case_version: 1 };

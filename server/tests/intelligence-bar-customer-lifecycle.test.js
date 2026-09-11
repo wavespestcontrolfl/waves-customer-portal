@@ -213,6 +213,23 @@ describe('merge_customers', () => {
     expect(card.note_to_operator).not.toMatch(/2 unconfirmed combined payment session/);
   });
 
+  test('session counts are per PaymentIntent, not per stamped invoice (Codex r10 P2)', async () => {
+    // One combined intent stamped onto three invoices: the release cancels
+    // it ONCE, so the card must not promise three cancellations.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, combined_payment_sessions: { winner: [], loser: [
+      { invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' },
+      { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_a', outcome: 'cancel' },
+      { invoice_id: 'inv-3', invoice_number: 'INV-3', payment_intent_id: 'pi_a', outcome: 'cancel' },
+      { invoice_id: 'inv-4', invoice_number: 'INV-4', payment_intent_id: 'pi_b', outcome: 'cancel' },
+    ] } } });
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(card.note_to_operator).toMatch(/2 unconfirmed combined payment session\(s\) will be cancelled in Stripe first/);
+    expect(card.note_to_operator).toMatch(/counted per payment session, not per invoice/);
+    // The per-invoice rows are still disclosed in full.
+    expect(card.financial_effects.combined_payment_sessions.loser).toHaveLength(4);
+  });
+
   test('the card puts the non-FK rewrites in words — an address stamp and a re-keyed delivery are not "rows listed above" (Codex r9 P2)', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
     mockDescribeMergeEffects.mockResolvedValueOnce({
