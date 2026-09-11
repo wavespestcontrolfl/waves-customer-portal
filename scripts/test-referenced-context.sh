@@ -77,6 +77,13 @@ echo "module.exports = { helper_index_substituted: 1 };" > server/services/helpe
 # lands on the wrong one. These two make that visible instead of silent.
 mkdir -p server/services/nested
 echo "module.exports = { ROOT_HELPER: 1 };"   > helper.js
+# Competing EXACT targets: an extensionless entry that Node would resolve
+# first, sitting beside a same-named .js. Neither may be substituted for the
+# other — the .js is the tempting wrong answer in both cases.
+ln -s /etc/passwd server/services/widget
+echo "module.exports = { widget_js_substituted: 1 };" > server/services/widget.js
+printf '#!/bin/sh\necho gadget\n' > server/services/gadget
+echo "module.exports = { gadget_js_substituted: 1 };" > server/services/gadget.js
 echo "module.exports = { NESTED_HELPER: 1 };" > server/services/nested/helper.js
 printf 'module.exports = { big: "%s" };\n' "$(head -c 4000 < /dev/zero | tr '\0' 'x')" > server/services/big.js
 ln -s /etc/passwd server/services/link.js
@@ -233,6 +240,15 @@ elif grep -qa "NESTED_HELPER" "$WORK/out.txt"; then
 else
   fail "resolved neither helper — the ++ case inlined nothing at all"
 fi
+
+# Node tries the EXACT path first, so that entry is the target even when it
+# is a symlink or carries no usable extension. Rejecting it must drop the
+# reference, never fall through to the same-named .js and present that as
+# what the import points at.
+expect "does not substitute widget.js for an extensionless symlink" \
+  "const w = require('./widget');" excludes "widget_js_substituted"
+expect "does not substitute gadget.js for an extensionless exact match" \
+  "const g = require('./gadget');" excludes "gadget_js_substituted"
 
 echo ""
 echo "reads the audited commit, not the working tree:"

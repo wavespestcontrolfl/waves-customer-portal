@@ -775,9 +775,17 @@ with open(diff_path, encoding='utf-8', errors='replace') as fh:
 out, seen = [], set()
 for src, spec in refs:
     base = os.path.normpath(os.path.join(os.path.dirname(src), spec))
-    cands = [base] if base.endswith(EXT) else []
+    # The EXACT path is always the first candidate, whatever it is named.
+    # Node tries it first, so it is the target even when it has no
+    # extension or an unsupported one — and if it is then rejected, the
+    # reference is dropped rather than quietly re-pointed at a sibling.
+    # Generating only EXT candidates would skip a tracked extensionless
+    # `helper` (a symlink, say) and inline `helper.js` in its place.
+    cands = [base]
     cands += [base + e for e in EXT]
     cands += [base + '/index' + e for e in EXT]
+    seen_cands = set()
+    cands = [c for c in cands if not (c in seen_cands or seen_cands.add(c))]
 
     # RESOLUTION FIRST, filtering second, and the two must not be mixed.
     # Walking the candidate list while filtering lets an excluded target
@@ -809,6 +817,11 @@ for src, spec in refs:
     # A symlink entry is refused outright: its blob is a path, and following
     # it would step outside the commit's own contents.
     if tree.get(target) == SYMLINK_MODE:
+        continue
+    # The extension is judged on the RESOLVED target, not used to filter the
+    # candidate list. Filtering the list is what let an unsupported exact
+    # match fall through to a same-named .js file.
+    if not target.endswith(EXT):
         continue
     seen.add(target)
     out.append(target)
