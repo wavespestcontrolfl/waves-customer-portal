@@ -129,6 +129,43 @@ function lowConfidenceRange(f) {
   return { pct, fraction, range_unit: rangeUnit, cadence: band(cadencePrice), annual: band(money(f.annual)) };
 }
 
+// On a MULTI-service estimate, a narrow LOW-confidence commercial line can
+// leave every individual top-level frequency exact (its own
+// lowConfidenceRangePct unset) while the composer stamps the AGGREGATE range
+// on bundle.combinedRecurring instead (withCombinedLowConfidenceRange,
+// estimate-public.js) — CombinedRecurringPriceCard/PlanTotalSummary on the
+// customer page fall back to combined.lowConfidenceRangePct exactly when the
+// selected top-level frequency carries none, and then never render the exact
+// combined monthly/annual, only the range. Extracted once per bundle so the
+// aggregate uncertain dollars (lowConfidenceMonthly) are read a single time.
+function combinedLowConfidenceRange(combined) {
+  if (!combined || typeof combined !== 'object') return null;
+  const pct = Number(combined.lowConfidenceRangePct);
+  if (!(pct > 0)) return null;
+  const rawFraction = Number(combined.lowConfidenceFraction);
+  const stampedFraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
+  const rawLowMonthly = Number(combined.lowConfidenceMonthly);
+  return { pct, stampedFraction, lowMonthly: Number.isFinite(rawLowMonthly) && rawLowMonthly > 0 ? rawLowMonthly : null };
+}
+
+// Bands ONE top-level frequency against the combined aggregate's fixed
+// uncertain dollars — same math as the customer page's combined card: the
+// fraction is recomputed against THIS candidate's own (unscaled) monthly
+// figure when the aggregate low dollars are known, else the stamped
+// fallback fraction; the SAME fraction then bands annual. Never applied to a
+// section's own frequencies (services[].frequencies) — those already carry
+// their own correct per-section stamp from the composer.
+function bandForFrequency(f, combinedRange) {
+  if (!combinedRange) return null;
+  const monthly = Number(f.monthly);
+  if (!(monthly > 0)) return null;
+  const fraction = combinedRange.lowMonthly != null ? Math.min(combinedRange.lowMonthly / monthly, 1) : combinedRange.stampedFraction;
+  if (!(fraction > 0)) return null;
+  const band = (price) => (Number.isFinite(price) && price != null ? [money(price - price * fraction * combinedRange.pct), money(price + price * fraction * combinedRange.pct)] : null);
+  const annual = Number(f.annual);
+  return { pct: combinedRange.pct, fraction, range_unit: 'monthly', cadence: band(monthly), annual: Number.isFinite(annual) ? band(annual) : null };
+}
+
 // On a ranged LOW-confidence cadence PriceCard suppresses the treatment rows
 // entirely (only the range is shown), so their exact amounts are withheld
 // here too — the service identity stays, every dollar figure goes.
@@ -148,9 +185,21 @@ function treatmentRow(r, { withholdPrices = false } = {}) {
   };
 }
 
-function frequencyEntry(f) {
+function frequencyEntry(f, combinedRange) {
   const rows = list(f.perServiceTreatments);
-  const range = lowConfidenceRange(f);
+  // This frequency's own stamped range first (PriceCard's per-cadence
+  // ladder), else the aggregate combined-card range when no individual
+  // stamp exists (see combinedLowConfidenceRange/bandForFrequency) — only
+  // one of the two customer-facing cards actually renders a range for any
+  // given payload, but withholding on either signal keeps the bar from
+  // quoting a midpoint the page could show as a range under either reading.
+  const range = lowConfidenceRange(f) || bandForFrequency(f, combinedRange);
+  // A quote-required cadence shows "Quote required" on the customer page
+  // (PriceCard.jsx) with no exact monthly/annual figure at all — a ranged
+  // cadence never has quoteRequired true simultaneously (lowConfidenceRange
+  // zeroes pct when quoteRequired), so this is an independent, additive
+  // withholding condition, not a duplicate of `range`.
+  const withheld = !!range || f.quoteRequired === true;
   const entry = {
     key: f.key || null,
     label: f.label || null,
@@ -158,15 +207,16 @@ function frequencyEntry(f) {
     // the customer page either — PriceCard's headline renders the range
     // string, never frequency.monthly or the interval-scaled cadencePrice —
     // so the bar must not quote a midpoint the page itself withholds
-    // (pre-push audit P1).
-    monthly: range ? null : money(f.monthly),
-    annual: range ? null : money(f.annual),
+    // (pre-push audit P1). A quote-required cadence withholds the same way
+    // (PriceCard.jsx suppresses the amount and shows "Quote required").
+    monthly: withheld ? null : money(f.monthly),
+    annual: withheld ? null : money(f.annual),
     visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
     billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
     // PriceCard's perAppNet rule: a ranged (or quote-required) cadence shows
     // the RANGE and no exact per-application headline — the customer never
     // sees the midpoint, so the bar must not quote it either.
-    per_application: range || f.quoteRequired === true ? null : perApplicationFor(f),
+    per_application: withheld ? null : perApplicationFor(f),
     per_service_treatments: rows.map((r) => treatmentRow(r, { withholdPrices: !!range })),
     // Row-level discount state: a program minimum can cap or suppress the
     // manual discount on SOME cadences only — the global manual_discount
@@ -289,8 +339,21 @@ async function authoredProposalPricing(row, data) {
   });
   if (proposal.enabled !== true) return null;
   const totals = computeProposalTotals(proposal);
+  // The public resolver always marks an enabled/itemized proposal
+  // quote-required (reason commercial_proposal) — a formal commercial
+  // proposal is finalized by the account manager, never self-serve accepted
+  // (estimate-public.js resolveEstimateQuoteRequirement, commercialProposal
+  // check). This early-return branch bypasses buildPricingBundle entirely,
+  // so without reading the resolver directly here shapeEstimate's
+  // requote_required/requote_reason would read null instead of agreeing
+  // with the customer page (pre-push audit / Codex r2 P2). Same call
+  // pattern as the legacy SSR page (estimate-public.js:4979): no bundle,
+  // just the stored estData.
+  const quoteState = lazy.publicRoute().resolveEstimateQuoteRequirement(null, data);
   return {
     pricing_authority: 'authored_proposal',
+    quote_required: quoteState.quoteRequired === true,
+    quote_required_reason: quoteState.reason || null,
     bills_per_application: billing?.billsPerApplication === true,
     proposal: {
       title: proposal.title,
@@ -349,21 +412,36 @@ async function authoredProposalPricing(row, data) {
 //             valid snapshot's columns already agree with this candidate,
 //             so no override is needed there.
 //
-// Both are null for a price-locked (accepted/declined) estimate: its totals
-// describe what was actually committed — same predicate resolveLivePricing
-// gates on before calling buildPricingBundle at all
-// (estimate-proposal-billing.js estimateIsPriceLocked; buildPricingBundle
+// A THIRD outcome — noSellableCadence — fires when every frequency on offer
+// is quoteRequired: the customer page shows "Quote required" with no
+// fallback figure at all, so totalsFor must not let the stored
+// monthly_total/annual_total columns stand in for a cadence the page never
+// prices (pre-push audit / Codex r2 P1). Distinguished from "no frequencies
+// at all" (a one-time-only estimate, which is not a quote-required signal).
+//
+// Both range/override are null for a price-locked (accepted/declined)
+// estimate: its totals describe what was actually committed — same
+// predicate resolveLivePricing gates on before calling buildPricingBundle at
+// all (estimate-proposal-billing.js estimateIsPriceLocked; buildPricingBundle
 // itself carries no such guard) — and a low-confidence range is resolved to
 // an exact, site-confirmed price before acceptance can go through at all.
 function defaultCadenceForTotals(bundle, snapshotHit, priceLocked) {
-  if (priceLocked) return { range: null, override: null };
-  const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
+  if (priceLocked) return { range: null, override: null, noSellableCadence: false };
+  const frequencies = list(bundle.frequencies);
+  const sellable = frequencies.filter((f) => f && f.quoteRequired !== true);
+  if (frequencies.length > 0 && sellable.length === 0) {
+    return { range: null, override: null, noSellableCadence: true };
+  }
   const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
-  if (!candidate) return { range: null, override: null };
-  const range = lowConfidenceRange(candidate);
-  if (range) return { range, override: null };
-  if (snapshotHit) return { range: null, override: null };
-  return { range: null, override: { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) } };
+  if (!candidate) return { range: null, override: null, noSellableCadence: false };
+  // The candidate's own stamped range first, else the aggregate combined-card
+  // fallback (see combinedLowConfidenceRange/bandForFrequency) — the same
+  // fallback frequencyEntry applies to plan_frequencies, so totals and the
+  // per-cadence list never disagree about whether this cadence is ranged.
+  const range = lowConfidenceRange(candidate) || bandForFrequency(candidate, combinedLowConfidenceRange(bundle.combinedRecurring));
+  if (range) return { range, override: null, noSellableCadence: false };
+  if (snapshotHit) return { range: null, override: null, noSellableCadence: false };
+  return { range: null, override: { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) }, noSellableCadence: false };
 }
 
 // A price-locked (accepted/declined) row whose bundle rebuilt WITHOUT a
@@ -397,8 +475,13 @@ function stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) {
   };
 }
 
-function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency) {
+function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency, noSellableCadence) {
   const fees = upfrontFees(bundle);
+  // Aggregate combined-card fallback (see combinedLowConfidenceRange), applied
+  // to every top-level frequency that carries no stamp of its own —
+  // frequencyEntry falls back to it identically for defaultCadenceForTotals'
+  // candidate, so plan_frequencies and totals never disagree.
+  const combinedRange = combinedLowConfidenceRange(bundle.combinedRecurring);
   return {
     default_service_mode: bundle.defaultServiceMode || null,
     // A price-locked (accepted/declined) row's totals — monthly, annual,
@@ -411,12 +494,20 @@ function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRan
     snapshot_hit: snapshotHit,
     ...(defaultCadenceRange ? { default_cadence_low_confidence_range: defaultCadenceRange } : {}),
     ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
-    plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
+    // Every cadence on offer is quoteRequired — the customer page has no
+    // fallback figure to show either, so totals must not fall back to the
+    // stored monthly_total/annual_total columns (pre-push audit / Codex r2 P1).
+    ...(noSellableCadence ? { no_sellable_cadence: true } : {}),
+    plan_frequencies: list(bundle.frequencies).map((f) => frequencyEntry(f, combinedRange)),
     services: list(bundle.services).map((s) => ({
       key: s.key || null,
       label: s.label || null,
       default_frequency_key: s.defaultFrequencyKey || null,
-      frequencies: list(s.frequencies).map(frequencyEntry),
+      // Section frequencies already carry their own correct per-section
+      // stamp from stampLowConfidenceRangeOnServices — no combined-card
+      // fallback here, or a section would be ranged twice by two different
+      // mechanisms.
+      frequencies: list(s.frequencies).map((f) => frequencyEntry(f)),
       ...sectionSelectors(s),
     })),
     combos: list(bundle.serviceCadenceCombos).map(comboEntry),
@@ -458,8 +549,8 @@ async function offeredPricing(row, data) {
   const snapshotHit = bundle.snapshotHit === true;
   const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
   if (priceLocked && !snapshotHit) return { offered_pricing: stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) };
-  const { range: defaultCadenceRange, override: rebuiltDefaultFrequency } = defaultCadenceForTotals(bundle, snapshotHit, priceLocked);
-  return { offered_pricing: builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency) };
+  const { range: defaultCadenceRange, override: rebuiltDefaultFrequency, noSellableCadence } = defaultCadenceForTotals(bundle, snapshotHit, priceLocked);
+  return { offered_pricing: builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency, noSellableCadence) };
 }
 
 // ── Links ────────────────────────────────────────────────────────────
@@ -574,6 +665,13 @@ function totalsFor(row, pricing, reconciliation_error) {
   if (offered.rebuilt_default_frequency) {
     const d = offered.rebuilt_default_frequency;
     return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
+  }
+  // Every cadence on offer is quoteRequired: the customer page shows
+  // "Quote required" with no fallback figure, so the stored
+  // monthly_total/annual_total columns (which can describe a stale or
+  // different cadence) must not stand in for it (pre-push audit / Codex r2 P1).
+  if (offered.no_sellable_cadence) {
+    return { monthly: null, annual: null, one_time: oneTime, source: 'no_sellable_cadence' };
   }
   return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: oneTime };
 }

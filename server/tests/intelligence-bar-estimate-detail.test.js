@@ -27,6 +27,15 @@ jest.mock('../routes/estimate-public', () => {
     resolveEstimateInvoiceMode: (e, data) => e.bill_by_invoice === true || data?.rodentGuaranteeOnly === true,
     isEstimateCustomerViewable: (e) => !e.archived_at && !unpublished.includes(e.status) && !['expired', 'send_failed'].includes(e.status),
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
+    // Simplified mirror of the real resolver's commercialProposal branch
+    // (estimate-public.js resolveEstimateQuoteRequirement) — enough to prove
+    // authoredProposalPricing carries the resolver's verdict through
+    // (Codex round 2 P2), without pulling in the whole real module.
+    resolveEstimateQuoteRequirement: (pricingBundle, estData) => (
+      estData?.proposal?.enabled === true
+        ? { quoteRequired: true, reason: 'commercial_proposal', items: [] }
+        : { quoteRequired: false, reason: null, items: [] }
+    ),
     // Real defaultFrequencyFromList: selected/recommended row first, else the
     // first entry — same fallback order the route itself uses.
     defaultFrequencyFromList: (frequencies = []) => {
@@ -153,7 +162,9 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
       ] },
       { key: 'lawn_care', label: 'Lawn Care', default_frequency_key: 'enhanced', frequencies: [
         { key: 'standard', label: 'Standard', monthly: 45, annual: 540, visits_per_year: 6, billing_unit: 'monthly', per_application: null, ...noRows },
-        { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visits_per_year: 9, billing_unit: 'monthly', per_application: null, ...noRows, quote_required: true },
+        // quoteRequired withholds monthly/annual too — PriceCard shows "Quote
+        // required" with no numeric amount at all (Codex round 2 P1).
+        { key: 'enhanced', label: 'Enhanced', monthly: null, annual: null, visits_per_year: 9, billing_unit: 'monthly', per_application: null, ...noRows, quote_required: true },
       ] },
       { key: 'commercial_pest', label: 'Commercial Pest', default_frequency_key: 'monthly', frequencies: [
         // per_application is null: the page shows the RANGE and no exact per-application headline (PriceCard perAppNet rule, Codex r7 P1).
@@ -384,13 +395,24 @@ test('a VALID snapshot (snapshotHit true) keeps the stored monthly_total/annual_
   expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
 });
 
-test('a rebuilt bundle (snapshotHit not true) with no sellable cadence — every frequency quote_required — falls back to the stored columns rather than reporting no total at all (Codex r-head P1)', async () => {
+test('a rebuilt bundle (snapshotHit not true) with no sellable cadence — every frequency quote_required — withholds totals rather than falling back to the stored columns, which can describe a different cadence entirely (Codex round 2 P1)', async () => {
   mockBuildPricingBundle.mockResolvedValue({
     frequencies: [{ key: 'quarterly', monthly: 999, annual: 11988, quoteRequired: true }],
   });
   const shaped = await shapeEstimate(estimateRow({ monthly_total: '47.00', annual_total: '564.00' }));
   expect(shaped.offered_pricing.snapshot_hit).toBe(false);
   expect(shaped.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(shaped.offered_pricing.no_sellable_cadence).toBe(true);
+  // The quote-required frequency itself withholds its numeric amounts too
+  // (PriceCard shows "Quote required" with no monthly/annual figure at all).
+  expect(shaped.offered_pricing.plan_frequencies[0]).toMatchObject({ monthly: null, annual: null });
+  expect(shaped.totals).toEqual({ monthly: null, annual: null, one_time: 125, source: 'no_sellable_cadence' });
+});
+
+test('a rebuilt bundle with NO frequencies at all (one-time-only estimate) is not treated as "no sellable cadence" — totals fall back to the stored columns as usual', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], anchorOneTimePrice: 125 });
+  const shaped = await shapeEstimate(estimateRow({ monthly_total: '47.00', annual_total: '564.00' }));
+  expect(shaped.offered_pricing.no_sellable_cadence).toBeUndefined();
   expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
 });
 
@@ -527,6 +549,42 @@ test('a VALID snapshot (snapshotHit true) whose default sellable cadence is a na
   });
 });
 
+test('a multi-service estimate whose narrow low-confidence range is stamped on combinedRecurring (top-level frequencies stay exact) still withholds the aggregate — the customer\'s combined card falls back to combined.lowConfidenceRangePct exactly when the selected frequency carries none, so the bar must too (Codex round 2 P1, finding 3987558108)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'quarterly', monthly: 300, annual: 3600, visitsPerYear: 4 }], // no own lowConfidenceRangePct
+    combinedRecurring: { monthlySubtotal: 300, annualSubtotal: 3600, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 0.5, lowConfidenceMonthly: 150 },
+    anchorOneTimePrice: 50,
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  // fraction = min(lowConfidenceMonthly / monthly, 1) = min(150/300, 1) = 0.5;
+  // band = 300 × 0.5 × 0.2 = 30 → [270, 330] (mirrors CombinedRecurringPriceCard).
+  expect(shaped.offered_pricing.plan_frequencies[0]).toMatchObject({
+    monthly: null, annual: null, per_application: null,
+    low_confidence_range: { pct: 0.2, fraction: 0.5, range_unit: 'monthly', cadence: [270, 330], annual: [3240, 3960] },
+  });
+  expect(shaped.offered_pricing.default_cadence_low_confidence_range).toEqual(
+    { pct: 0.2, fraction: 0.5, range_unit: 'monthly', cadence: [270, 330], annual: [3240, 3960] },
+  );
+  expect(shaped.totals).toEqual({
+    monthly: null, annual: null, one_time: 50,
+    low_confidence_range: { pct: 0.2, fraction: 0.5, range_unit: 'monthly', cadence: [270, 330], annual: [3240, 3960] },
+    source: 'rebuilt_bundle_default_range',
+  });
+});
+
+test('a service section\'s own frequencies never fall back to the combined-card range — they already carry their own correct per-section stamp from the composer, and applying both would range them twice', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [],
+    combinedRecurring: { monthlySubtotal: 300, annualSubtotal: 3600, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 0.5, lowConfidenceMonthly: 150 },
+    services: [{ key: 'commercial_pest', label: 'Commercial Pest', defaultFrequencyKey: 'monthly', frequencies: [
+      { key: 'monthly', monthly: 300, annual: 3600, visitsPerYear: 12 }, // no own stamp on this section frequency
+    ] }],
+  });
+  const [section] = (await shapeEstimate(estimateRow())).offered_pricing.services;
+  expect(section.frequencies[0]).toMatchObject({ monthly: 300, annual: 3600 });
+  expect(section.frequencies[0].low_confidence_range).toBeUndefined();
+});
+
 test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [], services: [
     { key: 'termite_bait', label: 'Termite', defaultFrequencyKey: 'quarterly', frequencies: [{ key: 'quarterly', monthly: 35, annual: 420, perTreatment: 105, visitsPerYear: 4, billedPerApplication: true }],
@@ -591,7 +649,11 @@ test('an enabled, itemized proposal is the pricing authority: authored lines, pr
   });
   expect(shaped.offered_pricing.plan_frequencies).toBeUndefined();
   expect(shaped.totals).toEqual({ monthly: 250, annual: 3000, one_time: 500, total_tax: 14, first_year_total: 3514, source: 'authored_proposal' });
-  expect(shaped.requote_required).toBeNull();
+  // The public resolver always marks an enabled/itemized proposal
+  // quote-required (commercial_proposal) — carried through even on this
+  // early-return branch (Codex round 2 P2; see the dedicated test below).
+  expect(shaped.requote_required).toBe(true);
+  expect(shaped.requote_reason).toBe('commercial_proposal');
   expect(JSON.stringify(shaped)).not.toMatch(/Engine row/);
 
   // enabled flag with NO itemization normalizes to the synthesized fallback → the page prices from the bundle, and so does the tool
@@ -610,6 +672,23 @@ test('an enabled, itemized proposal is the pricing authority: authored lines, pr
   // columns (92/1104) this tool explicitly does not treat as the billed quote
   // for a proposal estimate (pre-push audit P1).
   expect(failed.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
+});
+
+test('an enabled, itemized proposal carries the resolver\'s quote-required verdict (reason commercial_proposal) at the top level — the public resolver always marks a formal commercial proposal quote-required, and this early-return branch must not silently read null instead (Codex round 2 P2, finding 3987558134)', async () => {
+  const row = estimateRow({
+    category: 'COMMERCIAL',
+    estimate_data: JSON.stringify({
+      proposal: {
+        enabled: true, title: 'Commercial Service Proposal', preparedFor: 'Harbor Plaza LLC', propertyAddress: '9 Dock Rd', taxRate: 0, taxLabel: null, terms: null,
+        buildings: [{ name: 'Building A', lineItems: [{ description: 'Monthly pest service', quantity: 1, unitPrice: 250, frequency: 'monthly', taxable: false }] }],
+      },
+    }),
+  });
+  const shaped = await shapeEstimate(row);
+  expect(shaped.offered_pricing).toMatchObject({ pricing_authority: 'authored_proposal', quote_required: true, quote_required_reason: 'commercial_proposal' });
+  // Carried through to the top-level fields the customer page's verdict maps to.
+  expect(shaped.requote_required).toBe(true);
+  expect(shaped.requote_reason).toBe('commercial_proposal');
 });
 
 test('a proposal line priced by a measured unit keeps its unit and its own four-decimal rate, not a rounded-to-cents unit price (Codex round P1)', async () => {

@@ -41,4 +41,34 @@ module.exports = {
   update_lead_pipeline: { sideEffects: true, reason: 'updates leads.pipeline stage, inserts lead_activities' },
   queue_for_adam:     { sideEffects: true, reason: 'inserts lead_agent_responses queue rows' },
   save_lead_response_report: { sideEffects: true, reason: 'inserts lead_agent_responses report rows (write path swallowed its own failure during smoke)' },
+
+  // get_estimate_detail's own DB reads live in
+  // services/intelligence-bar/estimate-detail.js, a helper required INTO
+  // estimate-tools.js (which owns the tool's registry sourcePath) — the
+  // static source scan on estimate-tools.js finds none of these
+  // references, so without this manual contract the DB-columns gate
+  // silently checks nothing for this tool (Codex round 2, #4345).
+  get_estimate_detail: {
+    tables: ['estimates', 'estimate_deposits'],
+    columns: {
+      // select('*') plus every estimates.<column> the tool reads off the
+      // row afterward (shapeEstimate / getEstimateDetail's own where/
+      // orderBy/whereNull clauses) — enumerated so a dropped or renamed
+      // column is still caught, not just table existence.
+      estimates: [
+        'id', 'customer_id', 'customer_name', 'address', 'status', 'disposition', 'disposition_note',
+        'decline_reason', 'category', 'service_interest', 'waveguard_tier', 'pricing_version', 'bill_by_invoice',
+        'monthly_total', 'annual_total', 'onetime_total', 'accepted_at', 'accepted_service_mode',
+        'accepted_frequency_key', 'notes', 'token', 'sent_at', 'viewed_at', 'view_count', 'declined_at',
+        'expires_at', 'archived_at', 'created_at', 'updated_at', 'estimate_data',
+      ],
+      // Exactly the .select(...) list in getEstimateDetail(), plus the
+      // orderBy column.
+      estimate_deposits: [
+        'estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount', 'refunded_surcharge',
+        'status', 'received_at', 'created_at',
+      ],
+    },
+    reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',
+  },
 };
