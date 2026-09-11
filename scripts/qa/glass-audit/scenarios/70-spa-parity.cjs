@@ -27,7 +27,8 @@ const liveReschedule = (body) => {
   return {
     ...body,
     current: body.current ? { ...body.current, date: shift(body.current.date) } : body.current,
-    availability: { ...body.availability, rangeFrom: shift(body.availability.rangeFrom), rangeTo: shift(body.availability.rangeTo), days: (body.availability.days || []).map(day) },
+    // `slots` is the top-level ranked list ScheduleFlowPage feeds the picker; it is re-based like the day grid.
+    availability: { ...body.availability, rangeFrom: shift(body.availability.rangeFrom), rangeTo: shift(body.availability.rangeTo), days: (body.availability.days || []).map(day), slots: (body.availability.slots || []).map(slot) },
   };
 };
 const T = (c) => c.repeat(64);

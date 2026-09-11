@@ -19,6 +19,11 @@ const OUTLINE_TOKEN = 'Qx7Lm2Np9Rt4Vw6Yz8Ab1Cd3Ef5Gh7Jk9Mn2Pq4Rs6T'; // 43 chars
 const NEWS_ID = '3f2a9c1e-7b4d-4e8f-9a6c-1d2e3f4a5b6c';
 
 const ok = (body) => ({ status: 200, body });
+// appointment-public.js classifies a visit as `past` once its arrival window has ended, so an
+// `upcoming` / `confirmable` payload must carry a FUTURE date: eight ET calendar days out (never tomorrow,
+// which flips `isTomorrow` copy), computed with the same helpers the booking scenarios use.
+const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const APPT_DATE = etDateString(addETDays(new Date(), 8));
 const serverError = () => ({ status: 500, body: { error: 'glass-audit: simulated outage' } });
 
 // ---------------------------------------------------------------------------
@@ -28,7 +33,7 @@ const APPT_BASE = {
   state: 'upcoming',
   phase: null,
   service: { type: 'Quarterly Pest Control' },
-  appointment: { date: '2026-09-18', windowStart: '09:00', arrivalWindow: '9:00–11:00 AM' },
+  appointment: { date: APPT_DATE, windowStart: '09:00', arrivalWindow: '9:00–11:00 AM' },
   calendarEligible: true,
   vanScene: false,
   isTomorrow: false,

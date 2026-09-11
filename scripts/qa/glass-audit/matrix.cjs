@@ -48,7 +48,9 @@ const status = (s, list, w) => {
   const latestOf = (st, e) => rs.filter((c) => c.state === st && c.engine === e).pop();
   const ok = (c) => !!c && !c.failure && !!c.metrics;
   const failedEngines = engines.filter((e) => states.some((st) => { const c = latestOf(st, e); return c && !ok(c); }));
-  const okStates = states.filter((st) => engines.every((e) => { const c = latestOf(st, e); return !c || ok(c); }) && engines.some((e) => ok(latestOf(st, e))));
+  // EVERY engine represented at this width must hold a successful latest capture of the state: an
+  // interrupted WebKit run that captured only the first state leaves the others partial, not inspected.
+  const okStates = states.filter((st) => engines.every((e) => ok(latestOf(st, e))));
   if (!okStates.length) { const c = rs[rs.length - 1]; return `BLOCKED (${c.failure ? c.failure.slice(0, 40) : 'no metrics'})`; }
   const note = failedEngines.length ? `; latest ${failedEngines.join('/')} capture failed` : '';
   return okStates.length === states.length && !note ? 'inspected' : `partial (${okStates.length}/${states.length} states${note})`;
@@ -56,10 +58,15 @@ const status = (s, list, w) => {
 const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|');
 for (const s of scenarios) {
   const list = byId[s.id] || [];
+  // Interaction / unmocked-call cells come from the LATEST capture per state/width/engine: a corrective
+  // rerun retires an earlier `(failed)` interaction or unmatched call instead of listing both.
+  const latestMap = new Map();
+  for (const c of list) latestMap.set(`${c.state}@${c.width}#${c.engine}`, c);
+  const latestList = [...latestMap.values()];
   const states = [...new Set(list.map((c) => c.state))];
   const declaredStates = (s.states || [{ name: 'default' }]).map((x) => x.name);
   const missing = declaredStates.filter((x) => !states.includes(x));
-  const ix = [...new Set(list.flatMap((c) => c.interactions.map((i) => `${i.name}${i.ok ? '' : ' (failed)'}`)))];
+  const ix = [...new Set(latestList.flatMap((c) => (c.interactions || []).map((i) => `${i.name}${i.ok ? '' : ' (failed)'}`)))];
   const other = [...new Set(list.map((c) => c.width).filter((w) => w !== 390 && w !== 1440))].sort((a, b) => a - b);
   const engines = [...new Set(list.map((c) => c.engine))];
   const runsUsed = [...new Set(list.map((c) => c.run))];
@@ -67,7 +74,7 @@ for (const s of scenarios) {
   if (!list.length) blockers.push('no capture');
   if (missing.length) blockers.push(`states not captured: ${missing.join(', ')}`);
   if (s.notes) blockers.push(s.notes);
-  const unmatched = [...new Set(list.flatMap((c) => c.unmatched))];
+  const unmatched = [...new Set(latestList.flatMap((c) => c.unmatched || []))];
   if (unmatched.length) blockers.push(`unmocked: ${unmatched.slice(0, 2).join(', ')}${unmatched.length > 2 ? ` +${unmatched.length - 2}` : ''}`);
   lines.push(['', s.surface, `\`${s.route}\``, s.role, s.family, s.id, states.join(', ') || '—', ix.join(', ') || '—', status(s, list, 390), status(s, list, 1440), other.join('/') || '—', engines.join('+') || '—', runsUsed.join(', ') || '—', s.findings || '', blockers.join('; ') || '—', ''].map(cell).join(' | ').trim());
 }

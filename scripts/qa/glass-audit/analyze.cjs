@@ -51,11 +51,13 @@ if (latestFailed.length) {
 lines.push('## Per-scenario summary (390 / 1440)', '', '| scenario/state | glass | h1 | <14px | >700 | off-scale | ctrl<44 | nested blur | inline blur | pills | heading≠sheet | contrast<AA | overflow-x | main | footer | unmatched | errors |', '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
 // Runs are read in argument order, so the LAST match is the corrective rerun (e.g. `previews previews-fix`).
 const pick = (rs, w) => rs.filter((r) => r.width === w).pop();
+// Top-document overflow plus any same-origin iframe's INTERNAL overflow (`+f<n>`), which html.scrollWidth cannot see.
+const ovx = (L) => { const f = (L.frameOverflow || []).filter((x) => x.overflowX > 0); return `${L.overflowX}${f.length ? ` +f${f.map((x) => x.overflowX).join('/')}` : ''}`; };
 const fmt2 = (a, b, f) => `${a ? f(a) : '–'} / ${b ? f(b) : '–'}`;
 for (const [k, rs] of Object.entries(byScenario)) {
   const a = pick(rs, 390); const b = pick(rs, 1440);
   const m = (r) => r.metrics;
-  lines.push(`| ${k} | ${fmt2(a, b, (r) => m(r).theme.mounted ? (m(r).theme.attr || 'on') : 'OFF')} | ${fmt2(a, b, (r) => m(r).h1Count)} | ${fmt2(a, b, (r) => m(r).text.under14.length)} | ${fmt2(a, b, (r) => m(r).text.over700.length)} | ${fmt2(a, b, (r) => m(r).text.offScale.length)} | ${fmt2(a, b, (r) => m(r).controls.small.length)} | ${fmt2(a, b, (r) => m(r).glass.nestedBlur.length)} | ${fmt2(a, b, (r) => m(r).glass.inlineBlur.length)} | ${fmt2(a, b, (r) => m(r).pills.length)} | ${fmt2(a, b, (r) => m(r).headingIssues.length)} | ${fmt2(a, b, (r) => r.contrast.length)} | ${fmt2(a, b, (r) => m(r).layout.overflowX)} | ${fmt2(a, b, (r) => m(r).layout.mainCount)} | ${fmt2(a, b, (r) => m(r).layout.footer.present ? 'y' : 'n')} | ${fmt2(a, b, (r) => r.unmatched.length)} | ${fmt2(a, b, (r) => r.pageErrors.length)} |`);
+  lines.push(`| ${k} | ${fmt2(a, b, (r) => m(r).theme.mounted ? (m(r).theme.attr || 'on') : 'OFF')} | ${fmt2(a, b, (r) => m(r).h1Count)} | ${fmt2(a, b, (r) => m(r).text.under14.length)} | ${fmt2(a, b, (r) => m(r).text.over700.length)} | ${fmt2(a, b, (r) => m(r).text.offScale.length)} | ${fmt2(a, b, (r) => m(r).controls.small.length)} | ${fmt2(a, b, (r) => m(r).glass.nestedBlur.length)} | ${fmt2(a, b, (r) => m(r).glass.inlineBlur.length)} | ${fmt2(a, b, (r) => m(r).pills.length)} | ${fmt2(a, b, (r) => m(r).headingIssues.length)} | ${fmt2(a, b, (r) => r.contrast.length)} | ${fmt2(a, b, (r) => ovx(m(r).layout))} | ${fmt2(a, b, (r) => m(r).layout.mainCount)} | ${fmt2(a, b, (r) => m(r).layout.footer.present ? 'y' : 'n')} | ${fmt2(a, b, (r) => r.unmatched.length)} | ${fmt2(a, b, (r) => r.pageErrors.length)} |`);
 }
 lines.push('');
 
@@ -63,15 +65,19 @@ lines.push('');
 //    WebKit is listed once per engine, so the /webkit suffix can show a cross-engine reproduction).
 //    `source` defaults to the current successful captures; error sections pass the latest records
 //    INCLUDING failed ones, because a failed interaction / page error is exactly what fails a capture.
+//    Every captured width is read (320/375/430/768/1024 extra viewports included: a 320px overflow is a
+//    finding), and each interaction's own metrics snapshot (opened sheet / menu / dialog / later booking
+//    step) is read as a virtual record labelled `/<interaction>`, so overlay-only defects are listed too.
+const ixRecords = (r) => (r.interactions || []).filter((i) => i.ok && i.metrics).map((i) => ({ ...r, metrics: i.metrics, contrast: [], focusProbe: [], interactions: [], unmatched: [], pageErrors: [], ix: i.name }));
 function section(title, getter, fmt, limitPer = 12, source = withMetrics) {
   lines.push(`## ${title}`, '');
   const seen = new Set();
   const grouped = {};
-  for (const r of source.filter((x) => x.width === 390 || x.width === 1440)) {
+  for (const r of source.flatMap((x) => [x, ...(source === withMetrics ? ixRecords(x) : [])])) {
     for (const it of getter(r) || []) {
       const id = `${r.scenario}|${engineOf(r)}|${fmt(it)}`;
       if (seen.has(id)) continue; seen.add(id);
-      (grouped[r.scenario] = grouped[r.scenario] || []).push(`${fmt(it)} @${r.width}${engineOf(r) !== 'chromium' ? '/' + engineOf(r) : ''}`);
+      (grouped[r.scenario] = grouped[r.scenario] || []).push(`${fmt(it)} @${r.width}${r.ix ? '/' + r.ix : ''}${engineOf(r) !== 'chromium' ? '/' + engineOf(r) : ''}`);
     }
   }
   const total = Object.values(grouped).reduce((n, a) => n + a.length, 0);
@@ -90,6 +96,7 @@ section('Inputs (height / font / radius / placeholder)', (r) => r.metrics.contro
 section('Heading sizes ≠ sheet', (r) => r.metrics.headingIssues, (h) => `${h.why} “${h.text.slice(0, 30)}”`);
 section('Nested backdrop-filter (glass inside glass)', (r) => r.metrics.glass.nestedBlur, (g) => `${g.sel}`);
 section('Elements extending past the viewport edge (clipped overflow)', (r) => r.metrics.layout.overflowers, (o) => `${o.sel} right=${o.right} w=${o.w} y=${o.y}`);
+section('Iframe documents with internal horizontal overflow', (r) => (r.metrics.layout.frameOverflow || []).filter((f) => f.overflowX > 0), (f) => `frame ${f.w}px wide scrolls ${f.scrollWidth}px (+${f.overflowX})`);
 section('Untagged inline backdrop-filter surfaces', (r) => r.metrics.glass.inlineBlur, (g) => `${g.sel} ${g.backdrop} r${g.radius}`);
 section('Status-chip-like pills (no-chips ruling)', (r) => r.metrics.pills, (p) => `${p.sel} “${p.text.slice(0, 24)}” ${p.size}px r${p.radius} ${p.bg}`);
 section('Contrast below AA on composited background', (r) => r.contrast, (c) => `${c.sel} “${c.text.slice(0, 24)}” ${c.size}px ${c.color} on ${c.bg} = ${c.avg}:1 (min ${c.min})`);
