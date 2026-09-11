@@ -374,6 +374,64 @@ describe('retired stored-discount stack-group metadata (finding 2, P2)', () => {
     })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
   });
 
+  test('the EDIT path refuses the same combination — a retired tier stamp plus a fresh same-group pick on a retotal', async () => {
+    // Fallback-auditor P1 on 80a57de6e: create() got the retired-row
+    // widening, calculateUpdateFinancials did not, so editing an invoice that
+    // already carried a retired Silver stamp and adding Gold in the same edit
+    // saved two combined tier discounts.
+    const SILVER_RETIRED = {
+      id: 'silver-id', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10,
+      is_active: false, show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+    };
+    const GOLD = {
+      id: 'gold-id', name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15,
+      is_active: true, show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+    };
+    setupDb({ customer: { ...CUSTOMER, waveguard_tier: 'Silver' }, discounts: [SILVER_RETIRED, GOLD] });
+
+    await expect(InvoiceService._calculateUpdateFinancials({
+      customer: { ...CUSTOMER, waveguard_tier: 'Silver' },
+      invoice: { id: 'invoice-1', customer_id: 'customer-1', status: 'draft' },
+      taxRate: 0,
+      lineItems: [
+        line,
+        {
+          client_id: 'd-stamp', _kind: 'discount', discount_id: 'silver-id', discount_for: 'line-1',
+          description: 'WaveGuard Silver', quantity: 1, unit_price: -10, amount: -10,
+          discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+          use_stored_discount: true, stored_discount_source: 'scheduled_service',
+        },
+        pick(GOLD, 'd-gold'),
+      ],
+    })).rejects.toThrow(/Only one WaveGuard tier discount can apply/);
+  });
+
+  test('the EDIT path still saves a retired stamp on its own — the widening only feeds the tier check', async () => {
+    const SILVER_RETIRED = {
+      id: 'silver-id', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10,
+      is_active: false, show_in_invoices: true, stack_group: 'tier', is_stackable: false,
+    };
+    setupDb({ customer: { ...CUSTOMER, waveguard_tier: 'Silver' }, discounts: [SILVER_RETIRED] });
+
+    const totals = await InvoiceService._calculateUpdateFinancials({
+      customer: { ...CUSTOMER, waveguard_tier: 'Silver' },
+      invoice: { id: 'invoice-1', customer_id: 'customer-1', status: 'draft' },
+      taxRate: 0,
+      lineItems: [
+        line,
+        {
+          client_id: 'd-stamp', _kind: 'discount', discount_id: 'silver-id', discount_for: 'line-1',
+          description: 'WaveGuard Silver', quantity: 1, unit_price: -10, amount: -10,
+          discount_type: 'percentage', discount_amount: 10, discount_dollars: 10,
+          use_stored_discount: true, stored_discount_source: 'scheduled_service',
+        },
+      ],
+    });
+    // The frozen stamp keeps its $10 even though its catalog row is gone.
+    expect(totals.discount_amount).toBe(10);
+    expect(totals.total).toBe(90);
+  });
+
   test('a retired NON-stored discount id (no live stamp) is unaffected — still filtered as before', async () => {
     // Sanity check: the permissive metadata load only ever widens the
     // trusted-STORED-id set; a fresh pick referencing a retired id (not a

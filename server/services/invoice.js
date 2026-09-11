@@ -580,6 +580,34 @@ async function loadDiscountStackMetaRows(ids = [], database = db) {
   return database("discounts").whereIn("id", uniqueIds);
 }
 
+// The row map the one-tier check reads, for create() and the edit path
+// alike. A trusted stored stamp rides the stack frozen even after its catalog
+// row is later deactivated or hidden from invoices — loadInvoiceDiscountRows'
+// active+visible filter drops that row, so the id-keyed map would silently
+// omit the stamp from the conflict check and let a second pick from the same
+// non-stackable tier group through beside it. Widen the map with stack-group
+// metadata for those trusted ids, loaded WITHOUT the filter, for this check
+// only — it never feeds the dollar math (stamps keep their frozen amount
+// regardless).
+async function widenStackGroupRows(
+  lineItemDiscountRowById,
+  trustedStoredDiscountIds,
+  database = db,
+) {
+  const missingTrustedStoredIds = [...trustedStoredDiscountIds].filter(
+    (id) => !lineItemDiscountRowById.has(id),
+  );
+  const trustedStoredStackMetaRows = missingTrustedStoredIds.length
+    ? await loadDiscountStackMetaRows(missingTrustedStoredIds, database)
+    : [];
+  return trustedStoredStackMetaRows.length
+    ? new Map([
+        ...lineItemDiscountRowById,
+        ...trustedStoredStackMetaRows.map((row) => [String(row.id), row]),
+      ])
+    : lineItemDiscountRowById;
+}
+
 function buildDiscountLineItem({
   parentClientId,
   discountId,
@@ -847,11 +875,18 @@ async function calculateUpdateFinancials({
   // Same one-entry-per-item rule as create(). The edit path takes no
   // invoice-level discounts, so every entry is a line lane.
   if (editStackingEnabled) {
+    // Same retired-row widening as create(): a stored tier stamp whose
+    // catalog row has since been deactivated must still collide with a fresh
+    // pick from its group on an edit.
+    const editStackGroupRowById = await widenStackGroupRows(
+      lineItemDiscountRowById,
+      trustedStoredDiscountIds,
+    );
     assertStackGroups(
       editNegativeItems
         .filter((item) => item.discount_id)
         .map((item) => {
-          const row = lineItemDiscountRowById.get(String(item.discount_id));
+          const row = editStackGroupRowById.get(String(item.discount_id));
           return row ? { ...row, scope: String(item.discount_for || 'line') } : null;
         })
         .filter(Boolean),
@@ -1516,26 +1551,13 @@ const InvoiceService = {
         Number(item.amount) < 0 && item.category !== "deposit_credit",
     );
     if (stackingEnabled) {
-      // A trusted stored stamp rides the stack frozen even after its catalog
-      // row is later deactivated or hidden from invoices — loadInvoiceDiscountRows'
-      // active+visible filter drops that row, so lineItemDiscountRowById would
-      // silently omit the stamp from the conflict check below and let a second
-      // pick from the same non-stackable tier group through beside it. Load
-      // stack-group metadata for those trusted ids WITHOUT the filter, for
-      // this check only — it never feeds the dollar math (stamps keep their
-      // frozen amount regardless).
-      const missingTrustedStoredIds = [...trustedStoredDiscountIds].filter(
-        (id) => !lineItemDiscountRowById.has(id),
+      // Retired-row stamps still count toward the one-tier rule — see
+      // widenStackGroupRows.
+      const stackGroupRowById = await widenStackGroupRows(
+        lineItemDiscountRowById,
+        trustedStoredDiscountIds,
+        database,
       );
-      const trustedStoredStackMetaRows = missingTrustedStoredIds.length
-        ? await loadDiscountStackMetaRows(missingTrustedStoredIds, database)
-        : [];
-      const stackGroupRowById = trustedStoredStackMetaRows.length
-        ? new Map([
-            ...lineItemDiscountRowById,
-            ...trustedStoredStackMetaRows.map((row) => [String(row.id), row]),
-          ])
-        : lineItemDiscountRowById;
       // One entry per discount ITEM (loadInvoiceDiscountRows dedupes ids, so
       // checking its rows would miss the same tier twice on one line). A
       // line's discounts share that line's lane; an invoice-level discount
@@ -6916,6 +6938,9 @@ module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;
 module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
+// Test hook: the edit-path retotal, so its one-tier rule can be pinned without
+// driving update()'s editability fences.
+module.exports._calculateUpdateFinancials = calculateUpdateFinancials;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
 // The statuses sendViaSMS/claimInvoiceForSend will claim — the ONE
 // sendability authority (the collections pay-link anchor reads it).
