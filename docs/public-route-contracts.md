@@ -125,11 +125,15 @@ allocation order at the certified anchor, using a nonblocking day fence for
 callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
-Activation also requires the remaining booking writers: phone-booking primary
-and follow-up inserts retain the owner's lock-free book-and-flag contract.
-Existing-row locks do not fence those inserts, and their post-commit conflict
-check detects overlaps without preventing them. This stage does not close that
-race or authorize changing the phone-booking contract or enabling capacity.
+Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
+try the shared day fence — rung 1 date occupancy plus the tech-day or
+unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
+default 1500 ms) before each insert. A granted fence makes the phone row visible
+to a concurrent route certification or lands it after that certification commits.
+A missed fence books exactly as before (unfenced, post-commit conflict check
+flags overlaps, the card records which insert missed its fence); the booking
+never fails, waits past the cap, or blocks on a lock. This stage still does
+not authorize enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
