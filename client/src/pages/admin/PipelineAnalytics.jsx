@@ -380,8 +380,8 @@ function AttentionCard({
         onClick={() => onFilterChange(filterKey)}
         className={
           alert
-            ? "h-auto w-full justify-start bg-alert-bg p-4 text-left text-alert-fg"
-            : "h-auto w-full justify-start p-4 text-left"
+            ? "h-auto w-full flex-col items-start justify-start bg-alert-bg p-4 text-left text-alert-fg"
+            : "h-auto w-full flex-col items-start justify-start p-4 text-left"
         }
       >
         <div className="text-ui-body uppercase tracking-label">{label}</div>
@@ -415,7 +415,7 @@ function PricingRiskCard({
           type="button"
           variant="ghost"
           onClick={() => onFilterChange("pricing_risk")}
-          className="h-auto w-full justify-start px-0 text-left"
+          className="h-auto w-full flex-col items-start justify-start px-0 text-left"
         >
           <div className="text-ui-body uppercase tracking-label">
             Pricing risk
