@@ -1210,7 +1210,35 @@ function accountPricingFromContext(context = {}) {
   // draft. Pricing still uses the qualifying set only. Each entry carries the property addresses the service is
   // active at, and commercial_* programs also match their base key so a
   // requested `pest` collides with an active "Commercial Pest Control".
-  const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])
+  const activeServices = activeRecurringServices(account.current_services);
+  const coveredKeys = new Set(activeServices.map((entry) => entry.key));
+  for (const key of priorQualifyingServices) {
+    // Qualifying keys normally also appear in current_services with address
+    // detail; a bare leftover stays an account-wide (address-less) block.
+    if (!coveredKeys.has(key)) activeServices.push({ key, addresses: [] });
+  }
+  return {
+    customerId: account.recognized ? account.customer_id : null,
+    recognized: account.recognized === true,
+    leadCustomerId: context?.lead?.customer_id || null,
+    leadCustomerIdKnown: Object.prototype.hasOwnProperty.call(context?.lead || {}, 'customer_id'),
+    phoneDerivedMatch: account.match_method === 'unambiguous_phone',
+    phoneDerivedMatchPhone: account.match_method === 'unambiguous_phone'
+      ? normalizeContactPhone(context?.lead?.phone)
+      : null,
+    serviceContextUnavailable: account.service_context_unavailable === true,
+    priorQualifyingServices,
+    activeServices,
+    customerAccount: account,
+    evidenceContext: context,
+  };
+}
+
+// Every active recurring service as { key, addresses }: the property
+// addresses it is active at, trusted for scoping only when every row of that
+// service carries one; commercial_* programs also match their base key.
+function activeRecurringServices(currentServices) {
+  return (Array.isArray(currentServices) ? currentServices : [])
     .flatMap((row) => {
       if (!row?.key) return [];
       // Addresses are trusted for property scoping only when EVERY active row
@@ -1242,27 +1270,6 @@ function accountPricingFromContext(context = {}) {
       }
       return entries;
     });
-  const coveredKeys = new Set(activeServices.map((entry) => entry.key));
-  for (const key of priorQualifyingServices) {
-    // Qualifying keys normally also appear in current_services with address
-    // detail; a bare leftover stays an account-wide (address-less) block.
-    if (!coveredKeys.has(key)) activeServices.push({ key, addresses: [] });
-  }
-  return {
-    customerId: account.recognized ? account.customer_id : null,
-    recognized: account.recognized === true,
-    leadCustomerId: context?.lead?.customer_id || null,
-    leadCustomerIdKnown: Object.prototype.hasOwnProperty.call(context?.lead || {}, 'customer_id'),
-    phoneDerivedMatch: account.match_method === 'unambiguous_phone',
-    phoneDerivedMatchPhone: account.match_method === 'unambiguous_phone'
-      ? normalizeContactPhone(context?.lead?.phone)
-      : null,
-    serviceContextUnavailable: account.service_context_unavailable === true,
-    priorQualifyingServices,
-    activeServices,
-    customerAccount: account,
-    evidenceContext: context,
-  };
 }
 
 // A recognized customer whose existing-service lookup failed has NO reliable
@@ -3625,6 +3632,8 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
 module.exports = {
   ESTIMATE_TOOLS,
   executeEstimateTool,
+  activeRecurringServices,
+  duplicateCurrentServices,
   // Route-side proposal pin (W0B): resolve the toggle target ONCE at proposal
   // so the card names the estimate and Confirm acts on that immutable id.
   resolveEstimateByIdentifier,

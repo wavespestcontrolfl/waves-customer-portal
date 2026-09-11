@@ -341,7 +341,21 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
 }
 
 async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false, validateAllowance = false } = {}) {
+  // CATALOG SERIALIZATION under capacity: a `services` table SHARE lock
+  // (scheduling/catalog-lock.js), taken as the FIRST statement of the
+  // lookup savepoint and held to the outer commit. It replaced per-row FOR
+  // SHARE (codex #4344 P1 + #4369 r1/r2): a row lock protects only a MATCHED
+  // row, so an absent match could be overtaken by a row activated or mapped
+  // before the commit; and mixing row locks with a table lock deadlocked
+  // against writers that pre-lock rows (deactivateService's FOR UPDATE) or
+  // against this transaction's own earlier FOR SHARE reads. SHARE conflicts
+  // with every INSERT/UPDATE/DELETE (implicit ROW EXCLUSIVE) — admin writes
+  // and pre-deploy migrations alike — and not with other SHARE readers, so
+  // reads under it need no row lock at all and concurrent bookings never
+  // block each other. Inside the savepoint so a lock_timeout stays a
+  // recoverable catalog_unavailable and never aborts the outer transaction.
   const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
+  const lockCatalogTable = async (sp) => { if (lockCatalog) await require('./scheduling/catalog-lock').lockCatalogIdentity(sp); };
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
@@ -399,11 +413,11 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
     let byKey = null;
     try {
       await conn.transaction(async (sp) => {
+        await lockCatalogTable(sp);
         const rows = await sp('services')
           .where({ service_key: catalogKey })
           .limit(2)
-          .select(...catalogColumns)
-          .modify(query => { if (lockCatalog) query.forShare(); });
+          .select(...catalogColumns);
         if (rows.length === 1) byKey = rows[0];
         else if (rows.length > 1) {
           logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
@@ -430,6 +444,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {
+        await lockCatalogTable(sp);
       // Containment, not equality: engine_keys is a jsonb ARRAY because the
       // engine emits versioned aliases for one catalog service
       // (stinging_insect + stinging_insect_v2 → bee_wasp_removal). Codex
@@ -454,8 +469,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         const cadenceRows = await sp('services')
           .where({ service_key: cadenceKey, is_active: true })
           .limit(2)
-          .select(...catalogColumns)
-          .modify(query => { if (lockCatalog) query.forShare(); });
+          .select(...catalogColumns);
         if (cadenceRows.length === 1) resolved = cadenceRows[0];
         else if (cadenceRows.length > 1 && (strictAllowanceRead || validateAllowance)) throw capacityError('catalog_unavailable');
         return;
@@ -464,8 +478,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select(...catalogColumns)
-        .modify(query => { if (lockCatalog) query.forShare(); });
+        .select(...catalogColumns);
       if (rows.length === 1) {
         resolved = rows[0];
       } else if (rows.length > 1) {
@@ -1349,9 +1362,15 @@ async function commitReservation({
     // this key: it pre-acquires rung 1 as its first statements — before its
     // estimates UPDATE / customers insert take row locks — and passes the
     // locked key down as preLockedDate (checked against the pre-read below).
+    // The whole row, not a column list: the early catalog lock below keys on
+    // reservation_policy_version for a persisted version-2 hold after the
+    // gate is turned off (codex #4369 r4 P1), and naming that column breaks
+    // the golden-master schemas that predate the capacity columns (CI's
+    // combined PG suite) — `select *` reads undefined there, exactly like the
+    // FOR UPDATE reload below, and the early lock then follows the gate alone.
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('scheduled_date', 'technician_id');
+      .first();
     if (!preRow) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
@@ -1381,6 +1400,23 @@ async function commitReservation({
     // before its own row locks. Standalone commits acquire it here.
     if (preparedCapacity) await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate },
       { techId: null, date: lockedDate }]);
+    // Catalog SHARE lock BEFORE this row's FOR UPDATE (codex #4369 r3 P1):
+    // catalog migrations lock `services` first and then update
+    // scheduled_services rows (20260902000010), so reaching the catalog
+    // lock only later, through the commit-time profile resolution, would
+    // ABBA-deadlock against one that targets this visit. Same condition
+    // the resolver uses to lock at all; re-issued there as a no-op.
+    if (capacityEnabled() || preRow.reservation_policy_version === 2) {
+      // Same error contract as the resolver's savepoint: a lock_timeout
+      // behind a catalog write or migration is a recoverable
+      // catalog_unavailable (409 slot recovery), never a raw 55P03 that the
+      // accept route would surface as a 500 (pre-push codex P1).
+      try {
+        await require('./scheduling/catalog-lock').lockCatalogIdentity(client);
+      } catch (err) {
+        throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
+      }
+    }
 
     // Canonical order with the scheduled-invoice writers (PR #3476 r21
     // P1): the shared advisory mint lock comes BEFORE this row FOR

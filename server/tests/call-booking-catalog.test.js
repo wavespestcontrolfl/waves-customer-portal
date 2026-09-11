@@ -1282,6 +1282,9 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     expect(occupancy.findConflictingVisits).toHaveBeenCalledTimes(1);
     expect(occupancy.findConflictingVisits.mock.calls[0][0]).toMatchObject({ date: '2026-07-19', windowStart: '09:00', windowEnd: '10:30', excludeServiceIds: ['kid-1'] });
     expect(report.skipped).toEqual([{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19' }]);
+    // A shifted child reports BOTH of its own days — the parent's dates never
+    // name them, and the post-change route refresh needs them (#4295 r1 P2).
+    expect(report.shifted).toEqual([{ id: 'kid-2', previousDate: '2026-07-16', date: '2026-07-19', windowStart: null, windowEnd: null }]);
     expect(shifted).toBe(1); // only the windowless child moved
     expect(log.wheres).toContainEqual({ id: 'kid-2' });
     expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
