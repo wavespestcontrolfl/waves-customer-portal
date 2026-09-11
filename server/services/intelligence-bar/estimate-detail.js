@@ -40,6 +40,7 @@
 // Record scope: estimate_id resolves to its customer through the
 // task-context RECORDS map, customer_id is the customer selector itself.
 const db = require('../../models/db');
+const { roundDecimal } = require('../../../shared/proposal-bid.cjs');
 
 const MAX_PER_CUSTOMER = 10;
 const DEFAULT_PER_CUSTOMER = 3;
@@ -302,7 +303,7 @@ async function authoredProposalPricing(row, data) {
         name: b.name,
         note: b.note ?? null,
         line_items: list(b.lineItems).map((i) => ({
-          description: i.description, quantity: i.quantity, unit_price: money(i.unitPrice), amount: money(i.amount),
+          description: i.description, quantity: i.quantity, ...(i.unit ? { unit: i.unit } : {}), unit_price: roundDecimal(i.unitPrice), amount: money(i.amount),
           frequency: i.frequency, frequency_label: i.frequencyLabel || null, visits_per_year: i.visitsPerYear > 0 ? i.visitsPerYear : null, taxable: i.taxable === true,
         })),
       })),

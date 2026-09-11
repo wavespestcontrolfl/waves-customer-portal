@@ -612,6 +612,24 @@ test('an enabled, itemized proposal is the pricing authority: authored lines, pr
   expect(failed.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
 });
 
+test('a proposal line priced by a measured unit keeps its unit and its own four-decimal rate, not a rounded-to-cents unit price (Codex round P1)', async () => {
+  const row = estimateRow({
+    category: 'COMMERCIAL',
+    estimate_data: JSON.stringify({
+      proposal: {
+        enabled: true, title: 'Turf Treatment Proposal', preparedFor: 'Harbor Plaza LLC', propertyAddress: '9 Dock Rd', taxRate: 0, taxLabel: null, terms: null,
+        buildings: [{ name: 'Grounds', lineItems: [
+          { description: 'Turf treatment', quantity: 14768, unit: 'sqft', unitPrice: 0.0755, frequency: 'one_time', taxable: false },
+        ] }],
+      },
+    }),
+  });
+  const shaped = await shapeEstimate(row);
+  expect(shaped.offered_pricing.proposal.buildings[0].line_items[0]).toMatchObject({
+    description: 'Turf treatment', quantity: 14768, unit: 'sqft', unit_price: 0.0755, amount: 1114.98,
+  });
+});
+
 test('a pending or failed deposit intent collected nothing: total_paid null, the requested face amount kept (Codex r7 P2, r8 P2)', async () => {
   db.__rows = (q) => (q.sql.includes('"estimate_deposits"')
     ? [
