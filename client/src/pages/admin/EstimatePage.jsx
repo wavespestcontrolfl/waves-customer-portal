@@ -14,6 +14,7 @@ import {
   applyServerTermiteBondPricingConfig,
   applyServerTermiteRentalPricingConfig,
   applyServerTermiteMonitoringPricingConfig,
+  applyServerTermiteInstallPricingConfig,
   applyServerRodentBaitBracketsPricingConfig,
   applyServerRodentSetupFeePricingConfig,
   applyServerRodentWaveguardPricingConfig,
@@ -1384,6 +1385,11 @@ function EstimateToolView() {
   // (codex #3591 r13 P1): a selective failure on any of the three rows must
   // block a rodent fallback quote rather than price it on defaults.
   const rodentConfigOkRef = useRef(false);
+  // Termite fallback quotes need the server's EFFECTIVE station-cost basis
+  // (catalog-linked, served with termite_install); a timed-out fetch or a
+  // failed server sync (effective absent) must block the quote rather than
+  // price and stamp it on stale module state (codex #4313 r3 P1).
+  const termiteConfigOkRef = useRef(false);
   const refreshPricingConfig = useCallback(() => {
     const run = (async () => {
       const fetchConfigRow = async (key) => {
@@ -1404,6 +1410,9 @@ function EstimateToolView() {
             ok: true,
             data: body?.data ?? null,
             featureAvailable: body?.featureAvailable !== false,
+            // Engine-effective values some keys carry beside the row
+            // (termite_install: the catalog-linked station cost).
+            effective: body?.effective ?? null,
           };
         } catch {
           return { ok: false, data: null, featureAvailable: false }; /* last applied state stands */
@@ -1411,12 +1420,13 @@ function EstimateToolView() {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow, installRow, rodentBracketsRow, rodentSetupRow, rodentWaveguardRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
         fetchConfigRow("termite_rental"),
         fetchConfigRow("termite_monitoring"),
+        fetchConfigRow("termite_install"),
         fetchConfigRow("rodent_bait_brackets"),
         fetchConfigRow("rodent_setup_fee"),
         fetchConfigRow("rodent_waveguard"),
@@ -1436,6 +1446,12 @@ function EstimateToolView() {
       // Station-check brackets: same live-rates posture as the rental horizon
       // above, and same not-part-of-readiness reasoning (new row shape).
       if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
+      // Station hardware cost basis — the row overlaid by the server's
+      // inventory catalog link (served as `effective`); the fallback quote
+      // prices and stamps what the server will price (codex #4313 r1 P1).
+      // Same not-part-of-readiness posture as the rows above.
+      if (installRow.ok) applyServerTermiteInstallPricingConfig(installRow.data, installRow.effective);
+      termiteConfigOkRef.current = installRow.ok && installRow.effective != null;
       // Rodent bait ladder + setup fee: live-rates posture, not part of the
       // readiness return (new rows — codex #3591 r10 P1). A missing row
       // leaves the in-code default in place.
@@ -2377,6 +2393,10 @@ function EstimateToolView() {
     }
     if (form.svcRodentBait && !rodentConfigOkRef.current) {
       alert("Live rodent bait pricing (brackets, setup fee, WaveGuard flags) could not be loaded — retry in a moment. (Rodent quotes are blocked rather than priced on possibly-stale configuration.)");
+      return;
+    }
+    if (form.svcTermiteBait && !termiteConfigOkRef.current) {
+      alert("Live termite station pricing (catalog-linked station cost) could not be loaded — retry in a moment. (Termite quotes are blocked rather than priced on a possibly-stale station cost.)");
       return;
     }
     // EVERY quote for a MATCHED account waits for the canonical

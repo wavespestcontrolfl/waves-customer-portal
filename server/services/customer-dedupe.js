@@ -22,6 +22,7 @@
  * full original row is preserved in customer_merge_journal.
  */
 const db = require('../models/db');
+const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
@@ -3636,6 +3637,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // automate — REFUSE (409; the throw rolls the transaction back to
       // zero writes). Rebook or reassign the appointment first, then
       // revert. (Untouched-merges contract.)
+      // The lawn actuals ledger freezes each visit's property (#4113) with a
+      // SET NULL FK the transfer decision below would otherwise bypass: a
+      // ledger row still pointing at this property counts like a referencing
+      // visit, so the property transfers instead of being deleted and the
+      // frozen reference survives (Codex #4113 P2).
+      // Fail closed: a probe that errors is NOT proof the ledger holds no
+      // reference. The error propagates and the undo aborts (the throw rolls
+      // the transaction back to zero writes) rather than deleting a property
+      // whose SET NULL FK would erase a frozen ledger reference (Codex #4113).
+      const ledgerRows = lockedProperty
+        ? await ledgerReferenceRead(trx, (k) => k('lawn_protocol_service_completions')
+          .where({ property_id: recorded.linked_property_id }).select('id').limit(1))
+        : [];
+      const ledgerReference = Array.isArray(ledgerRows) ? ledgerRows.some((row) => row?.id) : Boolean(ledgerRows?.id);
       const strandedVisits = referencingVisits.filter((v) => v.customer_id !== loserId);
       if (strandedVisits.length) {
         refuse(`${strandedVisits.length} appointment(s) referencing the linked property would not belong to the restored customer after the undo — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
@@ -3645,7 +3660,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (!lockedProperty) {
         // Row already gone or re-owned — nothing to act on (and nothing was
         // locked); report it like any moved-on state.
-      } else if (referencingVisits.length) {
+      } else if (referencingVisits.length || ledgerReference) {
         transferred = await transferToLoser();
         if (transferred) {
           repointedBack['customer_properties.linked_property_transferred'] = transferred;

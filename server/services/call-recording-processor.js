@@ -9192,6 +9192,18 @@ const CallRecordingProcessor = {
           await createDefaultCustomerRows(db, customerId)
             .catch((e) => logger.warn(`[call-proc] default rows create failed for ${customerId}: ${e.message}`));
 
+          // Line-type check (2026-09-10 incident): `phone` here can be the
+          // caller-ID ANI the customer never spoke (resolveCallContactPhone's
+          // fallback) — landing a landline in customers.phone silently breaks
+          // SMS login and every future text to this customer. Fail-open;
+          // never blocks or delays creation, which has already committed.
+          const { flagNonMobileCallCustomer } = require('./call-created-customer-line-type');
+          await flagNonMobileCallCustomer({
+            customerId,
+            phone,
+            name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+          });
+
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
           // skipping every new customer's billing record)

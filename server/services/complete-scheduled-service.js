@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const Joi = require('joi');
 const db = require('../models/db');
-const { savepointRead, failSoftRead } = require('../utils/savepoint-read');
+const { savepointRead, failSoftRead, savepointScope } = require('../utils/savepoint-read');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
@@ -22,7 +22,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
-const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-defaults');
+const { lawnCompletionDefaultsEnabled, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -57,6 +57,7 @@ const {
 } = require('../services/service-photos');
 const {
   recordLawnProtocolCompletion,
+  lawnActualsLedgerEnabled,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
@@ -2395,9 +2396,41 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // value the old writer number-coerced (e.g. 2500.5), and its retry must
     // reach the replay/resume claim instead of 400-ing (Codex P0 #4126 r4).
     const lawnDefaultsEnabled = lawnCompletionDefaultsEnabled();
+    // Validated whenever a consumer exists: the completion defaults planner
+    // (defaults gates) or the all-lawn actuals ledger (ledger gate). Neither
+    // ever receives the raw field.
+    const lawnVisitAreaConsumed = lawnDefaultsEnabled || lawnActualsLedgerEnabled();
     const { value: lawnCompletionAreaValue, error: lawnCompletionAreaError } = Joi.number().integer().min(1).max(10000000).allow(null)
-      .validate(lawnDefaultsEnabled ? lawnProtocolCompletion?.treatedSqft : undefined);
+      .validate(lawnVisitAreaConsumed ? lawnProtocolCompletion?.treatedSqft : undefined);
     const lawnCompletionArea = lawnCompletionAreaError ? undefined : lawnCompletionAreaValue;
+    // Plan defaults the technician removed, recorded as skipped on the lawn
+    // actuals ledger. No reason is required (owner ruling: no skip-reason
+    // checklist); an optional typed reason is kept verbatim. Validated
+    // whenever submitted — independent of the UI-defaults gates, so a form
+    // opened before a gate rollback still records its skips. The writer
+    // receives Joi's validated copy (names and reasons trimmed), never the
+    // raw payload: max(180) is checked after trim, and product_name is
+    // varchar(180), so a padded name that passed here would otherwise roll
+    // back the whole completion as a 500.
+    // productId must be a UUID: it lands in lawn_protocol_product_actuals.product_id
+    // (uuid), where a bad value would roll back the whole completion as a 500.
+    // Each product at most once: the ledger writer inserts one skipped
+    // actual per entry and Command Center counts actual rows, so a repeated
+    // id would inflate the compliance metric by the number of copies
+    // (Codex #4113 P2). Rejected, not deduplicated — strict validation.
+    const { value: lawnSkippedProducts, error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
+      // Canonical lowercase: Joi's uuid() accepts uppercase text unchanged,
+      // while the plan/catalog maps compare lowercase UUID strings and
+      // PostgreSQL treats both spellings as one uuid — normalize BEFORE the
+      // uniqueness check so a case-variant pair cannot evade it and an
+      // uppercase id from an older client still matches its default (Codex #4113 P2).
+      productId: Joi.string().uuid().lowercase().required(),
+      productName: Joi.string().trim().max(180).required(),
+      reason: Joi.string().trim().max(500).allow(null, ''),
+    })).unique('productId').allow(null).validate(lawnProtocolCompletion?.skippedProducts);
+    if (lawnSkippedProductsError) {
+      return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId (uuid), productName, reason? }, each product at most once.', code: 'lawn_skipped_products_invalid' } };
+    }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
     }
@@ -2712,11 +2745,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // Track which IDs came from the appointment assignment rather than the
+    // submitted actuals: only the planner can verify an assignment, so a
+    // ledgered visit whose planner fails must drop them again (Codex #4113 P2).
+    let assignmentDerivedEquipmentSystem = false;
+    let assignmentDerivedCalibration = false;
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
+      assignmentDerivedEquipmentSystem = true;
     }
     if (!waveguardCalibrationId && svc.assigned_calibration_id) {
       waveguardCalibrationId = svc.assigned_calibration_id;
+      assignmentDerivedCalibration = true;
     }
 
     // The profile row is the typed-completion feature flag AND the project
@@ -4224,19 +4264,64 @@ async function completeScheduledService(completionInput, packetContext = null) {
       treeShrubCloseoutWarnings = typedCompliance.warnings || [];
     }
 
+    // GATE_LAWN_ACTUALS_LEDGER: every lawn visit gets the appointment plan
+    // built so its ledger row can carry any protocol attribution the visit
+    // has. The WaveGuard advisories below stay tier-scoped; a plan outage on
+    // a non-WaveGuard visit records actuals without attribution rather than
+    // failing the closeout.
     // An invoice-issued closeout carries no application evidence: no plan
-    // is built, so no lawn_protocol_service_completions row, no planned
+    // is built, no lawn_protocol_service_completions row, no planned
     // treated_sqft / carrier / response stamps, and no protocol assignment
     // on the visit (GitHub r3 P1 #4127) — the same exclusion as the
-    // assessment form gate.
-    if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc) && !issuedInvoiceCloseout) {
-      const plan = await buildPlanForService(svc.id, {
-        db,
-        equipmentSystemId: waveguardEquipmentSystemId || null,
-        calibrationId: waveguardCalibrationId || null,
-        lawnSqft: lawnCompletionArea,
-      });
-      waveguardPlan = plan;
+    // assessment form gate, applied to the ledger flag as well so the gated
+    // ledger never records actuals for a visit nobody attested.
+    const lawnLedgerVisit = lawnActualsLedgerEnabled() && detectServiceLine(svc?.service_type) === 'lawn' && !issuedInvoiceCloseout;
+    const waveguardCloseout = !isIncompleteVisit && isWaveGuardLawnCompletion(svc) && !issuedInvoiceCloseout;
+    if (claim.action === 'proceed' && (waveguardCloseout || lawnLedgerVisit)) {
+      try {
+        // Under a packet closeout `db` is the packet's outer transaction: a
+        // planner statement that fails would leave it aborted, and catching
+        // the error below could not restore it — the later unattributed
+        // ledger writes would fail with "current transaction is aborted" and
+        // roll back the whole grouped closeout. The savepoint makes the
+        // fail-soft path real (Codex #4113 P1). savepointScope, not
+        // savepointRead: the planner performs its own fail-soft reads on this
+        // transaction, and the queued variant would wait on itself.
+        waveguardPlan = await savepointScope(db, (database) => buildPlanForService(svc.id, {
+          db: database,
+          equipmentSystemId: waveguardEquipmentSystemId || null,
+          calibrationId: waveguardCalibrationId || null,
+          lawnSqft: lawnCompletionArea,
+        }));
+      } catch (planErr) {
+        if (waveguardCloseout) throw planErr;
+        logger.warn('lawn actuals ledger: appointment plan unavailable, recording actuals without attribution', { serviceId: svc.id, error: planErr?.message });
+        waveguardPlan = null;
+        // With no plan the `unresolved` guard below cannot run, yet the
+        // assignment's IDs were copied above and the writer gives explicit
+        // IDs precedence — a deleted or deactivated rig would be recorded as
+        // equipment actually used during the outage. Keep only IDs the
+        // closeout submitted as visit actuals (Codex #4113 P2).
+        if (assignmentDerivedEquipmentSystem || assignmentDerivedCalibration) {
+          if (assignmentDerivedEquipmentSystem) waveguardEquipmentSystemId = null;
+          if (assignmentDerivedCalibration) waveguardCalibrationId = null;
+          waveguardCalibrationCleared = true;
+        }
+      }
+    }
+    // A ledgered non-WaveGuard or incomplete lawn visit skips the WaveGuard
+    // advisories below, but an assignment whose calibration the planner
+    // marks `unresolved` (deactivated or deleted since) must be cleared
+    // before its ledger row too — recordLawnProtocolCompletion gives the
+    // explicit IDs precedence and would record the stale rig as equipment
+    // actually used (Codex #4113 P2).
+    if (claim.action === 'proceed' && lawnLedgerVisit && !waveguardCloseout && waveguardPlan?.equipmentCalibration?.unresolved) {
+      waveguardEquipmentSystemId = null;
+      waveguardCalibrationId = null;
+      waveguardCalibrationCleared = true;
+    }
+    if (claim.action === 'proceed' && waveguardCloseout) {
+      const plan = waveguardPlan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
       // Calibration is advisory at completion, not a hard gate (mirrors
       // CompletionPanel's calibrationAdvisory): the tech acknowledges the warning
@@ -5012,6 +5097,125 @@ async function completeScheduledService(completionInput, packetContext = null) {
               err.code = 'VISIT_OWNER_CHANGED';
               throw err;
             }
+            // Property re-resolve under the lock (Codex r1/r3 on #4113): the
+            // lawn plan above was built from the handler-entry property (turf
+            // profile, history, assignment), and the lawn actuals ledger and
+            // lawn_assessments freeze svc.property_id at completion. An
+            // address edit that committed between the load and this lock
+            // would stamp the old plan onto the new property — abort with the
+            // same retryable shape as the owner change rather than adopt
+            // either side silently.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'property_id')
+              && String(lockedSvcRow.property_id || '') !== String(svc.property_id || '')) {
+              const err = new Error('This appointment\'s property changed while completing — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_PROPERTY_CHANGED';
+              throw err;
+            }
+            // Service identity likewise: the lawn ledger eligibility, the lawn
+            // plan and the report line were all derived from the handler-entry
+            // service_type. An update-details edit that flipped the line
+            // between the load and this lock would write (or omit) a lawn
+            // actuals row against the wrong identity — abort, same shape.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'service_type')
+              && String(lockedSvcRow.service_type || '') !== String(svc.service_type || '')) {
+              const err = new Error('This appointment\'s service type changed while completing — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_SERVICE_CHANGED';
+              throw err;
+            }
+            // The ledger plan was built from the turf profile at handler entry:
+            // a PUT turf-profile that committed since would attribute the visit
+            // to the former grass track and protocol. Re-read the profile
+            // version under the customer and visit locks and abort with the same retryable
+            // shape as the owner/property/service/tier changes (Codex #4113 P2).
+            if (lawnLedgerVisit && waveguardPlan?.propertyGate?.turfProfile) {
+              const planProfile = waveguardPlan.propertyGate.turfProfile;
+              const lockedProfile = await savepointRead(trx, (k) => k('customer_turf_profiles')
+                .where({ customer_id: svc.customer_id, active: true }).forShare().first('id', 'updated_at'));
+              const lockedUpdatedAt = lockedProfile?.updated_at ? new Date(lockedProfile.updated_at).toISOString() : null;
+              if (String(lockedProfile?.id || '') !== String(planProfile.id || '') || String(lockedUpdatedAt || '') !== String(planProfile.updatedAt || '')) {
+                const err = new Error('This customer\'s turf profile changed while completing — reload the job and complete it again.');
+                err.statusCode = 409;
+                err.isOperational = true;
+                err.code = 'VISIT_TURF_PROFILE_CHANGED';
+                throw err;
+              }
+            }
+            // The service date likewise: the planner picked the seasonal
+            // protocol and defaults from the handler-entry scheduled_date
+            // (toServiceDate), and a reschedule that committed between the
+            // load and this lock would persist the former date's protocol
+            // onto the moved appointment. Same retryable shape (Codex #4113 P2).
+            if (lawnLedgerVisit && waveguardPlan && Object.prototype.hasOwnProperty.call(lockedSvcRow, 'scheduled_date')) {
+              const dateKey = (value) => {
+                if (value == null || value === '') return '';
+                const parsed = value instanceof Date ? value : new Date(value);
+                return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
+              };
+              if (dateKey(lockedSvcRow.scheduled_date) !== dateKey(svc.scheduled_date)) {
+                const err = new Error('This appointment was rescheduled while completing — reload the job and complete it again.');
+                err.statusCode = 409;
+                err.isOperational = true;
+                err.code = 'VISIT_DATE_CHANGED';
+                throw err;
+              }
+            }
+            // Address inputs likewise (Codex #4113 P2): a Customer 360 primary
+            // address edit that committed between the plan build and the
+            // customer FOR SHARE above moves the primary property's address
+            // (syncPrimaryAddress) without touching property_id or the turf
+            // profile's updated_at, so the checks above all pass while the
+            // plan proved the OLD home. Rebuild both keys the proof compared
+            // from the locked customer row / locked visit row / the property
+            // row (readable under the customer share lock the address writer
+            // must wait on) and abort with the same retryable shape.
+            if (lawnLedgerVisit && waveguardPlan?.propertyGate?.addressProof) {
+              const { addressKey } = require('./customer-properties');
+              const proof = waveguardPlan.propertyGate.addressProof;
+              const lockedVisitAddress = lockedSvcRow.service_address_line1 ? {
+                address_line1: lockedSvcRow.service_address_line1, address_line2: lockedSvcRow.service_address_line2,
+                city: lockedSvcRow.service_address_city, zip: lockedSvcRow.service_address_zip,
+              } : (snapshotCustomerRow || {});
+              const lockedVisitKey = lockedVisitAddress.address_line1 ? addressKey(lockedVisitAddress) : null;
+              const lockedProperty = proof.propertyId
+                ? await savepointRead(trx, (k) => k('customer_properties').where({ id: proof.propertyId }).first('address_line1', 'address_line2', 'city', 'zip'))
+                : null;
+              const lockedPropertyKey = lockedProperty ? addressKey(lockedProperty) : null;
+              if (String(lockedVisitKey || '') !== String(proof.visitAddressKey || '')
+                || String(lockedPropertyKey || '') !== String(proof.propertyAddressKey || '')) {
+                const err = new Error('This appointment\'s address changed while completing — reload the job and complete it again.');
+                err.statusCode = 409;
+                err.isOperational = true;
+                err.code = 'VISIT_ADDRESS_CHANGED';
+                throw err;
+              }
+            }
+            // Assignment-derived rig IDs are revalidated INSIDE the transaction
+            // (Codex #4113 P2): a calibration PUT that deactivated the assigned
+            // rig after buildPlanForService observed it active leaves the stale
+            // plan's `unresolved` false, and the writer would record the
+            // deactivated rig as equipment actually used. Same outcome as the
+            // planner's unresolved path — clear, never 409 — and FOR SHARE on
+            // the calibration row so a deactivation cannot commit underneath.
+            if (lawnLedgerVisit && !waveguardCloseout && (assignmentDerivedEquipmentSystem || assignmentDerivedCalibration)
+              && (waveguardEquipmentSystemId || waveguardCalibrationId)) {
+              const liveRig = await savepointRead(trx, (k) => {
+                const query = k('equipment_calibrations as ec')
+                  .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+                  .where('ec.active', true).where('es.active', true).forShare('ec');
+                if (waveguardCalibrationId) query.where('ec.id', waveguardCalibrationId);
+                else query.where('es.id', waveguardEquipmentSystemId);
+                return query.first('ec.id');
+              });
+              if (!liveRig) {
+                if (assignmentDerivedEquipmentSystem) waveguardEquipmentSystemId = null;
+                if (assignmentDerivedCalibration) waveguardCalibrationId = null;
+                waveguardCalibrationCleared = true;
+              }
+            }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
@@ -5712,6 +5916,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
               ...(billingModeColumnsExist ? ['billing_mode'] : []),
             ));
           } catch { snapshotCustomer = null; }
+          // Ledger attribution was derived from the handler-entry tier the
+          // plan carries (propertyGate.serviceTier). A membership edit that
+          // committed since would freeze attribution contradicting the tier
+          // snapshot below — abort with the same retryable shape as the
+          // owner/property/service-type changes; the retry rebuilds the plan
+          // from the current tier (Codex #4113 P2). FAIL CLOSED: the
+          // non-ledger fallback to the entry read is exactly the stale tier
+          // this recheck exists to catch, so a ledgered visit whose reread
+          // errored aborts instead of comparing nothing (Codex #4113 P2).
+          if (lawnLedgerVisit && waveguardPlan && !snapshotCustomer) {
+            const err = new Error('This customer\'s membership tier could not be verified while completing — reload the job and complete it again.');
+            err.statusCode = 409;
+            err.isOperational = true;
+            err.code = 'VISIT_TIER_UNVERIFIED';
+            throw err;
+          }
+          if (lawnLedgerVisit && waveguardPlan
+            && String(snapshotCustomer.waveguard_tier || '') !== String(waveguardPlan.propertyGate?.serviceTier || '')) {
+            const err = new Error('This customer\'s membership tier changed while completing — reload the job and complete it again.');
+            err.statusCode = 409;
+            err.isOperational = true;
+            err.code = 'VISIT_TIER_CHANGED';
+            throw err;
+          }
           Object.assign(recordInsert, completionTierSnapshotFields({
             serviceRecordCols,
             waveguardTier: snapshotCustomer ? snapshotCustomer.waveguard_tier : svc.cust_waveguard_tier,
@@ -6366,14 +6594,36 @@ async function completeScheduledService(completionInput, packetContext = null) {
           await ComplianceService.createComplianceRecords(record.id, { trx });
         }
 
-        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+        // Ledger row: legacy = completed WaveGuard visits with a structured
+        // plan; under GATE_LAWN_ACTUALS_LEDGER = every completed lawn visit,
+        // plus an incomplete one that applied product (what was put down is
+        // real regardless of the visit outcome).
+        const ledgerVisit = lawnLedgerVisit
+          ? (!isIncompleteVisit || insertedServiceProducts.length > 0)
+          : (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured);
+        if (ledgerVisit) {
           const protocolCompletion = await recordLawnProtocolCompletion(trx, {
             service: svc,
             serviceRecord: record,
-            plan: waveguardPlan,
+            // A track-resolved protocol on a visit with no program, or a plan
+            // that did not resolve the visit's explicit assignment, is not the
+            // visit's protocol — record the actuals without attribution.
+            // Only the protocol portion is withheld: the plan's calibrated rig
+            // carrier is still the visit's measured carrier (Codex #4113 P2).
+            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanAttributesVisit(waveguardPlan) ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
+              // Under a consumer gate the writer receives the validated visit
+              // area, never the raw client field. With every gate off the
+              // spread keeps the legacy raw field exactly as before this lane
+              // (pre-push audit P1: overriding it with undefined made the
+              // WaveGuard writer substitute the planned area for a submitted
+              // one on a form opened before a gate rollback).
+              ...(lawnVisitAreaConsumed ? { treatedSqft: lawnCompletionArea } : {}),
+              // The validated (trimmed) skipped defaults — never the raw field.
+              skippedProducts: lawnSkippedProducts,
+              incompleteVisit: isIncompleteVisit,
               inventoryDeductions,
             },
             equipmentSystemId: waveguardEquipmentSystemId,
