@@ -407,18 +407,24 @@ function parseLooseJsonObject(text) {
   return JSON.parse(raw.slice(start, end + 1));
 }
 
-// The transcript's labelled turns, normalized, by speaker. Null when the
-// transcript carries no Agent:/Caller: labels at all (a flat fallback
-// transcript), in which case only flat grounding is possible.
+// The transcript's labelled turns, normalized, by speaker — plus the same
+// turns in spoken order under `ordered` ({ speaker, text }) for a reader
+// that needs to know what came BEFORE what across speakers (the promised-
+// link worker's caller-refusal ordering). Null when the transcript carries
+// no Agent:/Caller: labels at all (a flat fallback transcript), in which
+// case only flat grounding is possible.
 const PARTY_SPEAKER = { waves: 'agent', customer: 'caller' };
 function speakerTurns(transcript) {
-  const turns = { agent: [], caller: [] };
+  const turns = { agent: [], caller: [], ordered: [] };
   let labelled = false;
   for (const line of String(transcript || '').split('\n')) {
     const m = line.match(/^\s*(agent|caller|customer)\s*:\s*(.*)$/i);
     if (!m) continue;
     labelled = true;
-    turns[m[1].toLowerCase() === 'agent' ? 'agent' : 'caller'].push(normalizeForMatch(m[2]));
+    const speaker = m[1].toLowerCase() === 'agent' ? 'agent' : 'caller';
+    const text = normalizeForMatch(m[2]);
+    turns[speaker].push(text);
+    turns.ordered.push({ speaker, text });
   }
   return labelled ? turns : null;
 }
@@ -710,6 +716,12 @@ async function recordCallCommitments({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
+    // A send_reschedule_link row this pass writes is judged later against
+    // the promised-link worker's live-activation instant; that instant has
+    // to be on record BEFORE the row exists, or the worker's first sweep
+    // reads the promise as pre-activation history and cancels it. No-op
+    // unless that gate is live; never throws.
+    await require('./reschedule-link-promises').recordLiveActivation(conn);
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;

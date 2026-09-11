@@ -395,6 +395,80 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
   });
 });
 
+describe('recordCallCommitments fixes the promised-link activation boundary before writing commitments (codex #4293 P1 r3)', () => {
+  const { recordCallCommitments } = require('../services/call-commitments');
+  const { gates } = require('../config/feature-gates');
+
+  // Same trx shape the seeds-survive-model-failure test above uses — a
+  // single object standing in for every table the write path touches — plus
+  // a callable conn that ALSO answers system_settings the way
+  // persistedActivationBoundary needs (read, insert-if-absent, re-read).
+  // recordLiveActivation is the only direct conn(...) call in this whole
+  // path; everything else goes through conn.transaction(trx).
+  function fakeConn(systemSettings) {
+    const raw = jest.fn(async () => ({ rows: [{ id: 'row' }], rowCount: 1 }));
+    const trx = Object.assign(jest.fn(() => ({ where: () => ({ forShare: () => ({ first: async () => ({ id: 'c' }) }) }) })), { raw });
+    const conn = Object.assign(jest.fn((table) => {
+      if (table !== 'system_settings') throw new Error(`recordLiveActivation touched an unexpected table: ${table}`);
+      let key;
+      const b = {
+        where: (eq) => { key = eq.key; return b; },
+        first: async () => (systemSettings[key] !== undefined ? { value: systemSettings[key] } : null),
+        insert: (data) => ({ onConflict: () => ({ ignore: async () => {
+          if (!(data.key in systemSettings)) systemSettings[data.key] = data.value;
+          return 1;
+        } }) }),
+      };
+      return b;
+    }), { transaction: async (fn) => fn(trx) });
+    return conn;
+  }
+
+  const v2 = {
+    service_request: { quote_promised: true },
+    caller: { preferred_contact_method: 'email' },
+    confidence: { overall: 0.8 },
+    evidence: [{ field_path: '/service_request/quote_promised', quote: 'I will email you an estimate', speaker: 'agent', transcript_offset_ms: null }],
+  };
+  const modelClient = { messages: { create: jest.fn(async () => { throw new Error('provider timeout'); }) } };
+  const run = (conn) => recordCallCommitments({ conn, call: { id: 'c', created_at: new Date().toISOString(), transcript_structured: null },
+    transcript: 'Agent: I will email you an estimate this afternoon, thank you for calling us today.', v2, procToken: 'tok', modelClient });
+
+  test('gate live, nothing persisted: the boundary is on record by the time this write returns, not deferred to a later sweep', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorEnv = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    const priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+      delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+      const systemSettings = {};
+      const out = await run(fakeConn(systemSettings));
+      expect(out.error).toBeUndefined();
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeDefined();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      if (priorEnv === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorEnv;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+
+  test('gate off (or shadow): the write proceeds exactly as before and system_settings is never touched', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+    try {
+      delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      gates.callCommitments = true;
+      const systemSettings = {};
+      const out = await run(fakeConn(systemSettings));
+      expect(out.error).toBeUndefined();
+      expect(out.seeds).toBe(1);
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeUndefined();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+});
+
 describe('the model pass sends no sampling controls (current models reject them)', () => {
   const { extractCommitmentsWithModel, callEndedAt } = require('../services/call-commitments');
   test('one request, no temperature, under the per-attempt budget', async () => {

@@ -9,6 +9,7 @@ const { resolveRescheduleCards } = require('../services/triage-auto-resolve');
 const links = require('../services/reschedule-link-promises');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { gates } = require('../config/feature-gates');
+const { portalUrl } = require('../utils/portal-url');
 const now = new Date('2030-01-07T12:00:00Z');
 const quote = 'I will text you a reschedule link for that appointment.';
 const customer = { id: 'customer', phone: '+15555550100', active: true };
@@ -198,6 +199,28 @@ test('an extracted date with no naming token at all parks for review among sever
   expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, second] }).reason).toBe('date_not_grounded');
 });
 
+test('a bare ordinal date names a day only, not a month — two visits sharing it stay ambiguous', () => {
+  // "on the 20th" resolves ONLY a day (explicitQuoteDate: "the 14th" is
+  // month-agnostic). Treating the missing month as a wildcard the model was
+  // free to fill in let a February extraction narrow Jan 20 / Feb 20 down to
+  // one and send the link for a visit the quote never actually identified
+  // (codex #4293 P1 r3). The claim grounds the pick only when the components
+  // it DID resolve single that date out among the open candidates.
+  const jan20 = { ...visit, id: 'jan20', scheduled_date: '2030-01-20' };
+  const feb20 = { ...visit, id: 'feb20', scheduled_date: '2030-02-20' };
+  const subject = { quote: 'My appointment on the 20th.' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  // The model picked February; the bare "20th" cannot tell Jan 20 and Feb 20
+  // apart, so neither is grounded — this must park for review, not narrow to
+  // whichever date the model happened to extract.
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-02-20' } },
+    candidates: [jan20, feb20] }).reason).toBe('date_not_grounded');
+  // The SAME bare-day quote DOES ground the pick once only one open visit
+  // falls on the 20th of any month at all.
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-02-20' } },
+    candidates: [feb20] }).visit?.id).toBe('feb20');
+});
+
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
     expect(select({ customer: { ...customer, active } }).reason).toBe('customer_inactive');
@@ -240,28 +263,72 @@ test('an agent who takes the promise back later in the call stops the send', () 
   expect(select({ call: { ...call, transcription: `Agent: I cannot send that link yet.\nAgent: ${quote}` } }).visit?.id).toBe('visit');
 });
 
+test('only a caller refusal spoken AFTER the accepted promise counts, and it revokes only the channel it names', () => {
+  // An early "don't email me anything" spoken BEFORE the agent ever promises
+  // to TEXT the link refuses nothing the agent went on to promise — a whole-
+  // call, order-blind scan read it as a revocation anyway (codex #4293 P2
+  // r3).
+  const early = `Caller: Don't email me anything, please.\nAgent: ${quote}\nCaller: Thank you.`;
+  expect(select({ call: { ...call, transcription: early } }).visit?.id).toBe('visit');
+
+  // "Don't email it—text it" in ONE caller turn, spoken AFTER the promise,
+  // refuses only email and asks for the text in the same breath — a
+  // channel-blind scan read the whole turn as refusing every channel,
+  // including the SMS the agent actually promised and this worker only ever
+  // sends over.
+  const namedChannel = `Agent: ${quote}\nCaller: Don't email it, text it.`;
+  expect(select({ call: { ...call, transcription: namedChannel } }).visit?.id).toBe('visit');
+
+  // A later, unqualified refusal after the promise still stands down exactly
+  // as before (the existing 'a caller request... revocation cannot send'
+  // test covers this baseline; repeated here as the order/channel test's own
+  // negative control).
+  const stillRefused = `Agent: ${quote}\nCaller: Do not text me that.`;
+  expect(select({ call: { ...call, transcription: stillRefused } }).reason).toBe('promise_needs_review');
+});
+
 // A knex stand-in that records the filters the worker builds and the writes it
 // makes. Only the shapes this module actually uses are modelled; builders are
 // thenable the way knex's are.
-// `selfServeVisitIds` answers the sweep's bulk "which visits have ANY
-// self-serve move at all" pre-filter (reconcileUsedLinks's evidence-before-
-// LIMIT query); `selfServe` still answers the per-row exact-match check
-// (selfServeMoveAfterSend). Defaulting the former from the latter — present
-// for every outbox row when `selfServe` is truthy, empty when it is not —
-// keeps every existing fixture behaving exactly as before; pass it
-// explicitly to pull the two apart.
-function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null, systemSettings = {} } = {}) {
+// `selfServeVisitIds` is the set of visits that have a self-serve move on
+// record at all — what reconcileUsedLinks's correlated EXISTS against
+// reschedule_log admits into the bounded scan (modelled here by filtering
+// the outbox rows the moment that predicate is applied); `selfServe` still
+// answers the per-row exact-match check (selfServeMoveAfterSend). Defaulting
+// the former from the latter — present for every outbox row when
+// `selfServe` is truthy, empty when it is not — keeps every existing fixture
+// behaving exactly as before; pass it explicitly to pull the two apart.
+// `smsRows` (when given) are answered through the sms_log evidence query's
+// own status allowlist and NOT NULL predicates, so a SID-less row can be
+// shown to fall out of the result rather than merely asserting the SQL.
+// `filterStatus` makes the outbox rows honour the sweep's status allowlist
+// the way the real WHERE does.
+function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null, smsRows = null, systemSettings = {}, filterStatus = false } = {}) {
   const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], whereRawCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
+  const evidenceVisitIds = () => (selfServeVisitIds !== null ? selfServeVisitIds
+    : selfServe ? [...new Set(outbox.map((row) => row.related_scheduled_service_id).filter(Boolean))] : []);
   const build = (table) => {
     const name = String(table).split(' ')[0];
-    const state = { eq: {}, ranges: [], whereIn: [] };
-    const rows = () => (name === 'outbox_messages' ? outbox : name === 'triage_items' ? openCards() : []);
+    const state = { eq: {}, ranges: [], whereIn: [], notNull: [], evidenceFilter: false };
+    const statusIn = (row) => state.whereIn.filter((w) => w.col === 'status').every((w) => w.values.includes(row.status));
+    const rows = () => {
+      if (name === 'outbox_messages') {
+        return outbox.filter((row) => (!state.evidenceFilter || evidenceVisitIds().includes(row.related_scheduled_service_id))
+          && (!filterStatus || statusIn(row)));
+      }
+      if (name === 'triage_items') return openCards();
+      if (name === 'sms_log' && smsRows) return smsRows.filter((row) => statusIn(row) && state.notNull.every((col) => row[col] != null));
+      return [];
+    };
     const b = {};
     const pass = (fn) => (...args) => { if (fn) fn(...args); return b; };
     Object.assign(b, {
-      whereNotNull: pass(), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(),
-      whereRaw: pass((sql) => seen.whereRawCalls.push({ table: name, sql })),
+      whereNotNull: pass((col) => state.notNull.push(col)), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(),
+      whereRaw: pass((sql, bindings) => {
+        seen.whereRawCalls.push({ table: name, sql, bindings });
+        if (name === 'outbox_messages' && /reschedule_log/.test(sql)) state.evidenceFilter = true;
+      }),
       whereNull: pass(), join: pass(), leftJoin: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
       orderBy: pass((arg) => seen.orderByCalls.push({ table: name, arg })),
       onConflict: () => ({ ignore: async () => 1 }),
@@ -278,10 +345,11 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
       then: (resolve, reject) => Promise.resolve().then(rows).then(resolve, reject),
       select: pass(),   // knex returns the builder; awaiting it yields the rows
       pluck: async (col) => {
+        // A bulk pluck of reschedule_log is the unbounded shape the r3 P2
+        // retired; it is recorded so a regression back to it is visible.
         if (name !== 'reschedule_log' || col !== 'scheduled_service_id') return [];
         seen.visitIdFilters.push({ eq: { ...state.eq } });
-        if (selfServeVisitIds !== null) return selfServeVisitIds;
-        return selfServe ? [...new Set(outbox.map((row) => row.related_scheduled_service_id).filter(Boolean))] : [];
+        return evidenceVisitIds();
       },
       first: async () => {
         if (name === 'outbox_messages') {
@@ -334,26 +402,29 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
 const sentRow = { id: 'outbox', status: 'sent', commitment_id: 'commitment', related_call_log_id: 'call',
   related_scheduled_service_id: 'visit', sent_at: new Date('2030-01-07T12:00:00Z') };
 
-test('a push-channel row is never counted as promised-link delivery evidence', async () => {
-  // push-channel-routing.js records its own App-delivery proof in sms_log
-  // with status 'sent' and the customer's real phone in to_phone, but
-  // from_phone is the literal string 'push', twilio_sid is always null, and
-  // metadata.channel is 'push' — never proof an actual SMS left the
-  // building. Without excluding it, a push notice that merely CONTAINS the
-  // short link's text reads as delivery evidence, settling the row 'sent'
-  // with no provider id while the real SMS is never sent at all (codex
-  // #4293 P2 r8). This shallow mock cannot simulate a real WHERE clause
-  // filtering rows out of a result set (nothing in this suite's fakeConn
-  // does), so the structural proof is that the query itself carries the
-  // same exclusion predicate twilio-webhook.js already uses for exactly
-  // this shape of row.
-  const { conn, seen } = fakeConn({});
-  const result = await links.matchingSend(conn, { visit, customer }, new Date('2030-01-07T12:00:00Z'));
-  expect(result).toBeNull();
-  const evidenceFilter = seen.whereRawCalls.find((c) => c.table === 'sms_log');
-  expect(evidenceFilter).toBeDefined();
-  expect(evidenceFilter.sql).toContain("COALESCE(from_phone, '') <> 'push'");
-  expect(evidenceFilter.sql).toContain("COALESCE(metadata->>'channel', '') <> 'push'");
+test('promised-link delivery evidence requires the provider\'s own id, not merely an accepted-looking status', async () => {
+  // Two SID-less sms_log shapes otherwise pass the status allowlist:
+  // push-channel-routing's own App-notification proof row (status 'sent',
+  // from_phone 'push', twilio_sid always null — codex #4293 P2 r8), and a
+  // scheduled operator text that claimDueScheduledSms (scheduler.js:286-313)
+  // has already moved to 'sending' BEFORE the provider call — if that send
+  // is then blocked or returned to 'scheduled', twilio_sid is still null
+  // (codex #4293 P2 r3). Requiring the provider's own sid — the one thing
+  // every real send carries (twilio.js writes twilio_sid: message.sid after
+  // the handoff) — covers both in one predicate; neither counts as evidence.
+  const linkBody = `Your reschedule link: ${portalUrl(`/reschedule/${visit.reschedule_token}`)}`;
+  const noEvidence = [
+    { id: 'push', status: 'sent', twilio_sid: null, message_body: linkBody },
+    { id: 'presend', status: 'sending', twilio_sid: null, message_body: linkBody },
+  ];
+  const { conn: withoutSid } = fakeConn({ smsRows: noEvidence });
+  expect(await links.matchingSend(withoutSid, { visit, customer }, new Date('2030-01-07T12:00:00Z'))).toBeNull();
+
+  // The identical shape WITH a provider sid IS evidence.
+  const withSid = [{ id: 'real', status: 'sent', twilio_sid: 'SM123', message_body: linkBody }];
+  const { conn: withEvidence } = fakeConn({ smsRows: withSid });
+  const result = await links.matchingSend(withEvidence, { visit, customer }, new Date('2030-01-07T12:00:00Z'));
+  expect(result?.id).toBe('real');
 });
 
 // A dedicated stand-in for stagePromises' own tables (call_commitments /
@@ -540,23 +611,34 @@ test('a link used after the row was parked still closes its cards and the call',
 
 test('a visit with no self-serve move on record is never scanned by the reconcile sweep', async () => {
   // A row whose link was simply never used has no reschedule_log evidence at
-  // all — ordering the raw unreconciled set by updated_at let a backlog of
-  // exactly these rows fill the LIMIT 100 forever, since nothing about an
-  // unmatched row ever changes its updated_at (codex #4293 P1). The bulk
-  // evidence query runs BEFORE any per-row check, so an all-untouched backlog
-  // costs one empty lookup and zero per-row work, never a wasted scan slot.
+  // all. An earlier round answered the starvation problem (a backlog of
+  // untouched rows filling the LIMIT 100 forever, since nothing about them
+  // ever changes their updated_at — codex #4293 P1) by plucking EVERY visit
+  // id reschedule_log has ANY self-serve move for, the whole table's history
+  // materialized on every tick and pushed back as an unbounded WHERE IN list
+  // (codex #4293 P2 r3). The evidence check now lives INSIDE the bounded
+  // query itself, as a correlated EXISTS against reschedule_log evaluated
+  // per candidate row — nothing about the log's size is ever fetched, so a
+  // regression back to the bulk-pluck shape is exactly what the first
+  // assertion below catches.
   const untouched = { ...sentRow, id: 'untouched' };
   const { conn, seen } = fakeConn({ outbox: [untouched], selfServe: null, selfServeVisitIds: [] });
   expect(await links.reconcileUsedLinks(conn)).toBe(0);
-  expect(seen.visitIdFilters).toEqual([{ eq: { initiated_by: 'customer_self_serve' } }]);
+  // No bulk pluck('scheduled_service_id') against reschedule_log at all.
+  expect(seen.visitIdFilters).toEqual([]);
+  const evidenceQuery = seen.whereRawCalls.find((c) => c.table === 'outbox_messages' && /reschedule_log/.test(c.sql));
+  expect(evidenceQuery).toBeDefined();
+  expect(evidenceQuery.sql).toMatch(/EXISTS/);
+  expect(evidenceQuery.bindings).toEqual(['customer_self_serve']);
   // No self-serve evidence at all means the per-row check never runs either.
   expect(seen.logFilters).toEqual([]);
 
   // A visit that DOES have evidence on record still reconciles exactly as
-  // before once it clears the bulk pre-filter.
+  // before, through the same bounded query.
   const { conn: withEvidence, seen: seenWithEvidence } = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' }, selfServeVisitIds: ['visit'] });
   const scanTime = new Date('2030-01-09T00:00:00Z');
   expect(await links.reconcileUsedLinks(withEvidence, scanTime)).toBe(1);
+  expect(seenWithEvidence.visitIdFilters).toEqual([]);
   // The reconcile sweep shares the SAME fairness ordering as the send-queue
   // sweep, and stamps every row it examines, matched or not.
   expect(seenWithEvidence.orderByCalls.find((c) => c.table === 'outbox_messages').arg)
@@ -564,6 +646,24 @@ test('a visit with no self-serve move on record is never scanned by the reconcil
   const evidenceStamp = seenWithEvidence.updates.find((u) => u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch);
   expect(evidenceStamp.whereIn).toContainEqual({ col: 'id', values: ['outbox'] });
   expect(evidenceStamp.patch.last_scanned_at).toEqual(scanTime);
+});
+
+test('a large, unrelated reschedule_log history never changes what the bounded reconcile scan returns', async () => {
+  // The evidence-before-LIMIT query used to pull every visit id with ANY
+  // self-serve move at all, unrelated backlog included, before filtering
+  // (codex #4293 P2 r3). The correlated EXISTS is scoped per candidate row,
+  // so a large history for visits this sweep's own rows have nothing to do
+  // with can never widen (or narrow) the result — modelling a thousand of
+  // them here changes nothing about which rows reconcile.
+  const manyUnrelatedVisits = Array.from({ length: 1000 }, (_, i) => `unrelated-visit-${i}`);
+  const untouched = { ...sentRow, id: 'untouched' };
+  const { conn: withNoise, seen: seenWithNoise } = fakeConn({ outbox: [untouched], selfServeVisitIds: manyUnrelatedVisits });
+  expect(await links.reconcileUsedLinks(withNoise)).toBe(0);
+  expect(seenWithNoise.visitIdFilters).toEqual([]);
+
+  const matching = [...manyUnrelatedVisits, 'visit'];
+  const { conn: withMatch } = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' }, selfServeVisitIds: matching });
+  expect(await links.reconcileUsedLinks(withMatch)).toBe(1);
 });
 
 const promiseRow = (id, commitmentId, extra = {}) => ({ id, status: 'pending', commitment_id: commitmentId,
@@ -602,6 +702,22 @@ test('one unprocessable row cannot starve the rest of the sweep', async () => {
   expect(seen.updates.some((u) => u.table === 'outbox_messages' && u.eq.id === 'ok')).toBe(true);
   // ...and used-link reconciliation still runs for both rows.
   expect(seen.logFilters).toHaveLength(2);
+});
+
+test('a backlog of delivered rows cannot occupy the primary sweep — a pending row is still picked on the first tick', async () => {
+  // Delivered (and any other terminal) rows stay in outbox_messages for
+  // good, and runOne already returns immediately for them — but leaving them
+  // in the primary LIMIT-100 SELECT and its last_scanned_at stamp lets a
+  // backlog of them occupy every scan slot, so a retried pending row behind
+  // them would wait a full rotation for a send it is due right now (codex
+  // #4293 P2 r3). reconcileUsedLinks looks at delivered rows separately.
+  const delivered = Array.from({ length: 150 }, (_, i) => promiseRow(`delivered-${i}`, `commitment-${i}`, { status: 'delivered' }));
+  const { seen, result } = await sweepWith({ outbox: [...delivered, promiseRow('pending', 'pending-commitment')],
+    selfServeVisitIds: [], filterStatus: true });
+  expect(result.processed).toBe(1);
+  const scanStamp = seen.updates.find((u) => u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch);
+  expect(scanStamp).toBeDefined();
+  expect(scanStamp.whereIn.find((w) => w.col === 'id').values).toEqual(['pending']);
 });
 
 test('a review row parked for the same unchanging reason is still stamped scanned, so it cannot starve the send queue', async () => {
@@ -835,6 +951,69 @@ test('an empty first live sweep still fixes the activation boundary; a promise m
   const next = await sweepWith({ outbox: [fresh], selfServeVisitIds: [], systemSettings }, 'true');
   const freshUpdate = next.seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'fresh');
   expect(freshUpdate.patch.last_error).not.toBe('pre_activation');
+});
+
+test('a call extracted live before any sweep fixes the boundary immediately, so the very next sweep never parks it as pre_activation', async () => {
+  // With the gate live and no env set, a call processed between the gate
+  // flip and the NEXT five-minute sweep tick creates a legitimate live
+  // commitment before anything has persisted the boundary. Establishing the
+  // instant only as a side effect of a sweep running defers it to whatever
+  // sweep happens to run next, and that sweep then reads every commitment
+  // made in between as pre_activation and cancels it silently (codex #4293
+  // P1 r3). recordLiveActivation is call-commitments.recordCallCommitments'
+  // own call, made inline in the live-extraction path the moment a live pass
+  // can begin — well before either the commitment or its outbox row exist —
+  // so the boundary is already on record by the time the first sweep ever
+  // looks at it.
+  const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+  const priorEnv = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+  const priorCommitments = gates.callCommitments;
+  try {
+    gates.callCommitments = true;
+    process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+    delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    const systemSettings = {};
+    const { conn } = fakeConn({ systemSettings });
+    await links.recordLiveActivation(conn);
+    const boundary = systemSettings.reschedule_link_promise_activated_at;
+    expect(boundary).toBeDefined();
+
+    // A commitment "created" at that same fixed instant — the closest a live
+    // extraction and the boundary it just wrote can ever be — must still
+    // read as on-or-after the boundary, not before it.
+    const justInTime = promiseRow('just-in-time', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: boundary } });
+    const { conn: sweepConn, seen } = fakeConn({ outbox: [justInTime], selfServeVisitIds: [], systemSettings });
+    const result = await links.sweep(sweepConn, { now: new Date(boundary) });
+    expect(result.processed).toBe(1);
+    expect(seen.updates.some((u) => u.table === 'outbox_messages' && u.eq.id === 'just-in-time'
+      && u.patch.last_error === 'pre_activation')).toBe(false);
+    // The boundary already existed — the sweep's own fallback write (still
+    // in place as the safety net) never had to fire.
+    expect(seen.inserts.some((i) => i.table === 'system_settings')).toBe(false);
+  } finally {
+    if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+    if (priorEnv === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorEnv;
+    gates.callCommitments = priorCommitments;
+  }
+});
+
+test('recordLiveActivation is a no-op outside live mode — shadow and off never touch the persisted boundary', async () => {
+  const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+  const priorCommitments = gates.callCommitments;
+  try {
+    gates.callCommitments = true;
+    for (const mode of ['shadow', '']) {
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = mode;
+      const systemSettings = {};
+      const { conn, seen } = fakeConn({ systemSettings });
+      await links.recordLiveActivation(conn);
+      expect(seen.inserts).toEqual([]);
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeUndefined();
+    }
+  } finally {
+    if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+    gates.callCommitments = priorCommitments;
+  }
 });
 
 test('one call-level card speaks for every promise parked against the call', async () => {

@@ -72,6 +72,26 @@ async function activationBoundary(conn) {
   const parsed = configured ? new Date(configured) : null;
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
 }
+
+// The boundary has to exist BEFORE the first live commitment does, not on
+// the first sweep after it. With the gate live and no env set, every call
+// processed between the gate flip and the next five-minute tick recorded a
+// legitimate live promise; that first tick then wrote now() as the boundary
+// and cancelled all of them as pre_activation, silently (codex #4293 P1 r3).
+// call-commitments.recordCallCommitments calls this ahead of its upsert
+// whenever this gate is live, so the stored instant is the EARLIER of the
+// first live extraction and the first live sweep: insert-if-absent means
+// whichever runs first fixes it and nothing later moves it. Shadow and off
+// are no-ops exactly as in activationBoundary. Never throws — a settings
+// hiccup must not cost the call its commitments, and the sweep's own
+// persist remains the fallback.
+async function recordLiveActivation(conn = db) {
+  try {
+    await activationBoundary(conn);
+  } catch (err) {
+    require('./logger').warn(`[reschedule-link-promises] activation boundary not recorded (${err.code || err.name || 'error'})`);
+  }
+}
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const dateOnly = (v) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
 const snapshot = (v) => ({ id: v.id, customer_id: v.customer_id, date: dateOnly(v.scheduled_date),
@@ -103,6 +123,11 @@ const NEW_BOOKING = /\b(?:new|first|initial) (?:service|customer|account|appoint
 // separately — this one scans the agent's LATER turns (codex #4293 r2 P1).
 const AGENT_RETRACTION = /\b(?:can t|cannot|won t|will not|unable to|not able to|don t|do not|no longer)\b[a-z0-9 ]{0,25}\b(?:send|text|email|link)\b|\b(?:scratch that|never mind|nevermind|disregard that|forget that)\b|\bthe office will (?:call|reach out|follow up|handle)\b/;
 const CONDITIONAL = /\b(?:not|never|unless|if|until|once|maybe|might|cannot)\b|\b(?:don|won|can) t\b/;
+// The caller's own refusal, with the channel it names: "don't email it" is
+// group 1, "don't send me a text" is group 2, and a bare "don't send the
+// link" names no channel at all (both groups empty — refuses everything).
+const CALLER_REFUSAL = /\b(?:don t|do not|no need|never mind|nevermind)\b[a-z0-9 ]{0,20}?\b(?:(email|emailing|e mail|text|texting|sms)|(?:link|send|sending)(?:\s+(?:me|us)?\s*(?:a|an|the|any|another)?\s*(email|e mail|text|sms)\b)?)/g;
+const TEXT_REQUEST = /\b(?:text|texting|sms)\b/g;
 // This worker has exactly ONE pipeline: an SMS to the caller's own phone.
 // "I'll EMAIL you a reschedule link" is a promise it cannot keep, and quietly
 // texting it instead delivers the link on a channel the agent never named (or
@@ -152,6 +177,43 @@ function standingPromiseQuotes(commitment, turns) {
       const spokenAt = turns.agent.findIndex((turn) => turn.includes(quote) && !CONDITIONAL.test(turn));
       return spokenAt >= 0 && !turns.agent.slice(spokenAt + 1).some((turn) => AGENT_RETRACTION.test(turn));
     });
+}
+
+// Which channel a caller refusal names: this worker only ever texts, so a
+// refusal of email alone leaves its promise standing.
+function refusedChannel(match) {
+  const word = match[1] || match[2] || '';
+  if (/^(?:email|emailing|e mail)$/.test(word)) return 'email';
+  return /^(?:text|texting|sms)$/.test(word) ? 'sms' : 'any';
+}
+
+// Whether the caller's refusal of the TEXT still stands once the agent has
+// promised it. Only turns AFTER the promise count — a caller who opened with
+// "don't email me the link" and then asked for a text has refused nothing the
+// agent went on to promise — and the refusal has to reach this channel:
+// "don't email it, text it" refuses the email and asks for the text in one
+// breath, and a later "text it to me" withdraws an earlier refusal of the
+// text. A whole-call, channel-blind scan parked every one of those as
+// promise_needs_review (codex #4293 P2 r3). Events are replayed in spoken
+// order, so the last word on the text wins; the agent's own retraction is
+// standingPromiseQuotes' business and unchanged.
+function callerRefusedText(ordered, promiseAt) {
+  let refused = false;
+  for (const turn of ordered.slice(promiseAt + 1)) {
+    if (turn.speaker !== 'caller') continue;
+    const events = [...turn.text.matchAll(CALLER_REFUSAL)]
+      .map((m) => ({ at: m.index, end: m.index + m[0].length, refuses: refusedChannel(m) }));
+    for (const m of turn.text.matchAll(TEXT_REQUEST)) {
+      // "text" inside the refusal itself ("don't text me") is the refusal's
+      // own object, not a request for one.
+      if (!events.some((e) => m.index >= e.at && m.index < e.end)) events.push({ at: m.index, requests: true });
+    }
+    for (const event of events.sort((a, b) => a.at - b.at)) {
+      if (event.requests) refused = false;
+      else if (event.refuses !== 'email') refused = true;
+    }
+  }
+  return refused;
 }
 
 // A subject is grounded only when it NAMES the visit — a bare quote with no
@@ -259,14 +321,29 @@ function quoteHasWeekdayToken(q) {
 // must likewise match the visit it names; only when the quote gives NEITHER
 // an explicit claim NOR a weekday name at all is there nothing to check the
 // pick against, and a single open candidate is trusted.
+//
+// An explicit claim that leaves a component unsaid is NOT a wildcard for the
+// model to fill in: "my appointment on the 20th" resolves a day and nothing
+// else, and treating the missing month as "whatever the model picked" let a
+// February extraction narrow Jan 20 / Feb 20 to one and send the link for a
+// visit the quote never identified (codex #4293 P1 r3). The claim grounds
+// the pick only when the components it DID resolve single that date out
+// among the open visits — two candidates that agree on everything the quote
+// said leave the quote grounding neither.
+function claimFitsDate(claim, ymd) {
+  const [year, month, day] = String(ymd).split('-').map(Number);
+  return claim.day === day && (claim.month == null || claim.month === month) && (claim.year == null || claim.year === year);
+}
+
 function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
   const q = ` ${norm(quote)} `;
   const [year, month, day] = String(ymd).split('-').map(Number);
   if (![year, month, day].every(Number.isFinite)) return false;
   const explicit = explicitQuoteDate(q, reference);
   if (explicit) {
-    return explicit.day === day && (explicit.month == null || explicit.month === month)
-      && (explicit.year == null || explicit.year === year);
+    if (!claimFitsDate(explicit, ymd)) return false;
+    const fitting = new Set(candidates.map((v) => dateOnly(v.scheduled_date)).filter((date) => claimFitsDate(explicit, date)));
+    return fitting.size <= 1;
   }
   if (quoteHasWeekdayToken(q)) return quoteNamesWeekday(q, weekdayOf(ymd), candidates, ymd);
   return candidates.length <= 1;
@@ -312,14 +389,23 @@ function extractedDateUngrounded({ subject, call, candidates, callCommitments })
     && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at, candidates);
 }
 
+// Whether the caller ever refused the SMS channel AFTER the agent's own
+// promise turn — split out of selectDiscussedVisit so that function's own
+// branch count stays where a reviewer can still take it in at a glance.
+function revokedAfterPromise(promisedQuotes, ordered) {
+  const promiseAt = ordered.findIndex((turn) => turn.speaker === 'agent' && !CONDITIONAL.test(turn.text)
+    && promisedQuotes.some((quote) => turn.text.includes(quote)));
+  return promiseAt >= 0 && callerRefusedText(ordered, promiseAt);
+}
+
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   const identity = callerIdentityReason(call, customer);
   if (identity) return skip(identity);
   const callCommitments = require('./call-commitments');
   const turns = callCommitments.speakerTurns(call.transcription);
-  const revoked = (turns?.caller || []).some((turn) => /\b(?:don t|do not|no need|never mind)\b/.test(turn) && /\b(?:link|text|send|email)\b/.test(turn));
   const promisedQuotes = standingPromiseQuotes(commitment, turns);
+  const revoked = revokedAfterPromise(promisedQuotes, turns?.ordered || []);
   const subject = commitment.subject;
   if (subjectNotGrounded(subject, call)) return skip('subject_not_grounded');
   const groundedSubject = !!subject && [subject.visit_date, subject.service, subject.address].some(Boolean);
@@ -368,16 +454,19 @@ async function matchingSend(conn, context, since) {
   const messages = await conn('sms_log').where({ customer_id: context.customer.id, direction: 'outbound' })
     .where('created_at', '>=', since).whereIn('status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
     .whereIn(conn.raw("regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g')"), phoneMatchDigits(context.customer.phone))
-    // push-channel-routing's App notification records its own sms_log proof
-    // row the same way a real text does — status 'sent', the customer's real
-    // phone in to_phone — but from_phone is the literal string 'push',
-    // twilio_sid is always null, and metadata.channel is 'push' (never a
-    // Twilio SID to prove an SMS actually left the building). Without this
-    // exclusion a push notice that merely CONTAINS the short link's text
-    // reads as delivery evidence, settling the row 'sent' with no provider
-    // id while the real SMS is never sent at all (codex #4293 P2 r8). Same
-    // predicate twilio-webhook.js already uses to spot a push row.
-    .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
+    // Only a row the provider actually accepted is evidence, and the
+    // provider's own id is the one thing every real send carries
+    // (twilio.js writes twilio_sid: message.sid on the row it inserts after
+    // the handoff). Two SID-less sms_log shapes otherwise pass the status
+    // allowlist above: push-channel-routing's App-notification proof row
+    // (status 'sent', from_phone 'push', twilio_sid null — codex #4293 P2
+    // r8), and a scheduled operator text that claimDueScheduledSms
+    // (scheduler.js) has moved to 'sending' BEFORE the provider call — if
+    // that send is then blocked or returned to 'scheduled', a promise
+    // settled 'sent' against it has no provider id, no delivery evidence,
+    // and no pending row left to claim: the link is never sent and never
+    // surfaced (codex #4293 P2 r3). Requiring the SID covers both.
+    .whereNotNull('twilio_sid')
     .where(function carriesLink() { for (const needle of needles) this.orWhere('message_body', 'like', `%${needle}%`); })
     .orderBy('created_at', 'desc').limit(201).select('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
   if (messages.length > 200) throw new Error('Promised-link delivery evidence is truncated');
@@ -828,6 +917,8 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
 // has never been scanned (fresh, or predating this column) — the fairness
 // ordering every LIMIT-100 sweep over outbox_messages shares.
 const SCAN_FAIRNESS_ORDER = [{ column: 'last_scanned_at', order: 'asc', nulls: 'first' }, { column: 'updated_at', order: 'asc' }];
+// Every non-terminal lane the send sweep still has work in.
+const SWEEP_STATUSES = ['pending', 'shadow', 'sending', 'sent', 'review'];
 
 // Marks every row a sweep looked at as scanned, regardless of what else
 // happened to it. A row a sweep examines but leaves unchanged (context still
@@ -849,11 +940,20 @@ async function sweep(conn = db, options = {}) {
   // empty queue defers the write to whatever LATER sweep finally sees a
   // row, and every commitment created between gate-on and that later sweep
   // reads as pre_activation against a boundary that arrived too late
-  // (codex #4293 P1, folded into round 2 on baa4cf295).
+  // (codex #4293 P1, folded into round 2 on baa4cf295). This is the
+  // FALLBACK writer: a call processed live before this tick has already
+  // fixed the instant through recordLiveActivation, and insert-if-absent
+  // keeps whichever of the two came first (codex #4293 P1 r3).
   if (mode() === 'true') await activationBoundary(conn);
   await stagePromises(conn);
   const now = options.now || new Date();
-  const rows = await conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', ['pending', 'shadow', 'sending', 'sent', 'review'])
+  // Terminal rows ('delivered', 'cancelled') stay in the table for good but
+  // are NOT in this allowlist: they would otherwise occupy scan slots and
+  // last_scanned_at stamps forever, and once 100 of them accumulated a
+  // retried pending row behind them would wait a full rotation for a send
+  // it is due now. Delivered rows still needed for used-link reconciliation
+  // are selected separately by reconcileUsedLinks (codex #4293 P2 r3).
+  const rows = await conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', SWEEP_STATUSES)
     .where(function due() { this.whereNull('available_at').orWhere('available_at', '<=', now); }).orderBy(SCAN_FAIRNESS_ORDER).limit(100);
   await stampScanned(conn, rows, now);
   // One row must never starve the tick. There is an explicit row-specific
@@ -1121,19 +1221,27 @@ async function resolveUsedLink(conn, visitId) {
     .select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
 }
 
-// Every visit that has EVER had a self-serve move recorded — fetched once,
-// before the per-row LIMIT below. A promised-link row whose customer never
-// touched /reschedule/:token can never be reconciled, and ordering the raw
-// unreconciled set by updated_at let a backlog of exactly those untouched
-// rows occupy the whole LIMIT 100 forever: their updated_at never advances
-// (nothing about them changes), so once 100 accumulated, no row behind them
-// was ever scanned again and its triage card stayed open even after the
-// post-commit hook in reschedule-public failed (codex #4293 P1). Filtering on
-// this set first means only rows that could actually resolve compete for a
-// scan slot; selfServeMoveAfterSend below still enforces the exact
-// after-sent_at boundary per row.
-function selfServeVisitIds(conn) {
-  return conn('reschedule_log').where({ initiated_by: SELF_SERVE_INITIATOR }).pluck('scheduled_service_id');
+// Only a row whose visit HAS a self-serve move on record, made after the
+// link went out, can ever be reconciled; a promised-link row whose customer
+// never touched /reschedule/:token is nothing for this pass to look at, and
+// letting such rows compete for the LIMIT-100 scan slots let a backlog of
+// them starve the rows that could resolve (codex #4293 P1). An earlier round
+// answered that by plucking EVERY visit id in reschedule_log with a
+// self-serve move — the whole table's history, materialized on every tick
+// and then pushed back as an unbounded WHERE IN list (codex #4293 P2 r3).
+// The evidence check belongs INSIDE the bounded query instead: a correlated
+// EXISTS against reschedule_log's own (scheduled_service_id) index, evaluated
+// per candidate row as the fairness-ordered scan walks toward its LIMIT, so
+// nothing about the log's size is ever fetched or carried in the query.
+// selfServeMoveAfterSend below still re-checks the exact after-sent_at
+// boundary on each row it stamps as used.
+function whereSelfServeMoveExists(query) {
+  return query.whereRaw(`EXISTS (
+      SELECT 1 FROM reschedule_log rl
+      WHERE rl.scheduled_service_id = outbox_messages.related_scheduled_service_id
+        AND rl.initiated_by = ?
+        AND (outbox_messages.sent_at IS NULL OR rl.created_at >= outbox_messages.sent_at)
+    )`, [SELF_SERVE_INITIATOR]);
 }
 
 // The post-commit hook in reschedule-public is best-effort: a transient DB
@@ -1143,12 +1251,10 @@ function selfServeVisitIds(conn) {
 // (codex #4293 r1 P2). This is the last chance — same evidence, run from the
 // sweep until it lands.
 async function reconcileUsedLinks(conn, now = new Date()) {
-  const visitIds = await selfServeVisitIds(conn);
-  if (!visitIds.length) return 0;
-  const rows = await unreconciledPromiseRows(conn).whereIn('related_scheduled_service_id', visitIds).orderBy(SCAN_FAIRNESS_ORDER)
+  const rows = await whereSelfServeMoveExists(unreconciledPromiseRows(conn)).orderBy(SCAN_FAIRNESS_ORDER)
     .limit(100).select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at');
   await stampScanned(conn, rows, now);
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation };
