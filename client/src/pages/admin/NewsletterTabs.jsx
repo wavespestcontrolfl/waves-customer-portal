@@ -1171,7 +1171,7 @@ export function ComposeView({
     <UiSurface density="comfortable" className="space-y-4">
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4">
         {autopilotBanner && (
-          <div className="col-span-full flex items-center justify-between bg-zinc-50 border-hairline border-zinc-200 rounded-sm px-4 py-3 text-ui-body text-zinc-900">
+          <div className="col-span-full flex items-center justify-between bg-warn-bg border-hairline border-warn-fg/30 rounded-sm px-4 py-3 text-ui-body text-warn-fg">
             <span>
               <strong>Autopilot draft</strong> — This draft was auto-generated
               by the weekly autopilot. Review and send when ready.
@@ -1813,7 +1813,7 @@ export function ComposeView({
                   {validationResult.warnings?.map((w, i) => (
                     <div
                       key={`w${i}`}
-                      className="flex items-start gap-1.5 text-ui-body text-ink-secondary bg-zinc-50 rounded px-2 py-1"
+                      className="flex items-start gap-1.5 text-ui-body text-warn-fg bg-warn-bg rounded px-2 py-1"
                     >
                       <AlertTriangle size={11} className="mt-0.5 shrink-0" />
                       {w}
@@ -1821,7 +1821,7 @@ export function ComposeView({
                   ))}
                   {validationResult.valid &&
                     !validationResult.warnings?.length && (
-                      <div className="flex items-center gap-1.5 text-ui-body text-ink-secondary bg-zinc-50 rounded px-2 py-1">
+                      <div className="flex items-center gap-1.5 text-ui-body text-green-700 bg-green-50 rounded px-2 py-1">
                         <CheckCircle2 size={11} className="shrink-0" />
                         Validation passed
                       </div>
@@ -2249,7 +2249,7 @@ function DigestPlanner({ onDraftFromPlan }) {
               {plan.warnings.map((w, i) => (
                 <div
                   key={i}
-                  className="flex items-start gap-1.5 text-ui-body text-ink-secondary bg-zinc-50 rounded px-2 py-1"
+                  className="flex items-start gap-1.5 text-ui-body text-warn-fg bg-warn-bg rounded px-2 py-1"
                 >
                   <AlertTriangle size={11} className="mt-0.5 shrink-0" />
                   {w}

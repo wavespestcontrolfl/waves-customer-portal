@@ -908,7 +908,7 @@ function EventInboxView({ onDraftFromEvent }) {
                   className="flex items-center gap-1.5 px-2 py-1 bg-zinc-50 border-hairline border-zinc-200 rounded text-ui-body"
                 >
                   <span
-                    className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "error" ? "bg-alert-fg" : zeroYieldDegraded ? "bg-zinc-500" : s.lastPullStatus === "success" ? "bg-zinc-900" : "bg-zinc-300"}`}
+                    className={`inline-block w-1.5 h-1.5 rounded-full ${s.lastPullStatus === "error" ? "bg-alert-fg" : zeroYieldDegraded ? "bg-warn-fg" : s.lastPullStatus === "success" ? "bg-green-500" : "bg-zinc-300"}`}
                   />
                   <span className="text-ink-primary font-medium truncate max-w-[140px]">
                     {s.name.split("—")[0].trim()}
