@@ -625,14 +625,27 @@ function freeDifferentialRe() {
   return freeDifferential;
 }
 const SEGMENT_PREDICATE = /\b(?:present|visible|spreading|active|observed|seen|noted|confirmed|is|are|was|were|has|have|had|appears?|looks?|remains?)\b/;
+// A conjunct that carries its own content (a symptom/damage noun or a location)
+// is an independent positive statement even without a verb.
+const SEGMENT_CONTENT = /\b(?:damage|activity|pressure|signs?|evidence|symptoms?|lesions?|thinning|feeding|infestation|outbreak|stress|patches|at|along|near|in|on|across|around|by)\b/;
+// Split a clause into predicate segments. Commas and colons always separate;
+// "and"/"plus"/"&" separates too, except that a bare noun conjunct with no
+// predicate or content of its own shares the predicate that follows it
+// ("Chinch bugs and weeds absent" is one negated segment, while "Chinch bug
+// damage at the edge, weeds absent" and "Large patch present and weeds absent"
+// keep their positive segment).
 function predicateSegments(text) {
   const segments = [];
   let carry = '';
-  for (const raw of text.split(/[,:]|\s+(?:and|plus|&)\s+/)) {
-    const part = raw.trim();
+  const tokens = text.split(/([,:]|\s+(?:and|plus|&)\s+)/);
+  for (let i = 0; i < tokens.length; i += 2) {
+    const part = tokens[i].trim();
     if (!part) continue;
+    const nextSep = (tokens[i + 1] || '').trim();
+    const joinsNext = /^(?:and|plus|&)$/.test(nextSep);
+    const standalone = SEGMENT_PREDICATE.test(part) || NEGATION_MARKER.test(part) || SEGMENT_CONTENT.test(part);
     const joined = carry ? `${carry} and ${part}` : part;
-    if (!SEGMENT_PREDICATE.test(part) && !NEGATION_MARKER.test(part)) { carry = joined; continue; }
+    if (joinsNext && !standalone) { carry = joined; continue; }
     segments.push(joined);
     carry = '';
   }

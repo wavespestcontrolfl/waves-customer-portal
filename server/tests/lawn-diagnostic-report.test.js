@@ -680,6 +680,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['No weeds? Large patch is visible', 'large patch (fungal) activity'],
     // A postpositive marker negates only its own segment, comma- or and-joined.
     ['Large patch present and weeds absent', 'large patch (fungal) activity'],
+    ['Chinch bug damage at the edge, weeds absent', 'chinch bug activity'],
+    ['Chinch bug damage at the edge and weeds absent', 'chinch bug activity'],
     ['Large patch absent and drought stress visible', 'drought stress'],
     ['Weeds absent and large patch present', 'large patch (fungal) activity'],
     ['Large patch present, weeds absent', 'large patch (fungal) activity'],
