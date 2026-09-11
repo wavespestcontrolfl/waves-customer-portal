@@ -1394,6 +1394,15 @@ async function commitReservation({
     // before its own row locks. Standalone commits acquire it here.
     if (preparedCapacity) await lockTechDays(client, [{ techId: preRow.technician_id, date: lockedDate },
       { techId: null, date: lockedDate }]);
+    // Catalog SHARE lock BEFORE this row's FOR UPDATE (codex #4369 r3 P1):
+    // catalog migrations lock `services` first and then update
+    // scheduled_services rows (20260902000010), so reaching the catalog
+    // lock only later, through the commit-time profile resolution, would
+    // ABBA-deadlock against one that targets this visit. Same condition
+    // the resolver uses to lock at all; re-issued there as a no-op.
+    if (capacityEnabled() || preRow.reservation_policy_version === 2) {
+      await require('./scheduling/catalog-lock').lockCatalogIdentity(client);
+    }
 
     // Canonical order with the scheduled-invoice writers (PR #3476 r21
     // P1): the shared advisory mint lock comes BEFORE this row FOR

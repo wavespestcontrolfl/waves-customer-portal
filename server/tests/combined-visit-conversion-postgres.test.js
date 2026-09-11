@@ -345,9 +345,12 @@ postgres('combined capacity conversion on the migrated application schema', () =
         if (failure === 'query_failure') {
           const query = trx.client._query;
           catalogQuerySpy = jest.spyOn(trx.client, '_query').mockImplementation(function (connection, statement) {
-            // The protected catalog read is fenced by the services table SHARE
-            // lock (scheduling/catalog-lock.js) instead of a row FOR SHARE;
-            // failing that statement is the synthetic lookup failure.
+            // The protected catalog reads are fenced by the services table
+            // SHARE lock (scheduling/catalog-lock.js) instead of a row FOR
+            // SHARE; failing that statement is the synthetic lookup failure.
+            // convertEstimate takes the same lock first thing (before any
+            // visit row lock), so the failure surfaces there — mapped to the
+            // same recoverable catalog_unavailable 409.
             if (/lock table services in share mode/i.test(statement.sql)) {
               return Promise.reject(new Error('Synthetic catalog query failure'));
             }

@@ -4236,6 +4236,26 @@ const EstimateConverter = {
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
     const estimate = await database('estimates').where({ id: estimateId }).first();
+    // Catalog SHARE lock BEFORE any scheduled_services row lock in this
+    // transaction (codex #4369 r3 P1): the version-2 protected catalog
+    // reads below take it late, after family/prepaid/reserved visit rows
+    // are FOR UPDATE'd, while catalog migrations lock `services` first and
+    // then update scheduled_services rows (20260902000010) — an ABBA cycle.
+    // Unlocked pre-read of the hold's policy version; the lock is a no-op
+    // when re-issued by those reads.
+    if (database.isTransaction && (require('./scheduling/policy').capacityEnabled() || await database('scheduled_services')
+      .where({ source_estimate_id: estimateId, reservation_policy_version: 2 }).first('id'))) {
+      try {
+        await require('./scheduling/catalog-lock').lockCatalogIdentity(database);
+      } catch (lockErr) {
+        // A lock timeout here is the catalog being unavailable for a
+        // capacity-certified conversion: the same recoverable 409 the
+        // protected reads raise, never an unmapped 500.
+        const unavailable = require('./scheduling/arrival-route').capacityError('catalog_unavailable');
+        unavailable.cause = lockErr;
+        throw unavailable;
+      }
+    }
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
     if (estimate.status !== 'accepted') throw new Error(`Estimate ${estimateId} is not accepted (status: ${estimate.status})`);
     if (!estimate.customer_id) throw new Error(`Estimate ${estimateId} has no linked customer`);

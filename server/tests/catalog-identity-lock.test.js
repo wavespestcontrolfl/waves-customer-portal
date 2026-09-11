@@ -117,7 +117,33 @@ describe('catalogLinkForProfile — table SHARE lock replaces catalog row locks'
     expect(slotSrc).not.toMatch(/lockCatalog\) query\.forShare/);
     const converterSrc = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
     expect(converterSrc).not.toMatch(/catalogQuery\.forShare\(\)/);
-    expect(converterSrc.match(/lockCatalogIdentity\((database|trx)\)/g)).toHaveLength(3);
+    // Three protected reads + the top-of-transaction acquisition.
+    expect(converterSrc.match(/lockCatalogIdentity\((database|trx)\)/g)).toHaveLength(4);
+  });
+});
+
+describe('lock order: catalog SHARE lock precedes scheduled_services row locks (codex #4369 r3)', () => {
+  test('commitReservation takes it after the day fences and before its hold row FOR UPDATE', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
+    const start = src.indexOf('async function commitReservation(');
+    const body = src.slice(start, src.indexOf("const row = await client('scheduled_services')", start));
+    const lockIdx = body.indexOf("require('./scheduling/catalog-lock').lockCatalogIdentity(client)");
+    expect(lockIdx).toBeGreaterThan(body.lastIndexOf('await lockTechDays(client'));
+    expect(lockIdx).toBeGreaterThan(-1);
+    expect(body.slice(lockIdx)).not.toContain('.forUpdate()');
+    expect(body).toContain("capacityEnabled() || preRow.reservation_policy_version === 2");
+  });
+
+  test('convertEstimate takes it right after loading the estimate, before any row lock', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    const start = src.indexOf('async convertEstimate(estimateId');
+    const lockIdx = src.indexOf("require('./scheduling/catalog-lock').lockCatalogIdentity(database)", start);
+    expect(lockIdx).toBeGreaterThan(-1);
+    const before = src.slice(start, lockIdx);
+    expect(before).toContain("const estimate = await database('estimates').where({ id: estimateId }).first();");
+    expect(before).not.toContain('.forUpdate()');
+    expect(before).not.toContain('database.transaction(');
+    expect(src.slice(lockIdx - 400, lockIdx)).toContain("reservation_policy_version: 2 }).first('id')");
   });
 });
 
