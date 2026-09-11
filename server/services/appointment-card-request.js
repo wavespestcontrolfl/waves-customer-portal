@@ -45,6 +45,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { etDateString } = require('../utils/datetime-et');
 const { callBookingDateOnly } = require('./call-booking-catalog');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { isAmbiguousProviderOutcome } = require('./sms-auto-send');
 
 const TEMPLATE_KEY = 'secure_appointment_card';
 // Plan-choice copy variant (owner-approved 2026-07-24): used only when the
@@ -1080,32 +1081,37 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         },
       });
     } catch (sendErr) {
-      // UNCERTAIN outcome (Codex #2771 r4): sendCustomerMessage dispatches
-      // to the provider BEFORE persisting its audit row, so a throw here
-      // can follow a Twilio-ACCEPTED send. Two bearer card links is the
-      // worse failure mode — keep the claim consumed and stamp the
-      // maybe-sent marker so the stale-claim lease never re-texts.
-      logger.error(`[appt-card-request] send outcome UNCERTAIN for visit ${visit.id} — keeping the one-text claim: ${sendErr.message}`);
+      const providerOutcome = sendErr?.providerOutcome;
+      if (providerOutcome?.deliveryOutcome === 'not_sent') {
+        await releaseClaim();
+        return skip(`send_blocked:${providerOutcome.code || providerOutcome.reason || 'unknown'}`);
+      }
+      if (providerOutcome?.deliveryOutcome === 'accepted') {
+        result = providerOutcome;
+      } else {
+        // UNCERTAIN outcome (Codex #2771 r4): sendCustomerMessage dispatches
+        // to the provider BEFORE persisting its audit row, so a throw here
+        // can follow a Twilio-ACCEPTED send. Two bearer card links is the
+        // worse failure mode — keep the claim consumed and stamp the
+        // maybe-sent marker so the stale-claim lease never re-texts.
+        logger.error(`[appt-card-request] send outcome UNCERTAIN for visit ${visit.id} — keeping the one-text claim: ${sendErr.message}`);
+        await markSendOutcome();
+        return skip('send_outcome_uncertain');
+      }
+    }
+    if (isAmbiguousProviderOutcome(result)) {
+      logger.error(`[appt-card-request] send outcome ambiguous for visit ${visit.id} — keeping the one-text claim (${result?.code || 'no_code'})`);
       await markSendOutcome();
       return skip('send_outcome_uncertain');
     }
-    if (!result?.sent) {
+    const accepted = result?.deliveryOutcome
+      ? result.deliveryOutcome === 'accepted'
+      : result?.sent === true;
+    if (!accepted) {
       // blocked:true is a VALIDATOR stop — the pipeline never reached the
       // provider, so the outcome is definitive even when the result also
       // advertises deferral timing (the send-window block returns
       // retryable/deferred/nextAllowedAt for callers that self-reschedule).
-      // Only a provider-phase retryable result is genuinely ambiguous.
-      if ((result?.retryable || result?.deferred) && !result?.blocked) {
-        // AMBIGUOUS provider outcome (Codex #2771 r7): the Twilio adapter
-        // classifies timeouts/5xx/429 as retryable non-sent results — the
-        // provider may already have accepted the message. Same rule as the
-        // thrown-uncertain path: keep the claim consumed and stamp the
-        // maybe-sent marker. A definitively-lost send surfaces through the
-        // office/abandonment lanes, never as a second bearer link.
-        logger.error(`[appt-card-request] send outcome RETRYABLE-ambiguous for visit ${visit.id} — keeping the one-text claim (${result?.code || 'no_code'})`);
-        await markSendOutcome();
-        return skip('send_outcome_uncertain');
-      }
       // Send-window hold: the one-shot automation triggers
       // (ai_call_pipeline, outbound_review_confirm, booking) never retry,
       // and the previsit backstop is independent — a released claim here
