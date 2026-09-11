@@ -465,3 +465,32 @@ test('an unknown loud reaction rings exactly one alert — not also the legacy o
     else process.env.ADAM_PHONE = originalAdamPhone;
   }
 });
+
+test('a deliberately suppressed alert releases the claim, stamps a terminal marker (not sms_reply_alerted), and still skips the legacy owner forward (codex #4210 round-17 P1)', async () => {
+  mockState.ai = false;
+  const originalAdamPhone = process.env.ADAM_PHONE;
+  process.env.ADAM_PHONE = '+19415993489';
+  // triggerNotification's own suppressed/policySilenced outcome — a
+  // recipient preference or the admin bell policy intentionally disabled
+  // delivery, not a failure. Must not be confused with "nothing tried yet"
+  // (which the recovery sweep would retry forever) or with a genuine
+  // delivery (sms_reply_alerted).
+  triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 }, suppressed: true });
+  try {
+    await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    // Released, not confirmed — a later genuinely new message still gets
+    // its own fresh attempt.
+    expect(mockState.claims.has(sender)).toBe(false);
+    const metadata = await storedMetadata();
+    expect(metadata.sms_reply_suppressed).toBe(true);
+    expect(metadata.sms_reply_alerted).toBeUndefined();
+    // The suppression is deliberate — falling back to the legacy owner
+    // forward would undo exactly what triggerNotification was just asked
+    // to honor.
+    expect(require('../services/twilio').sendSMS).not.toHaveBeenCalled();
+  } finally {
+    if (originalAdamPhone === undefined) delete process.env.ADAM_PHONE;
+    else process.env.ADAM_PHONE = originalAdamPhone;
+  }
+});

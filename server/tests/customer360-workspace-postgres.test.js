@@ -963,6 +963,33 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('the sweep never retries a message that was deliberately, terminally suppressed rather than failed (codex #4210 round-17 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-suppressed-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // triggerNotification returned suppressed/policySilenced — a
+      // recipient preference or the admin bell policy intentionally
+      // disabled delivery. No claim exists (released, not confirmed — same
+      // as a genuine failure), but the message carries the TERMINAL
+      // sms_reply_suppressed marker, not sms_reply_alerted. Retrying this
+      // forever would fight a decision that was never accidental.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550209' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550209', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_suppressed: true }) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('the sweep never re-alerts an AI-answered message just because it is still unread (codex #4210 round-9 P1)', async () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();

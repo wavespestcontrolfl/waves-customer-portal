@@ -2131,9 +2131,21 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
     return true;
   }
   let delivered = false;
+  // Deliberate, terminal non-delivery (codex #4210 round-17 P1) — distinct
+  // from a transient failure: triggerNotification returns
+  // suppressed/policySilenced when a recipient preference or the admin
+  // bell policy INTENTIONALLY disabled delivery, not because anything went
+  // wrong. Treating that the same as a failure released the claim (correct
+  // — nothing to confirm) but left the message eligible with no terminal
+  // marker, so the recovery sweep retried it every tick forever and could
+  // eventually deliver a stale alert for an old message the moment
+  // preferences happened to change — working exactly as designed against
+  // a decision that was never accidental.
+  let suppressed = false;
   try {
     const stats = await ringSmsReplyBell({ customer: null, From, MessageSid, message });
     delivered = Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+    suppressed = Boolean(stats && (stats.suppressed || stats.policySilenced));
   } catch (e) {
     if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
     else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
@@ -2145,10 +2157,21 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   } else {
     // Nothing actually delivered — release so a later message in this
     // window gets another chance (mirrors the voicemail/dropped-call claim
-    // contract's release-on-non-delivery half).
+    // contract's release-on-non-delivery half). A later, genuinely new
+    // message still gets its own fresh attempt even after a suppression —
+    // only the recovery SWEEP is barred from retrying THIS one.
     await releaseUnknownSenderAlertClaim(From, token);
+    if (suppressed) {
+      await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_suppressed: true })]) })
+        .catch((err) => logger.warn('[twilio-webhook] sms_reply suppression stamp failed', { code: err.code || 'unknown' }));
+    }
   }
-  return delivered;
+  // A deliberate suppression counts as HANDLED for the caller (codex #4210
+  // round-17 P1) — the loud-reaction branch uses this to skip its legacy
+  // internal_alert owner forward, and falling back to that would undo the
+  // exact suppression triggerNotification was just asked to honor.
+  return delivered || suppressed;
 }
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {

@@ -128,6 +128,15 @@ async function findOrphanMessage(phone) {
     // candidate to SOME OTHER message's receipt; a message's own delivery
     // is never in question regardless of how long ago it happened.
     .whereRaw("COALESCE(l.metadata->>'sms_reply_alerted', 'false') != 'true'")
+    // Deliberately, terminally suppressed (codex #4210 round-17 P1) —
+    // triggerNotification's own suppressed/policySilenced outcome, not a
+    // failure — is never a recovery candidate either: retrying it forever
+    // fights a decision that was never accidental, and delivering it the
+    // moment preferences happen to change would ring a stale alert for
+    // what could be a long-since-irrelevant message. A later, genuinely
+    // new message from the same phone is unaffected — only ITS OWN
+    // eventual dispatch attempt decides whether IT gets suppressed too.
+    .whereRaw("COALESCE(l.metadata->>'sms_reply_suppressed', 'false') != 'true'")
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereNotNull('m.twilio_sid')
     .whereNotExists(function covered() {
