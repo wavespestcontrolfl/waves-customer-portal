@@ -310,6 +310,26 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
   });
 
+  test.each(['unsubscribed address', 'group unsubscribe', 'spam reporting address'])('a drop for an opted-out recipient (%s) settles the summary as suppressed, not as a bounce for review', async (reason) => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = false; });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    await mockPg.transaction(async (trx) => {
+      await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'dropped', reason, timestamp: Math.floor(Date.now() / 1000),
+        sg_event_id: randomUUID(), email: delivered.recipient_email_snapshot, asm_group_id: '1' }, delivered, trx);
+    });
+    expect(await mockPg('email_messages').where({ id: delivered.id }).first()).toMatchObject({ status: 'dropped', error_message: reason });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'sent' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+    // The same drop for an unreachable address is a bounce for review.
+    await mockPg('email_messages').where({ id: delivered.id }).update({ bounced_at: null });
+    await mockPg.transaction(async (trx) => {
+      await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'dropped', reason: 'Bounced Address', timestamp: Math.floor(Date.now() / 1000),
+        sg_event_id: randomUUID(), email: delivered.recipient_email_snapshot }, { ...delivered, bounced_at: null }, trx);
+    });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'unknown_delivery' });
+  });
+
   test('a billing-email save assigning the recovery destination waits for the held retry handoff', async () => {
     const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
     const destination = `${randomUUID()}@example.invalid`;

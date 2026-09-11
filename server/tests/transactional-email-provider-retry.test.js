@@ -15,6 +15,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 jest.mock('../services/visit-completion-summary', () => ({
   retrySummaryThroughHandoff: jest.fn(async (message, dispatch) => { await dispatch(); return { ok: true }; }),
   reconcileSummaryEmailRecovery: jest.fn(async () => ({ reconciled: true })),
+  reconcileSummaryEmailBounce: jest.fn(async () => ({ reconciled: true })),
 }));
 
 const retry = require('../services/transactional-email-provider-retry');
@@ -157,6 +158,9 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', provider_retry_next_at: null,
       error_message: expect.stringMatching(/^Provider outcome unknown/) }));
     expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
+    // The uncertain settlement reopens the summary for office review, like an exhausted retry.
+    expect(require('../services/visit-completion-summary').reconcileSummaryEmailBounce)
+      .toHaveBeenCalledWith(expect.objectContaining({ id: 'message-1', template_key: 'service.visit_summary' }));
   });
 
   test('a failure clearing the provider block before the visit summary request keeps the ordinary retry schedule', async () => {
@@ -309,12 +313,16 @@ describe('transactional email provider retry classification', () => {
     chain.whereNull = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    // The uncertain settlement returns its rows: one interrupted summary handoff.
+    chain.returning = jest.fn(async () => [{ id: 'stale-summary', status: 'failed', template_key: 'service.visit_summary' }]);
     db.mockReturnValue(chain);
     const now = new Date('2026-07-16T12:30:00Z');
 
     // Two recovery updates run (started handoffs settle as uncertain, the
-    // rest requeue); the fake resolves 1 for each.
+    // rest requeue); the fake yields one row for each.
     await expect(retry.recoverStaleClaims(now)).resolves.toBe(2);
+    expect(require('../services/visit-completion-summary').reconcileSummaryEmailBounce)
+      .toHaveBeenCalledWith(expect.objectContaining({ id: 'stale-summary' }));
 
     expect(chain.where).toHaveBeenCalledWith({ status: 'queued' });
     expect(chain.where).toHaveBeenCalledWith('provider_retry_count', '>', 0);

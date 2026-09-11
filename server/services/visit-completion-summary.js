@@ -365,10 +365,20 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
 
 // The template library saves each recipient before provider handoff. Only an
 // absent row or its explicit pre-dispatch abort proves another send is safe.
+// SendGrid drops a message for a recipient who opted out (a group or
+// address unsubscribe, a spam report) under one of these reasons. The
+// address is reachable; the customer declined. Such a leg settles as
+// suppressed, never as an unknown delivery for the office to chase.
+const SUMMARY_OPT_OUT_DROP_REASONS = ['group unsubscribe', 'unsubscribed address', 'spam reporting address'];
+function summaryEmailOptOutDrop(reason) {
+  return SUMMARY_OPT_OUT_DROP_REASONS.includes(String(reason || '').trim().toLowerCase());
+}
+
 function summaryEmailState(message) {
   if (!message) return 'retry';
   if (['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
   if (message.status === 'blocked') return 'suppressed';
+  if (message.status === 'dropped' && summaryEmailOptOutDrop(message.error_message)) return 'suppressed';
   if (message.status === 'failed' && !message.sent_at && !message.provider_message_id
     && message.error_message === require('./email-template-library').ABORTED_BEFORE_DISPATCH) return 'retry';
   return 'unknown_delivery';
@@ -687,4 +697,4 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
-  retrySummaryThroughHandoff };
+  retrySummaryThroughHandoff, summaryEmailOptOutDrop };

@@ -792,8 +792,12 @@ async function handleEmailMessageEvent(ev, message, client = db) {
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
   // A provider block is retryable and stays with the retry rail (which
   // reconciles the summary when its retries terminate); only a terminal
-  // bounce reopens the summary for office review here.
-  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerRetry.isProviderBlockedEvent(ev)) {
+  // bounce reopens the summary for office review here. A drop for a
+  // recipient who opted out is a suppression, not a bounce: the ledger
+  // below records it and the summary leg settles as suppressed.
+  const optOutDrop = ev.event === 'dropped'
+    && require('../services/visit-completion-summary').summaryEmailOptOutDrop(ev.reason || ev.response);
+  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerRetry.isProviderBlockedEvent(ev) && !optOutDrop) {
     await require('../services/visit-completion-summary').reconcileSummaryEmailBounce(message, client);
   }
   // A delivery event after a provider-retry resend is the durable retry for
