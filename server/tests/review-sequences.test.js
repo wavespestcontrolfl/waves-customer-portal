@@ -107,7 +107,7 @@ function makeMock(initial = {}, opts = {}) {
       whereNotIn(c, vs) { this.notIns.push([c, vs]); return this; },
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
-      leftJoin() { return this; }, select(...cols) { this.selected = cols; return this; },
+      leftJoin() { return this; }, joinRaw() { return this; }, select(...cols) { this.selected = cols; return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; }, groupBy() { return this; }, groupByRaw() { return this; },
       limit(n) { this.limitValue = n; return this; },
@@ -994,7 +994,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
         // The runner's own last-ask lookup: review_requests, delivered asks,
         // bounded by delivery time (the cap-stats read has no such bound).
-        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(sms_sent_at, sent_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
+        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(review_requests\.sms_sent_at, review_requests\.sent_at/.test(String(r))) && (q.selected || []).includes('review_requests.sequence_id'),
       });
       db.mockImplementation(mock);
 
