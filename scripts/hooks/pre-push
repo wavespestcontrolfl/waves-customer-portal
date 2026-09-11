@@ -821,7 +821,9 @@ run_claude_audit() {
             echo "Your previous reply was JSON but did not match the schema. Every"
             echo "finding needs priority (exactly \"P0\", \"P1\" or \"P2\" — no"
             echo "brackets, no lowercase), a non-empty file, title and description,"
-            echo "and line as a number or null. Re-issue the SAME review correctly."
+            echo "and a line key whose value is a whole number of at least 1, or"
+            echo "null when the finding has no single line. Re-issue the SAME"
+            echo "review correctly."
             ;;
           *)
             echo "Your previous reply to this exact review request did not follow the"
