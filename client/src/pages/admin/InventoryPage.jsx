@@ -5325,130 +5325,74 @@ function MarginsTab({ showToast }) {
       })
       .catch(() => setLoading(false));
   }, []);
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading service margins...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading service margins…</ActionFeedback>;
   return (
     <div>
       {" "}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 16,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
         COGS by Service Line
       </div>
       {services.length === 0 ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No service product mappings yet.
-        </div>
+        </Card>
       ) : (
         services.map((svc) => (
-          <div key={svc.serviceType} style={{ ...sCard }}>
+          <Card key={svc.serviceType} className="p-5 mb-3">
             {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-              }}
-            >
+            <div className="flex justify-between items-center mb-[12px]">
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {svc.serviceType}
               </div>{" "}
-              <div
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 16,
-                  fontWeight: 700,
-                  color: D.green,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900">
                 ${svc.totalCost.toFixed(2)}/app
               </div>{" "}
             </div>{" "}
             {/* overflow-x wrapper: phones scroll the wide table instead of
-                clipping it; index.css adds the scroll-shadow affordance. */}
-            <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {[
-                    "Product",
-                    "Usage",
-                    "Per 1000sf",
-                    "Best Price",
-                    "Cost/App",
-                    "Cost Source",
-                  ].map((h) => (
-                    <th key={h} style={thS}>
-                      {h}
-                    </th>
+             clipping it; index.css adds the scroll-shadow affordance. */}
+            <div className="overflow-x-auto">
+              <Table className="w-full">
+                <THead>
+                  <TR>
+                    {[
+                      "Product",
+                      "Usage",
+                      "Per 1000sf",
+                      "Best Price",
+                      "Cost/App",
+                      "Cost Source",
+                    ].map((h) => (
+                      <TH key={h}>{h}</TH>
+                    ))}
+                  </TR>
+                </THead>
+                <TBody>
+                  {svc.products.map((p) => (
+                    <TR key={p.id}>
+                      <TD className="font-medium">
+                        {p.productName}{" "}
+                        {p.isPrimary && <Badge tone="neutral">Primary</Badge>}
+                      </TD>
+                      <TD>
+                        {p.usageAmount} {p.usageUnit}
+                      </TD>
+                      <TD>{p.usagePer1000sf || "—"}</TD>
+                      <TD>
+                        {p.bestPrice
+                          ? `$${parseFloat(p.bestPrice).toFixed(2)}`
+                          : "—"}
+                      </TD>
+                      <TD className="text-zinc-900">
+                        {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
+                      </TD>
+                      <TD title={p.costWarning || ""}>{costSourceLabel(p)}</TD>
+                    </TR>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
-                {svc.products.map((p) => (
-                  <tr key={p.id}>
-                    <td style={{ ...tdS, fontWeight: 500 }}>
-                      {p.productName}{" "}
-                      {p.isPrimary && (
-                        <span style={sBadge(`${D.teal}22`, D.teal)}>
-                          Primary
-                        </span>
-                      )}
-                    </td>
-                    <td style={{ ...tdS, fontSize: 12 }}>
-                      {p.usageAmount} {p.usageUnit}
-                    </td>
-                    <td style={{ ...tdS, fontSize: 12 }}>
-                      {p.usagePer1000sf || "—"}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        fontFamily: "'JetBrains Mono', monospace",
-                      }}
-                    >
-                      {p.bestPrice
-                        ? `$${parseFloat(p.bestPrice).toFixed(2)}`
-                        : "—"}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        fontFamily: "'JetBrains Mono', monospace",
-                        color: D.green,
-                      }}
-                    >
-                      {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        fontSize: 11,
-                        color: p.costWarning ? D.amber : D.muted,
-                      }}
-                      title={p.costWarning || ""}
-                    >
-                      {costSourceLabel(p)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>{" "}
+                </TBody>
+              </Table>{" "}
             </div>
-          </div>
+          </Card>
         ))
       )}
     </div>
@@ -5478,7 +5422,9 @@ function ScrapeTab({ showToast }) {
     try {
       const r = await adminFetch(
         `/admin/inventory/scrape-jobs/${vendorId}/trigger`,
-        { method: "POST" },
+        {
+          method: "POST",
+        },
       );
       showToast(r.message || "Scrape triggered");
       load();
@@ -5486,177 +5432,93 @@ function ScrapeTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading scrape data...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading scrape data…</ActionFeedback>;
   return (
     <div>
       {" "}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 16,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
         Vendor Scrape Status
       </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
-          gap: 10,
-          marginBottom: 24,
-        }}
-      >
+      <div className="grid gap-[10px] mb-[24px]">
         {vendors.map((v) => {
-          const sc =
-            v.lastScrapeStatus === "completed"
-              ? D.green
-              : v.lastScrapeStatus === "running"
-                ? D.amber
-                : v.lastScrapeStatus === "failed"
-                  ? D.red
-                  : D.muted;
           return (
-            <div
-              key={v.id}
-              style={{ ...sCard, marginBottom: 0, textAlign: "center" }}
-            >
-              <div
-                style={{
-                  fontSize: 14,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 4,
-                }}
-              >
+            <Card key={v.id} className="p-5 mb-3 mb-[0px] text-center">
+              <div className="text-ui-body font-medium text-zinc-900 mb-[4px]">
                 {v.name}
               </div>
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 8 }}>
+              <div className="text-ui-body text-ink-secondary mb-[8px]">
                 {v.productCount} products
               </div>
-              <span style={sBadge(`${sc}22`, sc)}>
-                {v.lastScrapeStatus || "never"}
-              </span>
-              <button
+              <Badge tone="neutral">{v.lastScrapeStatus || "never"}</Badge>
+              <Button
                 onClick={() => triggerScrape(v.id)}
-                style={{
-                  ...sBtn(D.teal, D.white),
-                  marginTop: 8,
-                  width: "100%",
-                  fontSize: 11,
-                }}
+                variant="primary"
+                className="mt-[8px] w-full"
               >
                 Trigger Scrape
-              </button>
-            </div>
+              </Button>
+            </Card>
           );
         })}
         {!vendors.length && (
-          <div
-            style={{
-              color: D.muted,
-              gridColumn: "1 / -1",
-              textAlign: "center",
-              padding: 20,
-            }}
-          >
+          <div className="text-ink-secondary col-span-full text-center p-[20px]">
             No vendors with scraping enabled
           </div>
         )}
       </div>{" "}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 12,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
         Recent Scrape Jobs
       </div>
       {!jobs.length ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 30, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[30px] text-ink-secondary">
           No scrape jobs yet
-        </div>
+        </Card>
       ) : (
         // overflow-x wrapper: phones scroll the wide table instead of
         // clipping it; index.css adds the scroll-shadow affordance.
-        <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              {[
-                "Vendor",
-                "Status",
-                "Products",
-                "Updated",
-                "New",
-                "Errors",
-                "Duration",
-                "Date",
-              ].map((h) => (
-                <th key={h} style={thS}>
-                  {h}
-                </th>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                {[
+                  "Vendor",
+                  "Status",
+                  "Products",
+                  "Updated",
+                  "New",
+                  "Errors",
+                  "Duration",
+                  "Date",
+                ].map((h) => (
+                  <TH key={h}>{h}</TH>
+                ))}
+              </TR>
+            </THead>
+            <TBody>
+              {jobs.map((j) => (
+                <TR key={j.id}>
+                  <TD className="font-medium">{j.vendor_name}</TD>
+                  <TD>
+                    <Badge tone={j.status === "failed" ? "alert" : "neutral"}>
+                      {j.status}
+                    </Badge>
+                  </TD>
+                  <TD>{j.products_found}</TD>
+                  <TD>{j.prices_updated}</TD>
+                  <TD>{j.prices_new}</TD>
+                  <TD>{j.errors}</TD>
+                  <TD>
+                    {j.duration_ms
+                      ? `${(j.duration_ms / 1000).toFixed(1)}s`
+                      : "—"}
+                  </TD>
+                  <TD className="text-ink-secondary">
+                    {new Date(j.created_at).toLocaleString()}
+                  </TD>
+                </TR>
               ))}
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.map((j) => (
-              <tr key={j.id}>
-                <td style={{ ...tdS, fontWeight: 500 }}>
-                  {j.vendor_name}
-                </td>
-                <td style={tdS}>
-                  <span
-                    style={sBadge(
-                      j.status === "completed"
-                        ? `${D.green}22`
-                        : j.status === "failed"
-                          ? `${D.red}22`
-                          : `${D.amber}22`,
-                      j.status === "completed"
-                        ? D.green
-                        : j.status === "failed"
-                          ? D.red
-                          : D.amber,
-                    )}
-                  >
-                    {j.status}
-                  </span>
-                </td>
-                <td style={tdS}>{j.products_found}</td>
-                <td style={tdS}>{j.prices_updated}</td>
-                <td style={tdS}>{j.prices_new}</td>
-                <td style={{ ...tdS, color: j.errors > 0 ? D.red : D.muted }}>
-                  {j.errors}
-                </td>
-                <td
-                  style={{
-                    ...tdS,
-                    fontSize: 11,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  {j.duration_ms
-                    ? `${(j.duration_ms / 1000).toFixed(1)}s`
-                    : "—"}
-                </td>
-                <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
-                  {new Date(j.created_at).toLocaleString()}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+            </TBody>
+          </Table>
         </div>
       )}
     </div>
