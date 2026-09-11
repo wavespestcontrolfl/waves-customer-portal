@@ -39,6 +39,9 @@ afterEach(() => {
   window.location.hash = "";
 });
 
+// Follow-through has its own browser workflow; these tests isolate the legacy ledger.
+vi.mock("../../components/admin/AdminFollowThroughCards", () => ({ default: () => null }));
+
 describe("OwedTabV2", () => {
   it("paints only the latest response: a filter change while an earlier load is pending is not overwritten when the older reply lands", async () => {
     let releaseFirst;

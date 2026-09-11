@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Select, cn } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import AdminFollowThroughCards from "../../components/admin/AdminFollowThroughCards";
 
 const KIND_LABEL = {
   send_estimate: "Send estimate",
@@ -166,11 +167,14 @@ export default function OwedTabV2() {
     else window.location.hash = next;
   };
 
-  const rows = state.rows;
+  // While callback cards are on, the cards above own Waves' callbacks; the
+  // ledger list keeps every other promise.
+  const rows = state.rows.filter((r) => !state.callbacksEnabled || r.kind !== "callback" || r.party !== "waves");
   const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length;
 
   return (
     <div className="space-y-3">
+      <AdminFollowThroughCards />
       <div className="flex flex-wrap items-center gap-2">
         <Select aria-label="Whose promises" value={party} onChange={(e) => setParty(e.target.value)} className="h-11 md:h-9">
           <option value="waves">Waves promised</option>
