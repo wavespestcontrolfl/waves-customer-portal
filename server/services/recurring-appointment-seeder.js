@@ -1169,7 +1169,7 @@ async function applySeededPrepayCoverage(conn, parent, columns) {
     // visit.
     const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, null).where('t.id', termId).first('t.*');
     if (!term) return;
-    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietExceptions: true });
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietTransientExceptions: true });
   };
   try {
   // Inside a caller transaction the work must run on that trx (the row we

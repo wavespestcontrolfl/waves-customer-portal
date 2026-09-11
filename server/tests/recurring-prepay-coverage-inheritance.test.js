@@ -79,7 +79,7 @@ afterEach(() => {
   coveredSpy = null;
 });
 
-function connWithTerm(term, { isTransaction = false } = {}) {
+function connWithTerm(term, { isTransaction = false, siblingRow = undefined } = {}) {
   coveredSpy = jest.spyOn(AnnualPrepayRenewals, 'coveredTermsAsOf').mockImplementation(() => {
     const b = {};
     b.where = () => b;
@@ -88,8 +88,10 @@ function connWithTerm(term, { isTransaction = false } = {}) {
   });
   const conn = (table) => {
     const b = {};
-    b.where = () => b;
-    b.first = () => Promise.resolve(table === 'annual_prepay_terms' ? term : undefined);
+    for (const m of ['where', 'whereNotNull', 'whereNotIn', 'orderBy']) b[m] = () => b;
+    b.first = () => Promise.resolve(
+      table === 'scheduled_services' ? siblingRow : (table === 'annual_prepay_terms' ? term : undefined),
+    );
     return b;
   };
   conn.isTransaction = isTransaction;
@@ -127,8 +129,8 @@ describe.each([
     expect(term.id).toBe(TERM_ID);
     // Same connection ⇒ the stamp commits or rolls back with the insert.
     expect(passedConn).toBe(conn);
-    // One bell per generated visit would bury the daily sweep's real ones.
-    expect(options).toEqual({ quietExceptions: true });
+    // Only the self-healing completion-race bell is silenced.
+    expect(options).toEqual({ quietTransientExceptions: true });
   });
 
   test('a parent on no term never calls the authority', async () => {
@@ -186,6 +188,50 @@ describe.each([
   });
 });
 
+describe('the auto-extend finds the term wherever the series carries it', () => {
+  // Annual prepay activated partway through an ongoing series links only
+  // visits inside the term window, so a root parent predating term_start is
+  // never linked. Reading the term from the root alone left the extension
+  // unstamped — the very bug this PR fixes.
+  let applySpy;
+  beforeEach(() => {
+    applySpy = jest.spyOn(AnnualPrepayRenewals, 'applyPrepaidCoverageForTerm').mockResolvedValue({});
+  });
+  afterEach(() => applySpy.mockRestore());
+
+  test('the just-completed visit carries it, the unlinked root does not', async () => {
+    await applyExtensionPrepayCoverage(
+      connWithTerm(LIVE_TERM), { id: 'root', annual_prepay_term_id: null },
+      { id: 'svc', annual_prepay_term_id: TERM_ID },
+    );
+    expect(applySpy).toHaveBeenCalledTimes(1);
+    expect(applySpy.mock.calls[0][0].id).toBe(TERM_ID);
+  });
+
+  test('neither root nor svc carries it — a linked sibling does', async () => {
+    const conn = connWithTerm(LIVE_TERM, { siblingRow: { annual_prepay_term_id: TERM_ID } });
+    await applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' });
+    expect(applySpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('nothing in the series is linked — nothing is stamped', async () => {
+    await applyExtensionPrepayCoverage(connWithTerm(LIVE_TERM), { id: 'root' }, { id: 'svc' });
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  test('a failed sibling lookup degrades to unstamped, never throws', async () => {
+    const conn = (table) => {
+      if (table === 'scheduled_services') throw new Error('column does not exist');
+      const b = {};
+      b.where = () => b;
+      b.first = () => Promise.resolve(LIVE_TERM);
+      return b;
+    };
+    await expect(applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' })).resolves.toBeUndefined();
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+});
+
 test('the seeder skips the re-apply when the link column does not exist', async () => {
   const applySpy = jest.spyOn(AnnualPrepayRenewals, 'applyPrepaidCoverageForTerm').mockResolvedValue({});
   await seeder._internals.applySeededPrepayCoverage(
@@ -195,8 +241,8 @@ test('the seeder skips the re-apply when the link column does not exist', async 
   applySpy.mockRestore();
 });
 
-describe('quietExceptions suppresses the bells and nothing else', () => {
-  test('only exception filing reads the flag; stamping and the warn log do not', () => {
+describe('quietTransientExceptions silences ONE bell, never the durable one', () => {
+  test('the flag gates stamp_raced_completion only; stamp_raced_cancel always fires', () => {
     const src = require('fs').readFileSync(
       require('path').join(__dirname, '..', 'services', 'annual-prepay-renewals.js'), 'utf8',
     );
@@ -205,12 +251,23 @@ describe('quietExceptions suppresses the bells and nothing else', () => {
       src.indexOf('async function reconcilePendingWindowCompletions'),
     );
     expect(fn).toBeTruthy();
-    const uses = fn.split('\n').filter((l) => l.includes('quietExceptions'));
-    expect(uses.length).toBeGreaterThanOrEqual(3); // signature + both bells
-    for (const line of uses) {
-      expect(line).toMatch(/fileCoverageExceptionAfterCommit|async function applyPrepaidCoverageForTerm/);
-    }
-    // The warn-level record of a race is NOT suppressed.
+    const lines = fn.split('\n');
+    const flagged = lines.filter((l) => l.includes('quietTransientExceptions') && !l.trim().startsWith('//'));
+    // Exactly the signature and the ONE guarded bell read the flag.
+    expect(flagged).toHaveLength(2);
+    expect(flagged.some((l) => l.includes('async function applyPrepaidCoverageForTerm'))).toBe(true);
+    expect(flagged.some((l) => l.includes("'stamp_raced_completion'"))).toBe(true);
+
+    // stamp_raced_cancel reports a PAID slot cancelled out from under the
+    // stamp. Nothing re-seeds it and reconcileCoveredTermsSweep only handles
+    // COMPLETED visits, so silencing it would leave the customer's paid
+    // schedule short and invisible. It must be filed unconditionally.
+    const cancelLine = lines.find((l) => l.includes("'stamp_raced_cancel'"));
+    expect(cancelLine).toBeTruthy();
+    expect(cancelLine).not.toMatch(/quietTransientExceptions/);
+    expect(cancelLine.trim()).toMatch(/^await fileCoverageExceptionAfterCommit\(/);
+
+    // The warn-level record of either race is never suppressed.
     expect(fn).toMatch(/completed while the prepaid stamp ran/);
     expect(fn).toMatch(/were cancelled while the prepaid stamp ran/);
   });

@@ -2478,8 +2478,37 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
 // Failing soft leaves the visit uncovered, which is a billing question
 // someone can correct; blocking the extension is a service failure the
 // customer feels.
-async function applyExtensionPrepayCoverage(conn, parent) {
-  const termId = parent?.annual_prepay_term_id;
+// The newest annual-prepay term id carried by any live visit in this series.
+// Used when the series root predates the term and so was never linked.
+async function linkedSeriesTermId(conn, parentId) {
+  if (!parentId) return null;
+  try {
+    const row = await conn('scheduled_services')
+      .where(function inSeries() {
+        this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+      })
+      .whereNotNull('annual_prepay_term_id')
+      .whereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'])
+      .orderBy('scheduled_date', 'desc')
+      .first('annual_prepay_term_id');
+    return row?.annual_prepay_term_id || null;
+  } catch (e) {
+    logger.warn(`[recurring] series term lookup failed for parent=${parentId}: ${e.message}`);
+    return null;
+  }
+}
+
+async function applyExtensionPrepayCoverage(conn, parent, svc = null) {
+  // The term link can live on ANY visit in the series, not the root.
+  // Annual prepay activated partway through an ongoing series links only
+  // visits inside the term window (coverageRowsForTerm /
+  // attachScheduledServices), so a root parent that predates term_start is
+  // never linked — reading the term from it alone would bail out and leave
+  // the extension unstamped, which is the exact bug this fixes. Prefer the
+  // visit that just completed, then the parent, then any linked sibling.
+  const termId = svc?.annual_prepay_term_id
+    || parent?.annual_prepay_term_id
+    || await linkedSeriesTermId(conn, parent?.id);
   if (!termId) return;
   const run = async (c) => {
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
@@ -2494,7 +2523,7 @@ async function applyExtensionPrepayCoverage(conn, parent) {
     // visit.
     const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, null).where('t.id', termId).first('t.*');
     if (!term) return;
-    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietExceptions: true });
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietTransientExceptions: true });
   };
   try {
   // Inside a caller transaction the work must run on that trx (the row we
@@ -12674,9 +12703,10 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           // only disagree with it.
           //
           // Runs on `conn`, so it commits or rolls back with the extension.
-          // Bells are quiet: this fires per generated visit, and the daily
-          // sweep files the durable exceptions.
-          await applyExtensionPrepayCoverage(conn, parent);
+          // The transient completion-race bell is quiet (this fires per
+          // generated visit and reconciliation settles that case); the
+          // cancelled-paid-slot bell still rings — nothing re-seeds it.
+          await applyExtensionPrepayCoverage(conn, parent, svc);
           // Post-insert re-check closes the remaining race: a
           // cancellation can stop the series between the pre-insert
           // read above and this insert. The row hasn't been mirrored,
@@ -18094,6 +18124,7 @@ router._test = {
   runRecurringAlertAction,
   resolveSeriesCreateInvoiceOnComplete,
   applyExtensionPrepayCoverage,
+  linkedSeriesTermId,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,
