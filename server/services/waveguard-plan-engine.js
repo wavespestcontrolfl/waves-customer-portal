@@ -1284,10 +1284,29 @@ function summarizeTurfProfileCompleteness(profile) {
   };
 }
 
+// customers.billing_mode arrived with migration 20260709000010; a database
+// predating it must still plan (and complete) a visit, so the column is
+// selected only when it exists (Codex #4365 r3 P2). Callers that already
+// probed (completeScheduledService) pass their result so the plan and the
+// closeout agree on the lane; otherwise probe here. A probe that cannot run
+// or fails reads as absent: the lane is then null (tier rule), never a
+// planner failure.
+async function customerBillingModeColumnExists(knex) {
+  if (typeof knex?.schema?.hasColumn !== 'function') return false;
+  try {
+    return (await knex.schema.hasColumn('customers', 'billing_mode')) === true;
+  } catch {
+    return false;
+  }
+}
+
 async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
   const completionDefaultsEnabled = options.completionDefaultsEnabled ?? lawnCompletionDefaultsEnabled();
+  const billingModeColumnExists = typeof options.billingModeColumnExists === 'boolean'
+    ? options.billingModeColumnExists
+    : await customerBillingModeColumnExists(knex);
 
   const service = await knex('scheduled_services as ss')
     .leftJoin('customers as c', 'ss.customer_id', 'c.id')
@@ -1296,7 +1315,8 @@ async function buildPlanForService(serviceId, options = {}) {
     .select(
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
-      'c.waveguard_tier', 'c.lawn_type', 'c.billing_mode',
+      'c.waveguard_tier', 'c.lawn_type',
+      ...(billingModeColumnExists ? ['c.billing_mode'] : []),
       't.name as technician_name',
     )
     .first();

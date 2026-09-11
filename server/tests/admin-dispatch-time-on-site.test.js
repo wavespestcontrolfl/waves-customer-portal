@@ -1103,6 +1103,11 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(source.match(/scheduledServiceUpdate\.lawn_protocol_assignment_source = /g)).toHaveLength(1);
   });
 
+  test('the closeout passes its billing_mode column probe to the planner so a pre-migration schema still plans (codex #4365 r3 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: billingModeColumnsExist,[^}]*\}\)/);
+  });
+
   test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // The IDs copied from the appointment assignment are tracked...

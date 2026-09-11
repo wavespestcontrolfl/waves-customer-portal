@@ -1012,6 +1012,49 @@ describe('missing grass protocol fallback', () => {
   });
 });
 
+describe('buildPlanForService selects customers.billing_mode only when the column exists (codex #4365 r3 P2)', () => {
+  const { buildPlanForService } = require('../services/waveguard-plan-engine');
+  const mockDb = (hasColumn) => {
+    const selects = [];
+    const knex = (table) => {
+      const query = {};
+      for (const method of ['leftJoin', 'where']) query[method] = () => query;
+      query.select = (...columns) => { if (table === 'scheduled_services as ss') selects.push(columns); return query; };
+      query.first = () => Promise.reject(new Error('stop after the visit select'));
+      return query;
+    };
+    if (hasColumn) knex.schema = { hasTable: async () => false, hasColumn: hasColumn };
+    return { knex, selects };
+  };
+  const columns = (selects) => selects[0].flat();
+
+  test('a legacy schema (probe false) omits the column instead of failing the planner', async () => {
+    const { knex, selects } = mockDb(async () => false);
+    await expect(buildPlanForService('svc1', { db: knex })).rejects.toThrow('stop after the visit select');
+    expect(columns(selects)).not.toContain('c.billing_mode');
+  });
+
+  test('a current schema (probe true) selects the lane column', async () => {
+    const { knex, selects } = mockDb(async () => true);
+    await expect(buildPlanForService('svc1', { db: knex })).rejects.toThrow('stop after the visit select');
+    expect(columns(selects)).toContain('c.billing_mode');
+  });
+
+  test.each([['no schema API', null], ['a failing probe', async () => { throw new Error('probe down'); }]])('%s reads as absent, never as a planner failure', async (_label, hasColumn) => {
+    const { knex, selects } = mockDb(hasColumn);
+    await expect(buildPlanForService('svc1', { db: knex })).rejects.toThrow('stop after the visit select');
+    expect(columns(selects)).not.toContain('c.billing_mode');
+  });
+
+  test('a caller that already probed (the closeout) passes its result and the planner does not probe again', async () => {
+    const probe = jest.fn(async () => false);
+    const { knex, selects } = mockDb(probe);
+    await expect(buildPlanForService('svc1', { db: knex, billingModeColumnExists: true })).rejects.toThrow('stop after the visit select');
+    expect(probe).not.toHaveBeenCalled();
+    expect(columns(selects)).toContain('c.billing_mode');
+  });
+});
+
 test('a failed profile lookup cannot become a St. Augustine plan', async () => {
   const db = (table) => {
     const query = {};

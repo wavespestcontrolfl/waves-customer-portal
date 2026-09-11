@@ -4200,6 +4200,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           equipmentSystemId: waveguardEquipmentSystemId || null,
           calibrationId: waveguardCalibrationId || null,
           lawnSqft: lawnCompletionArea,
+          // The closeout's own column probe: the planner must not select
+          // customers.billing_mode on a pre-migration schema (Codex #4365 r3
+          // P2), and the lane recheck under the customer lock compares the
+          // same column under the same probe.
+          billingModeColumnExists: billingModeColumnsExist,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
