@@ -362,6 +362,23 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       || check(['cartridge_replacement_rate', 'cartridgeReplacementRate'], (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) <= 1, 'a fraction between 0 and 1')
       || check(['link_station_costs_to_catalog', 'linkStationCostsToCatalog'], (v) => typeof v === 'boolean', 'a boolean');
     if (failed) return failed;
+  } else if (configKey === 'termite_annual_plan') {
+    // Ruling A-1 (owner 2026-09-11): P1 — setup per station + bracketed
+    // annual fee. Whole dollars (doorstep figures), bounded against typos.
+    const wholeDollar = (v) => Number.isFinite(num(v)) && Math.abs(num(v) - Math.round(num(v))) < 1e-9;
+    const checkPlan = (keys, predicate, label) => {
+      for (const key of keys) {
+        if (data?.[key] == null) continue;
+        if (!predicate(data[key])) return fail(`termite_annual_plan.${key} must be ${label}`);
+      }
+      return null;
+    };
+    const failedPlan = checkPlan(['setup_per_station', 'setupPerStation'], (v) => isPositive(v) && wholeDollar(v) && num(v) <= 200, 'a positive whole-dollar $/station setup no greater than 200')
+      || checkPlan(['annual_base', 'annualBase'], (v) => isPositive(v) && wholeDollar(v) && num(v) <= 2000, 'a positive whole-dollar annual fee no greater than 2000')
+      || checkPlan(['annual_step', 'annualStep'], (v) => isNonNegative(v) && wholeDollar(v) && num(v) <= 500, 'a non-negative whole-dollar bracket step no greater than 500')
+      || checkPlan(['bracket_stations', 'bracketStations'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 50, 'a whole number of stations between 1 and 50')
+      || checkPlan(['bracket_floor', 'bracketFloor'], (v) => Number.isInteger(num(v)) && num(v) >= 0 && num(v) <= 100, 'a whole number of stations between 0 and 100');
+    if (failedPlan) return failedPlan;
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
     // positive dollars — the db-bridge sync coerces and overwrites runtime
@@ -649,6 +666,7 @@ async function ensureTable() {
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 24.00, labor_per_station: 5.25, misc_per_station: 0.75, link_station_costs_to_catalog: true, cartridge_cost: 6.83, cartridges_per_station: 2, cartridge_replacement_rate: 0.33, follow_up_visit_reserve: 0.25 }) },
       { config_key: 'termite_monitoring', name: 'Termite Station-Check Brackets', category: 'termite', sort_order: 2, data: JSON.stringify({ pricing_model: 'station_brackets', base_monthly: 19, step_monthly: 5, bracket_stations: 5 }) },
+      { config_key: 'termite_annual_plan', name: 'Termite Annual Protection Plan (P1)', category: 'termite', sort_order: 3, data: JSON.stringify({ setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10 }) },
 
       // Rodent — bait stations (recurring monthly)
       { config_key: 'rodent_bait_brackets', name: 'Rodent Bait Footprint Brackets (per quarterly visit)', category: 'rodent', sort_order: 1, data: JSON.stringify({ brackets: [ { max_sq_ft: 1750, stations: 4, per_visit: 79 }, { max_sq_ft: 2750, stations: 5, per_visit: 89 }, { max_sq_ft: 3750, stations: 6, per_visit: 99 }, { max_sq_ft: 4750, stations: 7, per_visit: 109 }, { max_sq_ft: 5750, stations: 8, per_visit: 119 }, { max_sq_ft: 6750, stations: 9, per_visit: 129 } ], extension: { per_sq_ft: 1000, stations_per_step: 1, per_visit_per_step: 10 }, visits_per_year: 4, note: 'Owner directive 2026-08-29: billed per application; ladder extends above 6,750 sf; same brackets for commercial' }) },
@@ -1215,6 +1233,7 @@ router.post('/margin-check', async (req, res) => {
 // they picked (codex P1 on the station-rental PR).
 const CONFIG_KEY_FEATURE_GATES = {
   termite_rental: 'GATE_TERMITE_STATION_RENTAL',
+  termite_annual_plan: 'GATE_TERMITE_ANNUAL_PLAN',
 };
 
 // Gated SUB-features that live inside a broader config row (the row itself

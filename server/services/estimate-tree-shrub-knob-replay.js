@@ -222,6 +222,9 @@ function termiteKnobSignalForReplay(estData = {}) {
   const stampedCost = stamp ? Number(stamp.stationCost) : NaN;
   if (Number.isFinite(stampedCost) && stampedCost > 0) {
     const knob = (key) => (Number.isFinite(Number(stamp[key])) ? Number(stamp[key]) : PRE_STAMP_TERMITE_INSTALL_KNOBS[key]);
+    const planKnobs = stamp.plan === 'annual_protection'
+      ? { plan: 'annual_protection', setupPerStation: knob('setupPerStation'), annualBase: knob('annualBase'), annualStep: knob('annualStep'), bracketStations: knob('bracketStations'), bracketFloor: knob('bracketFloor') }
+      : {};
     return {
       system: String(stamp.system || stored.system).toLowerCase(),
       stationCost: stampedCost,
@@ -229,6 +232,8 @@ function termiteKnobSignalForReplay(estData = {}) {
       misc: knob('misc'),
       installMultiplier: knob('installMultiplier'),
       minStations: knob('minStations'),
+      // The annual plan's own constants replay from day one (plan §A2).
+      ...planKnobs,
     };
   }
   const basis = unstampedTermiteInstallBasis(stored.system, stored.stations, stored.install, stored.materialCost, stored.modifiers);

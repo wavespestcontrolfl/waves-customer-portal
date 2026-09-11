@@ -1059,12 +1059,19 @@ function generateEstimate(input) {
       // ignored and the program prices as outright purchase, exactly as it
       // did before this lane. Kill = unset the var.
       const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
-      const wantsRental = rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
+      // Annual protection plan (ruling A-1 = P1) is dark-shipped the same
+      // way: with GATE_TERMITE_ANNUAL_PLAN off a plan request is ignored and
+      // the program prices as today's quarterly program. Kill = unset the
+      // var. On the plan, rental and the bond rider are retired (plan §A2).
+      const planGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
+      const wantsAnnualPlan = planGateOn && String(termiteOptions.plan || '').toLowerCase() === 'annual_protection';
+      const wantsRental = !wantsAnnualPlan && rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
         system: termiteOptions.system || 'trelona',
         monitoringTier: termiteOptions.monitoringTier || 'basic',
         ownership: wantsRental ? 'rent' : 'own',
+        plan: wantsAnnualPlan ? 'annual_protection' : null,
         modifiers,
         // Quote-time station-cost snapshot replayed from a stored estimate
         // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, set
@@ -1135,7 +1142,7 @@ function generateEstimate(input) {
         // client-side, so picking a term while dark trips the pricing-drift
         // flag on that draft (visible only to staff; harmless nudge that the
         // gate is off).
-        const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
+        const bondGateOn = !wantsAnnualPlan && ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
         if (bondGateOn) {
           const bondTerm = termiteOptions.bondTerm;
           if (bondTerm) {

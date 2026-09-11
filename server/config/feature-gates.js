@@ -24,6 +24,7 @@
  *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
+ *   GATE_TERMITE_ANNUAL_PLAN=true (estimator emits the Subterranean Termite Protection plan — station setup fee + prepaid annual fee, 1 inspection/yr — when an estimate requests plan 'annual_protection'; dark = today's quarterly program; flip only after the agreement v3 sign-off, ruling A-11)
  *   GATE_ONE_TIME_WELCOME_EMAIL=true (welcome email for eligible first one-time bookings; enqueue + delivery opt-in, SMS unchanged)
  *     RETIRED BY OWNER DECISION 2026-09-09: one-time customers do not get a welcome email — the booking confirmation
  *     plus the en-route app-intro email (GATE_APP_INTRO_EMAIL) is the whole one-time onboarding. Unset in prod the

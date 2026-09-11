@@ -1106,6 +1106,28 @@ const TERMITE = {
     recoveryQuarters: 20,
     label: 'Station Rental',
   },
+  // Waves Subterranean Termite Protection — the annual plan (plan
+  // docs/estimator-pricing-plan-2026-09-03.md §A2/§A3; RULING A-1 = shape P1,
+  // owner 2026-09-11). Company-owned Trelona stations; a one-time STATION
+  // SETUP fee (stations × setupPerStation, never tier-discounted, the ~−10 %
+  // setup margin is accepted) plus an ANNUAL PROTECTION fee prepaid for a
+  // 12-month coverage period, one scheduled whole-structure inspection with
+  // every station serviced, tier-discounted like monitoring:
+  //   annual = annualBase + annualStep × max(0, ceil((stations − bracketFloor) / bracketStations))
+  //   ≤10 → $249 · 11-15 → $299 · 16-20 → $349 · …
+  // Emitted ONLY behind GATE_TERMITE_ANNUAL_PLAN (estimate-engine); the
+  // quarterly / rental / bond shapes stay for gate-off and legacy rows.
+  // DB-tunable via pricing_config.termite_annual_plan (db-bridge).
+  annualPlan: {
+    setupPerStation: r(30),
+    annualBase: r(249),
+    annualStep: r(50),
+    bracketStations: 5,
+    bracketFloor: 10,
+    visitsPerYear: 1,
+    coverageMonths: 12,
+    label: 'Subterranean Termite Protection',
+  },
 };
 
 // ============================================================
