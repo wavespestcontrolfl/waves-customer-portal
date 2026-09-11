@@ -323,7 +323,7 @@ async function main() {
     report.passed = true;
   } finally {
     await browser.close();
-    if (server.owned) await server.stop();
+    await server.close();
     fs.writeFileSync(
       path.join(output, "report.json"),
       `${JSON.stringify(report, null, 2)}\n`,
