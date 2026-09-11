@@ -234,19 +234,6 @@ describe('sendViaSMS: every pre-delivery exit restores the consumed queue row (t
   const ORIGINAL_SCHEDULED_FOR = new Date('2026-09-11T09:00:00.000Z');
   const CONSUMED_ROW = { id: 'sms-queued-1', scheduled_for: ORIGINAL_SCHEDULED_FOR };
 
-  // Common prefix every case shares: claim taken, one pre-existing queued
-  // row adopted (consumed) by this claim, nothing else live.
-  function baseMocks() {
-    return [
-      chain({ first: draftInvoice }), // claim read
-      chain({ first: undefined }), // pre-claim queued check (none)
-      chain({ returning: [{ ...draftInvoice, status: 'sending' }] }), // claim flip
-      chain({ first: undefined }), // reconcile: queued-under-claim check (none)
-      chain({ returning: [CONSUMED_ROW] }), // adoption consumes the pre-existing row
-      chain({ first: undefined }), // strict re-check after the consume (none live)
-    ];
-  }
-
   const CASES = [
     {
       name: 'payer_billed: invoice carries a payer_id — SMS suppressed, no credit reversal',
