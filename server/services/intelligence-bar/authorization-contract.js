@@ -117,6 +117,7 @@ const ACTION_LABELS = {
   update_customer: 'Update customer record',
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
+  merge_customers: 'Merge duplicate customer',
   add_customer_property: 'Add saved property',
   update_customer_property: 'Update saved property',
   set_primary_property: 'Change primary property',
@@ -149,6 +150,17 @@ const ACTION_LABELS = {
   run_seo_pipeline: 'Run the SEO pipeline',
   approve_seo_action: 'Approve an SEO action',
 };
+
+// A preview whose combined-payment disclosure cancels a PaymentIntent in
+// Stripe: the DB merge may still be undoable, but that cancellation is
+// permanent, so the card must carry the prominent "Cannot be undone"
+// warning.
+function cancelsStripeCheckoutSession(preview) {
+  const sessions = preview?.financial_effects?.combined_payment_sessions;
+  if (!sessions) return false;
+  return [...(sessions.winner || []), ...(sessions.loser || [])]
+    .some((s) => s && (s.outcome === 'cancel' || s.outcome === 'cancel_single_invoice'));
+}
 
 function tierFor(toolName) {
   if (CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES.has(toolName)) return 'red';
@@ -712,7 +724,15 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // an outbound message (customer texts on a notifying move, the tax
     // advisor's admin SMS) or spends externally (price research) cannot be
     // undone from the portal.
-    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup',
+    // Input-dependent irreversibility rides on the preview: a merge whose
+    // fold the duplicates-queue undo refuses says revertible_from_queue:false,
+    // and a merge that CANCELS a customer's Stripe checkout session is
+    // irreversible whatever the database undo can do — the canceled
+    // PaymentIntent cannot be restored, and the customer's payment link is
+    // dead (codex #4348 r7 P2).
+    irreversible: IRREVERSIBLE_TOOL_NAMES.has(toolName) || notifiesCustomer || toolName === 'run_tax_advisor' || toolName === 'run_price_lookup'
+      || preview?.financial_effects?.revertible_from_queue === false
+      || cancelsStripeCheckoutSession(preview),
     notifies_customer: notifiesCustomer,
     summary: summary || null,
     ...(moreEffects.length ? { more_effects: moreEffects } : {}),

@@ -118,17 +118,26 @@ export const SP = {
 
 // ---------- layout ----------
 
+// One page-column primitive (audit G-01, DECISIONS 2026-09-11 "R2a: one
+// customer page column"): a single 16px phone gutter at every viewport, 28px
+// top clearance, 56px bottom clearance, and two named max-widths. Prefer
+// <CustomerColumn> (client/src/components/brand/CustomerColumn.jsx), which
+// consumes these tokens — do not author a column wrapper by hand.
+export const PAGE_GUTTER = 16; // phone gutter, every viewport (SP.md)
+export const PAGE_TOP = 28; // top clearance
+export const PAGE_BOTTOM = 56; // bottom clearance
+
 // The 760px document column (owner ruling, PR #2527: "pay's cap is the
-// standard"). Prefer className="waves-receipt-page" (index.css) which also
-// carries the standard vertical margins; use these values when a page
-// needs the width inline.
-export const DOC_COLUMN = 'min(100% - 32px, 760px)';
+// standard"). Prefer <CustomerColumn column="document"> (the default); use
+// this value directly only where a component genuinely cannot render the
+// primitive element.
+export const DOC_COLUMN = `min(100% - ${PAGE_GUTTER * 2}px, 760px)`;
 export const DOC_COLUMN_MAX = 760;
 // The 640px flow column (chrome audit 2026-09-03): appointment / track /
 // reschedule / re-service — the short transactional flows. Documents
 // (estimates, reports, invoices, notices) use DOC_COLUMN_MAX.
 export const FLOW_COLUMN_MAX = 640;
-export const DOC_PAGE_MARGIN = '28px auto 56px';
+export const DOC_PAGE_MARGIN = `${PAGE_TOP}px auto ${PAGE_BOTTOM}px`;
 
 // ---------- color roles ----------
 
