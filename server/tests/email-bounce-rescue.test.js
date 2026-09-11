@@ -338,6 +338,7 @@ describe('rescueBouncedAddress flow', () => {
       if (name === 'customers') {
         const chain = customerChainByField({ id: 'c1', first_name: 'Sam', last_name: 'V', phone: null, email: 'svendor@corp-example.com' });
         chain.update = jest.fn(() => Promise.resolve(1));
+        chain.forUpdate = jest.fn(() => chain);
         return chain;
       }
       if (name === 'emails') return makeChain({ rows: [{ from_address: 'svendors@corp-example.com' }] });
@@ -345,6 +346,7 @@ describe('rescueBouncedAddress flow', () => {
       if (name === 'customer_interactions') { const c = makeChain(); c.insert = jest.fn(() => Promise.resolve([1])); return c; }
       return makeChain();
     });
+    db.raw = jest.fn(async () => ({})); // the destination key the apply takes
     dns.resolveMx.mockResolvedValue([{ exchange: 'mx', priority: 1 }]);
     const r = await rescue.rescueBouncedAddress('svendor@corp-example.com');
     expect(r).toMatchObject({ status: 'applied', tier: 'inbound_ground_truth', candidate: 'svendors@corp-example.com' });

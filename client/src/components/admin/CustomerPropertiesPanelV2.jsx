@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
-import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody } from "../ui";
+import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -67,22 +67,44 @@ export default function CustomerPropertiesPanelV2({
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [rowBusy, setRowBusy] = useState(null);
+  const rowMutationSeq = useRef(0);
   const [rowErr, setRowErr] = useState("");
+  const [canChangePrimary, setCanChangePrimary] = useState(false);
+  const [primaryPreview, setPrimaryPreview] = useState(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const primaryPreviewSeq = useRef(0);
+  const activeCustomer = useRef(customerId);
+  activeCustomer.current = customerId;
   // Inline label editing: { id, value } while a row's label input is open.
   const [labelEdit, setLabelEdit] = useState(null);
   // ONE write lock for additions and row edits: every response replaces the
   // whole list, so an overlapping POST and PATCH could let an older snapshot
   // land last and hide the new row / revert the edit.
-  const writeBusy = saving || !!rowBusy;
+  const writeBusy = saving || !!rowBusy || previewBusy;
 
   useEffect(() => {
+    rowMutationSeq.current += 1;
+    setRowBusy(null);
+    setRowErr("");
+    return () => { rowMutationSeq.current += 1; };
+  }, [customerId]);
+
+  useEffect(() => {
+    primaryPreviewSeq.current += 1;
     if (!customerId) return undefined;
     let cancelled = false;
     setLoading(true);
     setLoadErr("");
+    setCanChangePrimary(false);
+    setPrimaryPreview(null);
+    // A refreshed preview is obsolete; an in-flight write still owns its lock.
+    setPreviewBusy(false);
     adminFetch(`/admin/customers/${customerId}/properties`)
       .then((d) => {
-        if (!cancelled) setProperties(Array.isArray(d.properties) ? d.properties : []);
+        if (!cancelled) {
+          setProperties(Array.isArray(d.properties) ? d.properties : []);
+          setCanChangePrimary(d.canChangePrimary === true);
+        }
       })
       .catch((e) => {
         if (!cancelled) setLoadErr(e.message || "Could not load properties");
@@ -92,6 +114,7 @@ export default function CustomerPropertiesPanelV2({
       });
     return () => {
       cancelled = true;
+      primaryPreviewSeq.current += 1;
     };
   }, [customerId, refreshToken]);
 
@@ -147,6 +170,7 @@ export default function CustomerPropertiesPanelV2({
   // All row controls are disabled while rowBusy is set (see below).
   const patchRow = async (propertyId, patch) => {
     if (writeBusy) return;
+    const seq = ++rowMutationSeq.current;
     setRowBusy(propertyId);
     setRowErr("");
     try {
@@ -154,11 +178,11 @@ export default function CustomerPropertiesPanelV2({
         `/admin/customers/${customerId}/properties/${propertyId}`,
         { method: "PATCH", body: JSON.stringify(patch) },
       );
-      setProperties(Array.isArray(d.properties) ? d.properties : []);
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setProperties(Array.isArray(d.properties) ? d.properties : []);
     } catch (err) {
-      setRowErr(err.message || "Could not update property");
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not update property");
     } finally {
-      setRowBusy(null);
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowBusy(null);
     }
   };
 
@@ -172,7 +196,49 @@ export default function CustomerPropertiesPanelV2({
     await patchRow(id, { label: next || null });
   };
 
-  const isManager = contactRole === "property_manager";
+  const previewPrimary = async (propertyId) => {
+    if (writeBusy) return;
+    const seq = ++primaryPreviewSeq.current;
+    setPreviewBusy(true);
+    setRowErr("");
+    try {
+      const preview = await adminFetch(`/admin/customers/${customerId}/properties/${propertyId}/primary-preview`);
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setPrimaryPreview({ ...preview, customerId, propertyId });
+    } catch (err) {
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
+    } finally {
+      if (seq === primaryPreviewSeq.current && activeCustomer.current === customerId) setPreviewBusy(false);
+    }
+  };
+
+  const confirmPrimary = async () => {
+    if (writeBusy || !primaryPreview || primaryPreview.customerId !== customerId) return;
+    const seq = ++rowMutationSeq.current;
+    setRowBusy(primaryPreview.propertyId);
+    setRowErr("");
+    try {
+      const d = await adminFetch(`/admin/customers/${customerId}/properties/${primaryPreview.propertyId}/primary`, {
+        method: "POST", body: JSON.stringify({ expectedVersion: primaryPreview._version }),
+      });
+      if (seq !== rowMutationSeq.current || activeCustomer.current !== customerId) return;
+      setProperties(Array.isArray(d.properties) ? d.properties : []);
+      setPrimaryPreview(null);
+      if (typeof onChanged === "function") {
+        try { await onChanged(); } catch { /* saved list is already current */ }
+      }
+    } catch (err) {
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) {
+        setPrimaryPreview(null);
+        setRowErr(err.message || "Could not change the primary property. Refresh to check its saved state.");
+      }
+    } finally {
+      if (seq === rowMutationSeq.current && activeCustomer.current === customerId) setRowBusy(null);
+    }
+  };
+
+  const primaryCopy = contactRole === "property_manager"
+    ? { label: "Default", title: "Default service address", description: "This contact is a property manager — the primary row is the default service address on the profile, not a residence." }
+    : { label: "Primary", title: "Address on the profile", description: "The primary row is the address on the profile; every other row is an additional serviced property." };
   const inputCls =
     "w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
 
@@ -190,9 +256,7 @@ export default function CustomerPropertiesPanelV2({
           )}
         </div>
         <div className="text-ui-label text-ink-secondary mb-3">
-          {isManager
-            ? "This contact is a property manager — the primary row is the default service address on the profile, not a residence."
-            : "The primary row is the address on the profile; every other row is an additional serviced property."}
+          {primaryCopy.description}
         </div>
 
         {loading && <div className="text-ui-label text-ink-secondary">Loading…</div>}
@@ -213,9 +277,9 @@ export default function CustomerPropertiesPanelV2({
                     {p.is_primary && (
                       <span
                         className="text-ui-caption ui-label text-ink-tertiary mr-1.5"
-                        title={isManager ? "Default service address" : "Address on the profile"}
+                        title={primaryCopy.title}
                       >
-                        {isManager ? "Default" : "Primary"}
+                        {primaryCopy.label}
                       </span>
                     )}
                     {formatPropertyAddress(p)}
@@ -289,6 +353,14 @@ export default function CustomerPropertiesPanelV2({
                     ))}
                   </Select>
                 </div>
+                {canEdit && canChangePrimary && !p.is_primary && (
+                  <div className="max-w-64">
+                    <Button variant="secondary" size="sm" className="text-14" disabled={writeBusy || !p.primary_change_eligible} onClick={() => previewPrimary(p.id)}>
+                      Make primary
+                    </Button>
+                    {p.primary_change_unavailable && <p className="mt-1 text-14 text-ink-secondary">{p.primary_change_unavailable}</p>}
+                  </div>
+                )}
               </div>
             ))}
             {properties.length === 0 && (
@@ -464,6 +536,19 @@ export default function CustomerPropertiesPanelV2({
           </form>
         )}
       </CardBody>
+      {primaryPreview && <Dialog open layer={1100} onClose={() => { if (!writeBusy) setPrimaryPreview(null); }}>
+        <DialogHeader><DialogTitle>Change primary property</DialogTitle></DialogHeader>
+        <DialogBody className="text-14 space-y-3">
+          <p className="font-medium">{primaryPreview.primary_property.address}</p>
+          <ul className="list-disc pl-5 space-y-2">
+            {primaryPreview.effects.map(effect => <li key={effect}>{effect}</li>)}
+          </ul>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" className="text-14" disabled={writeBusy} onClick={() => setPrimaryPreview(null)}>Cancel</Button>
+          <Button className="text-14" disabled={writeBusy} onClick={confirmPrimary}>{writeBusy ? "Saving…" : "Confirm primary property"}</Button>
+        </DialogFooter>
+      </Dialog>}
     </Card>
   );
 }
