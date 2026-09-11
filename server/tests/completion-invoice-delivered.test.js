@@ -100,6 +100,35 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     db.__state.status = 'draft';
   });
 
+  test('interleaving: draft → sending → draft between the queue check and the claim flip (an admin send claimed, queued its held SMS leg, failed its email leg, restored draft) — the re-check under the claim refuses and gives the claim back', async () => {
+    const db = require('../models/db');
+    const { claimInvoiceForSend } = require('../services/invoice');
+    db.__state.status = 'draft';
+    db.__state.sent_at = null;
+    // No queue on the pre-claim read; the other sender's row exists by the re-check.
+    let smsLogReads = 0;
+    db.__state.queuedCompletionText = null;
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'sms_log') {
+        q.first = jest.fn(async () => {
+          smsLogReads += 1;
+          return smsLogReads === 1 ? null : { id: 'sms-other-sender', scheduled_for: new Date('2026-09-11T12:00:00Z') };
+        });
+      }
+      return q;
+    });
+    try {
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'queued_pay_link' });
+      expect(smsLogReads).toBe(2);
+      // The claim was taken (draft → sending) and given back (→ draft): nothing left under it.
+      expect(db.__state.status).toBe('draft');
+    } finally {
+      db.mockImplementation(original);
+    }
+  });
+
   test('behavioral: an admin send whose SMS leg was queued for the window (row back to draft) followed by the completion — the completion is refused and goes report-only; the admin retry still adopts its queue', async () => {
     const db = require('../models/db');
     const { claimInvoiceForSend } = require('../services/invoice');

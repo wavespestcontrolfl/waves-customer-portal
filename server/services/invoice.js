@@ -900,12 +900,13 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
   }
-  const queued = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
-  if (queued) {
+  const queuedPayLinkError = (queued) => {
     const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
     e.code = "queued_pay_link";
-    throw e;
-  }
+    return e;
+  };
+  const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
+  if (queuedBefore) throw queuedPayLinkError(queuedBefore);
 
   const [invoice] = await db("invoices")
     .where({ id: invoiceId, status: current.status })
@@ -920,6 +921,18 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
       throw invoiceAlreadyDeliveredError(latest);
     }
     throw invoiceNotSendableError(latest);
+  }
+  // Re-checked UNDER the claim (pre-push P1 r5 ×2): the flip above compares
+  // status only, so draft → sending → draft in between (another sender
+  // claimed, queued its held SMS leg, failed its email leg and restored the
+  // row) is invisible to it. A queue row is only ever inserted by the holder
+  // of the 'sending' claim, and this call holds it now — so any live queue
+  // row seen here was inserted before this claim and owns the delivery:
+  // give the claim back and refuse.
+  const queuedUnderClaim = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
+  if (queuedUnderClaim) {
+    await restoreSendClaim(invoiceId, current.status, true);
+    throw queuedPayLinkError(queuedUnderClaim);
   }
   return { invoice, previousStatus: current.status, claimed: true };
 }

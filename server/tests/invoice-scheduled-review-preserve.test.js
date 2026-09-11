@@ -59,17 +59,18 @@ function scheduledInvoice(overrides = {}) {
 
 // Mocks the db() call sequence inside sendViaSMSAndEmail:
 //   1. payer_statement_id accrual pre-check   2. claimInvoiceForSend read
-//   3. the claim's queued completion pay-link text check (none)
-//   4. claim update→returning   5. (review block) invoice read
-//   6. success-path update
+//   3. the claim's queued pay-link text check (none)
+//   4. claim update→returning   5. the same check re-run under the claim
+//   6. (review block) invoice read   7. success-path update
 // The chains are permissive, so the same sequence also covers runs where
-// the review block is skipped (call 5 becomes the success update).
+// the review block is skipped (call 6 becomes the success update).
 function mockSendSequence(invoice, reviewRead = {}) {
   db
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(chain({ first: undefined }))
     .mockReturnValueOnce(chain({ returning: [{ ...invoice, status: 'sending' }] }))
+    .mockReturnValueOnce(chain({ first: undefined }))
     .mockReturnValueOnce(
       chain({
         first: {
