@@ -61,16 +61,22 @@ async function lastDeliveredAskAt(customerId, options) {
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.
 // The enrollment standdown retains its explicit fail-open wrapper.
-async function lastManualAskAt(customerId, { since, includeReservations = true } = {}) {
+async function lastManualAskAt(customerId, { since, includeReservations = true, excludeReservationId = null } = {}) {
   const sinceAt = since ? new Date(since) : new Date(Date.now() - 30 * 86400000);
-  const outbound = await db('sms_log')
+  const rows = await db('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     // Include correspondence just before the boundary so its timestamp
     // cannot instead be assigned to a manual ask just after the boundary.
     .where('created_at', '>=', new Date(sinceAt.getTime() - 90000))
     .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
     .orderBy('created_at', 'desc')
-    .select('message_body', 'created_at', 'status', 'metadata');
+    .select('id', 'message_body', 'created_at', 'status', 'metadata');
+  // The caller's OWN in-flight reservation (already inserted under the same
+  // per-customer lock this check runs inside — see admin-communications.js)
+  // is the current attempt's own evidence, not a PRIOR ask to space against;
+  // excluding it here is exactly the excludeRequestId pattern lastDeliveredAskAt
+  // already uses for a caller's own claimed review_requests row.
+  const outbound = excludeReservationId ? rows.filter(row => row.id !== excludeReservationId) : rows;
   const isReviewReservation = row => row.metadata?.review_ask_reservation === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window only when the caller includes reservations. A confirmed marker

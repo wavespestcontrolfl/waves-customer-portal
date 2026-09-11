@@ -2015,6 +2015,40 @@ describe('Communications review ask serialization', () => {
     return () => reservations;
   };
 
+  test('a claimed-link ask reserves sms_log evidence before the review-send lock ever releases — no gap where a racer sees nothing (Codex #4331 P2)', async () => {
+    // admin-communications.js claims the inline link and reserves sms_log
+    // evidence under ONE lock hold, then dispatchReviewAsk re-acquires the
+    // SAME per-customer lock for its own spacing check + the actual send —
+    // two separate acquisitions of 'review-send:cust-A'. Before the fix, the
+    // reservation was created only inside the SECOND hold, leaving a real
+    // unlocked gap between the two where a concurrent scheduled/shared send
+    // for this customer would see neither a stamped delivery nor a
+    // reservation. Assert the reservation already exists the moment the
+    // SECOND acquisition begins.
+    const reservations = wireReservationLedger();
+    let acquisitions = 0;
+    let reservationVisibleBeforeSecondAcquire = null;
+    locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
+      if (key === 'review-send:cust-A') {
+        acquisitions += 1;
+        if (acquisitions === 2) {
+          reservationVisibleBeforeSecondAcquire = reservations().some(row => row.customer_id === 'cust-A'
+            && row.status === 'sending' && row.metadata?.review_ask_reservation === true);
+        }
+      }
+      if (held.has(key)) return { skipped: true, reason: 'lease_held' };
+      held.add(key);
+      try { return await callback(); } finally { held.delete(key); }
+    });
+
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(200);
+    });
+    expect(acquisitions).toBe(2);
+    expect(reservationVisibleBeforeSecondAcquire).toBe(true);
+  });
+
   test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
     let entered, release;
     const providerEntered = new Promise(resolve => { entered = resolve; });
@@ -2074,7 +2108,13 @@ describe('Communications review ask serialization', () => {
       }
       return b;
     });
-    history.lastManualAskAt.mockImplementation(async () => reserved ? new Date() : null);
+    // The claimed-link seam now reserves BEFORE dispatchReviewAsk's own
+    // spacing check runs, and passes excludeReservationId so this same
+    // attempt's own row (the default builder always returns id 'resv-1')
+    // doesn't self-block it — a later request (no exclude, or a different
+    // id) still sees it as durable spacing evidence.
+    history.lastManualAskAt.mockImplementation(async (_customerId, opts = {}) =>
+      (reserved && opts.excludeReservationId !== 'resv-1') ? new Date() : null);
     sendCustomerMessage.mockImplementation(async () => {
       expect(reserved).toBe(true);
       if (mode.includes('throw')) throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });
@@ -2118,8 +2158,12 @@ describe('Communications review ask serialization', () => {
   ('$kind $label retains only uncertain delivery (audit throw: $auditThrows)', async ({ kind, auditThrows, providerResult, retained }) => {
     mockGates.smsAutoSend = kind === 'tracked inferred';
     const reservations = wireReservationLedger();
-    history.lastManualAskAt.mockImplementation(async customerId => reservations().some(row =>
-      row.customer_id === customerId && row.metadata.review_ask_reservation) ? new Date() : null);
+    // excludeReservationId: the claimed-link seam reserves before
+    // dispatchReviewAsk's own spacing check now, so this attempt's own row
+    // must not self-block it (kind !== 'bare' routes through that seam).
+    history.lastManualAskAt.mockImplementation(async (customerId, opts = {}) => reservations().some(row =>
+      row.customer_id === customerId && row.metadata.review_ask_reservation
+      && row.id !== opts.excludeReservationId) ? new Date() : null);
     // Exercise the actual adapter's classification, including its thrown-error
     // path. The wrapper's post-provider audit failure preserves this outcome.
     require('../services/twilio').sendSMS = jest.fn(async () => {
