@@ -4,11 +4,12 @@
 // recorded rate first, else the catalog default — and submits only what the
 // tech confirms. These tests pin the prefill precedence and the payload.
 import React from 'react';
-import { afterEach, describe, expect, test, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import ServiceRecapModal from './ServiceRecapModal';
 
-afterEach(() => { cleanup(); localStorage.clear(); });
+beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 const CATALOG = [
   {
@@ -208,9 +209,9 @@ describe('ServiceRecapModal default pest tank mix', () => {
       />,
     );
 
-    expect(await screen.findByRole('button', { name: '✓ Taurus SC' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '✓ Talstar P' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '✓ Non-ionic Surfactant' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Talstar P', pressed: true })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Non-ionic Surfactant', pressed: true })).toBeTruthy();
     // The LESCO lawn surfactant is never substituted into the mix.
     expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant' })).toBeTruthy();
     // Rates seed from the same catalog prefill a manual tap would use —
@@ -233,7 +234,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
     );
 
     expect(await screen.findByRole('button', { name: 'Taurus SC' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^✓ / })).toBeNull();
+    expect(screen.queryByRole('button', { pressed: true })).toBeNull();
   });
 
   test('a reopened recap keeps the recorded selection — no mix injection', async () => {
@@ -251,8 +252,8 @@ describe('ServiceRecapModal default pest tank mix', () => {
       />,
     );
 
-    expect(await screen.findByRole('button', { name: '✓ Advion Ant Bait Gel' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Advion Ant Bait Gel', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Taurus SC' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '✓ Taurus SC' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Taurus SC', pressed: true })).toBeNull();
   });
 });

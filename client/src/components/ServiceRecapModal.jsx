@@ -2,8 +2,7 @@
 //
 // Lightweight "Service Recap" modal for pest_control services — the slim
 // alternative to the heavy CreateProjectModal "project report". Used on
-// BOTH surfaces: admin dispatch (DispatchPageV2, theme="light") and the
-// tech portal (TechHomePage, theme="dark").
+// the tech portal (TechHomePage).
 //
 // It is a thin UI over the recap-only completion path:
 //   GET  /admin/dispatch/:id/pest-recap/context   (timeline + catalog)
@@ -13,31 +12,17 @@
 // The `request(path, options)` prop is the surface's fetch helper
 // (adminFetch on admin; a bearer-token wrapper on tech). It must resolve
 // to parsed JSON and throw on non-2xx — matching adminFetch's contract.
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useId } from 'react';
 import { createPortal } from 'react-dom';
 import useIsMobile from '../hooks/useIsMobile';
 import useModalFocus from '../hooks/useModalFocus';
+import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import { defaultApplicationMethodForLine, resolveRatePrefill } from '../lib/product-rate-prefill';
 import { isPestDefaultMixVisit, pestDefaultMixSelections } from '../lib/pest-default-mix';
 import useServiceRecapDraft, { recapSubmitError, recapVisitIdentity } from '../hooks/useServiceRecapDraft';
 import { RecapDraftPanel, RecapMissingSelections } from './ServiceRecapDraftPanel';
-
-const PALETTES = {
-  dark: {
-    overlay: 'rgba(2,6,12,0.72)',
-    bg: '#0f1923', card: '#1e293b', border: '#334155', chip: '#243244',
-    accent: '#0ea5e9', accentText: '#fff', text: '#e2e8f0', muted: '#94a3b8',
-    green: '#10b981', red: '#ef4444',
-    headingFont: "'Montserrat', sans-serif", bodyFont: "'Nunito Sans', sans-serif",
-  },
-  light: {
-    overlay: 'rgba(30,24,16,0.45)',
-    bg: '#F7F3EC', card: '#FFFFFF', border: '#E7DFD2', chip: '#F2ECE1',
-    accent: '#1F6F43', accentText: '#fff', text: '#2B2620', muted: '#857B6B',
-    green: '#1F6F43', red: '#991B1B',
-    headingFont: "'Source Serif 4', Georgia, serif", bodyFont: "'Inter', system-ui, sans-serif",
-  },
-};
+import { UiSurface, Button, Field, Input, Textarea, Checkbox, ActionFeedback, cn } from './ui';
+import '../styles/tech-workflow.css';
 
 // Timeline status -> { label, icon }. Only the events that matter to a
 // recap; anything else falls through to a generic row.
@@ -96,7 +81,6 @@ function fmtTime(ts) {
 export default function ServiceRecapModal({
   service,
   request,
-  theme = 'dark',
   onClose,
   onCompleted,
 }) {
@@ -107,14 +91,10 @@ export default function ServiceRecapModal({
   // after the draft hook, so the key handler reaches it through a ref.
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
-  const P = PALETTES[theme] || PALETTES.dark;
+  useLockBodyScroll(true);
+  const titleId = useId();
   const serviceId = service?.id;
   const base = `/admin/dispatch/${serviceId}/pest-recap`;
-  const draftActionStyle = {
-    border: `1px solid ${P.border}`, background: P.card, color: P.text,
-    borderRadius: 10, padding: '12px 18px', minHeight: 48, fontSize: 16,
-    cursor: 'pointer', fontFamily: P.bodyFont,
-  };
 
   const [loading, setLoading] = useState(true);
   const [ctx, setCtx] = useState(null);
@@ -349,7 +329,7 @@ export default function ServiceRecapModal({
     const willSend = sendText && !!message.trim() && !!ctx?.service?.hasPhone;
     if (willSend) {
       const name = ctx?.service?.customerName || 'the customer';
-       
+
       if (!window.confirm(`Text this recap to ${name}?\n\n${message.trim()}`)) return;
     }
     submitInFlight.current = true;
@@ -422,285 +402,174 @@ export default function ServiceRecapModal({
   }, [base, ctx, draft, message, note, onCompleted, productById, rates, request, selected, sendText]);
 
   const timeline = (ctx?.timeline || []).filter((t) => t.to_status !== 'pending');
+  const willSend = sendText && !!message.trim() && !!ctx?.service?.hasPhone;
 
   return createPortal(
-    <div
-      ref={dialogRef}
-      tabIndex={-1}
-      aria-label="Service Recap"
-      role="dialog"
-      aria-modal="true"
-      onClick={close}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 1000, background: P.overlay,
-        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-        fontFamily: P.bodyFont,
+    <UiSurface
+      density="touch"
+      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget) close();
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: '100%', maxWidth: isMobile ? 'none' : 520, height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : '92vh',
-          display: 'flex', flexDirection: 'column', overflow: 'hidden', boxSizing: 'border-box',
-          paddingTop: 'env(safe-area-inset-top, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)',
-          paddingLeft: 'env(safe-area-inset-left, 0px)', paddingRight: 'env(safe-area-inset-right, 0px)',
-          background: P.bg, borderTopLeftRadius: isMobile ? 0 : 18, borderTopRightRadius: isMobile ? 0 : 18,
-          border: `1px solid ${P.border}`, boxShadow: '0 -8px 40px rgba(0,0,0,0.35)',
-        }}
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className={cn('tech-visit-dialog', isMobile && 'tech-visit-dialog--fullscreen')}
       >
-        {/* Header */}
-        <div style={{
-          flexShrink: 0, background: P.bg,
-          padding: '16px 18px 12px', borderBottom: `1px solid ${P.border}`,
-          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
-        }}>
+        <header className="tech-visit-header">
           <div>
-            <div style={{ fontFamily: P.headingFont, fontSize: 18, fontWeight: 700, color: P.text }}>
-              Service Recap
-            </div>
-            <div style={{ fontSize: 13, color: P.muted, marginTop: 2 }}>
+            <h2 id={titleId} className="tech-visit-title">Service Recap</h2>
+            <p className="tech-visit-muted">
               {service?.customerName || ctx?.service?.customerName || 'Customer'}
               {service?.serviceType ? ` · ${service.serviceType}` : ''}
-            </div>
+            </p>
           </div>
-          <button
-            type="button"
-            onClick={close}
-            disabled={submitting}
-            aria-label="Close"
-            style={{
-              border: 'none', background: 'transparent', color: P.muted,
-              fontSize: 24, lineHeight: 1, cursor: 'pointer', padding: 4, minWidth: 44, minHeight: 44,
-            }}
-          >×</button>
-        </div>
+          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={submitting} aria-label="Close">×</Button>
+        </header>
 
         {loading ? (
-          <div style={{ padding: 28, textAlign: 'center', color: P.muted, fontSize: 14 }}>Loading…</div>
+          <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>
         ) : loadError ? (
-          <div style={{ padding: 24, color: P.red, fontSize: 14 }}>{loadError}</div>
+          <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{loadError}</ActionFeedback>
         ) : (
           <>
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '14px 18px 18px' }}>
-            <RecapDraftPanel draft={draft} onRestore={restoreDraft} actionStyle={draftActionStyle} palette={P} />
-            <fieldset disabled={draft.formLocked} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
-            {/* Timeline */}
-            {timeline.length > 0 && (
-              <div style={{
-                background: P.card, border: `1px solid ${P.border}`, borderRadius: 12,
-                padding: '10px 12px', marginBottom: 14,
-              }}>
-                {timeline.map((t, i) => {
-                  const meta = TIMELINE_LABELS[t.to_status] || { label: t.to_status, icon: '•' };
-                  return (
-                    <div key={i} style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      padding: '4px 0', fontSize: 13, color: P.text,
-                    }}>
-                      <span><span style={{ marginRight: 8 }}>{meta.icon}</span>{meta.label}</span>
-                      <span style={{ color: P.muted, fontVariantNumeric: 'tabular-nums' }}>{fmtTime(t.transitioned_at)}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Quick note */}
-            <label style={{ display: 'block', fontSize: 13, fontWeight: 600, color: P.text, marginBottom: 6 }}>
-              What did you do?
-            </label>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Quick internal note — areas treated, what you found, anything for the next visit."
-              rows={3}
-              style={{
-                width: '100%', boxSizing: 'border-box', resize: 'vertical',
-                background: P.card, color: P.text, border: `1px solid ${P.border}`,
-                borderRadius: 10, padding: '10px 12px', fontSize: 14, fontFamily: P.bodyFont,
-                marginBottom: 16,
-              }}
-            />
-
-            {/* Products */}
-            <div style={{ fontSize: 13, fontWeight: 600, color: P.text, marginBottom: 8 }}>
-              Products applied
+            <div className="tech-visit-body">
+              <RecapDraftPanel draft={draft} onRestore={restoreDraft} />
+              <fieldset disabled={draft.formLocked} className="tech-visit-form">
+                {timeline.length > 0 && (
+                  <div className="tech-visit-card">
+                    {timeline.map((t, i) => {
+                      const meta = TIMELINE_LABELS[t.to_status] || { label: t.to_status, icon: '•' };
+                      return (
+                        <div key={i} className="tech-visit-timeline-row">
+                          <span><span aria-hidden="true">{meta.icon} </span>{meta.label}</span>
+                          <span className="tech-visit-muted">{fmtTime(t.transitioned_at)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <Field label="What did you do?" className="tech-visit-field">
+                  <Textarea
+                    className="tech-visit-control"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    rows={3}
+                    placeholder="Quick internal note — areas treated, what you found, anything for the next visit."
+                  />
+                </Field>
+                <RecapProducts products={products} selected={selected} rates={rates} productById={productById} toggleProduct={toggleProduct} setRateValue={setRateValue} />
+                <RecapMissingSelections ids={draft.missingSelections} names={restoredNames} onRemove={toggleProduct} />
+                <RecapMessage
+                  message={message} setMessage={setMessage} drafting={drafting} handleDraft={handleDraft}
+                  includeComms={includeComms} setIncludeComms={setIncludeComms} sendText={sendText} setSendText={setSendText}
+                  hasPhone={!!ctx?.service?.hasPhone}
+                />
+                {submitting && <ActionFeedback className="tech-visit-feedback">Saving completion… Keep this visit open.</ActionFeedback>}
+              </fieldset>
             </div>
-            {products.length === 0 ? (
-              <div style={{ fontSize: 13, color: P.muted, marginBottom: 16 }}>No products in catalog.</div>
-            ) : (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
-                {products.map((p) => {
-                  const on = selected.has(p.id);
-                  return (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => toggleProduct(p.id)}
-                      style={{
-                        border: `1px solid ${on ? P.accent : P.border}`,
-                        background: on ? P.accent : P.chip,
-                        color: on ? P.accentText : P.text,
-                        borderRadius: 999, padding: '6px 12px', fontSize: 13,
-                        cursor: 'pointer', fontFamily: P.bodyFont,
-                      }}
-                    >
-                      {on ? '✓ ' : ''}{p.name}
-                    </button>
-                  );
-                })}
+            <footer className="tech-visit-footer">
+              {error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{error}</ActionFeedback>}
+              <div className="tech-visit-actions">
+                <Button variant="secondary" className="tech-visit-action" onClick={close} disabled={submitting}>Cancel</Button>
+                <Button
+                  className="tech-visit-action tech-visit-complete"
+                  onClick={handleSubmit}
+                  loading={submitting}
+                  disabled={draft.submitBlocked}
+                >
+                  {willSend ? 'Complete & Send' : 'Complete Service'}
+                </Button>
               </div>
-            )}
-
-            {/* Application rates for the selected products — editable so the
-                recorded rate is what the tech actually applied, not the
-                catalog default it starts from. Products with no known unit
-                (no catalog default, nothing recorded) record no rate. */}
-            <RecapMissingSelections ids={draft.missingSelections} names={restoredNames} onRemove={toggleProduct} actionStyle={draftActionStyle} palette={P} />
-            {[...selected].some((id) => rates[id]?.unit) && (
-              <div style={{
-                background: P.card, border: `1px solid ${P.border}`, borderRadius: 12,
-                padding: '10px 12px', marginBottom: 16,
-              }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: P.muted, marginBottom: 6 }}>
-                  Application rates (adjust to what you applied)
-                </div>
-                {[...selected]
-                  .map((id) => ({ id, p: productById.get(id), entry: rates[id] }))
-                  .filter((row) => row.p && row.entry?.unit)
-                  .map(({ id, p, entry }) => (
-                    <div key={id} style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      padding: '4px 0', fontSize: 13, color: P.text,
-                    }}>
-                      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.name}
-                      </span>
-                      <input
-                        type="number"
-                        inputMode="decimal"
-                        min="0"
-                        step="any"
-                        value={entry.rate}
-                        onChange={(e) => setRateValue(id, e.target.value)}
-                        aria-label={`Application rate for ${p.name}`}
-                        style={{
-                          width: 72, boxSizing: 'border-box', textAlign: 'right',
-                          background: P.bg, color: P.text, border: `1px solid ${P.border}`,
-                          borderRadius: 8, padding: '5px 8px', fontSize: 13, fontFamily: P.bodyFont,
-                        }}
-                      />
-                      <span style={{ color: P.muted, fontSize: 12, minWidth: 56 }}>{entry.unit}</span>
-                      {entry.max != null && parseFloat(entry.rate) > entry.max && (
-                        <span style={{ color: P.red, fontSize: 11, whiteSpace: 'nowrap' }}>
-                          &gt; label max {entry.max}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-              </div>
-            )}
-
-            {/* Customer message */}
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6,
-            }}>
-              <label style={{ fontSize: 13, fontWeight: 600, color: P.text }}>Message to customer</label>
-              <button
-                type="button"
-                onClick={handleDraft}
-                disabled={drafting}
-                style={{
-                  border: `1px solid ${P.accent}`, background: 'transparent', color: P.accent,
-                  borderRadius: 8, padding: '4px 10px', fontSize: 12, fontWeight: 600,
-                  cursor: drafting ? 'default' : 'pointer', opacity: drafting ? 0.6 : 1,
-                }}
-              >
-                {drafting ? 'Drafting…' : '✨ Draft with AI'}
-              </button>
-            </div>
-            <label style={{
-              display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
-              color: P.muted, cursor: 'pointer', marginBottom: 6,
-            }}>
-              <input
-                type="checkbox"
-                checked={includeComms}
-                onChange={(e) => setIncludeComms(e.target.checked)}
-                style={{ width: 15, height: 15 }}
-              />
-              Include recent customer calls/texts/emails
-            </label>
-            <textarea
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              placeholder="The recap your customer receives. Tap “Draft with AI” to generate from your note, then edit."
-              rows={4}
-              style={{
-                width: '100%', boxSizing: 'border-box', resize: 'vertical',
-                background: P.card, color: P.text, border: `1px solid ${P.border}`,
-                borderRadius: 10, padding: '10px 12px', fontSize: 14, fontFamily: P.bodyFont,
-                marginBottom: 12,
-              }}
-            />
-
-            {/* Send toggle */}
-            <label style={{
-              display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, color: P.text,
-              opacity: ctx?.service?.hasPhone ? 1 : 0.55, marginBottom: 4,
-            }}>
-              <input
-                type="checkbox"
-                checked={sendText && !!ctx?.service?.hasPhone}
-                disabled={!ctx?.service?.hasPhone}
-                onChange={(e) => setSendText(e.target.checked)}
-              />
-              Text this recap to the customer
-            </label>
-            {!ctx?.service?.hasPhone && (
-              <div style={{ fontSize: 12, color: P.muted, marginBottom: 4 }}>
-                No mobile number on file — recap will be saved without texting.
-              </div>
-            )}
-            </fieldset>
-          </div>
-            {/* Footer */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', flexShrink: 0, gap: 10, padding: '12px 18px 18px', borderTop: `1px solid ${P.border}` }}>
-              {error && <div role="alert" style={{ flexBasis: '100%', color: P.red, fontSize: 13 }}>{error}</div>}
-              <button
-                type="button"
-                onClick={close}
-                disabled={submitting}
-                style={{
-                  flex: '0 0 auto', border: `1px solid ${P.border}`, background: 'transparent',
-                  color: P.text, borderRadius: 10, padding: '12px 18px', fontSize: 14,
-                  cursor: 'pointer', fontFamily: P.bodyFont,
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSubmit}
-                disabled={draft.submitBlocked}
-                style={{
-                  flex: 1, border: 'none', background: P.green, color: '#fff',
-                  borderRadius: 10, padding: '12px 18px', fontSize: 15, fontWeight: 700,
-                  cursor: submitting ? 'default' : 'pointer', opacity: draft.submitBlocked ? 0.5 : 1,
-                  fontFamily: P.bodyFont,
-                }}
-              >
-                {submitting
-                  ? 'Saving…'
-                  : (sendText && !!message.trim() && !!ctx?.service?.hasPhone)
-                    ? 'Complete & Send'
-                    : 'Complete Service'}
-              </button>
-            </div>
+            </footer>
           </>
         )}
-      </div>
-    </div>,
+      </section>
+    </UiSurface>,
     document.body,
+  );
+}
+
+function RecapProducts({ products, selected, rates, productById, toggleProduct, setRateValue }) {
+  const rateRows = [...selected]
+    .map((id) => ({ id, product: productById.get(id), entry: rates[id] }))
+    .filter((row) => row.product && row.entry?.unit);
+  return (
+    <>
+      <h3 className="tech-visit-section-title">Products applied</h3>
+      {products.length === 0 ? (
+        <p className="tech-visit-muted">No products in catalog.</p>
+      ) : (
+        <div className="tech-visit-products">
+          {products.map((product) => (
+            <Button
+              key={product.id}
+              variant="secondary"
+              className="tech-visit-action tech-visit-product"
+              aria-pressed={selected.has(product.id)}
+              onClick={() => toggleProduct(product.id)}
+            >
+              {selected.has(product.id) && <span aria-hidden="true">✓ </span>}{product.name}
+            </Button>
+          ))}
+        </div>
+      )}
+      {rateRows.length > 0 && (
+        <div className="tech-visit-card">
+          <h3 className="tech-visit-section-title">Application rates (adjust to what you applied)</h3>
+          {rateRows.map(({ id, product, entry }) => (
+            <Field
+              key={id}
+              label={`Application rate for ${product.name}`}
+              className="tech-visit-field"
+              help={<span className="tech-visit-muted">{entry.unit}</span>}
+              error={entry.max != null && parseFloat(entry.rate) > entry.max ? <span className="tech-visit-warning">&gt; label max {entry.max}</span> : undefined}
+            >
+              <Input
+                className="tech-visit-control"
+                type="number"
+                inputMode="decimal"
+                min="0"
+                step="any"
+                value={entry.rate}
+                onChange={(e) => setRateValue(id, e.target.value)}
+              />
+            </Field>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function RecapMessage({ message, setMessage, drafting, handleDraft, includeComms, setIncludeComms, sendText, setSendText, hasPhone }) {
+  return (
+    <>
+      <Field label="Message to customer" className="tech-visit-field">
+        <Textarea
+          className="tech-visit-control"
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          rows={4}
+          placeholder="The recap your customer receives. Tap “Draft with AI” to generate from your note, then edit."
+        />
+      </Field>
+      <Button variant="secondary" className="tech-visit-action" onClick={handleDraft} loading={drafting}>
+        {drafting ? 'Drafting…' : '✨ Draft with AI'}
+      </Button>
+      <label className="ui-choice-label tech-visit-choice">
+        <Checkbox className="tech-visit-checkbox" checked={includeComms} onChange={(e) => setIncludeComms(e.target.checked)} />
+        <span>Include recent customer calls/texts/emails</span>
+      </label>
+      <label className="ui-choice-label tech-visit-choice">
+        <Checkbox className="tech-visit-checkbox" checked={sendText && hasPhone} disabled={!hasPhone} onChange={(e) => setSendText(e.target.checked)} />
+        <span>Text this recap to the customer</span>
+      </label>
+      {!hasPhone && <p className="tech-visit-muted">No mobile number on file — recap will be saved without texting.</p>}
+    </>
   );
 }

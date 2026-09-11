@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import ServiceRecapModal from './ServiceRecapModal';
 import { completionDraftKey } from '../lib/completion-drafts';
@@ -14,6 +14,7 @@ const requestFor = () => vi.fn(async (path) => {
   if (path.endsWith('/draft')) throw new Error('Example AI unavailable.');
   return { ok: true };
 });
+beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); });
 
 describe('recap interruption recovery', () => {
@@ -122,15 +123,15 @@ describe('recap interruption recovery', () => {
     const open = () => render(<ServiceRecapModal service={{ id: 'visit-a' }} request={request} onClose={vi.fn()} />);
     const first = open();
     const gelButton = () => screen.getByRole('button', { name: /Example gel$/ });
-    await screen.findByRole('button', { name: '✓ Example gel', exact: true });
+    await screen.findByRole('button', { name: 'Example gel', pressed: true, exact: true });
     fireEvent.click(gelButton());
     fireEvent.click(gelButton());
-    expect(screen.getByRole('button', { name: '✓ Example gel', exact: true })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Example gel', pressed: true, exact: true })).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText(/Draft saved on this device/)).toBeNull());
     first.unmount();
 
     open();
-    await screen.findByRole('button', { name: '✓ Example gel', exact: true });
+    await screen.findByRole('button', { name: 'Example gel', pressed: true, exact: true });
     expect(screen.queryByRole('button', { name: 'Restore draft', exact: true })).toBeNull();
   });
 
@@ -152,7 +153,7 @@ describe('recap interruption recovery', () => {
     expect(await screen.findByRole('button', { name: 'Restore draft', exact: true })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Complete Service', exact: true })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Discard draft', exact: true }));
-    expect(screen.getByRole('button', { name: '✓ Example gel', exact: true })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Example gel', pressed: true, exact: true })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Complete Service', exact: true }));
     await waitFor(() => expect(request.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(true));
     const payload = JSON.parse(request.mock.calls.find(([, options]) => options?.method === 'POST')[1].body);
