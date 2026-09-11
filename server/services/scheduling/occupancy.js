@@ -311,21 +311,18 @@ function bookingFenceWaitMs() {
   return Number.isFinite(raw) && raw >= 0 ? raw : CALL_BOOKING_FENCE_WAIT_MS;
 }
 
-// `deadline` (absolute, same clock as `now`) lets a caller RE-FENCE — e.g.
-// the phone writer's fallback to the unassigned-day rung — inside the budget
-// its first attempt was given, instead of starting a fresh one (codex #4368
-// r2 P2); it wins over `waitMs`. Every result carries the deadline it ran
-// against so the caller can pass it back.
-async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFenceWaitMs(), deadline: fixedDeadline = null,
-  pollMs = CALL_BOOKING_FENCE_POLL_MS, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-  now = () => Date.now() } = {}) {
-  const deadline = Number.isFinite(fixedDeadline) ? fixedDeadline : now() + Math.max(0, waitMs);
+// Every result carries the deadline it ran against so a caller can pass it
+// back for a re-fence (see fenceDeadline).
+async function fenceBookingDay(trx, options = {}) {
+  const { date, techId = null, pollMs = CALL_BOOKING_FENCE_POLL_MS,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() } = options;
+  const deadline = fenceDeadline(options, now);
   const dateStr = String(date || '').split('T')[0];
-  if (!dateStr) return { acquired: false, keys: [], reason: 'no_date', deadline };
-  const { lockTechDays } = require('./tech-day-lock');
   const keys = [];
-  let haveOccupancy = false;
   const miss = (reason) => ({ acquired: false, keys, reason, deadline });
+  if (!dateStr) return miss('no_date');
+  const { lockTechDays } = require('./tech-day-lock');
+  let haveOccupancy = false;
   for (;;) {
     // Canonical order: rung 1 before rung 3, exactly like every blocking
     // writer. A granted rung is kept (xact-scoped) and not re-requested.
@@ -333,25 +330,41 @@ async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFence
     // a slow round trip can return past the deadline, and neither the next
     // rung nor a late grant may then count — the cap bounds the decision,
     // not just the sleeps. (A granted rung stays held; it still serializes,
-    // it is just not reported as a fence the booking waited for.)
+    // it is just not reported as a fence the booking waited for.) Strictly
+    // past: an attempt landing exactly on the deadline still counts, so an
+    // exhausted budget (the unassigned re-fence) gets one try per rung.
     if (!haveOccupancy) {
       haveOccupancy = await tryAcquireOccupancyLock(trx, dateStr);
       if (haveOccupancy) keys.push(occupancyLockKey(dateStr));
-      if (now() >= deadline) return miss(haveOccupancy ? 'deadline_exceeded' : 'date_busy');
+      if (now() > deadline) return miss(haveOccupancy ? 'deadline_exceeded' : 'date_busy');
     }
     if (haveOccupancy) {
       const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
-      if (techKeys && now() < deadline) return { acquired: true, keys: keys.concat(techKeys), deadline };
-      if (techKeys) return { ...miss('deadline_exceeded'), keys: keys.concat(techKeys) };
+      if (techKeys) {
+        keys.push(...techKeys);
+        return now() > deadline ? miss('deadline_exceeded') : { acquired: true, keys, deadline };
+      }
     }
-    const remaining = deadline - now();
-    if (remaining <= 0) return miss(haveOccupancy ? 'tech_day_busy' : 'date_busy');
-    await sleep(Math.max(1, Math.min(pollMs, remaining)));
-    // Re-check AFTER waking (codex #4368 r3 P2): a delayed event loop can
-    // oversleep the clamped timer, and a rung released after the cap must
-    // not be tried, let alone reported as fenced. The cap is a hard cap.
-    if (now() >= deadline) return miss(haveOccupancy ? 'tech_day_busy' : 'date_busy');
+    if (!await pausedWithinBudget({ deadline, now, sleep, pollMs })) return miss(haveOccupancy ? 'tech_day_busy' : 'date_busy');
   }
+}
+
+// An absolute `deadline` (same clock as `now`) wins over `waitMs`, so a
+// re-fence runs inside the budget its first attempt was given rather than
+// starting a fresh one (codex r2 P2).
+function fenceDeadline({ deadline = null, waitMs = bookingFenceWaitMs() }, now) {
+  return Number.isFinite(deadline) ? deadline : now() + Math.max(0, waitMs);
+}
+
+// One poll pause, clamped to the remaining budget (codex r1 P2) and re-checked
+// after waking (codex r3 P2): a delayed event loop can oversleep the clamped
+// timer, and a rung released after the cap must not be tried. Returns false
+// when the budget is spent, before or after the pause.
+async function pausedWithinBudget({ deadline, now, sleep, pollMs }) {
+  const remaining = deadline - now();
+  if (remaining <= 0) return false;
+  await sleep(Math.max(1, Math.min(pollMs, remaining)));
+  return now() < deadline;
 }
 
 // Acquire the date-wide occupancy lock for MANY dates in one transaction
