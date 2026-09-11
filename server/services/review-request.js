@@ -747,6 +747,23 @@ async function reserveReviewSms({ request, to, body }) {
   return { id: reservation.id, reservedAt, requestId: request.id };
 }
 
+// Turn an ask reservation into durable delivery evidence: the provider
+// accepted, so this is no longer an unresolved in-flight marker and the
+// expiry sweep must never reclaim it.
+async function promoteReviewSmsReservation(reservation) {
+  if (!reservation?.id) return false;
+  try {
+    const promoted = await db("sms_log").where({ id: reservation.id, status: "sending" })
+      .update({ status: "sent", updated_at: new Date() });
+    if (!promoted) return false;
+    logger.warn(`[review] SMS accepted but its request row is unstamped — reservation kept as delivery evidence (requestId=${reservation.requestId || "n/a"})`);
+    return true;
+  } catch (err) {
+    logger.warn(`[review] review SMS reservation promotion failed (requestId=${reservation.requestId || "n/a"}): ${err.message}`);
+    return false;
+  }
+}
+
 async function releaseReviewSmsReservation(reservation) {
   if (!reservation?.id) return;
   try {
@@ -2053,7 +2070,20 @@ const ReviewService = {
           }),
           `SMS sent stamp (requestId=${requestId})`,
         );
-        if (!stamped) return { sent: true, unrecorded: true };
+        if (!stamped) {
+          // The text WAS accepted but the row could not record it. Leaving
+          // the reservation 'sending' makes it decay: the 72-hour sweep
+          // expires an unresolved reservation by design, and processScheduled
+          // then finds this row still pending and sends the same ask again
+          // (codex #4331 P1). Definite acceptance must not decay like
+          // uncertainty, so promote the reservation to 'sent' instead — a
+          // resolved reservation is never swept, however old, and review-ask
+          // history reads it as real delivery evidence. It is a different
+          // table from the one that just failed, so it is a real second
+          // chance; when it fails too the reservation stays as it was.
+          await promoteReviewSmsReservation(reservation);
+          return { sent: true, unrecorded: true };
+        }
         await releaseReviewSmsReservation(reservation);
         reservation = null;
         // PII: ID-only per AGENTS.md.

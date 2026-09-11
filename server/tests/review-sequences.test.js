@@ -1510,6 +1510,26 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
     });
 
+    test('an accepted ask whose sent stamp fails keeps its reservation as durable delivery evidence', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'un-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-un1', customer_id: 'un-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tun1', location_id: 'venice', created_at: new Date() }],
+        // Only the sent stamp fails; the recheck's no-op write still passes.
+      }, { onUpdate: (table, patch) => { if (table === 'review_requests' && patch.sms_sent_at) throw new Error('pg blip on sent stamp'); } });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-un1');
+
+      // Codex #4331 P1: left 'sending', the reservation would be expired by
+      // the 72-hour sweep as an unresolved marker and processScheduled would
+      // re-send this still-pending row. Definite acceptance must not decay
+      // the way uncertainty does.
+      expect(out).toEqual({ sent: true, unrecorded: true });
+      const reservation = mock.__state.rows.sms_log[0];
+      expect(reservation.status).toBe('sent');
+      expect(JSON.parse(reservation.metadata).review_ask_reservation).toBe(true);
+    });
+
     test('an ask refused before the provider is reported unsent by its reason, never sent (codex #4331 P1)', async () => {
       const mock = makeMock({
         customers: [{ id: 'rf-1', first_name: 'Ona', last_name: 'P', phone: '+19410000168', nearest_location_id: 'venice' }],
