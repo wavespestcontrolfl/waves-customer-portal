@@ -1848,7 +1848,7 @@ function getToolsForContext(context, isAdmin = false) {
   if (context === 'comms') {
     // Full comms set already includes the read tools — don't double-load.
     // Call-research re-added explicitly: this branch bypasses BASE_TOOLS.
-    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? EMAIL_SHARED_TOOLS : []), ...CALL_RESEARCH_TOOLS, ...infra];
+    return [...TOOLS, ...COMMS_TOOLS, ...(isAdmin ? [...EMAIL_SHARED_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS] : []), ...CALL_RESEARCH_TOOLS, ...infra];
   }
   if (context === 'tax') {
     return [...base, ...TAX_TOOLS, ...infra];
@@ -1859,7 +1859,7 @@ function getToolsForContext(context, isAdmin = false) {
   if (context === 'email') {
     // Full email set already includes the shared subset — don't double-load.
     // Call-research re-added explicitly: this branch bypasses BASE_TOOLS.
-    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...infra] : base;
+    return isAdmin ? [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_TOOLS, ...CALL_RESEARCH_TOOLS, ...CUSTOMER_LIFECYCLE_TOOLS, ...infra] : base;
   }
   if (context === 'banking') {
     return [...base, ...BANKING_QUERY_TOOLS, ...infra];

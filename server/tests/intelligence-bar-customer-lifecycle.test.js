@@ -67,7 +67,8 @@ const NOT_ENROLLED = { loser_enrolled: false };
 const FINANCIAL = {
   account_credits_moved_to_winner: 12.5, billing_mode_adopted_from_loser: 'per_application', per_application_fee_adopted_from_loser: 85,
   loser_plan_rate_rows_deleted: 0, referral_fold: NOT_ENROLLED, autopay_restrictions_inherited: {},
-  winner_backfills: { email: 'stub@example.com' }, winner_backfills_caveat: 'a Stripe profile derived from saved cards may also be adopted when neither row names one',
+  winner_backfills: { email: 'stub@example.com' }, stripe_profile_from_saved_cards: null, saved_card_profile_conflict: false,
+  combined_payment_sessions: { winner: [], loser: [] },
   predicted_collision_handlers: [], revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)',
 };
 const EFFECTS = { moving: { scheduled_services: 3, sms_log: 5, 'notifications.recipient_id': 2, total_rows: 10 }, financial_effects: FINANCIAL, fingerprint: 'fp-card-1' };
@@ -123,6 +124,27 @@ describe('merge_customers', () => {
     const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
     expect(result.financial_effects).toMatchObject({ predicted_collision_handlers: ['referral_promoters'], revertible_from_queue: false });
     expect(result.note_to_operator).toMatch(/EXCEPT that this merge folds referral_promoters/);
+  });
+
+  test('ids are normalized to lowercase at the tool boundary (Postgres returns canonical lowercase uuids)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID.toUpperCase(), loser_customer_id: ` ${LOSER_ID.toUpperCase()} ` }, {});
+    expect(result.error).toBeUndefined();
+    expect(result.winner_customer_id).toBe(WINNER_ID);
+    expect(db.__qb.whereIn).toHaveBeenCalledWith('id', [WINNER_ID, LOSER_ID]);
+    expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(WINNER_ID, LOSER_ID);
+  });
+
+  test('saved cards on a third Stripe profile refuse the preview (a card the executor would refuse is a tool failure, not a card); open combined sessions are named in the note', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, saved_card_profile_conflict: true } });
+    const refused = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(refused).toMatchObject({ code: 'stripe_profile_conflict', error: expect.stringMatching(/different Stripe profile/) });
+    expect(refused.preview).toBeUndefined();
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, combined_payment_sessions: { winner: [], loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a' }] } } });
+    const withSession = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(withSession.note_to_operator).toMatch(/1 open combined payment session\(s\) listed above will be cancelled in Stripe first/);
   });
 
   test('preview refuses not_in_queue with the canonical message', async () => {

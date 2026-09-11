@@ -2202,10 +2202,12 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
   const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
   const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', billing_mode: null, per_application_fee: null, account_credits: '0', address_line1: '100 Test St', email: null };
   const loser = { id: 'L', first_name: 'Unknown', last_name: '', billing_mode: 'per_application', per_application_fee: '85.00', account_credits: '12.50', address_line1: null, email: 'stub@example.com', autopay_enabled: false };
-  function install(counts = {}) {
+  function install(counts = {}, { sessions = {}, cards = {} } = {}) {
     db.raw = jest.fn(async () => FK_ROWS);
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
+      if (table === 'payment_methods') return (cards[q.args('where')[0].customer_id] || []).map((id) => ({ stripe_customer_id: id }));
+      if (table === 'invoices' && !q.called('count')) return sessions[q.args('where')[0].customer_id] || [];
       if (table === 'customer_plan_rates') return { n: counts.customer_plan_rates || 0 };
       return { n: counts[table] || 0 };
     });
@@ -2222,7 +2224,9 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       referral_fold: { loser_enrolled: false },
       autopay_restrictions_inherited: { autopay_enabled: false },
       winner_backfills: { email: 'stub@example.com', billing_mode: 'per_application', per_application_fee: '85.00' },
-      winner_backfills_caveat: expect.stringMatching(/Stripe profile derived from saved cards/),
+      stripe_profile_from_saved_cards: null,
+      saved_card_profile_conflict: false,
+      combined_payment_sessions: { winner: [], loser: [] },
       predicted_collision_handlers: [],
       revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
     });
@@ -2235,6 +2239,47 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     // One more invoice on the loser → a different fingerprint.
     install({ invoices: 3, customer_plan_rates: 1 });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+  });
+
+  it('discloses and pins the saved-card Stripe profile the winner will adopt and every stamped combined payment session (Codex r4 P1s)', async () => {
+    install({}, {
+      cards: { W: ['cus_shared'], L: ['cus_shared'] },
+      sessions: { L: [{ id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_b' }, { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] },
+    });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.stripe_profile_from_saved_cards).toEqual({ stripe_customer_id: 'cus_shared', from: 'both' });
+    expect(out.financial_effects.winner_backfills.stripe_customer_id).toBe('cus_shared'); // the backfill prediction uses the REAL derivation
+    expect(out.financial_effects.saved_card_profile_conflict).toBe(false);
+    expect(out.financial_effects.combined_payment_sessions).toEqual({
+      winner: [],
+      loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b' }],
+    });
+    // A new session on the loser → a different fingerprint.
+    install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+    // Cards on a third profile: the executor would refuse — the disclosure says so.
+    install({}, { cards: { W: ['cus_other'], L: ['cus_shared'] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.saved_card_profile_conflict).toBe(true);
+  });
+});
+
+describe('deriveSavedCardStripeCustomer (shared by the executor and the preview)', () => {
+  const rowsFor = (cards) => (table, q) => (table === 'payment_methods' ? (cards[q.args('where')[0].customer_id] || []).map((id) => ({ stripe_customer_id: id })) : []);
+  it('no foreign cards → nothing derived, no conflict', async () => {
+    installDb(rowsFor({ W: ['cus_w'] }));
+    expect(await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W', stripe_customer_id: 'cus_w' }, { id: 'L' })).toEqual({ derivedStripeCustomerId: null, stripeDerivedFrom: null, conflict: false });
+  });
+  it('neither row names a profile, the cards agree on one → derived, with whose cards identified it', async () => {
+    installDb(rowsFor({ L: ['cus_x'] }));
+    expect(await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W' }, { id: 'L' })).toEqual({ derivedStripeCustomerId: 'cus_x', stripeDerivedFrom: 'loser', conflict: false });
+    installDb(rowsFor({ W: ['cus_x'], L: ['cus_x'] }));
+    expect((await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W' }, { id: 'L' })).stripeDerivedFrom).toBe('both');
+  });
+  it('cards on a profile other than the survivor\'s, or on two profiles → conflict', async () => {
+    installDb(rowsFor({ L: ['cus_other'] }));
+    expect((await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W', stripe_customer_id: 'cus_w' }, { id: 'L' })).conflict).toBe(true);
+    installDb(rowsFor({ W: ['cus_a'], L: ['cus_b'] }));
+    expect((await dedupe.deriveSavedCardStripeCustomer(db, { id: 'W' }, { id: 'L' })).conflict).toBe(true);
   });
 });
 

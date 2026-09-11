@@ -1066,6 +1066,36 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   return { backfills, winnerPriorValues };
 }
 
+// Saved cards live on a specific STRIPE customer: charge paths attach
+// PaymentIntents to ensureStripeCustomer(winner), so a moved method
+// attached elsewhere would strand and autopay/card-on-file charges fail.
+// When neither customer row names a Stripe profile but the saved cards on
+// either side agree on one, the merge adopts it (derivedStripeCustomerId);
+// cards on a profile other than the survivor's are a conflict the merge
+// refuses. ONE reader, used by the executor under its locks and by the IB
+// preview (disclosed + pinned), so the card shows the profile the winner
+// will actually adopt. `from` says whose cards identified it — journaled so
+// an undo knows where the id belongs.
+async function deriveSavedCardStripeCustomer(database, winner, loser) {
+  const pmStripeIdsFor = async (customerId) => [...new Set((await database('payment_methods')
+    .where({ customer_id: customerId })
+    .whereNotNull('stripe_customer_id')
+    .select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
+  const loserPmStripeIds = await pmStripeIdsFor(loser.id);
+  const winnerPmStripeIds = await pmStripeIdsFor(winner.id);
+  const allPmStripeIds = [...new Set([...winnerPmStripeIds, ...loserPmStripeIds])];
+  const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
+  const foreignPmStripe = allPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
+  if (!foreignPmStripe.length) return { derivedStripeCustomerId: null, stripeDerivedFrom: null, conflict: false };
+  if (!effectiveWinnerStripe && allPmStripeIds.length === 1) {
+    const derivedStripeCustomerId = allPmStripeIds[0];
+    const winnerHasIt = winnerPmStripeIds.includes(derivedStripeCustomerId);
+    const loserHasIt = loserPmStripeIds.includes(derivedStripeCustomerId);
+    return { derivedStripeCustomerId, stripeDerivedFrom: winnerHasIt && loserHasIt ? 'both' : (winnerHasIt ? 'winner' : 'loser'), conflict: false };
+  }
+  return { derivedStripeCustomerId: null, stripeDerivedFrom: null, conflict: true };
+}
+
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
@@ -1228,8 +1258,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // rows at card time) recomputed HERE over the locked rows: a child row
     // added or removed, a balance, a backfill, a fold that differs from what
     // the operator saw refuses with previewChanged, nothing committed.
+    let approvedEffects = null;
     if (expectedEffectsFingerprint) {
       const effects = await describeMergeEffects(trx, winner, loser);
+      approvedEffects = effects.financial_effects;
       if (effects.fingerprint !== expectedEffectsFingerprint) {
         const err = new Error('executeMerge: the rows that would move changed since this merge was approved — review a fresh proposal');
         err.previewChanged = true;
@@ -1250,36 +1282,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Validate before the sweep moves them; when neither customer row names
     // a Stripe profile but the saved cards agree on one, derive it (same
     // spirit as the loser-only-profile transfer below).
-    let derivedStripeCustomerId = null;
-    const pmStripeIdsFor = async (customerId) => [...new Set((await trx('payment_methods')
-      .where({ customer_id: customerId })
-      .whereNotNull('stripe_customer_id')
-      .select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
-    // The survivor ends with ONE Stripe profile (its own, or the loser's via
-    // the transfer below) and EVERY saved card on EITHER side must live on
-    // it — including the winner's own cards when its customer row hasn't
-    // named a profile yet (backfilling the loser's would strand them).
-    const loserPmStripeIds = await pmStripeIdsFor(loserId);
-    const winnerPmStripeIds = await pmStripeIdsFor(winnerId);
-    const allPmStripeIds = [...new Set([...winnerPmStripeIds, ...loserPmStripeIds])];
-    const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
-    const foreignPmStripe = allPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
-    let stripeDerivedFrom = null;
-    if (foreignPmStripe.length) {
-      if (!effectiveWinnerStripe && allPmStripeIds.length === 1) {
-        derivedStripeCustomerId = allPmStripeIds[0];
-        // WHICH side's cards identified the derived profile — journaled so
-        // an undo knows where the id belongs: 'loser' restores it to the
-        // split-out customer; 'winner'/'both' means the kept customer's
-        // own cards ride it and it stays put (the undo refuses if it would
-        // also return cards onto it).
-        const winnerHasIt = winnerPmStripeIds.includes(derivedStripeCustomerId);
-        const loserHasIt = loserPmStripeIds.includes(derivedStripeCustomerId);
-        stripeDerivedFrom = winnerHasIt && loserHasIt ? 'both' : (winnerHasIt ? 'winner' : 'loser');
-      } else {
-        throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
-      }
+    const savedCards = await deriveSavedCardStripeCustomer(trx, winner, loser);
+    if (savedCards.conflict) {
+      throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
     }
+    const { derivedStripeCustomerId, stripeDerivedFrom } = savedCards;
     // Two DIFFERENT third-party payer defaults is a human billing decision,
     // exactly like both-have-Stripe: refuse. (A loser-only payer transfers
     // with the backfills below — invoice precedence is
@@ -1908,8 +1915,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // An unreleasable session aborts the merge; the admin retries.
     {
       const PayCombined = require('./pay-combined');
-      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId);
-      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id);
+      // A confirmed card pinned the sessions it disclosed: the release
+      // re-reads them under the pay.combined lock and refuses if a session
+      // appeared or vanished since (previewChanged — fresh card).
+      const pinned = (side) => (approvedEffects ? approvedEffects.combined_payment_sessions[side].map((sess) => sess.payment_intent_id) : null);
+      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId, { expectedPaymentIntentIds: pinned('winner') });
+      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id, { expectedPaymentIntentIds: pinned('loser') });
       if (loserRelease.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
       }
@@ -4540,10 +4551,20 @@ async function describeMergeEffects(database, winner, loser) {
   } catch {
     loserPlanRates = 'unknown';
   }
-  // Row-derived prediction only: the saved-card Stripe derivation needs the
-  // executor's payment_methods reads, so it is disclosed as a caveat, never
-  // guessed (a guessed value would also make the fingerprint drift).
-  const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: null });
+  // The executor's own saved-card derivation (what the winner will actually
+  // adopt) feeds the backfill prediction; a profile conflict the executor
+  // would refuse is stated so the preview refuses too.
+  const savedCards = await deriveSavedCardStripeCustomer(database, winner, loser);
+  const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: savedCards.derivedStripeCustomerId });
+  // Stamped combined payment sessions on either side: the merge releases
+  // (cancels in Stripe) every unconfirmed one and DEFERS on loser-side
+  // money in flight — disclosed as the PaymentIntents involved and pinned;
+  // the release re-reads them under its own lock (expectedPaymentIntentIds).
+  const PayCombined = require('./pay-combined');
+  const combined_payment_sessions = {
+    winner: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, winner.id),
+    loser: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, loser.id),
+  };
   const predictedCollisionHandlers = referral?.folded_into_winner_promoter ? ['referral_promoters'] : [];
   const financial_effects = {
     account_credits_moved_to_winner: credits,
@@ -4555,9 +4576,16 @@ async function describeMergeEffects(database, winner, loser) {
     // Fill-if-empty identity/address/contact/billing values the winner takes
     // from the loser (predictWinnerBackfills — the executor's own rule).
     winner_backfills: backfills,
-    winner_backfills_caveat: 'a Stripe profile derived from saved cards may also be adopted when neither row names one',
+    stripe_profile_from_saved_cards: savedCards.derivedStripeCustomerId
+      ? { stripe_customer_id: savedCards.derivedStripeCustomerId, from: savedCards.stripeDerivedFrom } : null,
+    saved_card_profile_conflict: savedCards.conflict,
+    combined_payment_sessions,
     predicted_collision_handlers: predictedCollisionHandlers,
-    revertible_from_queue: predictedCollisionHandlers.length ? false : 'unless the sweep has to fold colliding rows (journaled)',
+    // Predicted from what can be read ahead (the referral fold); other
+    // unique-key collisions (tags, singleton prefs, conversations) are only
+    // discovered by the sweep itself, journaled as collision_handlers, and
+    // make the queue undo refuse — stated, never promised away.
+    revertible_from_queue: predictedCollisionHandlers.length ? false : 'unless the sweep has to fold colliding rows (journaled; the undo then refuses)',
   };
   const sortKeys = (obj) => Object.fromEntries(Object.entries(obj || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   const fingerprint = JSON.stringify({ moving: sortKeys(moving), financial_effects: sortKeys(financial_effects) });
@@ -4579,6 +4607,7 @@ module.exports = {
   previewMergeEffects,
   describeMergeEffects,
   predictWinnerBackfills,
+  deriveSavedCardStripeCustomer,
   inheritedAutopayRestrictions,
   acquirePairAdjudicationLock,
   REFERRAL_FOLD_COUNTERS,

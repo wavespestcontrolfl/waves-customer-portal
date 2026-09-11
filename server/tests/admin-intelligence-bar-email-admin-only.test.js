@@ -130,6 +130,12 @@ describe('email tools are admin-only in the intelligence bar', () => {
 
       const email = await queryToolNames(baseUrl, 'admin', 'email');
       expect(email).toEqual(expect.arrayContaining(EMAIL_TOOL_NAMES));
+      // The comms and email branches rebuild their lists instead of using
+      // BASE_TOOLS — the admin-only merge tool must still reach them (Codex #4348 r4 P2).
+      expect(email).toContain('merge_customers');
+      const comms = await queryToolNames(baseUrl, 'admin', 'comms');
+      expect(comms).toContain('merge_customers');
+      expect(await queryToolNames(baseUrl, 'tech', 'comms')).not.toContain('merge_customers');
     });
   });
 

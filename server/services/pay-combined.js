@@ -515,11 +515,13 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
  * writer creates the identical late-assignment gap). */
-async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId) {
-  if (!customerId) return { released: 0, inFlight: 0 };
-  // Same setup-serialization lock as the scheduled-service variant.
-  await lockCombinedCustomers(database, [String(customerId)]);
-  const rows = await database('invoices')
+// The stamped combined sessions a customer currently holds — the rows the
+// release below acts on. Read-only, no lock: a merge PREVIEW discloses
+// these (the PaymentIntents the merge would cancel, or defer on when money
+// is in flight) and pins them; the release re-reads under its lock and
+// refuses if the set moved (expectedPaymentIntentIds).
+function stampedCombinedSessionRows(database, customerId) {
+  return database('invoices')
     .where({ customer_id: customerId })
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): filtering them
@@ -527,6 +529,29 @@ async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerI
     // to detect.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
+}
+
+async function listUnconfirmedCombinedSessionsForCustomer(database, customerId) {
+  if (!customerId) return [];
+  const rows = await stampedCombinedSessionRows(database, customerId);
+  return rows.map((r) => ({ invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: String(r.stripe_payment_intent_id) }))
+    .sort((a, b) => (a.payment_intent_id < b.payment_intent_id ? -1 : a.payment_intent_id > b.payment_intent_id ? 1 : 0));
+}
+
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null } = {}) {
+  if (!customerId) return { released: 0, inFlight: 0 };
+  // Same setup-serialization lock as the scheduled-service variant.
+  await lockCombinedCustomers(database, [String(customerId)]);
+  const rows = await stampedCombinedSessionRows(database, customerId);
+  if (Array.isArray(expectedPaymentIntentIds)) {
+    const live = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))].sort();
+    const expected = [...new Set(expectedPaymentIntentIds.map(String))].sort();
+    if (live.length !== expected.length || live.some((id, i) => id !== expected[i])) {
+      const err = new Error('The customer\'s combined payment sessions changed since this merge was approved — review a fresh proposal');
+      err.previewChanged = true;
+      throw err;
+    }
+  }
   return releaseUnconfirmedCombinedSessions(database, rows);
 }
 
@@ -1157,6 +1182,7 @@ module.exports = {
   lockCombinedCustomerStable,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
+  listUnconfirmedCombinedSessionsForCustomer,
   releaseCombinedSessionBeforeCollection,
   revokeOutstandingCombinedSessionsOnGateOff,
   settleCombinedPaymentIntent,

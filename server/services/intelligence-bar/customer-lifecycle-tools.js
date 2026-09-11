@@ -102,6 +102,11 @@ async function previewMergeCustomers(winnerId, loserId) {
   const { winner, loser, eligibility } = check;
   const { describeMergeEffects } = require('../customer-dedupe');
   const { moving, financial_effects, fingerprint } = await describeMergeEffects(db, winner, loser);
+  // An unexecutable preview is a tool failure, not a card: the executor
+  // refuses saved cards on a profile other than the survivor's.
+  if (financial_effects.saved_card_profile_conflict) {
+    return { error: "Saved cards on these records belong to a different Stripe profile than the surviving customer's — resolve that in Stripe first.", code: 'stripe_profile_conflict' };
+  }
   const winnerName = customerName(winner);
   const loserName = customerName(loser);
   return {
@@ -121,7 +126,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     financial_effects,
     moving,
     effects_fingerprint: fingerprint,
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${financial_effects.combined_payment_sessions.winner.length + financial_effects.combined_payment_sessions.loser.length ? ` ${financial_effects.combined_payment_sessions.winner.length + financial_effects.combined_payment_sessions.loser.length} open combined payment session(s) listed above will be cancelled in Stripe first (money already moving defers the merge).` : ''} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
 
@@ -182,8 +187,11 @@ async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVe
 }
 
 async function mergeCustomers(input, actionContext = {}) {
-  const winnerId = input.winner_customer_id;
-  const loserId = input.loser_customer_id;
+  // Postgres accepts an uppercase UUID and returns the row's canonical
+  // lowercase id; the pair is matched by string, so normalize at the boundary.
+  const uuid = (v) => (v == null ? v : String(v).trim().toLowerCase());
+  const winnerId = uuid(input.winner_customer_id);
+  const loserId = uuid(input.loser_customer_id);
   if (!winnerId || !loserId) return { error: 'winner_customer_id and loser_customer_id are required' };
   if (String(winnerId) === String(loserId)) return { error: 'winner_customer_id and loser_customer_id must be two different customers' };
 
@@ -201,7 +209,7 @@ const CUSTOMER_LIFECYCLE_TOOLS = [
   {
     name: 'merge_customers',
     description: `Merge a duplicate customer record into the real one. Use this for a duplicate "Unknown" website/lead stub that shares a phone with an existing customer, or any other confirmed duplicate pair (check find_duplicates first when unsure which record should win). The loser is archived (soft-deleted) and every one of its appointments, service records, invoices, estimates, and messages is repointed onto the winner in one transaction; the merge is journaled and reviewable/revertible afterward from the duplicates queue.
-Refuses when either id is missing, the two ids are the same, either customer is already archived, or the underlying merge engine finds a conflict it cannot resolve automatically (e.g. both customers carry their own Stripe profile, or different billing modes) — those must be reconciled first.
+Refuses when either id is missing, the two ids are the same, either customer is already archived, the pair is not an eligible duplicate-queue candidate (use find_duplicates: its queue section names the canonical winner, each candidate's id, tier and reasons), or the underlying merge engine finds a conflict it cannot resolve automatically (e.g. both customers carry their own Stripe profile, saved cards on a third profile, or different billing modes) — those must be reconciled first.
 The first call returns a PREVIEW naming both customers (name, phone, email) and counts of what would move; nothing changes until the operator confirms from the card.`,
     input_schema: {
       type: 'object',
