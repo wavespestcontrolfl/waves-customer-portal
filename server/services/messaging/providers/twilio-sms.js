@@ -168,8 +168,12 @@ async function sendViaTwilio(input, { preSendCheck, withSmsHandoff } = {}) {
     //    line is never a customer). Without this branch the generic
     //    success:false path below would record PROVIDER_FAILURE and the
     //    queued-send lanes would retry a send that can never succeed.
-    if (input.channel === 'push' && (result.suppressed || result.gateBlocked || result.templateDisabled || result.guardBlocked)) {
-      return { sent: false, blocked: true, provider: 'push', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
+    const suppressed = result.suppressed || result.gateBlocked || result.templateDisabled;
+    // Review delivery timestamps and cadence advancement require an actual
+    // send. Normalize suppression before any review caller can stamp success.
+    if ((input.channel === 'push' && (suppressed || result.guardBlocked))
+      || (input.purpose === 'review_request' && suppressed)) {
+      return { sent: false, blocked: true, provider: input.channel === 'push' ? 'push' : 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
     }
     if (result.appUnavailable) {
       return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: result.error || 'push_unavailable' };

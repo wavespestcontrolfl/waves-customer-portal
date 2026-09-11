@@ -25,6 +25,16 @@ describe('Twilio messaging provider adapter', () => {
     TwilioService.sendSMS.mockResolvedValue({ success: true, sid: 'SM123', deliveryOutcome: 'accepted' });
   });
 
+  test.each([
+    { success: true, sid: 'gate-blocked', gateBlocked: true },
+    { success: true, sid: 'template-disabled', templateDisabled: true },
+    { success: true, sid: 'owner-silence', suppressed: true },
+  ])('review suppression is a no-send outcome before callers stamp delivery: %j', async outcome => {
+    TwilioService.sendSMS.mockResolvedValueOnce(outcome);
+    expect(await sendViaTwilio(baseInput({ purpose: 'review_request', audience: 'customer' })))
+      .toMatchObject({ sent: false, blocked: true, code: 'DELIVERY_SUPPRESSED' });
+  });
+
   test('does not forward media URLs for automated sends without explicit authorization', async () => {
     await sendViaTwilio(baseInput({
       metadata: {
