@@ -1772,6 +1772,33 @@ postgres('visit summary recipient recovery', () => {
     } finally { await mockPg('invoices').where({ id: invoiceId }).del(); }
   });
 
+  test('a coordinator replay after the invoice was scheduled closes again without re-entering collection under held member rows', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payment_needed', invoiceId } } });
+      const scheduled = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(scheduled).toMatchObject({ status: 'scheduled' });
+      // The process died between scheduling the send and closing the packet:
+      // the recovery sweep runs the coordinator again over the scheduled invoice.
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: null });
+      const Payment = require('../services/visit-completion-payment');
+      const collect = jest.spyOn(Payment, 'collectVisitCompletionInvoice');
+      try {
+        expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payment_needed', invoiceId } } });
+        // One collection read up front; the ownership transaction decides the
+        // rest itself instead of calling the collector on its held rows.
+        expect(collect).toHaveBeenCalledTimes(1);
+        expect(Boolean(collect.mock.calls[0][1]?.isTransaction)).toBe(false);
+      } finally { collect.mockRestore(); }
+      expect(await mockPg('invoices').where({ id: invoiceId }).first())
+        .toMatchObject({ status: 'scheduled', scheduled_send_at: scheduled.scheduled_send_at, scheduled_send_error: null });
+      expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'done' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    } finally { await mockPg('invoices').where({ id: invoiceId }).del(); }
+  });
+
   test.each(['customer', 'member'])('a third-party payer assigned to the %s after the self-pay invoice was minted holds the visit instead of scheduling a homeowner pay link', async (target) => {
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,

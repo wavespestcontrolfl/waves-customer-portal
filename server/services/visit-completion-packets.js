@@ -335,6 +335,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     // Decided and applied under the same held rows the scheduled-send claim
     // uses, so a payer change cannot land between the decision and the
     // withdrawal or the scheduling.
+    let recollect = false;
     payment = await database.transaction(async (trx) => {
       const { visit, billed, payerId: owner } = await resolvePacketOwnershipLocked(packet.id, trx);
       if (owner) {
@@ -346,12 +347,23 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
           status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null,
           updated_at: trx.fn.now(),
         });
-      // Nothing moved: the draft was voided (or otherwise left draft) since
-      // the collector read it. The collector's own terminal-state handling
-      // (hold + office review) decides, never a clean close on a stale read.
-      if (!scheduled) return require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, trx);
+      if (scheduled) return payment;
+      // Nothing moved. A self-pay invoice already on the send queue is this
+      // coordinator's own earlier scheduling (a replay after that commit):
+      // the queue owns it and there is nothing to decide again.
+      const current = await trx('invoices').where({ id: payment.invoiceId, visit_completion_packet_id: packet.id })
+        .first('status', 'payer_id', 'payer_statement_id');
+      if (current?.status === 'scheduled' && !current.payer_id && !current.payer_statement_id) return payment;
+      // Otherwise the draft was voided (or otherwise left draft) since the
+      // collector read it. The collector's own terminal-state handling (hold
+      // + office review) decides, never a clean close on a stale read. It
+      // runs after these rows are released: its send claim opens its own
+      // transaction and takes the member rows FOR UPDATE, which would wait
+      // forever on the FOR SHARE this transaction holds.
+      recollect = true;
       return payment;
     });
+    if (recollect) payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
   }
   let delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
   // Canonical completion gives these two effects different eligibility: a
