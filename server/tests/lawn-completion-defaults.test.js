@@ -1,11 +1,11 @@
-const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
+const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 
 function fixture() {
   return {
     context: { isLawn: true, propertyId: 'property', propertyMatchesProfile: true, history: { rows: [] } },
     plan: {
       serviceId: 'visit', appointmentAssignment: {},
-      propertyGate: { serviceTier: 'Silver', trackKey: 'st_augustine', blocks: [] },
+      propertyGate: { serviceTier: 'Silver', trackKey: 'st_augustine', blocks: [], propertyMatchesProfile: true },
       protocol: { structured: {
         status: 'active', grassTrack: 'st_augustine', protocolKey: 'protocol', version: '1', window: { key: 'june' },
         products: [{ productId: 'product', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' }],
@@ -135,12 +135,21 @@ test('a deactivated catalog product is offered neither as a default nor under "A
   expect(result.options).toEqual([]);
 });
 
-test('a nonmember can use an explicitly assigned window; a spot default stays spot work', () => {
+test('a nonmember can use a complete explicit assignment; a spot default stays spot work', () => {
   const { plan, context } = fixture();
   plan.propertyGate.serviceTier = null;
-  plan.appointmentAssignment.windowKey = 'june';
+  plan.appointmentAssignment = { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' };
   plan.protocol.structured.products[0].applicationMode = 'spot';
   expect(buildLawnCompletionDefaults(plan, context).items[0].applicationMethod).toBe('spot_treatment');
+});
+
+test('a nonmember with a partial assignment (window only) has no program: the calendar-resolved protocol is not adopted', () => {
+  const { plan, context } = fixture();
+  plan.propertyGate.serviceTier = null;
+  plan.appointmentAssignment = { windowKey: 'june' };
+  const defaults = buildLawnCompletionDefaults(plan, context);
+  expect(defaults.items).toEqual([]);
+  expect(defaults.message).toBe('No assigned lawn plan for this visit. Add the products actually applied.');
 });
 
 test.each(['WDG', 'WG', 'WP', 'liquid', 'granular', 'G', 'Granule (G)', 'Granule (restricted-use)', 'Granular pre-emergent on fertilizer', 'Granular bait', 'Water-dispersible granule (WDG)', 'Water-soluble granule (WSG)', 'Water-dispersible granule (WG)', 'Suspension concentrate (SC)'])('formulation %s determines the default application method, not its weight unit', formulation => {
@@ -200,4 +209,25 @@ test('an archived recipe accepts derived-rate defaults only inside the archived 
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'oz', rateSource: 'catalog_default_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: 0, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: null, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
+});
+
+test.each([
+  ['member without an assignment', {}, 'Silver', true],
+  ['nonmember without a program', {}, null, false],
+  ['nonmember whose assignment the plan resolved', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true],
+  ['nonmember with a partial assignment (window only, key/version wildcards)', { windowKey: 'june' }, null, false],
+  ['nonmember with a partial assignment (key + window, no version)', { protocolKey: 'protocol', windowKey: 'june' }, null, false],
+  ['member whose assignment the plan did NOT resolve (defaults gate off → calendar protocol)', { protocolKey: 'protocol', protocolVersion: '2', windowKey: 'september' }, 'Silver', false],
+  ['assignment on a plan with no structured window', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'no-window'],
+  ['member whose turf profile does NOT prove this property', {}, 'Silver', 'unproven'],
+  ['member with the property proof never evaluated (defaults gates off)', {}, 'Silver', 'unevaluated'],
+])('ledger attribution — %s', (_label, assignment, tier, expected) => {
+  const { plan } = fixture();
+  plan.appointmentAssignment = assignment;
+  plan.propertyGate.serviceTier = tier;
+  if (expected === 'no-window') { plan.protocol.structured = null; expected = false; }
+  if (expected === 'unproven') { plan.propertyGate.propertyMatchesProfile = false; expected = false; }
+  if (expected === 'unevaluated') { plan.propertyGate.propertyMatchesProfile = null; expected = false; }
+  expect(lawnPlanAttributesVisit(plan)).toBe(expected);
+  expect(lawnPlanAttributesVisit(null)).toBe(false);
 });

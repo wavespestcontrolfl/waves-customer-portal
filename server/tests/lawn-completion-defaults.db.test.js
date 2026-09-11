@@ -88,6 +88,20 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
     expect((await loadLawnCompletionContext(joined(unfinished, f), knex)).propertyMatchesProfile).toBe(false);
   });
 
+  test('a tierless assigned visit stamped to a second address cannot adopt the sole saved property (codex #4113 P1)', async () => {
+    const f = await fixture(knex);
+    // The plan query joins the CUSTOMER address onto the visit; the visit is
+    // stamped elsewhere with no property id. The sole saved property matches
+    // the account address, never the stamped one.
+    const visit = await f.visit(0, { property_id: null, lawn_protocol_key: 'fixture_lawn', lawn_protocol_version: 'fixture1', lawn_protocol_window_key: 'fixture_6',
+      service_address_line1: '200 Fixture Street', service_address_city: f.property.city, service_address_zip: f.property.zip });
+    const result = await loadLawnCompletionContext(joined(visit, f), knex);
+    expect(result.propertyMatchesProfile).toBe(false);
+    expect(result.propertyId).toBe(null);
+    // The proof the completion transaction rebuilds from locked rows: keyed by the stamp.
+    expect(result.addressProof).toEqual({ propertyId: null, propertyAddressKey: null, visitAddressKey: expect.stringMatching(/^200/), stamped: true });
+  });
+
   test('an explicit second property gets its own history and no primary turf area', async () => {
     const f = await fixture(knex);
     const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: f.property.city, zip: f.property.zip }).returning('*');
@@ -242,5 +256,64 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
       expect(Number(nutrient.k_applied_per_1000)).toBe(Math.round(area) === 1000 ? 0.5 : 0.2);
     }
     expect(Number((await knex('customer_turf_profiles').where({ id: profile.id }).first()).lawn_sqft)).toBe(4000);
+  });
+
+  describe('GATE_LAWN_ACTUALS_LEDGER', () => {
+    afterEach(() => { delete process.env.GATE_LAWN_ACTUALS_LEDGER; });
+
+    test('a one-time lawn visit records the frozen property and unattributed per-product actuals, idempotently', async () => {
+      process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+      const f = await fixture(knex);
+      const visit = await f.visit(0, { scheduled_date: '2026-09-07', service_type: 'Lawn one-time fertilization' });
+      const record = await f.record(visit);
+      let plan = null;
+      try { plan = await buildPlanForService(visit.id, { db: knex }); } catch { plan = null; }
+      const { lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
+      expect(plan === null || lawnPlanAttributesVisit(plan)).toBe(false);
+      const [product] = await knex('products_catalog').insert({ name: 'Fixture one-time iron', category: 'micronutrient', rate_unit: 'fl oz', active: true }).returning('*');
+      const [applied] = await knex('service_products').insert({
+        service_record_id: record.id, product_id: product.id, product_name: product.name, application_rate: 3, rate_unit: 'fl oz',
+        total_amount: 4.5, amount_unit: 'fl oz', application_method: 'spot_spray', application_area: 'Front yard', area_value: 1500, area_unit: 'sqft',
+      }).returning('*');
+      const args = {
+        service: visit, serviceRecord: record, plan: null, serviceProducts: [applied],
+        completionInput: { treatedSqft: null, incompleteVisit: true, skippedProducts: [
+          // Defaults a form showed from a plan this completion did not attribute
+          // (one retired meanwhile): neither is this visit's protocol skip, so
+          // neither lands as a `skipped` actual — no FK 500, no false skip count.
+          { productId: product.id, productName: 'Fixture removed default' },
+          { productId: '00000000-0000-4000-8000-00000000dead', productName: 'Fixture retired default' },
+        ] },
+      };
+      const completion = await recordLawnProtocolCompletion(knex, args);
+      expect(completion).toMatchObject({ property_id: visit.property_id, customer_id: f.customerId, protocol_key: null, window_key: null, treated_sqft: null, total_carrier_gal: null });
+      // The applied product is never also a skip (it drops out of both lists);
+      // the retired default stays on the metadata as unlisted.
+      expect(completion.metadata).toMatchObject({ attribution: 'none', treatedSqftSource: 'missing', incompleteVisit: true, unlistedSkippedProducts: [
+        { productId: '00000000-0000-4000-8000-00000000dead', productName: 'Fixture retired default' },
+      ] });
+      const actuals = () => knex('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).orderBy('status').orderBy('product_name');
+      const first = await actuals();
+      expect(first.map(row => row.status)).toEqual(['applied']);
+      expect(first[0]).toMatchObject({ service_product_id: applied.id, protocol_product_id: null });
+      expect(first[0].metadata).toMatchObject({ areaValue: 1500, areaUnit: 'sqft', applicationArea: 'Front yard', applicationMethod: 'spot_spray' });
+      // A retry re-runs the same writer: one completion row, the same actual row.
+      const again = await recordLawnProtocolCompletion(knex, args);
+      expect(again.id).toBe(completion.id);
+      expect((await actuals()).length).toBe(1);
+      expect(await knex('lawn_protocol_service_completions').where({ service_record_id: record.id }).count('id as count').first()).toMatchObject({ count: '1' });
+    });
+
+    test('gate off leaves a one-time lawn visit unrecorded while a member visit records attribution plus the property', async () => {
+      const f = await fixture(knex);
+      const oneTime = await f.visit(0, { scheduled_date: '2026-09-07' });
+      expect(await recordLawnProtocolCompletion(knex, { service: oneTime, serviceRecord: await f.record(oneTime), plan: null, serviceProducts: [], completionInput: {} })).toBeNull();
+      process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+      const { f: member, visit } = await plannedVisit();
+      const plan = await buildPlanForService(visit.id, { db: knex, completionDefaultsEnabled: true, lawnSqft: 2500 });
+      const completion = await recordLawnProtocolCompletion(knex, { service: visit, serviceRecord: await member.record(visit), plan, completionInput: { treatedSqft: 2500 } });
+      expect(completion).toMatchObject({ property_id: visit.property_id, protocol_key: 'fixture_lawn', window_key: 'fixture_6', treated_sqft: 2500 });
+      expect(completion.metadata).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'visit' });
+    });
   });
 });
