@@ -975,7 +975,8 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
         const mock = makeMock(fixture('seq-wk-sat', { lastAskAgoMs: 80 * 3600000, step: { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true } }));
         db.mockImplementation(mock);
         const sat8 = new Date('2026-08-08T08:00:00-04:00');
-        mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deferred: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: sat8.toISOString() });
+        // A quiet-hours hold is a DEFINITE not-sent (the real sender names it so).
+        mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deferred: true, retryable: true, deliveryOutcome: 'not_sent', code: 'QUIET_HOURS_HOLD', nextAllowedAt: sat8.toISOString() });
 
         const out = await ReviewService.processReviewSequences();
 
