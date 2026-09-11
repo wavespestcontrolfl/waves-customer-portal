@@ -45,7 +45,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { dunningStoppedInvoiceIds } = require('./completion-balance-sweep');
-const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-helpers');
+const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 
 // Stripe metadata values cap at 500 chars. The compact `${id}:${cents}`
 // encoding spends ~44 chars per sibling, so 8 siblings stay comfortably
@@ -364,6 +364,13 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     if (stoppedNow.has(String(entry.invoiceId))) throw staleErr(`dunning stopped on invoice ${row.invoice_number}`);
     if (!isInvoiceCollectibleStatus(row.status)) throw staleErr(`invoice ${row.invoice_number} is ${row.status}`);
     if (row.payer_id || row.payer_statement_id) throw staleErr(`invoice ${row.invoice_number} became payer-billed`);
+    // The WITHDRAWAL stamp under the same lock (pre-push P0): a combined-visit
+    // packet invoice whose Bill-To moved after the homeowner held its link
+    // keeps a collectible status and a NULL payer_id, so neither check above
+    // sees it, and the live resolve below reads only this invoice's own
+    // representative service — the payer may sit on another billed member of
+    // the same packet. This is the allocation's last fence before money moves.
+    if (invoiceWithdrawnFromCustomer(row)) throw staleErr(`invoice ${row.invoice_number} was withdrawn to a third-party payer`);
     // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
     // anchor exemption removed per codex r5 P1): a payer assigned after
     // invoice creation lives on scheduled_services (or as the customer's

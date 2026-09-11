@@ -3021,6 +3021,43 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a RETURNED provider failure after dispatch is as uncertain as a thrown one', async () => {
+    // The Twilio adapter catches provider errors and reports them as
+    // `sent: false` / PROVIDER_FAILURE instead of raising, so the throw
+    // branch never sees them (pre-push P1). With the durable row still
+    // `sending`, the request was made and its response was lost — applying
+    // retry bookkeeping would release it for a second send on top of a
+    // delivered one.
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'sms', triggered_by: 'auto' });
+    const send = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    const args = {
+      request: { id: askId },
+      customer: { id: fixture.customerId },
+      contact: { phone: '+12025550123' },
+      vars: { first: 'Pat', review_url: 'https://waves.test/r/abc' },
+      templateId: null,
+      customBody: 'How did we do? {review_url}',
+      manageRetryVia: 'cron',
+    };
+    try {
+      send.mockImplementationOnce(async () => ({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset', retryable: true }));
+      expect(await Review._sendOutreachSms(args)).toMatchObject({ ok: false, uncertain: true, retryable: false, reason: 'provider_uncertain' });
+      // The claim is left standing for the stranded-send reconciliation.
+      expect(await mockPg('review_requests').where({ id: askId }).first('status')).toMatchObject({ status: 'sending' });
+
+      // The same returned failure on a row the handoff already released is an
+      // ordinary retryable failure — nothing was stranded.
+      await mockPg('review_requests').where({ id: askId }).update({ status: 'pending', claimed_at: null });
+      send.mockImplementationOnce(async () => ({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset', retryable: true }));
+      expect(await Review._sendOutreachSms(args)).not.toMatchObject({ uncertain: true });
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
   test('a provider throw after dispatch leaves the ask sending and the sequence step claimed', async () => {
     const Review = require('../services/review-request');
     const askId = randomUUID();

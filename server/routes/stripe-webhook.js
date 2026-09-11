@@ -30,7 +30,7 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { isEnabled } = require('../config/feature-gates');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -1536,6 +1536,26 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     hasMatchingSavedCardAttempt: !!savedCardAttemptForTenderGuard,
   })) {
     const reason = `Late saved-card PI ${piId} succeeded after invoice ${invoiceForTenderGuard.id} was already ${invoiceForTenderGuardStatus}`;
+    logger.error(`[stripe-webhook] Quarantining ${reason}`);
+    await recordOrphanSucceededPaymentIntent(
+      paymentIntent,
+      chargedTotal ?? centsToDollars(paymentIntent.amount),
+      reason,
+    );
+    return;
+  }
+  // A PaymentIntent the customer minted BEFORE Bill-To moved is confirmed
+  // client-side at Stripe and never re-enters our routes, so no server-side
+  // route guard can refuse it — this webhook is the first place we see the
+  // money (pre-push P0). Settling it would mark an invoice now owned by
+  // third-party AP as paid with the homeowner's funds, so the charge is
+  // quarantined for manual refund/review the same way every other
+  // must-not-settle success is. Only a CUSTOMER-initiated intent: an
+  // office-initiated saved-card charge that was already in flight when the
+  // withdrawal committed is the office's own collection and settles normally.
+  if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard
+    && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)) {
+    const reason = `PI ${piId} succeeded on invoice ${invoiceForTenderGuard.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
     logger.error(`[stripe-webhook] Quarantining ${reason}`);
     await recordOrphanSucceededPaymentIntent(
       paymentIntent,

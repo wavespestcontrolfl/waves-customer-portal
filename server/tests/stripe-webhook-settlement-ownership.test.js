@@ -48,6 +48,9 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), g
 jest.mock('../services/invoice-helpers', () => ({
   INVOICE_UNCOLLECTIBLE_STATUSES: ['void'],
   invoiceAmountDue: jest.fn(() => 100),
+  // Pure predicate over the row — the real one, so the withdrawn-invoice
+  // quarantine is exercised rather than stubbed away.
+  invoiceWithdrawnFromCustomer: jest.requireActual('../services/invoice-helpers').invoiceWithdrawnFromCustomer,
 }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendPaymentFailed: jest.fn(async () => {}) }));
@@ -120,9 +123,13 @@ function mockMakeBuilder(table, { inTrx } = {}) {
   // report a row so the handler proceeds to that insert.
   b.update = async () => (table === 'payments' ? 0 : 1);
   b.del = async () => 1;
-  b.insert = async (payload) => {
+  b.insert = (payload) => {
     mockState.inserts.push({ table, payload });
-    return [{ id: 'new-row' }];
+    // Thenable so `await insert(...)` still yields the row, with the
+    // upsert chain the orphan-quarantine recorder uses.
+    const result = Promise.resolve([{ id: 'new-row' }]);
+    result.onConflict = () => ({ ignore: async () => 1, merge: async () => 1 });
+    return result;
   };
   b.returning = async () => [{ id: 'new-row' }];
   return b;
@@ -181,5 +188,30 @@ describe('payment settlement takes ownership from the LOCKED invoice row', () =>
     const paymentInsert = mockState.inserts.find((i) => i.table === 'payments');
     expect(paymentInsert).toBeTruthy();
     expect(paymentInsert.payload.customer_id).toBe(WINNER);
+  });
+});
+
+// A PaymentIntent the customer minted BEFORE Bill-To moved is confirmed
+// client-side at Stripe and never re-enters our routes, so the route guards
+// cannot refuse it — this webhook is the first place the money is visible
+// (pre-push P0). Settling it would mark an invoice now owned by third-party
+// AP as paid with the homeowner's funds.
+describe('a withdrawn invoice never settles from a customer-minted intent', () => {
+  test('quarantines the charge instead of recording the payment', async () => {
+    mockState.preLockInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'payer_billed:5:hold' };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeTruthy();
+  });
+
+  test('an ordinary delivery failure still settles normally', async () => {
+    mockState.preLockInvoice = { ...mockState.preLockInvoice, scheduled_send_error: 'smtp 550 mailbox unavailable' };
+
+    await handlePaymentIntentSucceeded(succeededPI());
+
+    expect(mockState.inserts.find((i) => i.table === 'payments')).toBeTruthy();
+    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
   });
 });

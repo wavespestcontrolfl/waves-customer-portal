@@ -3899,6 +3899,19 @@ const ReviewService = {
       }
       return summaryVerdict;
     }
+    // A RETURNED provider failure is as ambiguous as a thrown one (pre-push
+    // P1): the Twilio adapter catches provider errors and reports them as
+    // `sent: false` / PROVIDER_FAILURE rather than raising, so the throw
+    // branch above never sees them. If the durable row is still `sending`,
+    // the provider request was made and its response was lost — the same
+    // state the stranded-send reconciliation exists to prove or release.
+    // Applying retry bookkeeping to it would reset the row to
+    // pending/deferred/failed and let a second send go out on top of a
+    // delivered one.
+    if (result?.sent === false && await this._providerOutcomeUnknown(request.id)) {
+      logger.error(`[review] outreach SMS outcome unknown after a returned provider failure (requestId=${request.id} code=${result.code || "none"})`);
+      return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "sms", requestId: request.id };
+    }
     try {
       return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
     } catch (bookErr) {
