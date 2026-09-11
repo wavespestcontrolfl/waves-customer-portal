@@ -14,6 +14,7 @@ const {
 
 const root = path.resolve(__dirname, "../..");
 const output = path.join(root, ".tmp/admin-pipeline-foundation");
+const leadsOnly = process.argv.includes("--leads-only");
 const now = "2026-09-11T14:00:00.000Z";
 const lead = {
   id: "lead-fixture",
@@ -336,6 +337,26 @@ async function main() {
       await page.getByText("Organic", { exact: true }).waitFor();
       assert.equal(await analyticsButton.getAttribute("aria-current"), "page");
       assert.match(await analyticsButton.getAttribute("class"), /bg-zinc-900/);
+      await page.mouse.move(0, 0);
+      await analyticsButton.evaluate((node) =>
+        Promise.all(
+          node.getAnimations().map((animation) => animation.finished),
+        ),
+      );
+      assert.deepEqual(
+        await analyticsButton.evaluate((node) => {
+          const style = getComputedStyle(node);
+          return {
+            backgroundColor: style.backgroundColor,
+            color: style.color,
+          };
+        }),
+        {
+          backgroundColor: "rgb(24, 24, 27)",
+          color: "rgb(255, 255, 255)",
+        },
+        `Selected analytics control contrast at ${width}`,
+      );
       const leadsShot = path.join(output, `leads-${width}.png`);
       await page.screenshot({ path: leadsShot, fullPage: true });
       report.screenshots.push(leadsShot);
@@ -350,6 +371,18 @@ async function main() {
         ),
         `Leads overflow at ${width}`,
       );
+      if (leadsOnly) {
+        report.scenarios.push({
+          width,
+          leadsList: true,
+          leadDialog: true,
+          board: true,
+          sources: true,
+          analytics: true,
+        });
+        await context.close();
+        continue;
+      }
 
       await page
         .getByRole("button", { name: "Estimates", exact: true })

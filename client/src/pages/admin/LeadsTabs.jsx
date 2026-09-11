@@ -31,6 +31,7 @@ import {
   THead,
   TR,
   Textarea,
+  UiSurface,
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -4003,7 +4004,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
   return (
-    <div className="min-w-0 max-w-[1400px] text-zinc-900">
+    <UiSurface className="min-w-0 max-w-[1400px] text-zinc-900">
       <LeadsWorkspaceNav
         active={tab}
         onChange={setTab}
@@ -4030,6 +4031,6 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       {tab === "sources" && renderSources()}
       {tab === "analytics" && renderAnalytics()}
       {renderModal()}
-    </div>
+    </UiSurface>
   );
 }
