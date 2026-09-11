@@ -1436,6 +1436,30 @@ describe('executeMerge', () => {
     }
   });
 
+  it('withdraws the surviving record\'s packet invoices when the WINNER already had the payer', async () => {
+    // The opposite merge direction (codex r25 P1): a payer-linked winner
+    // absorbing a self-pay loser writes no backfill at all, yet the sweep just
+    // repointed the loser's sent/viewed/overdue packet invoices onto a
+    // payer-owned record. Gating the withdrawal on `backfills.payer_id` left
+    // exactly this direction collectible through the homeowner's link.
+    const Packets = require('../services/visit-completion-packets');
+    const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockResolvedValue(false);
+    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(1);
+    try {
+      const { trx } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: 5 },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: null },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      expect(withdraw).toHaveBeenCalledWith(trx, { customerId: WINNER });
+    } finally {
+      inFlight.mockRestore();
+      withdraw.mockRestore();
+    }
+  });
+
   it('transfers a loser-only payer default and clears it on the retired row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 };

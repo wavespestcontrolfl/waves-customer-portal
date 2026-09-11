@@ -1854,7 +1854,18 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // the same ownership-adding path every other Bill-To writer runs takes
     // the winner here, after the payer is applied and the sweep has
     // repointed the loser's invoices onto it.
-    if (backfills.payer_id) {
+    // Direction-independent (codex r25 P1): the withdrawal is owed whenever
+    // the SURVIVING record is payer-owned, not only when the loser supplied
+    // the payer. A payer-linked winner absorbing a self-pay loser writes no
+    // backfill at all, yet the sweep just repointed the loser's
+    // `sent`/`viewed`/`overdue` packet invoices onto that payer-owned winner
+    // — gating on `backfills.payer_id` left exactly that direction
+    // collectible through the homeowner's existing link. Two self-pay records
+    // merging still run nothing — Bill-To did not move, and a per-job payer on
+    // a repointed service was already withdrawn by the writer that assigned it.
+    // Both directions are fenced against a send in flight (the loser-side check
+    // before the sweep, the winner-side one just above).
+    if (backfills.payer_id || winner.payer_id) {
       await require('./visit-completion-packets').withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
     }
 
@@ -4329,6 +4340,22 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           await trx('customers').where({ id: winnerId }).update({ accepted_terms_version: remainingLatest, updated_at: trx.fn.now() });
         }
       }
+    }
+
+    // Ownership-REMOVING side of the undo (codex r25 P2): the merge withdrew
+    // every packet invoice the inherited payer took over, and an undo that
+    // clears or restores `payer_id` hands that debt back to self-pay. Without
+    // this the rows keep their `payer_billed:` stamps, billing holds and payer
+    // alerts forever — their send and payment rails stay blocked. Run for both
+    // records (the loser's invoices moved back to it during the un-repoint
+    // above) and only here, after the winner patch AND the loser restore have
+    // committed, so the resolver reads the post-undo Bill-To. Reconciliation
+    // resolves ownership per packet and releases nothing that still has a live
+    // payer, so an undo that leaves the payer in place is a no-op.
+    if (Object.prototype.hasOwnProperty.call(winnerPatch, 'payer_id')) {
+      const Packets = require('./visit-completion-packets');
+      await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
+      await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: loserId });
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({

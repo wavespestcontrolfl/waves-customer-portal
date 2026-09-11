@@ -750,6 +750,18 @@ describe('revertMerge', () => {
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
   const JOURNAL = 'cccccccc-0000-0000-0000-000000000001';
 
+  // An undo that hands debt back to self-pay releases the packet invoices the
+  // merge withdrew. That reconciliation runs its own queries against the real
+  // schema, which this suite's trx stub does not model — stubbed here so every
+  // revert test exercises the undo itself, and asserted on directly below.
+  let reconcileWithdrawn;
+  beforeEach(() => {
+    reconcileWithdrawn = jest
+      .spyOn(require('../services/visit-completion-packets'), 'reconcileWithdrawnPacketInvoices')
+      .mockResolvedValue(0);
+  });
+  afterEach(() => reconcileWithdrawn.mockRestore());
+
   // Which TIMESTAMP columns each table actually has, transcribed from the
   // migrations. Selecting one a table lacks raises undefined_column in
   // Postgres even when no rows match — the r9 regression (an unconditional
@@ -2911,6 +2923,46 @@ describe('revertMerge', () => {
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
     expect(state.winnerPatch.payer_id).toBe(null);
     expect(result.skipped).toHaveLength(0);
+  });
+
+  it('reconciles withdrawn packet invoices on both records when the undo removes the inherited payer', async () => {
+    // The merge withdrew every packet invoice the inherited payer took over
+    // (stamp, billing hold, payer alert). An undo that hands the debt back to
+    // self-pay must release them or their send and payment rails stay blocked
+    // forever (codex r25 P2). Run after BOTH the winner patch and the loser
+    // restore, and for both records — the loser's invoices moved back to it
+    // during the un-repoint.
+    const journal = baseJournal();
+    journal.winner_backfills = { ...journal.winner_backfills, payer_id: 5 };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), payer_id: 5 },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.payer_id).toBe(null);
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(trx, { customerId: WINNER });
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(trx, { customerId: LOSER });
+
+    // An undo that leaves Bill-To alone has nothing to release.
+    reconcileWithdrawn.mockClear();
+    const { trx: noPayer } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(noPayer));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(reconcileWithdrawn).not.toHaveBeenCalled();
   });
 
   it('refuses (409) on unjournaled payment_method_consents tied to a returned card; journaled consents pass', async () => {

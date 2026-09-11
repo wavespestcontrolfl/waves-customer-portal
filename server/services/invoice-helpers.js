@@ -138,7 +138,19 @@ function assertInvoiceCollectible(invoiceOrStatus) {
   // Checked last so a terminal status still reports its own, more accurate
   // reason (a withdrawal never stamps a terminal row, but a row that settled
   // between the withdrawal and this read can carry both).
-  if (invoiceWithdrawnFromCustomer(row)) {
+  assertInvoiceNotWithdrawnFromCustomer(row);
+}
+
+// The withdrawal half of assertInvoiceCollectible on its own, for the seams
+// that deliberately let a terminal status through (the /confirm rails accept
+// an already-`paid` row so a replayed PaymentIntent returns its recorded
+// payment idempotently). Those call sites gate assertInvoiceCollectible on a
+// terminal-status list, which is exactly the set a withdrawn invoice is NOT
+// in — `sent`/`viewed`/`overdue` with a NULL payer_id — so the row-aware gate
+// never ran for them. Call this AFTER the terminal-status handling so a
+// settled row still reports its own reason first.
+function assertInvoiceNotWithdrawnFromCustomer(invoice) {
+  if (invoiceWithdrawnFromCustomer(invoice)) {
     throw new Error('This visit is now billed to a third-party payer and is no longer payable here');
   }
 }
@@ -184,6 +196,7 @@ module.exports = {
   visitRefusesSettlement,
   lockVisitForSettlement,
   assertInvoiceCollectible,
+  assertInvoiceNotWithdrawnFromCustomer,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,

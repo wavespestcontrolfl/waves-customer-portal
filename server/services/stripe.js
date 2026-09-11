@@ -50,7 +50,7 @@ const {
   invoicePaymentStatusForIntent,
   nextInvoiceStatusAfterFailedPayment,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -5341,6 +5341,13 @@ const StripeService = {
     if (invoice.status === 'prepaid') {
       throw new Error('Invoice is already prepaid');
     }
+    // UNCONDITIONAL (codex r25 P1): the assertion above fires only for the
+    // terminal statuses, which a withdrawn packet invoice is never in — it
+    // keeps `sent`/`viewed`/`overdue` so the homeowner's link still resolves.
+    // Without this an already-issued PaymentIntent settles customer funds
+    // against debt that now belongs to AP. After the paid branch so a replayed
+    // PI still returns its recorded payment.
+    assertInvoiceNotWithdrawnFromCustomer(invoice);
     if (invoice.status === 'processing'
       && String(invoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
       throw new Error('Bank payment is already processing');
@@ -5666,6 +5673,10 @@ const StripeService = {
         if (lockedInvoice.status === 'prepaid') {
           throw new Error('Invoice is already prepaid');
         }
+        // Re-checked under the row lock for the same reason as the pre-lock
+        // read (codex r25 P1): a Bill-To move committing between them must not
+        // let this settlement through.
+        assertInvoiceNotWithdrawnFromCustomer(lockedInvoice);
         if (lockedInvoice.status === 'processing'
           && String(lockedInvoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
           throw new Error('Bank payment is already processing');

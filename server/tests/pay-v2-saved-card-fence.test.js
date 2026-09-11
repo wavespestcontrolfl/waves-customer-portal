@@ -260,3 +260,88 @@ describe('POST /api/pay/:token/setup stale-render (invoiceVersion) fence', () =>
     });
   });
 });
+
+// A packet invoice whose Bill-To moved to a third-party payer AFTER the
+// homeowner already held a pay link keeps a collectible status and a NULL
+// payer_id — the withdrawal lives only in the `payer_billed:` stamp. /confirm
+// gated its collectibility assertion on the TERMINAL statuses, which is
+// exactly the set these rows are not in, so an already-minted PaymentIntent
+// could still settle customer funds against payer-owned debt (codex r25 P1).
+describe('POST /api/pay/:token/confirm withdrawn-invoice fence', () => {
+  const WITHDRAWN = {
+    id: 'inv-1',
+    token: 'public-token-0123456789',
+    customer_id: 'cust-1',
+    status: 'overdue',
+    total: 100,
+    credit_applied: 0,
+    payer_statement_id: null,
+    payer_id: null,
+    scheduled_send_error: 'payer_billed:5:hold',
+  };
+
+  function mockInvoice(row) {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return invoiceQuery(row);
+      if (table === 'customers') return invoiceQuery({ billing_mode: null, monthly_rate: 0 });
+      throw new Error(`unexpected table ${table}`);
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+  });
+
+  test.each(['sent', 'viewed', 'overdue'])('refuses a withdrawn %s invoice', async (status) => {
+    mockInvoice({ ...WITHDRAWN, status });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId: 'pi-minted-before-the-payer' }),
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: 'This visit is now billed to a third-party payer and is no longer payable here',
+      });
+    });
+    expect(StripeService.confirmInvoicePayment).not.toHaveBeenCalled();
+  });
+
+  test('a self-pay invoice still confirms', async () => {
+    mockInvoice({ ...WITHDRAWN, scheduled_send_error: null });
+    StripeService.confirmInvoicePayment.mockResolvedValue({ id: 'pay-1', status: 'paid', metadata: {} });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId: 'pi-1' }),
+      });
+      // Past the fence is what this asserts — the downstream receipt work is
+      // out of scope for this suite's mocks.
+      await expect(response.json()).resolves.not.toEqual({
+        error: 'This visit is now billed to a third-party payer and is no longer payable here',
+      });
+    });
+    expect(StripeService.confirmInvoicePayment).toHaveBeenCalledWith('inv-1', 'pi-1');
+  });
+
+  // A retry delivery failure is not the same as a withdrawal: only the
+  // `payer_billed:` prefix means the debt moved.
+  test('an ordinary send error does not fence the confirm', async () => {
+    mockInvoice({ ...WITHDRAWN, scheduled_send_error: 'smtp 550 mailbox unavailable' });
+    StripeService.confirmInvoicePayment.mockResolvedValue({ id: 'pay-1', status: 'paid', metadata: {} });
+    await withServer(async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/api/pay/public-token-0123456789/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paymentIntentId: 'pi-1' }),
+      });
+      await expect(response.json()).resolves.not.toEqual({
+        error: 'This visit is now billed to a third-party payer and is no longer payable here',
+      });
+    });
+    expect(StripeService.confirmInvoicePayment).toHaveBeenCalled();
+  });
+});
