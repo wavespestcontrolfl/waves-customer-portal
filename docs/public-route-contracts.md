@@ -1752,7 +1752,10 @@ switch), then 120/15-min per-IP limiter (/64-collapsed), 401 on mismatch,
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on
-any non-2xx so nothing is lost. Writes exactly one admin `ops_digest` row
+any non-2xx so nothing is lost. `/resolve` shares the 404 → limiter → 401
+→ 400 layers but deliberately has NO 409: retiring history must never
+depend on the ingest lane being on, so it answers 200 `{ resolved: N }`
+(N may be 0) whatever the gates say. Writes exactly one admin `ops_digest` row
 (bell:true, dedupe on the check+key pair inside a rolling day; links must
 be `/admin`-relative; subject/body/metadata size-capped) or marks rows
 read + `metadata.resolved` — never deletes, never touches customer rows.
