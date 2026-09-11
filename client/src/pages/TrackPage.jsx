@@ -1,12 +1,11 @@
 import Icon from '../components/Icon';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import { GoogleMap, useJsApiLoader, Marker } from '@react-google-maps/api';
-import { WavesShell } from '../components/brand';
+import { WavesShell, CustomerColumn } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -164,9 +163,9 @@ function useLastUpdated(iso) {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
+      <CustomerColumn column="flow" data-glass-clear="" style={{ fontFamily: FONT_BODY, color: TRACK_SURFACE.text }}>
         {children}
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }

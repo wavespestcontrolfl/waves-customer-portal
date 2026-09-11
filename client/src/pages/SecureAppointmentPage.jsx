@@ -22,8 +22,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { FLOW_COLUMN_MAX } from '../theme-doc';
-import { WavesShell } from '../components/brand';
+import { WavesShell, CustomerColumn } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
@@ -67,9 +66,9 @@ const PRIMARY_CTA = {
 function Shell({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <CustomerColumn column="flow" style={{ fontFamily: FONT_BODY, color: S.text }}>
         {children}
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }
