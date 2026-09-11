@@ -151,6 +151,21 @@ describe('fenceBookingDay', () => {
     expect(trx.raw).toHaveBeenCalledTimes(4);
   });
 
+  test('a lock query that returns past the deadline ends the attempt: no next rung, no late grant counted (codex r4 P2)', async () => {
+    // rung 1 granted, but the round trip itself took 200ms of a 120ms budget.
+    let t = 0;
+    const raw = jest.fn(async (sql, binds) => { t += binds[1].startsWith('occupancy:') ? 200 : 0; return { rows: [{ locked: true }] }; });
+    let out = await fenceBookingDay({ raw }, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, sleep: jest.fn(), now: () => t });
+    expect(out).toEqual({ acquired: false, keys: ['occupancy:2099-01-05'], reason: 'deadline_exceeded', deadline: 120 });
+    expect(raw).toHaveBeenCalledTimes(1);
+    // rung 1 in time, rung 3 granted but only after the cap: held, not counted.
+    t = 0;
+    const raw2 = jest.fn(async (sql, binds) => { t += binds[1].startsWith('occupancy:') ? 10 : 200; return { rows: [{ locked: true }] }; });
+    out = await fenceBookingDay({ raw: raw2 }, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, sleep: jest.fn(), now: () => t });
+    expect(out).toEqual({ acquired: false, keys: ['occupancy:2099-01-05', 'tech-1:2099-01-05'], reason: 'deadline_exceeded', deadline: 120 });
+    expect(raw2).toHaveBeenCalledTimes(2);
+  });
+
   test('a query failure propagates (the caller treats the fence as best-effort)', async () => {
     const trx = { raw: jest.fn(async () => { throw new Error('connection reset'); }) };
     await expect(fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', ...clock() }))

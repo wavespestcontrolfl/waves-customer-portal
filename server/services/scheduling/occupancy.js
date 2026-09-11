@@ -325,25 +325,32 @@ async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFence
   const { lockTechDays } = require('./tech-day-lock');
   const keys = [];
   let haveOccupancy = false;
+  const miss = (reason) => ({ acquired: false, keys, reason, deadline });
   for (;;) {
     // Canonical order: rung 1 before rung 3, exactly like every blocking
     // writer. A granted rung is kept (xact-scoped) and not re-requested.
+    // The clock is re-read after EVERY awaited attempt (codex #4368 r4 P2):
+    // a slow round trip can return past the deadline, and neither the next
+    // rung nor a late grant may then count — the cap bounds the decision,
+    // not just the sleeps. (A granted rung stays held; it still serializes,
+    // it is just not reported as a fence the booking waited for.)
     if (!haveOccupancy) {
       haveOccupancy = await tryAcquireOccupancyLock(trx, dateStr);
       if (haveOccupancy) keys.push(occupancyLockKey(dateStr));
+      if (now() >= deadline) return miss(haveOccupancy ? 'deadline_exceeded' : 'date_busy');
     }
     if (haveOccupancy) {
       const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
-      if (techKeys) return { acquired: true, keys: keys.concat(techKeys), deadline };
+      if (techKeys && now() < deadline) return { acquired: true, keys: keys.concat(techKeys), deadline };
+      if (techKeys) return { ...miss('deadline_exceeded'), keys: keys.concat(techKeys) };
     }
-    const miss = () => ({ acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy', deadline });
     const remaining = deadline - now();
-    if (remaining <= 0) return miss();
+    if (remaining <= 0) return miss(haveOccupancy ? 'tech_day_busy' : 'date_busy');
     await sleep(Math.max(1, Math.min(pollMs, remaining)));
     // Re-check AFTER waking (codex #4368 r3 P2): a delayed event loop can
     // oversleep the clamped timer, and a rung released after the cap must
     // not be tried, let alone reported as fenced. The cap is a hard cap.
-    if (now() >= deadline) return miss();
+    if (now() >= deadline) return miss(haveOccupancy ? 'tech_day_busy' : 'date_busy');
   }
 }
 
