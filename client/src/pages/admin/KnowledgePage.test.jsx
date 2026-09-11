@@ -144,6 +144,81 @@ describe("KnowledgePage embedded navigation", () => {
     );
   });
 
+  it("keeps the loading state armed until each recent-query read starts", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const pending = deferred();
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/admin/knowledge/queries") ? pending.promise : response({ articles: [] })
+    ));
+    renderWiki("/admin/knowledge?wikiTab=queries");
+
+    // A deep link must not paint the empty state before the passive effect runs.
+    expect(screen.getByText("Loading recent queries\u2026")).toBeInTheDocument();
+    expect(screen.queryByText(/No queries yet/)).not.toBeInTheDocument();
+
+    pending.resolve(response({ queries: [] }));
+    expect(await screen.findByText(/No queries yet/)).toBeInTheDocument();
+  });
+
+  it("re-arms the loading state instead of showing the previous visit's queries", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const second = deferred();
+    let queryReads = 0;
+    fetch.mockImplementation(async (url) => {
+      if (!url.endsWith("/admin/knowledge/queries")) return response({ articles: [] });
+      queryReads += 1;
+      if (queryReads > 1) return second.promise;
+      return response({
+        queries: [{
+          id: "query-1",
+          query: "Fixture prior question",
+          answer: "Prior synthetic answer.",
+          asked_by: "Fixture operator",
+          created_at: "2026-09-10T15:00:00Z",
+        }],
+      });
+    });
+    renderWiki("/admin/knowledge?wikiTab=queries");
+    expect(await screen.findByText("Q: Fixture prior question")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Articles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recent Queries" }));
+    expect(screen.getByText("Loading recent queries\u2026")).toBeInTheDocument();
+    expect(screen.queryByText("Q: Fixture prior question")).not.toBeInTheDocument();
+
+    second.resolve(response({ queries: [] }));
+    expect(await screen.findByText(/No queries yet/)).toBeInTheDocument();
+  });
+
+  it("collapses a recent-query answer to three lines behind an expand control", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/admin/knowledge/queries")
+        ? response({
+          queries: [{
+            id: "query-1",
+            query: "Fixture prior question",
+            answer: "Prior synthetic answer.",
+            asked_by: "Fixture operator",
+            created_at: "2026-09-10T15:00:00Z",
+          }],
+        })
+        : response({ articles: [] })
+    ));
+    renderWiki("/admin/knowledge?wikiTab=queries");
+
+    const answer = await screen.findByText("Prior synthetic answer.");
+    expect(answer).toHaveClass("line-clamp-3");
+    const toggle = screen.getByRole("button", { name: "Show full answer" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", answer.id);
+
+    fireEvent.click(toggle);
+    expect(answer).not.toHaveClass("line-clamp-3");
+    expect(screen.getByRole("button", { name: "Show less" }))
+      .toHaveAttribute("aria-expanded", "true");
+  });
+
   it("does not expose the admin-only Health area to non-admin staff", () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "technician" }));
     renderWiki("/admin/knowledge?wikiTab=health");

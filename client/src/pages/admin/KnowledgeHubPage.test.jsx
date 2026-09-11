@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -69,6 +69,19 @@ describe("KnowledgeHubPage", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Wiki" }))
       .toHaveAttribute("aria-current", "page");
+  });
+
+  it("scopes the comfortable density to the whole workspace, not the header alone", async () => {
+    renderHub();
+
+    // A wrapper around the header alone would become the sticky header's
+    // containing block and pin it out of view as the workspace scrolls.
+    const surface = document.querySelector('[data-ui-density="comfortable"]');
+    expect(surface).toBeInTheDocument();
+    expect(within(surface).getByRole("navigation", { name: "Knowledge area" }))
+      .toBeInTheDocument();
+    expect(await within(surface).findByText("Embedded Wiki workspace"))
+      .toBeInTheDocument();
   });
 
   it("deep-links and switches areas without dropping query context", async () => {

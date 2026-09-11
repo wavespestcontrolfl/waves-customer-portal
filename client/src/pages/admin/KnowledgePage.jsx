@@ -112,7 +112,7 @@ export default function KnowledgePage({ embedded = false }) {
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [showQA, setShowQA] = useState(false);
   const [recentQueries, setRecentQueries] = useState([]);
-  const [queriesLoading, setQueriesLoading] = useState(false);
+  const [queriesLoading, setQueriesLoading] = useState(true);
   const [queriesError, setQueriesError] = useState("");
   const [queriesAttempt, setQueriesAttempt] = useState(0);
 
@@ -133,7 +133,12 @@ export default function KnowledgePage({ embedded = false }) {
   }, [tab, search, filterCat]);
 
   useEffect(() => {
-    if (tab !== "queries") return undefined;
+    if (tab !== "queries") {
+      // Arm the loading state for the next visit so the panel cannot paint the
+      // empty state, or the previous visit's results, before the read starts.
+      setQueriesLoading(true);
+      return undefined;
+    }
 
     let active = true;
     setQueriesLoading(true);

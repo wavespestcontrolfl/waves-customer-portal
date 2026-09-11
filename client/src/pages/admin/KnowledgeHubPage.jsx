@@ -29,19 +29,20 @@ export default function KnowledgeHubPage() {
   };
 
   return (
-    <div className="mx-auto max-w-[1300px]">
-      <UiSurface density="comfortable">
-        <AdminCommandHeader
-          variant="workspace"
-          title="Knowledge"
-          icon={Library}
-          sections={AREAS}
-          activeKey={area}
-          onSectionChange={setArea}
-          ariaLabel="Knowledge area"
-          navGridClassName="grid-cols-2"
-        />
-      </UiSurface>
+    // The density context wraps the whole workspace rather than the header
+    // alone: a wrapper no taller than the header would become the sticky
+    // header's containing block and pin it out of view as the content scrolls.
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
+      <AdminCommandHeader
+        variant="workspace"
+        title="Knowledge"
+        icon={Library}
+        sections={AREAS}
+        activeKey={area}
+        onSectionChange={setArea}
+        ariaLabel="Knowledge area"
+        navGridClassName="grid-cols-2"
+      />
 
       <Suspense
         fallback={(
@@ -56,6 +57,6 @@ export default function KnowledgeHubPage() {
           <KnowledgePage embedded />
         )}
       </Suspense>
-    </div>
+    </UiSurface>
   );
 }
