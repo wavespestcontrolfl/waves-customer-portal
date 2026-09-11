@@ -11,7 +11,15 @@ const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edi
 // ("thanks for the review you left us") out.
 const REVIEW_CONDITIONAL_RE = /\bif\s+(?:you|y['’]all|ya)\s+(?:ever\s+|could\s+|would\s+|would\s+ever\s+|wouldn['’]t\s+mind\s+)?(?:left|leave|leaving|wrote|write|writing|posted|post|posting|shared|share|sharing|gave|give|giving|submitted|submit|submitting)\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i;
 
-const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love|be\s+(?:really\s+)?grateful\s+for)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|make\s+(?:my|our)\s+day|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
+const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love|be\s+(?:really\s+)?grateful\s+for)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|make\s+(?:my|our)\s+day|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:really\s+)?(?:means|helps|supports|makes\s+(?:my|our)\s+day|is\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
+
+// Present-tense declarative asks with no textual link ("that review link one
+// more time") — the repo's own soft_reminder/qr_followup wording — count on
+// their own; they no longer need a co-occurring /l/ short link (see below).
+// Only request/reminder framing counts ("here is that review link", "that
+// review link one more time", "review link: <url>"). Support chatter about the
+// link ("the review link is broken", "I fixed the review link") is not an ask.
+const REVIEW_LINK_MENTION_RE = /\b(?:here(?:['’]s|\s+is)\s+(?:that|the|your)\s+review\s+link|(?:that|the|your)\s+review\s+link\s+(?:again|one\s+more\s+time|below|for\s+you)|review\s+link:\s*\S)/i;
 
 // Link-library destinations and explicit requests count. Acknowledgments
 // ("Thanks for your Google review") without a link/request do not.
@@ -26,30 +34,55 @@ function looksLikeReviewAsk(body) {
       try { return portalHosts.has(new URL(/^https?:/i.test(link) ? link : `https://${link}`).hostname.toLowerCase()); }
       catch { return false; }
     });
-  // Reviewing a document is different from reviewing the business.
-  const intentText = text.replace(/\breview\s+(?:of|on|for)\s+(?:(?:the|your|our|my|attached|updated)\s+)*(?:estimate|invoice|agreement|contract|report|document|proposal)\b/gi, 'document assessment');
+  // Reviewing a document is different from reviewing the business. A noun
+  // ("comments", "feedback", "notes") can sit between "review" and the
+  // document preposition ("share your review comments on the attached
+  // estimate") — tolerate up to two such words so the carve-out still fires.
+  const intentText = text.replace(/\breview\s+(?:\w+\s+){0,2}(?:of|on|for)\s+(?:(?:the|your|our|my|attached|updated)\s+)*(?:estimate|invoice|agreement|contract|report|document|proposal)\b/gi, 'document assessment');
   return portalRate || REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(intentText) || REVIEW_INVITATION_RE.test(intentText) || REVIEW_CONDITIONAL_RE.test(intentText)
     || /\b(?:could|can|may)\s+(?:i|we)\s+ask\s+(?:you\s+)?for\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i.test(intentText)
     || (/maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i.test(text)
       && /\b(?:share|leave|give)\s+(?:(?:us|me)\s+)?(?:(?:your|some)\s+)?feedback\b/i.test(text))
-    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+link\b/i.test(text));
+    || REVIEW_LINK_MENTION_RE.test(intentText)
+    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i.test(text));
 }
+
+// review_requests.followup_sent_at is NOT reliable delivery evidence: besides
+// the genuine review_request_followup SMS (review-request.js ~3024),
+// processFollowups also stamps it as a plain "handled" marker for
+// soft-deleted customers, dedup'd siblings, no-consent contacts, and
+// blocked/failed sends (review-request.js:2810,2875,2930,2953,3015) — none
+// of those reached the customer. The real delivery timestamp instead lives
+// in messaging_audit_log.sent_at (set only once the provider actually
+// dispatches), correlated back to this row via the review_request_id the
+// followup send stamps into its metadata.
+const FOLLOWUP_DELIVERED_SUBQUERY = `(
+  SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
+  FROM messaging_audit_log
+  WHERE customer_id = ? AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+  GROUP BY metadata->>'review_request_id'
+) followups`;
 
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
   const q = db('review_requests')
-    .where({ customer_id: customerId })
-    .whereRaw('(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)')
+    // Correlated to the customer so the derived table uses the audit log's
+    // customer index instead of grouping every follow-up ever delivered.
+    .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`, [customerId])
+    .where({ 'review_requests.customer_id': customerId })
+    .whereRaw('(review_requests.sms_sent_at IS NOT NULL OR review_requests.sent_at IS NOT NULL OR followups.followup_delivered_at IS NOT NULL)')
     .whereRaw(ASK_TOUCH_SQL)
-    .select('id', 'sequence_id', 'template_key', 'sms_sent_at', 'sent_at');
-  if (since) q.whereRaw('GREATEST(sms_sent_at, sent_at) > ?', [since]);
-  if (excludeRequestId) q.where('id', '!=', excludeRequestId);
+    .select('review_requests.id', 'review_requests.sequence_id', 'review_requests.template_key',
+      'review_requests.sms_sent_at', 'review_requests.sent_at', 'followups.followup_delivered_at');
+  if (since) q.whereRaw('GREATEST(review_requests.sms_sent_at, review_requests.sent_at, followups.followup_delivered_at) > ?', [since]);
+  if (excludeRequestId) q.where('review_requests.id', '!=', excludeRequestId);
   return q;
 }
 
-// A retried email leg can be later than the SMS of the same request.
+// A retried email leg, or the genuinely delivered legacy follow-up SMS, can
+// be later than the original ask's own sms_sent_at/sent_at on the same row.
 function latestDeliveredAt(rows) {
   return rows.reduce((latest, row) => {
-    const at = Math.max(...[row.sms_sent_at, row.sent_at].map(value => value ? new Date(value).getTime() : 0));
+    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at].map(value => value ? new Date(value).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
   }, null);
 }

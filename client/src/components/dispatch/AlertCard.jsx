@@ -176,11 +176,35 @@ function GenericBody({ alert }) {
   );
 }
 
+function RouteQualityBody({ alert }) {
+  const { date, issues = [], departureMinutes, techName } = alert.payload || {};
+  const departure = Number.isFinite(departureMinutes)
+    ? `${String(Math.floor(departureMinutes / 60)).padStart(2, '0')}:${String(departureMinutes % 60).padStart(2, '0')}` : null;
+  // The dispatch:alert broadcast carries the bare row, so a live card has no
+  // joined tech_name — the generator puts the name in the payload and this
+  // renderer prefers it, keeping same-day route cards distinguishable
+  // without waiting for the next board hydration.
+  const tech = techName || alert.tech_name;
+  return (
+    <div className="text-14 text-ink-primary space-y-2">
+      <p className="font-medium">{date}{tech ? ` · ${tech}` : ''}</p>
+      {issues.map(issue => <p key={issue}>{issue}</p>)}
+      {departure && <p className="text-ink-secondary">Timing assumes departure from base at {departure} ET. This is a forecast.</p>}
+      {date && (
+        <a className="inline-block text-ink-primary underline underline-offset-2" href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(date)}`}>
+          Review this day
+        </a>
+      )}
+    </div>
+  );
+}
+
 const TYPE_RENDERERS = {
   tech_late: TechLateBody,
   unassigned_overdue: UnassignedOverdueBody,
   missed_photo: MissedPhotoBody,
   moa_violation: MoaViolationBody,
+  schedule_route_quality: RouteQualityBody,
 };
 
 export default function AlertCard({ alert, onResolve }) {
@@ -220,8 +244,8 @@ export default function AlertCard({ alert, onResolve }) {
           >
             {alert.severity}
           </span>
-          <span className="text-11 uppercase tracking-label font-medium text-ink-tertiary truncate">
-            {alert.type}
+          <span className={cn('font-medium text-ink-tertiary truncate', alert.type === 'schedule_route_quality' ? 'text-14' : 'text-11 uppercase tracking-label')}>
+            {alert.type === 'schedule_route_quality' ? 'Route needs review' : alert.type}
           </span>
         </div>
         <span className="text-11 text-ink-tertiary flex-shrink-0">
