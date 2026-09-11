@@ -137,6 +137,64 @@ function tagWithBuild(response, buildIds) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+// Each build publishes the list of hashed files it emitted (a Vite plugin
+// writes it; see client/vite.config.js). The worker caches it beside that
+// build's shell, so it can tell which chunks a retained generation actually
+// OWNS. That is the one thing an /assets/ request cannot reveal on its own:
+// the worker has no way to know which tab asked, so without this list it has
+// to claim the chunk for the live build and the cached one both and hope.
+// When the list is missing — an older deploy, a failed fetch, dev — the
+// worker falls back to exactly the guess it made before.
+const BUILD_MANIFEST_URL = '/build-assets.json';
+const MANIFEST_KEY_PREFIX = '/__waves/manifest/';
+const manifestKey = buildId => `${MANIFEST_KEY_PREFIX}${buildId}`;
+
+// The list for the build whose shell was just fetched. A deploy can land
+// between the two requests, which would file the NEXT build's list under
+// this build's id; the shell's own hashed assets are in its own list by
+// construction, so a missing one proves the two came from different builds.
+async function fetchBuildManifest(assets) {
+  try {
+    const response = await fetch(new Request(BUILD_MANIFEST_URL, { cache: 'reload' }));
+    if (!response.ok) return null;
+    const owned = JSON.parse(await response.text());
+    if (!Array.isArray(owned) || !owned.length) return null;
+    const ownedSet = new Set(owned);
+    if (!assets.every(url => ownedSet.has(url))) return null;
+    return owned;
+  } catch {
+    return null;
+  }
+}
+
+async function ownedAssetsOf(cache, buildId) {
+  if (!buildId) return null;
+  try {
+    const stored = await cache.match(manifestKey(buildId));
+    if (!stored) return null;
+    const owned = JSON.parse(await stored.text());
+    return Array.isArray(owned) ? new Set(owned) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Claims for a chunk the worker cannot attribute to a tab. A build whose
+// list names the chunk owns it — a firm claim. A build whose list exists and
+// does NOT name it never claims it at all. Only a build with no list falls
+// back to the old guess: firm for the live build, provisional for the cached
+// one, exactly as before this manifest existed.
+async function claimsForAsset(cache, pathname, liveId, cachedId) {
+  const claims = [];
+  for (const id of [liveId, cachedId]) {
+    if (!id || claims.some(claim => claimIdOf(claim) === id)) continue;
+    const owned = await ownedAssetsOf(cache, id);
+    if (!owned) claims.push(id === liveId ? id : provisionalClaim(id));
+    else if (owned.has(pathname)) claims.push(id);
+  }
+  return claims;
+}
+
 // The build the cached shell currently describes — what a lazily loaded
 // chunk fetched right now belongs to. Worker globals do not survive
 // termination, so read it from the cache each time (one small parse, and
@@ -282,6 +340,10 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     if (!response.ok) throw new Error(`Shell asset failed (${response.status}): ${assetUrl}`);
     return [assetUrl, response];
   }));
+  // Fetched with the assets, not after the commit: a later deploy would
+  // serve the next build's list. A null result simply leaves this build
+  // without one, and the worker guesses as it always has.
+  const ownedAssets = await fetchBuildManifest(assets);
   // The asset fetches above take time; a newer navigation may have landed
   // meanwhile. Check again before committing anything.
   if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
@@ -399,6 +461,15 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   // navigation already advanced the live build — writing its own build back
   // would mis-tag the newer page's chunks. Only claim the memo if no
   // navigation moved it since this refresh was requested (install path).
+  // After the commit, so a failed refresh never leaves a list for a build
+  // whose shell was not stored; before the prune, so the prune can drop the
+  // lists of generations it is about to evict. A failed write is not fatal:
+  // the build just has no list and falls back to the guess.
+  if (ownedAssets) {
+    await cache.put(manifestKey(buildId), new Response(JSON.stringify(ownedAssets), {
+      headers: { 'Content-Type': 'application/json' },
+    })).catch(() => {});
+  }
   advanceLiveBuild(buildId, enqueuedSeq);
   // Keep the generation just replaced too: a tab still running the previous
   // build lazy-loads its chunks after the shell moved on, and an offline
@@ -419,7 +490,14 @@ function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
   return withAssetWrites(async () => {
     const requests = await cache.keys();
     await Promise.all(requests.map(async request => {
-      if (!new URL(request.url).pathname.startsWith('/assets/')) return;
+      const pathname = new URL(request.url).pathname;
+      // A retained build keeps its file list; a dropped one loses it, or the
+      // lists would outlive every generation and grow without bound.
+      if (pathname.startsWith(MANIFEST_KEY_PREFIX)) {
+        if (!retained.has(pathname.slice(MANIFEST_KEY_PREFIX.length))) await cache.delete(request);
+        return;
+      }
+      if (!pathname.startsWith('/assets/')) return;
       const cached = await cache.match(request);
       // firmOnly: a chunk survives only if a RETAINED build really listed it.
       // Chunks kept alive solely by a provisional claim go, freeing the space
@@ -563,11 +641,12 @@ self.addEventListener('fetch', event => {
           // build lookup awaits the cached shell, and the page can lock the
           // body in that window, making a later clone() throw.
           const copy = cached.clone();
-          const touch = Promise.all([currentBuildId(cache), cachedBuildId(cache)]).then(([buildId, cachedId]) => {
-            const claims = [buildId, provisionalClaim(cachedId)].filter(Boolean);
-            if (!claims.length || claims.every(c => tags.includes(c))) return undefined;
-            return claimBuilds(cache, event.request, copy, claims);
-          }).catch(() => {});
+          const touch = Promise.all([currentBuildId(cache), cachedBuildId(cache)])
+            .then(([buildId, cachedId]) => claimsForAsset(cache, url.pathname, buildId, cachedId))
+            .then(claims => {
+              if (!claims.length || claims.every(c => tags.includes(claimIdOf(c)))) return undefined;
+              return claimBuilds(cache, event.request, copy, claims);
+            }).catch(() => {});
           try { event.waitUntil(touch); } catch { /* fire and forget */ }
           return cached;
         }
@@ -585,7 +664,8 @@ self.addEventListener('fetch', event => {
             // run of never-cached builds would be unprunable and wedge the
             // bucket; see the firmOnly escalation in the quota recovery.
             const store = Promise.all([currentBuildId(cache), cachedBuildId(cache)])
-              .then(([buildId, cachedId]) => claimBuilds(cache, event.request, clone, [buildId || 'untagged', provisionalClaim(cachedId)]))
+              .then(([buildId, cachedId]) => claimsForAsset(cache, url.pathname, buildId, cachedId))
+              .then(claims => claimBuilds(cache, event.request, clone, claims.length ? claims : ['untagged']))
               .catch(() => {});
             // The respondWith promise is still pending here, so the event
             // can still be extended; if a browser disagrees, fall back to
