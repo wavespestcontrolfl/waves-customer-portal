@@ -99,6 +99,8 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
+import ServiceScore from "../../components/payGrowth/ServiceScore";
+import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
@@ -5296,6 +5298,7 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCardError, setJobCardError] = useState(false);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const payGrowthAvailable = usePayGrowthAvailable();
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -5500,6 +5503,7 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "photos", label: " ID Guide", count: photos.length },
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
+    ...(payGrowthAvailable ? [{ id: "score", label: "Score", count: null }] : []),
   ];
 
   const activeSection = SECTIONS.some((section) => section.id === requestedSection)
@@ -5661,7 +5665,9 @@ export function ProtocolPanel({ service, onClose }) {
             </button>
           </div>
         )}
-        {activeSection === "job_card" && jobCardEnabled ? (
+        {activeSection === "score" && payGrowthAvailable ? (
+          <ServiceScore key={service.id} serviceId={service.id} manage />
+        ) : activeSection === "job_card" && jobCardEnabled ? (
           <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
           <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { ProtocolPanel } from "./SchedulePage";
@@ -23,6 +24,9 @@ function fixture(url, label = "Current") {
   if (path.endsWith('/intelligence-bar/quick-actions')) return { actions: [] };
   // The job card is gate-off here (GATE_JOB_CARD unset): the legacy tabs render.
   if (path.includes("/protocols/job-card/")) return { enabled: false };
+  // Pay & Growth is gate-off by default; a test that needs the Score tab
+  // overrides this with its own fetch mock.
+  if (path.endsWith("/pay-growth/availability")) return { available: false };
   if (path.endsWith("/turf-profile")) return { profile: { track_key: "A_St_Aug_Sun", lawn_sqft: 10000 } };
   if (path.endsWith("/photos/relevant")) return { photos: [{ name: `${label} photo guide`, description: "Fixture reference" }] };
   if (path.endsWith("/seasonal-index")) return { pests: [] };
@@ -295,5 +299,26 @@ describe("Job card Tank section rigs", () => {
     expect(await screen.findByText("in 1 gal · covers 55,000 sq ft")).toBeVisible();
     expect(mixCalls().at(-1)).toContain("gallons=1");
     expect(mixCalls().at(-1)).not.toContain("rig=");
+  });
+});
+
+describe("Pay & Growth gate", () => {
+  it("opens the shared service score only when the pay and growth gate is enabled", async () => {
+    render(<ProtocolPanel service={service} onClose={() => {}} />);
+    await screen.findByText("Current mix product");
+    expect(screen.queryByRole("button", { name: "Score" })).not.toBeInTheDocument();
+    cleanup();
+
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ entries: [], can_manage: true });
+      return reply(fixture(url));
+    });
+    render(<MemoryRouter><ProtocolPanel service={service} onClose={() => {}} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Score" }));
+    expect(await screen.findByText(/It has not received a passing score/)).toBeVisible();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toBe(true);
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/admin/timetracking?tab=pay-growth");
   });
 });

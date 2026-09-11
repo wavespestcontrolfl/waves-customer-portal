@@ -5,6 +5,8 @@ import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
+import PayGrowth from "../../components/payGrowth/PayGrowth";
+import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -150,6 +152,7 @@ const STAFF_SECTIONS = [
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
+  { key: "pay-growth", label: "Pay & Growth", Icon: BarChart3 },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -167,7 +170,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents"],
+    tabs: ["team", "documents", "pay-growth"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -177,6 +180,7 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
+  const payGrowthAvailable = usePayGrowthAvailable();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const setTab = (value) => {
@@ -223,7 +227,7 @@ export default function TimeTrackingPage() {
             marginBottom: 16,
           }}
         >
-          {activeGroup.tabs.map((key) => {
+          {activeGroup.tabs.filter((key) => key !== "pay-growth" || (payGrowthAvailable && readStaffRole() === "admin")).map((key) => {
             const leaf = STAFF_LEAF_BY_KEY[key];
             const active = tab === key;
             const LeafIcon = leaf.Icon;
@@ -274,6 +278,7 @@ export default function TimeTrackingPage() {
           <DocumentsTab showToast={showToast} />
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
+      {tab === "pay-growth" && (payGrowthAvailable && readStaffRole() === "admin" ? <PayGrowth manage /> : <p>Pay and growth is unavailable.</p>)}
       <div
         style={{
           position: "fixed",
