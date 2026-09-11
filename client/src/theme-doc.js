@@ -136,7 +136,6 @@ export const DOC_COLUMN_MAX = 760;
 // The 640px flow column (chrome audit 2026-09-03): appointment / track /
 // reschedule / re-service — the short transactional flows. Documents
 // (estimates, reports, invoices, notices) use DOC_COLUMN_MAX.
-export const FLOW_COLUMN = `min(100% - ${PAGE_GUTTER * 2}px, 640px)`;
 export const FLOW_COLUMN_MAX = 640;
 export const DOC_PAGE_MARGIN = `${PAGE_TOP}px auto ${PAGE_BOTTOM}px`;
 
