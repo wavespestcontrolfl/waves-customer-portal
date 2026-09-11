@@ -2066,6 +2066,13 @@ describe('duplicatePairEligibility', () => {
     };
   }
 
+  it('fails CLOSED when the dismissals table is unreadable (pre-push Codex P1): a merge decision never falls open past operator verdicts', async () => {
+    const base = router({ customers: [winner, shellLoser] });
+    installDb((table) => { if (table === 'customer_duplicate_dismissals') throw new Error('relation unreadable'); return base(table); });
+    const result = await dedupe.duplicatePairEligibility(winner.id, shellLoser.id);
+    expect(result).toEqual({ eligible: false, code: 'dismissals_unreadable', reason: expect.stringMatching(/could not be read/), candidate: null });
+  });
+
   it('eligible: returns the live candidate with its tier and reasons', async () => {
     installDb(router({ customers: [winner, shellLoser] }));
     const result = await dedupe.duplicatePairEligibility(winner.id, shellLoser.id);

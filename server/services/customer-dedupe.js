@@ -445,8 +445,17 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 //                        callers that support link-as-property (only the
 //                        admin duplicates route does) may still proceed
 //   eligible           — safe to merge; candidate.tier/reasons carried along
+//   dismissals_unreadable — the operator "not a duplicate" verdicts could
+//                        not be read; a merge decision never falls open
+//                        past them (display does, this does not)
 async function duplicatePairEligibility(winnerId, loserId, database = db) {
-  const groups = await findDuplicateGroups(database);
+  let groups;
+  try {
+    groups = await findDuplicateGroups(database, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] duplicatePairEligibility: dismissals unreadable, refusing: ${e.message}`);
+    return { eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read — refusing to treat this pair as mergeable right now', candidate: null };
+  }
   const group = groups.find((g) => g.winner.id === winnerId);
   const candidate = group?.candidates.find((c) => c.loser.id === loserId);
   if (!candidate) {
