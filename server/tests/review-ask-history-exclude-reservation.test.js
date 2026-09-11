@@ -33,6 +33,18 @@ function makeSmsLogQuery(rows) {
       return q;
     },
     whereNotIn(field, list) { filtered = filtered.filter((r) => !list.includes(r[field])); return q; },
+    // Only the lastManualAskAt fetch-floor predicate is exercised here:
+    // '(created_at >= ? OR updated_at >= ?)' with both bindings the same
+    // fetchFloor value (review-ask-history.js).
+    whereRaw(sql, bindings) {
+      if (/created_at >= \? OR updated_at >= \?/.test(sql)) {
+        const [floor] = bindings;
+        filtered = filtered.filter((r) => new Date(r.created_at).getTime() >= new Date(floor).getTime()
+          || (r.updated_at && new Date(r.updated_at).getTime() >= new Date(floor).getTime()));
+        return q;
+      }
+      throw new Error(`fake whereRaw: unsupported SQL ${sql}`);
+    },
     orderBy() { return q; },
     select() { return Promise.resolve(filtered); },
   };

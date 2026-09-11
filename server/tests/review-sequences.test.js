@@ -112,7 +112,7 @@ function makeMock(initial = {}, opts = {}) {
       whereExists() { this.matchNone = true; return this; },
       whereNotExists() { return this; },
       whereNull(c) { this.nulls.push(c); return this; },
-      leftJoin() { return this; }, select(...cols) { this.selected = cols; return this; },
+      leftJoin() { return this; }, joinRaw() { return this; }, select(...cols) { this.selected = cols; return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; }, groupBy() { return this; }, groupByRaw() { return this; },
       limit(n) { this.limitValue = n; return this; },
@@ -1000,7 +1000,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock(fixture('seq-3d5', { lastAskAgoMs: 20 * 3600000 }), {
         // The runner's own last-ask lookup: review_requests, delivered asks,
         // bounded by delivery time (the cap-stats read has no such bound).
-        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(sms_sent_at, sent_at\)/.test(String(r))) && (q.selected || []).includes('sequence_id'),
+        throwSelectWhen: (q) => q.table === 'review_requests' && (q.raws || []).some((r) => /GREATEST\(review_requests\.sms_sent_at, review_requests\.sent_at/.test(String(r))) && (q.selected || []).includes('review_requests.sequence_id'),
       });
       db.mockImplementation(mock);
 
@@ -1331,7 +1331,12 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       const out = await ReviewService.sendSMS('rr-uq-checkin');
 
-      expect(out).toEqual({ sent: false, failed: 'send_failed_unqueued' });
+      // codex #4338 P1 round 3: the non-ask uncertain guard's own
+      // deferred-status write is wrapped in its own try/catch so a
+      // bookkeeping failure (review_requests update throws here) never
+      // escapes to the outer catch's generic 5-minute retry — the outcome
+      // is already known ambiguous, so it still reports held, not queued.
+      expect(out).toEqual({ deferred: 'provider_uncertain', nextAllowedAt: null });
     });
 
     test('processScheduled counts only delivered sends — a held row is reported held (codex #4156 r1 P2)', async () => {
@@ -3601,6 +3606,103 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences[0].status).toBe('completed');
   });
 
+  // codex #4338 P1, round 2: an uncertain provider handoff on a cadence step
+  // used to fall into the generic deferred/transient branch, which reschedules
+  // next_run_at +30 minutes — so the NEXT processReviewSequences tick re-ran
+  // this same step and sent a second text. The sequence must hold instead.
+  test('an uncertain provider handoff on a cadence step holds the whole sequence — no 30-minute reschedule, no second send', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-1', first_name: 'Uma', last_name: 'N', phone: '+19410000090', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-unc', customer_id: 'unc-1', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' });
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(out.sent).toBe(0);
+    expect(out.stopped).toBe(0);
+    expect(out.completed).toBe(0);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq.status).toBe('active'); // held, not stopped — an operator/later evidence can still resolve it
+    expect(seq.current_step).toBe(0); // not advanced
+    expect(seq.next_run_at).toBeNull(); // NOT rescheduled — the due-sweep will never re-pick this row
+    expect(JSON.parse(seq.decision).reason).toBe('provider_outcome_uncertain');
+
+    // A second cron tick must not re-send: with next_run_at null, this row
+    // never re-enters the due query in the first place.
+    mockSendCustomerMessage.mockClear();
+    const out2 = await ReviewService.processReviewSequences();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out2.sent).toBe(0);
+  });
+
+  // codex #4338 P1, round 2: sendCustomerMessage can throw AFTER the provider
+  // handoff (audit-persistence failure) instead of returning. _sendOutreachSms's
+  // old catch retried blind on ANY throw; this proves the thrown case reaches
+  // the SAME sequence-hold behavior as a returned uncertain result above.
+  test('an uncertain provider handoff THROWN (not returned) also holds the sequence, end to end', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-2', first_name: 'Vic', last_name: 'N', phone: '+19410000091', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-unc2', customer_id: 'unc-2', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 60000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockImplementationOnce(() => {
+      throw Object.assign(new Error('audit write failed'), {
+        providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+      });
+    });
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(out.sent).toBe(0);
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq.status).toBe('active');
+    expect(seq.next_run_at).toBeNull();
+    expect(JSON.parse(seq.decision).reason).toBe('provider_outcome_uncertain');
+    const req = mock.__state.rows.review_requests.find((r) => r.sequence_id === 'seq-unc2');
+    expect(req.status).toBe('deferred');
+  });
+
+  // codex #4338 P1, round 3: a RETURNED uncertain result whose OWN
+  // deferred-status DB write then fails used to be caught by
+  // _sendOutreachSms's bookkeeping catch, which only special-cased
+  // result.sent and fell back to `retryable: true` for everything else —
+  // losing the known-uncertain marker and letting _runSequenceStep
+  // reschedule a step whose send may already have landed.
+  test('a bookkeeping failure on the deferred-status write still surfaces as uncertain, not a blind retryable', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'unc-3', first_name: 'Wes', last_name: 'N', phone: '+19410000092', nearest_location_id: 'bradenton' }],
+    }, {
+      onUpdate: (table, patch) => {
+        if (table === 'review_requests' && patch.status === 'deferred') throw new Error('pg blip on deferred-status write');
+      },
+    });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', auditLogId: 'audit-unc3',
+    });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'sequence',
+    });
+
+    expect(out.ok).toBe(false);
+    expect(out.uncertain).toBe(true);
+    expect(out.deferred).toBe(true);
+    expect(out.retryable).toBeUndefined(); // never the generic bookkeeping_failed shape
+  });
+
   test('an ask delivered outside the sequence (legacy path while gate was off) supersedes the cadence', async () => {
     const mock = makeMock({
       customers: [{ id: 'sp-1', first_name: 'Eli', last_name: 'G', phone: '+19410000081', nearest_location_id: 'venice' }],
@@ -3809,6 +3911,120 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(bodies[1]).not.toContain('Our team');
     });
 
+    // codex #4338 P1, round 2: sendSMS's catch only handled a thrown pre-handoff
+    // failure (network down, safe to retry). sendCustomerMessage can ALSO throw
+    // AFTER the provider handoff (audit-persistence failure), attaching
+    // err.providerOutcome — the old catch retried blind either way, risking a
+    // duplicate text for an accepted-but-unaudited send, or for an uncertain one.
+    test('sendSMS on a thrown ACCEPTED post-handoff error marks the row sent, never retries', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-1', first_name: 'Rae', last_name: 'Q', phone: '+19410000097', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th1', customer_id: 'th-1', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th1', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(() => {
+        throw Object.assign(new Error('audit write failed'), {
+          providerOutcome: { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-th1' },
+        });
+      });
+
+      await ReviewService.sendSMS('rr-th1');
+
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('sent');
+      expect(row.sms_sent_at).toBeTruthy();
+      expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that would duplicate the text
+    });
+
+    test('sendSMS on a thrown UNCERTAIN post-handoff error holds the row, never retries', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-2', first_name: 'Sam', last_name: 'Q', phone: '+19410000098', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th2', customer_id: 'th-2', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th2', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(() => {
+        throw Object.assign(new Error('audit write failed'), {
+          providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+        });
+      });
+
+      const out = await ReviewService.sendSMS('rr-th2');
+
+      // day0_ask is an ASK template — sendSMS opened a reservation before the
+      // handoff, and the throw's providerOutcome is normalized back into the
+      // normal result flow (the inner try/catch around sendCustomerMessage),
+      // which routes an uncertain outcome with a live reservation through the
+      // SAME reservation-retaining hold a non-thrown uncertain result uses:
+      // status stays 'pending' with scheduled_for pushed out the full ask
+      // spacing, never 'deferred' — that park is reserved for non-ask
+      // templates, which never hold a reservation to retain (codex #4338 P1,
+      // reconciled against #4331's reservation feature).
+      expect(out).toMatchObject({ deferred: 'provider_uncertain' });
+      expect(new Date(out.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 1000);
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending'); // held via the reservation, not parked as 'deferred'
+      expect(row.scheduled_for).toEqual(out.nextAllowedAt); // never queued for a blind 5-min retry that could duplicate the text
+      const reservation = mock.__state.rows.sms_log[0];
+      expect(reservation.status).toBe('sending');
+      expect(JSON.parse(reservation.metadata).review_ask_reservation).toBe(true);
+    });
+
+    // codex #4338 P1, round 3: a RETURNED uncertain result whose own
+    // deferred-status DB write then fails used to let that write's exception
+    // reach the generic 5-minute retry queue — the known ambiguous outcome
+    // was lost the moment the bookkeeping call itself failed.
+    test('sendSMS on a RETURNED uncertain result whose deferred-status write fails still never queues a retry', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-4', first_name: 'Uri', last_name: 'Q', phone: '+19410000100', nearest_location_id: 'venice' }],
+        // resolution_check is a NON-ask (no-link) template — no reservation
+        // is opened for it, so this exercises the #4338 r3 guard's own
+        // try/catch-wrapped deferred-status write, not the ask-template
+        // reservation hold (which never writes status:'deferred' at all —
+        // see the sibling "thrown UNCERTAIN post-handoff" test above).
+        review_requests: [
+          { id: 'rr-th4', customer_id: 'th-4', channel: 'sms', status: 'pending', template_key: 'resolution_check', token: 'tok-th4', location_id: 'venice' },
+        ],
+      }, {
+        onUpdate: (table, patch) => {
+          if (table === 'review_requests' && patch.status === 'deferred') throw new Error('pg blip on deferred-status write');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({
+        sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', auditLogId: 'audit-th4',
+      });
+
+      await ReviewService.sendSMS('rr-th4');
+
+      const row = mock.__state.rows.review_requests[0];
+      // The write failed, so status could not flip to 'deferred' — but it
+      // must ALSO never gain a scheduled_for: processScheduled only ever
+      // picks whereNotNull('scheduled_for'), so an unset scheduled_for is
+      // what actually keeps this row out of an automatic resend.
+      expect(row.scheduled_for).toBeUndefined();
+    });
+
+    test('sendSMS on an ordinary pre-handoff throw (no providerOutcome) still retries exactly as before', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'th-3', first_name: 'Tia', last_name: 'Q', phone: '+19410000099', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th3', customer_id: 'th-3', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th3', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockImplementationOnce(() => { throw new Error('network down'); });
+
+      await ReviewService.sendSMS('rr-th3');
+
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending'); // unchanged
+      expect(row.scheduled_for).toBeTruthy(); // queued for the cron's 5-minute retry
+    });
+
     test('a record-scoped enrollment signs with the linked visit\'s technician, never a newer visit\'s (codex #4139 r2)', async () => {
       const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
       const mock = makeMock({
@@ -3955,6 +4171,38 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       // Owner hand-sent an ask a day after enrollment — no correlated
       // review_requests send within ±10 min.
       sms_log: [{ id: 'sms-4', customer_id: 'ma-4', direction: 'outbound', status: 'sent', message_body: 'Hey Ana, would love a Google review: https://g.page/r/waves/review', created_at: new Date(startedAt.getTime() + 86400000) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('manual_ask_recent');
+  });
+
+  test('a reservation opened just before enrollment but confirmed sent afterward still retires the cadence (codex review-request.js:1476 P1)', async () => {
+    const startedAt = new Date(Date.now() - 3 * 86400000);
+    // Communications opened the reservation moments before post-service
+    // enrollment ran — includeReservations: false missed it there because
+    // it was still 'sending'. The provider then confirmed delivery a
+    // moment AFTER the sequence started; the reservation's created_at
+    // still predates started_at (the placeholder is opened before the
+    // send), but its confirmation (updated_at) does not.
+    const reservedAt = new Date(startedAt.getTime() - 30000);
+    const confirmedAt = new Date(startedAt.getTime() + 45000);
+    const mock = makeMock({
+      customers: [{ id: 'ma-5', first_name: 'Reserved', last_name: 'K', phone: '+19410000051', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-ma-reserve', customer_id: 'ma-5', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+        started_at: startedAt, next_run_at: new Date(Date.now() - 60000),
+      }],
+      sms_log: [{
+        id: 'sms-5', customer_id: 'ma-5', direction: 'outbound', status: 'sent',
+        message_body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true },
+        created_at: reservedAt, updated_at: confirmedAt,
+      }],
     });
     db.mockImplementation(mock);
 
@@ -4600,11 +4848,20 @@ describe('shared ask history foundation', () => {
     'Could you review the service report?',
     'Please submit your review of the attached estimate.',
     'Please submit your review for the attached estimate.',
+    // codex #4326 finding 2: a noun ("comments"/"feedback"/"notes") between
+    // "review" and the document preposition must not defeat the carve-out.
+    'Please share your review comments on the attached estimate.',
+    'Share your review notes for the updated contract, please.',
+    'Please add your review feedback on the attached proposal.',
     'Shipping details: https://vendor.example/rate/abc',
     'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
     'We discussed your Google review yesterday.',
     'Thanks so much for the Google review you left us!',
+    // codex #4326 r3: support chatter about the link is not a request.
+    'The review link is broken; I’ll resend it later.',
+    'I fixed the review link.',
+    'Let me know if the review link works now.',
   ])('unrelated acknowledgment/support text is not an ask: %s', async body => {
     installHistory({ sms: [{ at: base, body }] });
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
@@ -4641,8 +4898,42 @@ describe('shared ask history foundation', () => {
     'We’d appreciate it if you left us a Google review.',
     'It would mean a lot if you left us a review.',
     'If you could leave us a quick Google review, that would help.',
+    // codex #4326 finding 1: present-tense invitations (no would/could) —
+    // this is the repo's own Day-0 template wording (review-outreach-templates.js).
+    'If we earned it, a Google review means a lot.',
+    'A quick review helps us out a ton.',
+    'A quick Google review really helps.',
+    'A 5-star review supports our small crew.',
+    'That review link one more time:',
+    'Here is that review link one more time.',
+    'Here’s your review link again.',
+    'Review link: https://portal.test/l/abc123',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
+  });
+
+  test('every real ask template in review-outreach-templates.js is recognized on its own wording', () => {
+    // Rendered with review_url stripped: a staff member forwarding this exact
+    // wording without the (per-customer) link must still trip the standdown
+    // (codex #4326 finding 1 — the repo's own Day-0 wording was the reported
+    // gap). Two templates lean entirely on the link with no textual review
+    // mention at all ("If we earned it:" / "sharing your experience?") — that
+    // is a structural template-design limit, not a classifier bug, so they
+    // are pinned here as known link-dependent rather than silently ignored.
+    const templates = require('../services/review-outreach-templates');
+    const LINK_DEPENDENT_ONLY = new Set(['service_specific_pest', 'recovery_review']);
+    for (const t of templates.OUTREACH_TEMPLATES) {
+      if (!templates.isAskTemplate(t.id)) continue; // no-link check-ins are not asks
+      const linkFreeBody = templates.renderOutreachBody(t.body, {
+        first: 'Jamie', tech: 'Bob', sender: 'Bob with Waves', review_url: '',
+      });
+      const detected = history.looksLikeReviewAsk(linkFreeBody);
+      if (LINK_DEPENDENT_ONLY.has(t.id)) {
+        expect(detected).toBe(false);
+      } else {
+        expect(detected).toBe(true);
+      }
+    }
   });
 
   test('an unresolved manual review reservation cannot be matched away by a pipeline stamp', async () => {
@@ -4680,6 +4971,38 @@ describe('shared ask history foundation', () => {
     })).toEqual(new Date(base));
   });
 
+  test('a reservation confirmed after the boundary is evidence via its confirmation time, even though its placeholder predates the boundary (codex review-request.js:1476 P1)', async () => {
+    const reservedAt = new Date(base - 300000);
+    const confirmedAt = new Date(base + 120000);
+    const mock = makeMock({
+      sms_log: [{
+        customer_id: 'history-customer', direction: 'outbound', status: 'sent',
+        message_body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true },
+        created_at: reservedAt, updated_at: confirmedAt,
+      }],
+    });
+    db.mockImplementation(mock);
+
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base), includeReservations: false,
+    })).toEqual(confirmedAt);
+
+    // An unconfirmed (still 'sending') reservation opened before the
+    // boundary is NOT evidence — only a resolved confirmation anchors past
+    // its placeholder's created_at.
+    const stillSending = makeMock({
+      sms_log: [{
+        customer_id: 'history-customer', direction: 'outbound', status: 'sending',
+        message_body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true },
+        created_at: reservedAt, updated_at: reservedAt,
+      }],
+    });
+    db.mockImplementation(stillSending);
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base), includeReservations: false,
+    })).toBeNull();
+  });
+
   test('ordinary in-flight messages do not count as accepted review asks', async () => {
     installHistory({ sms: [{ at: base, status: 'sending' }] });
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
@@ -4703,6 +5026,29 @@ describe('shared ask history foundation', () => {
       { sms_sent_at: new Date(base + 60000), sent_at: null },
     ])).toEqual(new Date(base + 3600000));
     expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
+  });
+
+  // codex #4326 finding 3: processFollowups (review-request.js) delivers the
+  // separate review_request_followup SMS several days after the original
+  // ask. The reducer must count that delivery too, or a caller enforcing
+  // ASK_SPACING_MS from this shared history under-counts the elapsed time
+  // and can fire the next ask too soon. (followup_delivered_at is what
+  // deliveredAskRows resolves from messaging_audit_log — see its postgres
+  // coverage in review-ask-history-postgres.test.js for why the raw
+  // review_requests.followup_sent_at column is NOT used directly: it is
+  // also stamped for dedup/no-consent/blocked paths that never reached the
+  // customer.)
+  test('a delivered legacy follow-up outranks the original ask timestamp', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: new Date(base), sent_at: null, followup_delivered_at: new Date(base + 4 * 86400000) },
+    ])).toEqual(new Date(base + 4 * 86400000));
+  });
+
+  test('a row with only a follow-up timestamp still counts', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: null, sent_at: null, followup_delivered_at: new Date(base) },
+    ])).toEqual(new Date(base));
+    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null, followup_delivered_at: null }])).toBeNull();
   });
 });
 

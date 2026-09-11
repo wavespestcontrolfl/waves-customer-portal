@@ -53,6 +53,7 @@ function chain(overrides = {}) {
     whereNotExists: jest.fn(function () { return this; }),
     whereExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
+    joinRaw: jest.fn(function () { return this; }),
     select: jest.fn(function () { return this; }),
     orderBy: jest.fn(function () { return this; }),
     limit: jest.fn(function () { return this; }),
@@ -311,6 +312,59 @@ describe('review request follow-up flow', () => {
     const result = await ReviewService.processFollowups();
 
     // Held, not left retryable for the next run to duplicate-send.
+    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: true,
+    }));
+  });
+
+  test('an uncertain follow-up handoff THROWN (not returned) is also held, not left eligible (codex #4338 P1, round 2)', async () => {
+    // The old catch only logged and returned — followup_sent stayed unset,
+    // so the NEXT run's candidate query re-selected this row and could send
+    // a duplicate follow-up after a post-handoff audit-persistence throw.
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([
+        {
+          id: 'rr-uncertain-throw',
+          customer_id: 'cust-1',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      updateQuery,
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-1',
+        first_name: 'Jamie',
+        last_name: 'Rios',
+        phone: '+19415550123',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+    sendCustomerMessage.mockImplementation(() => {
+      throw Object.assign(new Error('audit write failed'), {
+        providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+      });
+    });
+
+    const result = await ReviewService.processFollowups();
+
     expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
     expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       followup_sent: true,

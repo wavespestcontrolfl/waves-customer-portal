@@ -91,6 +91,32 @@ test('settle: provider uncertainty retains the linked marker and leaves decision
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ updated_at: expect.any(Date) }));
 });
 
+// codex #4338 P1: a reservation created solely to fence an in-flight
+// auto-send (no suggestion published yet) has heldDecisionIds: [] too, same
+// as a genuinely empty reservation — the decision-id arrays can't tell an
+// ambiguous provider outcome apart from a definite miss in that case. The
+// caller's explicit `ambiguous: true` is the real signal, and must retain
+// the reservation exactly like the non-empty-heldDecisionIds case above.
+test('settle: provider uncertainty on a no-card reservation (nothing held) still retains the marker when the caller marks it ambiguous', async () => {
+  const { del, update } = settleDb();
+  await suggest.settleHumanReply({
+    phoneLast10: '9415550100', startedAt: new Date(),
+    parkedDecisionIds: [], heldDecisionIds: [], reservationId: 'resv-1', sent: false, ambiguous: true,
+  });
+  expect(del).not.toHaveBeenCalled();
+  expect(update).toHaveBeenCalledWith(expect.objectContaining({ updated_at: expect.any(Date) }));
+});
+
+test('settle: a definite (non-ambiguous) miss on a no-card reservation still deletes it — nothing to protect', async () => {
+  const { del, update } = settleDb();
+  await suggest.settleHumanReply({
+    phoneLast10: '9415550100', startedAt: new Date(),
+    parkedDecisionIds: [], heldDecisionIds: [], reservationId: 'resv-1', sent: false,
+  });
+  expect(del).toHaveBeenCalled();
+  expect(update).not.toHaveBeenCalled();
+});
+
 test('settle (sent): sweeps a card published between the park commit and the accept, under the thread lock, cutoff at send start', async () => {
   const startedAt = new Date('2026-09-07T12:00:00Z');
   const { update, chain } = settleDb({ stale: [{ id: 'd9', entity_id: 'draft-9' }] });
