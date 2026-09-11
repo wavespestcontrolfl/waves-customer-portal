@@ -1099,8 +1099,16 @@ function staleClaimReviewHoldError(invoiceId) {
 // Claim-restoration: the ONE place every under-claim re-check gives an
 // already-taken claim back before re-throwing (a refusal or a lookup
 // failure alike), so a claim nobody holds never sits on a 'sending' row.
-async function restoreClaimAndThrow(invoiceId, previousStatus, err) {
-  await restoreSendClaim(invoiceId, previousStatus, true);
+// consumedQueuedSendRows is optional (most refusals here run BEFORE any
+// adoption has consumed anything) — when the caller HAS rows already
+// consumed at the point of the throw, passing them here is what makes
+// restoreSendClaim restore those too, in the right order, before this
+// throws (Codex r12 follow-on P1 #4131 round 2: a per-caller restore
+// after the fact misses exactly this — a throw from inside the adopting
+// step itself, before control ever returns to a caller that could restore
+// anything).
+async function restoreClaimAndThrow(invoiceId, previousStatus, err, consumedQueuedSendRows = []) {
+  await restoreSendClaim(invoiceId, previousStatus, true, consumedQueuedSendRows);
   throw err;
 }
 
@@ -1160,17 +1168,15 @@ async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, adoptsQu
   try {
     consumedRows = await consumeQueuedInvoiceSend(invoiceId);
     if (consumedRows.length) logger.info(`[invoice] Queued pay-link SMS for invoice ${invoiceId} consumed by a live send (${consumedRows.length} row${consumedRows.length === 1 ? "" : "s"} cancelled)`);
+    // The re-verify lookup itself can throw AFTER a successful consume
+    // (Codex r12 follow-on P1 #4131 round 2) — consumedRows is already
+    // populated by this point, so the catch below passes it through
+    // restoreClaimAndThrow rather than leaving it stranded cancelled.
     stillQueued = await queuedPayLinkText(invoiceId);
   } catch (adoptErr) {
-    await restoreClaimAndThrow(invoiceId, previousStatus, adoptErr);
+    await restoreClaimAndThrow(invoiceId, previousStatus, adoptErr, consumedRows);
   }
-  if (stillQueued) {
-    // Give back what we just took, ALL of it (Codex r12 follow-on P1
-    // #4131): the row(s) we cancelled above are part of the claim being
-    // handed back here too, not just the invoice status.
-    await restoreConsumedQueuedSend(consumedRows);
-    await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(stillQueued));
-  }
+  if (stillQueued) await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(stillQueued), consumedRows);
   return consumedRows;
 }
 
@@ -1228,7 +1234,18 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
 }
 
-async function restoreSendClaim(invoiceId, previousStatus, claimed) {
+// THE chokepoint for giving a send claim back (Codex r12 follow-on P1
+// #4131 round 2, owner rule: the same per-caller "restore the queue too"
+// convention kept recurring at new sites — moved here instead of asking
+// every release path to remember it). consumedQueuedSendRows restores
+// FIRST, the invoice claim SECOND: a worker's due-scan reads the invoices
+// table independently of sms_log, so releasing the invoice (making the
+// row look sendable again) before the queue row exists would let a worker
+// wake in that gap and see an unclaimed invoice with NO queued delivery
+// at all. Every existing caller that never adopts a queue keeps working
+// unchanged — the default is a no-op.
+async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows = []) {
+  await restoreConsumedQueuedSend(consumedQueuedSendRows);
   if (!claimed || !previousStatus) return;
   await db("invoices")
     .where({ id: invoiceId, status: "sending" })
@@ -2863,17 +2880,15 @@ const InvoiceService = {
     // 'sending').
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated });
     const { invoice, previousStatus, claimed, consumedQueuedSendRows } = claim;
-    // Claim-restoration + queue-restoration together (Codex r12 follow-on
-    // P1 #4131): consumeQueuedInvoiceSend (inside the claim above) cancels
-    // any pre-existing queued pay-link text BEFORE this delivery is even
+    // consumeQueuedInvoiceSend (inside the claim above) cancels any
+    // pre-existing queued pay-link text BEFORE this delivery is even
     // attempted, so the worker can never double-send while it's in flight.
     // If this attempt then fails and nothing else picks up the obligation
-    // (the quiet-hours requeue below), that cancellation must be undone or
-    // the customer's already-scheduled text is silently lost.
-    const restoreClaimAndQueuedSend = async () => {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
-      await restoreConsumedQueuedSend(consumedQueuedSendRows);
-    };
+    // (the quiet-hours requeue below), that cancellation must be undone —
+    // restoreSendClaim itself owns restoring it, in the right order,
+    // whenever consumedQueuedSendRows is passed (Codex r12 follow-on P1
+    // #4131 round 2).
+    const restoreClaimAndQueuedSend = () => restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows);
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, so apply credit here too
@@ -3276,12 +3291,12 @@ const InvoiceService = {
         });
         queuedReplacementSecured = requeue.scheduled === true;
       }
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
       // The queue row this claim's adoption cancelled is only safe to leave
       // cancelled when a fresh replacement now owns the delivery — otherwise
-      // restore it (Codex r12 follow-on P1 #4131): a failed send must never
-      // silently drop a customer's already-scheduled pay-link text.
-      if (!queuedReplacementSecured) await restoreConsumedQueuedSend(consumedQueuedSendRows);
+      // restoreSendClaim restores it (in order, before releasing the
+      // invoice) so a failed send never silently drops a customer's
+      // already-scheduled pay-link text (Codex r12 follow-on P1 #4131).
+      await restoreSendClaim(invoiceId, previousStatus, claimed, queuedReplacementSecured ? [] : consumedQueuedSendRows);
       // Provider/Twilio error after we auto-applied credit above — the pay
       // link was never delivered, so return the credit rather than leave it
       // consumed + the invoice edit-locked.
@@ -3509,13 +3524,13 @@ const InvoiceService = {
         logger.error(`[invoice-followups] scheduleForInvoice failed (post-send finalize): ${e.message}`);
       }
     } else {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
       // The queue row this claim's adoption cancelled is only safe to leave
       // cancelled when a fresh replacement now owns the delivery
-      // (sms.scheduled) — otherwise restore it (Codex r12 follow-on P1
-      // #4131): no channel delivered here must never silently drop a
-      // customer's already-scheduled pay-link text.
-      if (!sms.scheduled) await restoreConsumedQueuedSend(consumedQueuedSendRows);
+      // (sms.scheduled) — otherwise restoreSendClaim restores it (in
+      // order, before releasing the invoice) so no channel delivered here
+      // never silently drops a customer's already-scheduled pay-link text
+      // (Codex r12 follow-on P1 #4131).
+      await restoreSendClaim(invoiceId, previousStatus, claimed, sms.scheduled ? [] : consumedQueuedSendRows);
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:

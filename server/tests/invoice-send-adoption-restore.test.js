@@ -83,10 +83,15 @@ const draftInvoice = {
 describe('claimInvoiceForSend adoption survives a failed replacement delivery', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test('sendViaSMS (direct caller): a no-phone failure restores the consumed queued row — same id, same scheduled_for', async () => {
+  test('sendViaSMS (direct caller): a no-phone failure restores the consumed queued row — same id, same scheduled_for — BEFORE releasing the invoice claim', async () => {
     const ORIGINAL_SCHEDULED_FOR = new Date('2026-09-11T12:00:00.000Z');
-    const restoreClaimChain = chain();
     const restoreQueueChain = chain();
+    const restoreClaimChain = chain();
+    const callOrder = [];
+    restoreQueueChain.update = jest.fn((v) => { callOrder.push('queue'); return restoreQueueChain._baseUpdate(v); });
+    restoreQueueChain._baseUpdate = jest.fn(() => restoreQueueChain);
+    restoreClaimChain.update = jest.fn((v) => { callOrder.push('claim'); return restoreClaimChain._baseUpdate(v); });
+    restoreClaimChain._baseUpdate = jest.fn(() => restoreClaimChain);
     db
       .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
       .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
@@ -95,22 +100,28 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
       .mockReturnValueOnce(chain({ returning: [{ id: 'sms-queued-1', scheduled_for: ORIGINAL_SCHEDULED_FOR }] })) // adoption consumes the pre-existing queued row
       .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE
-      .mockReturnValueOnce(restoreClaimChain) // restoreSendClaim
-      .mockReturnValueOnce(restoreQueueChain); // restoreConsumedQueuedSend
+      // restoreSendClaim is now the chokepoint: queue row restored FIRST,
+      // invoice claim released SECOND (Codex r12 follow-on P1 #4131 round 2)
+      // — a worker waking in between must never see an unclaimed invoice
+      // with no queue row.
+      .mockReturnValueOnce(restoreQueueChain) // restoreConsumedQueuedSend
+      .mockReturnValueOnce(restoreClaimChain); // the invoice status update
 
     await expect(InvoiceService.sendViaSMS('inv-1')).rejects.toThrow('Customer has no phone number');
 
-    // The invoice claim itself was restored...
-    expect(restoreClaimChain.update.mock.calls[0][0]).toMatchObject({ status: 'draft' });
-    // ...and so was the queued send this adoption had cancelled: same row,
+    // The queued send this adoption had cancelled was restored: same row,
     // same schedule — not a fresh one, the ORIGINAL obligation.
     expect(restoreQueueChain.whereIn.mock.calls[0]).toEqual(['id', ['sms-queued-1']]);
     expect(restoreQueueChain.where.mock.calls.some((c) => c[0]?.status === 'cancelled')).toBe(true);
-    const restoreUpdate = restoreQueueChain.update.mock.calls[0][0];
+    const restoreUpdate = restoreQueueChain._baseUpdate.mock.calls[0][0];
     expect(restoreUpdate.status).toBe('scheduled');
     // scheduled_for is never touched by the restore — the row's original
     // schedule survives untouched, exactly as the fix requires.
     expect(restoreUpdate.scheduled_for).toBeUndefined();
+    // ...and the invoice claim itself was restored too...
+    expect(restoreClaimChain._baseUpdate.mock.calls[0][0]).toMatchObject({ status: 'draft' });
+    // ...strictly AFTER the queue row, per the owner's ordering rule.
+    expect(callOrder).toEqual(['queue', 'claim']);
   });
 
   test('sendViaSMS (direct caller) held by a quiet-hours-style provider hold requeues the text instead of losing it', async () => {
@@ -149,5 +160,62 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     const metadata = JSON.parse(queuedRow.metadata);
     expect(metadata.entry_point).toBe('invoice_send_deferred');
     expect(metadata.invoice_id).toBe('inv-1');
+  });
+
+  test('claimInvoiceForSend: the post-adoption re-verify lookup THROWING restores the consumed row before re-throwing — restoration is not a per-caller convention', async () => {
+    const ORIGINAL_SCHEDULED_FOR = new Date('2026-09-11T09:00:00.000Z');
+    const restoreQueueChain = chain();
+    const restoreClaimChain = chain();
+    const throwingLookup = {
+      where: jest.fn(() => throwingLookup),
+      whereRaw: jest.fn(() => throwingLookup),
+      first: jest.fn(async () => { throw new Error('sms_log lookup failed'); }),
+    };
+    db
+      .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
+      .mockReturnValueOnce(chain({ first: undefined })) // reconcile: queued-under-claim check (none)
+      .mockReturnValueOnce(chain({ returning: [{ id: 'sms-queued-1', scheduled_for: ORIGINAL_SCHEDULED_FOR }] })) // adoption consumes the pre-existing row
+      .mockReturnValueOnce(throwingLookup) // the RE-VERIFY lookup right after consuming — THROWS
+      .mockReturnValueOnce(restoreQueueChain) // restoreSendClaim: queue row restored FIRST
+      .mockReturnValueOnce(restoreClaimChain); // restoreSendClaim: invoice claim released SECOND
+
+    await expect(InvoiceService.claimInvoiceForSend('inv-1', { adoptsQueuedInvoiceSend: true }))
+      .rejects.toThrow('sms_log lookup failed');
+
+    // The row consumed just before the throw is restored — same id, same
+    // schedule — not stranded cancelled forever because the throw happened
+    // one line after the consume, inside the adopting step itself.
+    expect(restoreQueueChain.whereIn.mock.calls[0]).toEqual(['id', ['sms-queued-1']]);
+    const restoreUpdate = restoreQueueChain.update.mock.calls[0][0];
+    expect(restoreUpdate.status).toBe('scheduled');
+    expect(restoreUpdate.scheduled_for).toBeUndefined();
+    // ...and the invoice claim was released too.
+    expect(restoreClaimChain.update.mock.calls[0][0]).toMatchObject({ status: 'draft' });
+  });
+
+  test('a fully delivered send leaves the consumed queue row cancelled — nothing restores a row a live send actually superseded', async () => {
+    const fallback = chain();
+    db
+      .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
+      .mockReturnValueOnce(chain({ first: undefined })) // reconcile: queued-under-claim check (none)
+      .mockReturnValueOnce(chain({ returning: [{ id: 'sms-queued-1', scheduled_for: new Date('2026-09-11T09:00:00.000Z') }] })) // adoption consumes the pre-existing row
+      .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup
+      .mockReturnValue(fallback); // finalize + every post-delivery best-effort step
+
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+
+    const result = await InvoiceService.sendViaSMS('inv-1');
+
+    expect(result.sent).toBe(true);
+    // Nothing anywhere in the flow ever set the queue row (or any row)
+    // back to 'scheduled' — the consumed row stays cancelled because a
+    // live send actually delivered the pay link.
+    const anyRestoredToScheduled = fallback.update.mock.calls.some((c) => c[0]?.status === 'scheduled');
+    expect(anyRestoredToScheduled).toBe(false);
   });
 });
