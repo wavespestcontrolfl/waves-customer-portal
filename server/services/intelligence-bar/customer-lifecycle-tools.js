@@ -124,14 +124,35 @@ function collectionCasesNote(cases) {
   return ` Collection cases: ${cases.demoted_to_proposed.length} approved case(s) (${cases.demoted_to_proposed.join(', ')}) revert to proposed so the surviving record keeps one live approval; re-approve from the collections queue if still wanted.`;
 }
 
+// The loser's saved cards the merge strips of default/autopay because the
+// winner already has a default card (customer-dedupe
+// predictSavedCardDemotions — the executor's own set, pinned by the
+// fingerprint): named on the card so a disabled autopay card is never a
+// surprise.
+function savedCardDemotionsNote(demotions) {
+  if (!demotions?.winner_has_default || !demotions.cards?.length) return '';
+  const flags = (c) => [c.is_default ? 'default' : null, c.autopay_enabled ? 'autopay' : null].filter(Boolean).join('+');
+  const listed = demotions.cards.map((c) => `${c.id} (${flags(c)})`).join(', ');
+  return ` Saved cards: ${demotions.cards.length} card(s) moving from the archived record lose default/autopay because the surviving record already has a default card — ${listed}; the survivor's own default card stays the one autopay card.`;
+}
+
 async function previewMergeCustomers(winnerId, loserId) {
   const check = await loadMergeEligibility(winnerId, loserId);
   if (!check.ok) return { error: check.error, code: check.code };
   const { winner, loser, eligibility } = check;
-  const { describeMergeEffects } = require('../customer-dedupe');
+  const { describeMergeEffects, rowLevelMergeConflict } = require('../customer-dedupe');
+  // An unexecutable preview is a tool failure, not a card. The executor's
+  // own deterministic row-level refusals (inactive winner, two Stripe
+  // profiles, two payers, two billing modes / fees) run here FIRST so the
+  // operator gets "resolve X first" instead of spending an approval on a
+  // write that can never succeed.
+  const rowConflict = rowLevelMergeConflict(winner, loser);
+  if (rowConflict) {
+    return { error: `These records cannot be merged yet: ${rowConflict.message}.`, code: rowConflict.code };
+  }
   const { moving, financial_effects, fingerprint } = await describeMergeEffects(db, winner, loser);
-  // An unexecutable preview is a tool failure, not a card: the executor
-  // refuses saved cards on a profile other than the survivor's.
+  // Likewise the executor refuses saved cards on a profile other than the
+  // survivor's.
   if (financial_effects.saved_card_profile_conflict) {
     return { error: "Saved cards on these records belong to a different Stripe profile than the surviving customer's — resolve that in Stripe first.", code: 'stripe_profile_conflict' };
   }
@@ -154,7 +175,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     financial_effects,
     moving,
     effects_fingerprint: fingerprint,
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
 

@@ -2210,11 +2210,19 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
   const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
   const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', billing_mode: null, per_application_fee: null, account_credits: '0', address_line1: '100 Test St', email: null };
   const loser = { id: 'L', first_name: 'Unknown', last_name: '', billing_mode: 'per_application', per_application_fee: '85.00', account_credits: '12.50', address_line1: null, email: 'stub@example.com', autopay_enabled: false };
-  function install(counts = {}, { sessions = {}, cards = {} } = {}) {
+  // `defaults`: { W: true } plants a winner default card; `flagged`:
+  // { L: [{ id, is_default, autopay_enabled }] } are the loser cards the
+  // demotion reader lists (predictSavedCardDemotions).
+  function install(counts = {}, { sessions = {}, cards = {}, defaults = {}, flagged = {} } = {}) {
     db.raw = jest.fn(async () => FK_ROWS);
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
-      if (table === 'payment_methods') return (cards[q.args('where')[0].customer_id] || []).map((id) => ({ stripe_customer_id: id }));
+      if (table === 'payment_methods') {
+        const owner = q.args('where')[0].customer_id;
+        if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
+        if (q.called('orderBy')) return flagged[owner] || [];
+        return (cards[owner] || []).map((id) => ({ stripe_customer_id: id }));
+      }
       if (table === 'invoices' && !q.called('count')) return sessions[q.args('where')[0].customer_id] || [];
       if (table === 'customer_plan_rates') return { n: counts.customer_plan_rates || 0 };
       return { n: counts[table] || 0 };
@@ -2234,6 +2242,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       winner_backfills: { email: 'stub@example.com', billing_mode: 'per_application', per_application_fee: '85.00' },
       stripe_profile_from_saved_cards: null,
       saved_card_profile_conflict: false,
+      saved_card_demotions: { winner_has_default: false, cards: [] },
       combined_payment_sessions: { winner: [], loser: [] },
       collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
       predicted_collision_handlers: [],
@@ -2248,6 +2257,25 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     // One more invoice on the loser → a different fingerprint.
     install({ invoices: 3, customer_plan_rates: 1 });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+  });
+
+  it('discloses and pins the loser cards the merge strips of default/autopay when the winner already has a default (Codex r6 P1)', async () => {
+    const loserCards = [
+      { id: 'pm_l1', is_default: true, autopay_enabled: true },
+      { id: 'pm_l2', is_default: false, autopay_enabled: true },
+    ];
+    install({}, { defaults: { W: true }, flagged: { L: loserCards } });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.saved_card_demotions).toEqual({ winner_has_default: true, cards: loserCards });
+    // The same rows → the same pin; a flag flip on one card with the SAME
+    // count → a different pin (the executor recomputes under its locks).
+    install({}, { defaults: { W: true }, flagged: { L: loserCards } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).toBe(out.fingerprint);
+    install({}, { defaults: { W: true }, flagged: { L: [{ ...loserCards[0], is_default: false }, loserCards[1]] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
+    // No winner default → nothing is demoted, whatever the loser's flags.
+    install({}, { defaults: {}, flagged: { L: loserCards } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.saved_card_demotions).toEqual({ winner_has_default: false, cards: [] });
   });
 
   it('discloses and pins the saved-card Stripe profile the winner will adopt and every stamped combined payment session (Codex r4 P1s)', async () => {

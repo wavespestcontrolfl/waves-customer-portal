@@ -1076,6 +1076,78 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
 // preview (disclosed + pinned), so the card shows the profile the winner
 // will actually adopt. `from` says whose cards identified it — journaled so
 // an undo knows where the id belongs.
+/**
+ * Pure, deterministic row-level merge refusals — the checks executeMerge
+ * throws on before it reads a single child row. Exported so the IB preview
+ * runs the SAME rule and refuses the proposal (an actionable "resolve X
+ * first") instead of handing the operator a confirmation card that can
+ * never succeed. Returns { code, message } or null.
+ *
+ * - inactive winner: retiring an active customer into an inactive winner
+ *   would hide them from every live-customer surface.
+ * - two Stripe profiles / two third-party payers / two billing modes: a
+ *   human billing decision, never picked by a merge. (A loser-only value
+ *   transfers with the winner backfills — invoice precedence is
+ *   scheduled_service.payer_id ?? customers.payer_id, and the monthly cron
+ *   treats a NULL mode as legacy monthly membership, so dropping the only
+ *   marker would flip billing.)
+ * - same per_application mode, different fees: completion billing reads the
+ *   surviving row's fee for visits without an explicit price, so the
+ *   loser's moved visits would invoice at the wrong accepted amount.
+ */
+function rowLevelMergeConflict(winner, loser) {
+  if (winner.active === false) {
+    return { code: 'winner_inactive', message: 'winner is inactive — reactivate it first or keep the other row' };
+  }
+  if (winner.stripe_customer_id && loser.stripe_customer_id
+    && winner.stripe_customer_id !== loser.stripe_customer_id) {
+    return { code: 'stripe_profile_conflict', message: 'both customers have Stripe profiles — resolve in Stripe first' };
+  }
+  if (winner.payer_id && loser.payer_id && winner.payer_id !== loser.payer_id) {
+    return { code: 'payer_conflict', message: 'customers have different third-party payers — resolve billing first' };
+  }
+  if (winner.billing_mode && loser.billing_mode && winner.billing_mode !== loser.billing_mode) {
+    return { code: 'billing_mode_conflict', message: 'customers have different billing modes — reconcile billing first' };
+  }
+  if (winner.billing_mode === 'per_application' && loser.billing_mode === 'per_application') {
+    const wFee = Number(winner.per_application_fee);
+    const lFee = Number(loser.per_application_fee);
+    if (Number.isFinite(wFee) && Number.isFinite(lFee) && wFee !== lFee) {
+      return { code: 'per_application_fee_conflict', message: 'customers have different per-application fees — reconcile billing first' };
+    }
+  }
+  return null;
+}
+
+/**
+ * The saved cards a merge DEMOTES: when the winner already has a default
+ * card, every loser card arriving with is_default or autopay_enabled is
+ * cleared (autopay picks .first() among default+autopay rows, and two
+ * defaults after the repoint would charge an arbitrary card). ONE reader
+ * for the executor's demotion write and the IB card's disclosure, so the
+ * card names the exact payment-method ids and before/after flags and the
+ * effects fingerprint (recomputed under the executor's locks) changes when
+ * those flags do — a same-count flag flip during the pending window can
+ * no longer slip past the pin. Returns
+ * { winner_has_default, cards: [{ id, is_default, autopay_enabled }] } —
+ * cards ordered by id so the disclosure is stable.
+ */
+async function predictSavedCardDemotions(database, winnerId, loserId) {
+  const winnerDefault = await database('payment_methods')
+    .where({ customer_id: winnerId, is_default: true })
+    .first('id');
+  if (!winnerDefault) return { winner_has_default: false, cards: [] };
+  const cards = await database('payment_methods')
+    .where({ customer_id: loserId })
+    .where((q) => q.where({ is_default: true }).orWhere({ autopay_enabled: true }))
+    .orderBy('id')
+    .select('id', 'is_default', 'autopay_enabled');
+  return {
+    winner_has_default: true,
+    cards: cards.map((c) => ({ id: c.id, is_default: c.is_default === true, autopay_enabled: c.autopay_enabled === true })),
+  };
+}
+
 async function deriveSavedCardStripeCustomer(database, winner, loser) {
   const pmStripeIdsFor = async (customerId) => [...new Set((await database('payment_methods')
     .where({ customer_id: customerId })
@@ -1268,14 +1340,12 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw err;
       }
     }
-    // The surviving row must be live: retiring an active customer into an
-    // inactive winner would hide them from every live-customer surface.
-    if (winner.active === false) throw new Error('executeMerge: winner is inactive — reactivate it first or keep the other row');
-
-    if (winner.stripe_customer_id && loser.stripe_customer_id
-      && winner.stripe_customer_id !== loser.stripe_customer_id) {
-      throw new Error('executeMerge: both customers have Stripe profiles — resolve in Stripe first');
-    }
+    // Deterministic row-level refusals (inactive winner, two Stripe
+    // profiles, two payers, two billing modes / fees) — ONE rule, shared
+    // with the IB preview so an operator never receives a confirmation
+    // card for a merge this executor would unconditionally refuse.
+    const rowConflict = rowLevelMergeConflict(winner, loser);
+    if (rowConflict) throw new Error(`executeMerge: ${rowConflict.message}`);
     // Saved cards live on a specific STRIPE customer: charge paths attach
     // PaymentIntents to ensureStripeCustomer(winner), so a moved method
     // attached elsewhere would strand and autopay/card-on-file charges fail.
@@ -1287,33 +1357,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
     }
     const { derivedStripeCustomerId, stripeDerivedFrom } = savedCards;
-    // Two DIFFERENT third-party payer defaults is a human billing decision,
-    // exactly like both-have-Stripe: refuse. (A loser-only payer transfers
-    // with the backfills below — invoice precedence is
-    // scheduled_service.payer_id ?? customers.payer_id, so dropping it would
-    // flip the merged account to self-pay.)
-    if (winner.payer_id && loser.payer_id && winner.payer_id !== loser.payer_id) {
-      throw new Error('executeMerge: customers have different third-party payers — resolve billing first');
-    }
-    // Same contract for billing cadence: two DIFFERENT non-null modes is a
-    // human billing decision. (A loser-only mode transfers with the
-    // backfills below — the monthly cron treats NULL as legacy monthly
-    // membership, so dropping the only per_application/annual_prepay marker
-    // would bill the merged account on the wrong cadence.)
-    if (winner.billing_mode && loser.billing_mode && winner.billing_mode !== loser.billing_mode) {
-      throw new Error('executeMerge: customers have different billing modes — reconcile billing first');
-    }
-    // Same mode but DIFFERENT per-application fees is still a billing
-    // conflict: completion billing reads the surviving row's fee for visits
-    // without an explicit price, so the loser's moved visits would invoice
-    // at the wrong accepted amount.
-    if (winner.billing_mode === 'per_application' && loser.billing_mode === 'per_application') {
-      const wFee = Number(winner.per_application_fee);
-      const lFee = Number(loser.per_application_fee);
-      if (Number.isFinite(wFee) && Number.isFinite(lFee) && wFee !== lFee) {
-        throw new Error('executeMerge: customers have different per-application fees — reconcile billing first');
-      }
-    }
+    // (Payer / billing-mode / per-application-fee refusals: rowLevelMergeConflict above.)
     // Legacy NULL is a real cadence too — the monthly cron treats NULL as
     // monthly membership, and completion billing reads the SURVIVOR's mode.
     // Mixing a special-mode side with a legacy side is only safe when the
@@ -1419,16 +1463,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // is_default+autopay_enabled rows, and two defaults after the repoint
     // would charge an arbitrary card. (Reachable when both rows share a
     // Stripe profile or the loser's stripe_customer_id is stale/null.)
-    const winnerHadDefault = await trx('payment_methods')
-      .where({ customer_id: winnerId, is_default: true })
-      .first('id');
+    // The demotion set is the shared reader's (predictSavedCardDemotions),
+    // the same rule the IB card disclosed and the fingerprint pinned.
+    const savedCardDemotions = await predictSavedCardDemotions(trx, winnerId, loserId);
     // Capture each loser card's ORIGINAL default/autopay flags for the
     // journal: the demotion below clears them, and an undo must restore the
     // loser's cards exactly as they were (billing continuity — autopay picks
     // the default card).
     const loserCards = await trx('payment_methods')
       .where({ customer_id: loserId }).select('id', 'is_default', 'autopay_enabled');
-    const loserCardIds = loserCards.map((r) => r.id);
     // The winner's OWN pre-merge cards, journaled so the undo's
     // new-card-on-transferred-profile guard can tell them apart from cards
     // saved AFTER the merge: in the derived-profile case the derivation
@@ -1624,10 +1667,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
 
     // Normalize payment-method defaults now that the loser's cards moved:
     // the winner's own pre-merge default stays the ONE default/autopay card.
-    if (winnerHadDefault && loserCardIds.length) {
+    if (savedCardDemotions.winner_has_default && savedCardDemotions.cards.length) {
       const demoted = await trx('payment_methods')
-        .whereIn('id', loserCardIds)
-        .where((q) => q.where({ is_default: true }).orWhere({ autopay_enabled: true }))
+        .whereIn('id', savedCardDemotions.cards.map((c) => c.id))
         .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
       if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
     }
@@ -4599,6 +4641,9 @@ async function describeMergeEffects(database, winner, loser) {
   // would refuse is stated so the preview refuses too.
   const savedCards = await deriveSavedCardStripeCustomer(database, winner, loser);
   const { backfills } = predictWinnerBackfills(winner, loser, { derivedStripeCustomerId: savedCards.derivedStripeCustomerId });
+  // The loser cards the executor will strip of default/autopay (its own
+  // reader) — ids and before-flags on the card, pinned by the fingerprint.
+  const saved_card_demotions = await predictSavedCardDemotions(database, winner.id, loser.id);
   // Stamped combined payment sessions on either side: the merge releases
   // (cancels in Stripe) every unconfirmed one and DEFERS on loser-side
   // money in flight — disclosed as the PaymentIntents involved and pinned;
@@ -4625,6 +4670,7 @@ async function describeMergeEffects(database, winner, loser) {
     stripe_profile_from_saved_cards: savedCards.derivedStripeCustomerId
       ? { stripe_customer_id: savedCards.derivedStripeCustomerId, from: savedCards.stripeDerivedFrom } : null,
     saved_card_profile_conflict: savedCards.conflict,
+    saved_card_demotions,
     combined_payment_sessions,
     collection_cases,
     predicted_collision_handlers: predictedCollisionHandlers,
@@ -4657,6 +4703,8 @@ module.exports = {
   surplusApprovedCollectionCases,
   predictWinnerBackfills,
   deriveSavedCardStripeCustomer,
+  predictSavedCardDemotions,
+  rowLevelMergeConflict,
   inheritedAutopayRestrictions,
   acquirePairAdjudicationLock,
   REFERRAL_FOLD_COUNTERS,

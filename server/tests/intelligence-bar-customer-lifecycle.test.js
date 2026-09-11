@@ -46,6 +46,8 @@ jest.mock('../services/customer-dedupe', () => ({
   executeMerge: (...args) => mockExecuteMerge(...args),
   duplicatePairEligibility: (...args) => mockDuplicatePairEligibility(...args),
   describeMergeEffects: (...args) => mockDescribeMergeEffects(...args),
+  // The REAL pure rule: the preview must refuse exactly what the executor refuses.
+  rowLevelMergeConflict: jest.requireActual('../services/customer-dedupe').rowLevelMergeConflict,
 }));
 
 const db = require('../models/db');
@@ -68,6 +70,7 @@ const FINANCIAL = {
   account_credits_moved_to_winner: 12.5, billing_mode_adopted_from_loser: 'per_application', per_application_fee_adopted_from_loser: 85,
   loser_plan_rate_rows_deleted: 0, referral_fold: NOT_ENROLLED, autopay_restrictions_inherited: {},
   winner_backfills: { email: 'stub@example.com' }, stripe_profile_from_saved_cards: null, saved_card_profile_conflict: false,
+  saved_card_demotions: { winner_has_default: false, cards: [] },
   combined_payment_sessions: { winner: [], loser: [] },
   collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
   predicted_collision_handlers: [], revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)',
@@ -134,6 +137,42 @@ describe('merge_customers', () => {
     expect(result.winner_customer_id).toBe(WINNER_ID);
     expect(db.__qb.whereIn).toHaveBeenCalledWith('id', [WINNER_ID, LOSER_ID]);
     expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(WINNER_ID, LOSER_ID);
+  });
+
+  test('a pair the executor would unconditionally refuse (two Stripe profiles / payers / billing modes / fees, inactive winner) refuses the PREVIEW with the executor\'s reason — never a card that cannot succeed (Codex r6 P2)', async () => {
+    const cases = [
+      [{ stripe_customer_id: 'cus_w' }, { stripe_customer_id: 'cus_l' }, 'stripe_profile_conflict', /both customers have Stripe profiles/],
+      [{ payer_id: 'payer-1' }, { payer_id: 'payer-2' }, 'payer_conflict', /different third-party payers/],
+      [{ billing_mode: 'annual_prepay' }, { billing_mode: 'per_application' }, 'billing_mode_conflict', /different billing modes/],
+      [{ billing_mode: 'per_application', per_application_fee: '85.00' }, { billing_mode: 'per_application', per_application_fee: '95.00' }, 'per_application_fee_conflict', /different per-application fees/],
+      [{ active: false }, {}, 'winner_inactive', /winner is inactive/],
+    ];
+    for (const [w, l, code, message] of cases) {
+      db.__qb.select.mockResolvedValueOnce([{ ...winnerRow, ...w }, { ...loserRow, ...l }]);
+      const refused = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+      expect(refused).toMatchObject({ code, error: message });
+      expect(refused.preview).toBeUndefined();
+    }
+    // The refusal is decided BEFORE any effect is computed — no card, no engine call.
+    expect(mockDescribeMergeEffects).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+    // A loser-only value is a backfill, not a conflict: the card is built.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, { ...loserRow, stripe_customer_id: 'cus_l', payer_id: 'payer-1', billing_mode: 'per_application' }]);
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(card.preview).toBe(true);
+  });
+
+  test('the card names every loser card the merge strips of default/autopay, with its before-flags (Codex r6 P1)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, saved_card_demotions: { winner_has_default: true, cards: [{ id: 'pm_l1', is_default: true, autopay_enabled: true }, { id: 'pm_l2', is_default: false, autopay_enabled: true }] } } });
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(card.financial_effects.saved_card_demotions.cards).toHaveLength(2);
+    expect(card.note_to_operator).toMatch(/Saved cards: 2 card\(s\) moving from the archived record lose default\/autopay because the surviving record already has a default card — pm_l1 \(default\+autopay\), pm_l2 \(autopay\); the survivor's own default card stays the one autopay card\./);
+    // No winner default → nothing to say.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, saved_card_demotions: { winner_has_default: false, cards: [] } } });
+    const quiet = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(quiet.note_to_operator).not.toMatch(/Saved cards:/);
   });
 
   test('saved cards on a third Stripe profile refuse the preview (a card the executor would refuse is a tool failure, not a card); open combined sessions are named in the note', async () => {
