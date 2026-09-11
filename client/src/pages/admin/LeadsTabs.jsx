@@ -2581,10 +2581,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                     {" "}
                     <span
                       className={
-                        ["lost", "disqualified"].includes(stage)
-                          ? "w-2.5 h-2.5 rounded-full inline-block bg-alert-fg"
-                          : stage === "won"
-                            ? "w-2.5 h-2.5 rounded-full inline-block bg-zinc-900"
+                        stage === "won"
+                          ? "w-2.5 h-2.5 rounded-full inline-block bg-zinc-900"
+                          : ["lost", "disqualified"].includes(stage)
+                            ? "w-2.5 h-2.5 rounded-full inline-block bg-zinc-600"
                             : "w-2.5 h-2.5 rounded-full inline-block bg-zinc-400"
                       }
                     />{" "}
@@ -3015,8 +3015,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     // Lost reasons pie
     const totalLost = lostReasons.reduce((s, r) => s + r.count, 0);
     const pieClasses = [
-      "text-alert-fg",
       "text-zinc-900",
+      "text-zinc-800",
       "text-zinc-700",
       "text-zinc-600",
       "text-zinc-500",
@@ -3300,12 +3300,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                       <span className="text-ui-body text-zinc-900">
                         {b.label}
                       </span>
-                      <progress
-                        aria-label={`${b.label} lead count`}
-                        value={b.total}
-                        max={maxResp}
-                        className="h-3 w-full accent-zinc-900"
-                      />
+                      <div className="grid gap-1">
+                        <progress
+                          aria-label={`${b.label} total leads`}
+                          value={b.total}
+                          max={maxResp}
+                          className="h-1.5 w-full accent-zinc-400"
+                        />
+                        <progress
+                          aria-label={`${b.label} won leads`}
+                          value={b.won || 0}
+                          max={maxResp}
+                          className="h-1.5 w-full accent-zinc-900"
+                        />
+                      </div>
                       <span className="text-ui-body text-ink-secondary">
                         {b.total} · {b.conversionRate}%
                       </span>
@@ -3317,7 +3325,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             <div className="flex gap-[12px] text-ui-body text-ink-secondary mt-[12px]">
               {" "}
               <span>
-                <span className="inline-block w-[10px] h-[10px] bg-zinc-900 rounded-sm mr-[4px]" />
+                <span className="inline-block w-[10px] h-[10px] bg-zinc-400 rounded-sm mr-[4px]" />
                 Total
               </span>{" "}
               <span>

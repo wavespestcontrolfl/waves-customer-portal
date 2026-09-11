@@ -142,7 +142,13 @@ function bodyFor(url, method) {
   if (p === "/api/admin/leads/analytics/response")
     return {
       buckets: [
-        { label: "Under 5 min", total: 8, conversions: 4, conversionRate: 50 },
+        {
+          label: "Under 5 min",
+          total: 8,
+          won: 4,
+          conversions: 4,
+          conversionRate: 50,
+        },
       ],
     };
   if (p === "/api/admin/leads/analytics/lost")
