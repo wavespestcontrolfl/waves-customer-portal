@@ -6,6 +6,11 @@ const ASK_SPACING_MS = 72 * 3600000;
 const REVIEW_LINK_RE = /g\.page\/(?:r\/)?[^\s/]+\/review\b|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b/i;
 const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edit|(?:mind|consider|how\s+about)\s+(?:leaving|writing|posting|submitting|sharing|giving|adding|updating|editing))\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+us\b|\bshare\s+your\s+experience\s+in\s+a\s+review\b/i;
 
+// Conditional requests put the verb in the past tense ("if you left us a
+// Google review"). Gating on the "if you" clause keeps acknowledgments
+// ("thanks for the review you left us") out.
+const REVIEW_CONDITIONAL_RE = /\bif\s+(?:you|y['’]all|ya)\s+(?:ever\s+|could\s+|would\s+|would\s+ever\s+|wouldn['’]t\s+mind\s+)?(?:left|leave|leaving|wrote|write|writing|posted|post|posting|shared|share|sharing|gave|give|giving|submitted|submit|submitting)\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i;
+
 const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love|be\s+(?:really\s+)?grateful\s+for)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|make\s+(?:my|our)\s+day|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
 
 // Link-library destinations and explicit requests count. Acknowledgments
@@ -23,7 +28,7 @@ function looksLikeReviewAsk(body) {
     });
   // Reviewing a document is different from reviewing the business.
   const intentText = text.replace(/\breview\s+(?:of|on|for)\s+(?:(?:the|your|our|my|attached|updated)\s+)*(?:estimate|invoice|agreement|contract|report|document|proposal)\b/gi, 'document assessment');
-  return portalRate || REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(intentText) || REVIEW_INVITATION_RE.test(intentText)
+  return portalRate || REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(intentText) || REVIEW_INVITATION_RE.test(intentText) || REVIEW_CONDITIONAL_RE.test(intentText)
     || /\b(?:could|can|may)\s+(?:i|we)\s+ask\s+(?:you\s+)?for\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i.test(intentText)
     || (/maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i.test(text)
       && /\b(?:share|leave|give)\s+(?:(?:us|me)\s+)?(?:(?:your|some)\s+)?feedback\b/i.test(text))

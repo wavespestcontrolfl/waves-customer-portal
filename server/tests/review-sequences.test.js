@@ -3829,6 +3829,7 @@ describe('shared ask history foundation', () => {
     'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
     'We discussed your Google review yesterday.',
+    'Thanks so much for the Google review you left us!',
   ])('unrelated acknowledgment/support text is not an ask: %s', async body => {
     installHistory({ sms: [{ at: base, body }] });
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
@@ -3862,6 +3863,9 @@ describe('shared ask history foundation', () => {
     'https://www.yelp.com/writeareview/biz/example',
     'https://facebook.com/example/reviews',
     'Please leave a review: https://maps.app.goo.gl/abc123',
+    'We’d appreciate it if you left us a Google review.',
+    'It would mean a lot if you left us a review.',
+    'If you could leave us a quick Google review, that would help.',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
   });
