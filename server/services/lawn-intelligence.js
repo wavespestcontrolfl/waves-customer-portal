@@ -109,6 +109,14 @@ async function assessPhotoQuality(base64Image, mimeType) {
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
 
+// Only the columns this database actually has; null when there is no table.
+async function reportInsertData(reportData) {
+  if (!(await db.schema.hasTable('service_reports').catch(() => false))) return null;
+  const reportCols = await db('service_reports').columnInfo().catch(() => ({}));
+  const insertData = Object.fromEntries(Object.entries(reportData).filter(([key]) => reportCols[key]));
+  return Object.keys(insertData).length > 0 ? insertData : null;
+}
+
 // Delivery recovery's lease check must reach the caller, not the send-failure log.
 const isOwnershipLoss = (err) => err?.code === 'LAWN_DELIVERY_OWNERSHIP_LOST';
 async function runBeforeSend(options) {
@@ -409,22 +417,21 @@ const LawnIntelligence = {
         generated_at: new Date(),
       };
 
-      let report = null;
-      if (await db.schema.hasTable('service_reports').catch(() => false)) {
-        const reportCols = await db('service_reports').columnInfo().catch(() => ({}));
-        const insertData = Object.fromEntries(
-          Object.entries(reportData).filter(([key]) => reportCols[key])
-        );
-        if (Object.keys(insertData).length > 0) {
-          [report] = await db('service_reports').insert(insertData).returning('*');
-        }
-      }
+      const insertData = await reportInsertData(reportData);
 
-      const update = {};
-      if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
-      if (report?.id && assessmentCols.report_id) update.report_id = report.id;
-      if (assessmentCols.updated_at) update.updated_at = new Date();
-      if (Object.keys(update).length > 0) await db('lawn_assessments').where({ id: assessmentId }).update(update);
+      // One transaction. A process exit between the report row and its
+      // assessment marker used to leave an unmarked report that delivery
+      // recovery regenerated as a second row for the same assessment
+      // (service_reports has no uniqueness constraint to catch it).
+      const report = await db.transaction(async (trx) => {
+        const row = insertData ? (await trx('service_reports').insert(insertData).returning('*'))[0] : null;
+        const update = {};
+        if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
+        if (row?.id && assessmentCols.report_id) update.report_id = row.id;
+        if (assessmentCols.updated_at) update.updated_at = new Date();
+        if (Object.keys(update).length > 0) await trx('lawn_assessments').where({ id: assessmentId }).update(update);
+        return row;
+      });
 
       return report || { ...reportData, skippedInsert: true };
     } catch (err) {

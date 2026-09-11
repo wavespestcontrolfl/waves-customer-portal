@@ -29,9 +29,13 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   const done = [];
   try {
     await guard();
-    // Weather may legitimately be unavailable. It is an idempotent enrichment,
-    // while the steps below require their own durable proof before proceeding.
-    await LawnIntel.attachWeather(assessmentId);
+    // Weather may legitimately be unavailable. It is an enrichment, while the
+    // steps below require their own durable proof before proceeding. The stored
+    // snapshot is the VISIT's conditions and feeds later reports and outcome
+    // analysis, so a recovery hours or days later must not overwrite it with
+    // recovery-time weather — it is attached once, not refreshed per attempt.
+    const attachWeatherOnce = async (assessment) => (assessment?.fawn_snapshot ? null : LawnIntel.attachWeather(assessmentId));
+    await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
     const actions = [
       ['calibration', async (state) => {
         const { aiScores, finalScores, technicianId } = state.calibration;
@@ -72,14 +76,25 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   }
 }
 
-async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = runs.PIPELINE_STALE_MS, deliver = deliverConfirmedAssessment } = {}) {
+const RECOVERY_RETRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
+
+function validateSweepBounds(limit, retryHorizonMs, staleAfterMs) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Delivery recovery limit must be from 1 to 100');
+  if (!Number.isSafeInteger(retryHorizonMs) || retryHorizonMs <= staleAfterMs) throw new TypeError('Delivery recovery horizon must outlast its lease');
+}
+
+async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = runs.PIPELINE_STALE_MS, retryHorizonMs = RECOVERY_RETRY_HORIZON_MS, deliver = deliverConfirmedAssessment } = {}) {
+  validateSweepBounds(limit, retryHorizonMs, staleAfterMs);
   let candidates;
   try {
     candidates = await knex('lawn_assessment_runs as run')
       .join('lawn_assessments as assessment', 'assessment.id', 'run.assessment_id')
       .where('assessment.confirmed_by_tech', true).whereNull('run.pipeline_completed_at')
       .whereRaw("assessment.confirmed_at < clock_timestamp() - interval '2 minutes'")
+      // A run that cannot finish — a customer no channel will ever deliver to,
+      // say — must not be reclaimed every ten minutes forever. Each attempt is
+      // already logged; after the horizon the row stops being swept.
+      .whereRaw("assessment.confirmed_at > clock_timestamp() - (? * interval '1 millisecond')", [retryHorizonMs])
       .where((q) => q.whereNull('run.pipeline_claimed_at')
         .orWhereRaw("run.pipeline_claimed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]))
       .orderBy('assessment.confirmed_at', 'asc').limit(limit).select('run.assessment_id');
@@ -115,4 +130,4 @@ function scheduleRecovery(cron, { sweep = sweepAbandonedDeliveries } = {}) {
   }, { timezone: 'America/New_York' });
 }
 
-module.exports = { deliverConfirmedAssessment, sweepAbandonedDeliveries, scheduleRecovery };
+module.exports = { deliverConfirmedAssessment, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS };

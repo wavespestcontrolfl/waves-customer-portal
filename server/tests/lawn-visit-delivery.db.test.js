@@ -220,6 +220,33 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
   });
 
+  test('a recovery attaches weather once and never overwrites the visit snapshot', async () => {
+    const fresh = await seed();
+    const recovered = await seed();
+    const snapshot = JSON.stringify({ temp_f: 71, station: 'FIXTURE' });
+    await db.knex('lawn_assessments').where({ id: recovered.id }).update({ fawn_snapshot: snapshot, fawn_temp_f: 71 });
+    const deps = dependencies();
+    await deliver(fresh.id, deps);
+    expect(deps.LawnIntel.attachWeather).toHaveBeenCalledWith(fresh.id);
+    deps.LawnIntel.attachWeather.mockClear();
+    await deliver(recovered.id, deps);
+    // The snapshot is the visit's evidence; a later recovery must not refresh it.
+    expect(deps.LawnIntel.attachWeather).not.toHaveBeenCalled();
+    expect((await db.knex('lawn_assessments').where({ id: recovered.id }).first()).fawn_snapshot).toEqual(JSON.parse(snapshot));
+    expect((await stored(recovered.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
+  test('recovery stops sweeping a run that has been failing past the retry horizon', async () => {
+    await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
+    const recent = await seed(), ancient = await seed();
+    await db.knex('lawn_assessments').where({ id: ancient.id })
+      .update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '8 days'") });
+    const swept = jest.fn(async () => ({ skipped: 'fixture' }));
+    expect(await sweepAbandonedDeliveries({ knex: db.knex, deliver: swept })).toMatchObject({ candidates: 1 });
+    expect(swept.mock.calls.map(([arg]) => arg.assessmentId)).toEqual([recent.id]);
+    await expect(sweepAbandonedDeliveries({ knex: db.knex, retryHorizonMs: 60 })).rejects.toThrow(/horizon must outlast its lease/);
+  });
+
   test('completion refuses missing durable steps even with a valid lease', async () => {
     const assessment = await seed();
     const claim = await runs.claimPipeline(assessment.id, db.knex);
