@@ -365,17 +365,32 @@ async function recordAgreedWindow(conn, { callId, visitId } = {}) {
 async function recordSeriesSupersession(conn, { visitIds = [], communicatedAt = new Date(), seriesMoveId = null, excludeVisitId = null } = {}) {
   if (!captureEnabled()) return 0;
   const at = new Date(communicatedAt);
-  if (!Number.isFinite(at.getTime())) return 0;
+  // seriesMoveId is REQUIRED, not optional: it is the identity a retried
+  // notification pass dedupes against, and a timestamp fallback would be
+  // unique per call — the dedupe could never match and every retry would
+  // write another row (pre-push audit, round 5). admin-dispatch.js's own
+  // recordCustomerNotified already skips its bookkeeping without one, so an
+  // operation with no series move id is simply not a series move to record.
+  if (!seriesMoveId || !Number.isFinite(at.getTime())) return 0;
   const skip = excludeVisitId == null ? null : String(excludeVisitId);
-  const marker = seriesMoveId ? String(seriesMoveId) : `at:${at.toISOString()}`;
+  const marker = String(seriesMoveId);
   let written = 0;
   for (const id of new Set(visitIds.map((visitId) => String(visitId)).filter((visitId) => visitId && visitId !== skip))) {
-    const prior = await conn('audit_log').where({ action: 'visit_window_promised', resource_id: id })
-      .whereRaw("metadata->>'series_supersession' = ?", [marker]).first('id');
-    if (prior) continue;
-    await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: id,
-      metadata: { series_move_id: seriesMoveId, series_supersession: marker, start_at: null, communicated_at: at.toISOString() }, critical: true });
-    written += 1;
+    // Same advisory-lock discipline as recordAgreedWindow: the check and the
+    // write are one transaction keyed on (visit, series move), so two passes
+    // racing — a retry overlapping the original, or a double-submitted series
+    // move — cannot both read "no prior row" and both insert (pre-push audit,
+    // round 5). audit_log has no unique constraint to lean on instead.
+    const wrote = await conn.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['promised-series-supersession', `${id}:${marker}`]);
+      const prior = await trx('audit_log').where({ action: 'visit_window_promised', resource_id: id })
+        .whereRaw("metadata->>'series_supersession' = ?", [marker]).first('id');
+      if (prior) return false;
+      await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: id,
+        metadata: { series_move_id: marker, series_supersession: marker, start_at: null, communicated_at: at.toISOString() }, critical: true, trx });
+      return true;
+    });
+    if (wrote) written += 1;
   }
   return written;
 }

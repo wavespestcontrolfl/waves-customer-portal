@@ -584,29 +584,39 @@ describe('recordSeriesSupersession (one series text supersedes every moved occur
   const { recordAuditEvent } = require('../services/audit-log');
 
   function fakeConn({ priorIds = [] } = {}) {
-    const seen = [];
-    const conn = (table) => {
+    const locks = [];
+    const trx = (table) => {
       expect(table).toBe('audit_log');
       const chain = {};
       let resource = null;
-      chain.where = (args) => { resource = args.resource_id; seen.push(args); return chain; };
+      chain.where = (args) => { resource = args.resource_id; return chain; };
       chain.whereRaw = () => chain;
       chain.first = async () => (priorIds.includes(resource) ? { id: 'prior' } : undefined);
       return chain;
     };
-    return { conn, seen };
+    trx.raw = async (sql, bindings) => { locks.push({ sql, bindings }); };
+    const conn = () => { throw new Error('every write must go through conn.transaction'); };
+    conn.transaction = (work) => work(trx);
+    return { conn, locks };
   }
 
   beforeEach(() => { recordAuditEvent.mockClear(); process.env.GATE_NOSHOW_DETECTOR = 'true'; });
   afterEach(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
 
   test('writes an UNKNOWN-window promise for every moved sibling, skipping the anchor the text actually names', async () => {
-    const { conn } = fakeConn();
+    const { conn, locks } = fakeConn();
     const written = await recordSeriesSupersession(conn, { visitIds: ['anchor', 'sib-1', 'sib-2'], excludeVisitId: 'anchor',
       seriesMoveId: 'move-1', communicatedAt: new Date('2026-09-11T18:00:00Z') });
     expect(written).toBe(2);
     const resources = recordAuditEvent.mock.calls.map(([event]) => event.resource_id);
     expect(resources).toEqual(['sib-1', 'sib-2']);
+    // Check and write are one locked transaction per (visit, series move) —
+    // two racing passes cannot both read "no prior row" and both insert.
+    expect(locks.map((lock) => lock.bindings)).toEqual([
+      ['promised-series-supersession', 'sib-1:move-1'],
+      ['promised-series-supersession', 'sib-2:move-1'],
+    ]);
+    for (const lock of locks) expect(lock.sql).toContain('pg_advisory_xact_lock');
     for (const [event] of recordAuditEvent.mock.calls) {
       expect(event.action).toBe('visit_window_promised');
       // Unknown, not a window: the text quoted only the anchor's new slot.
@@ -624,6 +634,17 @@ describe('recordSeriesSupersession (one series text supersedes every moved occur
     const written = await recordSeriesSupersession(conn, { visitIds: ['sib-1', 'sib-2'], seriesMoveId: 'move-1' });
     expect(written).toBe(0);
     expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  // Without a series move id there is nothing stable to dedupe against, and
+  // a timestamp marker would be unique per call — every retried notification
+  // pass would write another row. admin-dispatch's own recordCustomerNotified
+  // skips its bookkeeping the same way (pre-push audit).
+  test('no series move id -> nothing written, rather than a marker that can never dedupe', async () => {
+    const { conn, locks } = fakeConn();
+    expect(await recordSeriesSupersession(conn, { visitIds: ['sib-1'], seriesMoveId: null })).toBe(0);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+    expect(locks).toEqual([]);
   });
 
   test('capture off entirely -> no evidence rows', async () => {
