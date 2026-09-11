@@ -433,8 +433,14 @@ button, input, select, textarea, optgroup {
 
 /* Customer-facing portal cleanup. These classes intentionally sit outside
    admin shells and pair with inline React styles on the public pages. */
+/* Document column 760, flow column 640 (owner ruling C6, DECISIONS
+   2026-09-11) — the two widths `theme-doc.js` already exports as
+   DOC_COLUMN_MAX and FLOW_COLUMN_MAX. The 1080 and 520 one-offs below are
+   retired with it. The 1080 here never actually rendered: this class's only
+   consumer (PayPageV2) also carries `.waves-receipt-page`, which sets 760
+   further down the file and wins on order. */
 .waves-customer-page {
-  width: min(100% - 32px, 1080px);
+  width: min(100% - 32px, 760px);
   margin: 28px auto 56px;
 }
 
@@ -475,13 +481,25 @@ button, input, select, textarea, optgroup {
   margin: 28px auto 48px;
 }
 
+/* Flow column. 520 was the narrowest one-off in the file and has no consumer
+   left in the client bundle; it stays declared at the ruled flow width rather
+   than reintroducing a third document size if a page picks the class up. */
 .waves-rate-page {
-  width: min(100% - 32px, 520px);
+  width: min(100% - 32px, 640px);
   margin: 48px auto 48px;
 }
 
-.waves-onboarding-page,
+/* The contract is a document: 760, matching the inline `DOC_COLUMN` that
+   ContractSignPage already authors on this very element — the 1080 here was
+   losing to it on every render anyway. Onboarding is a multi-step flow with
+   its own step grid and is not a document column; it is left at its current
+   width for the R2 layout-primitive pass rather than being narrowed blind. */
 .waves-contract-page {
+  width: min(100% - 32px, 760px);
+  margin: 28px auto 56px;
+}
+
+.waves-onboarding-page {
   width: min(100% - 32px, 1080px);
   margin: 28px auto 56px;
 }
