@@ -7,6 +7,7 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  UiSurface,
 } from "../ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -77,20 +78,26 @@ export default function IntegrationHealthSection() {
   };
 
   if (loading) {
-    return <ActionFeedback className="min-h-20">Loading integrations...</ActionFeedback>;
+    return (
+      <UiSurface>
+        <ActionFeedback className="min-h-20">Loading integrations...</ActionFeedback>
+      </UiSurface>
+    );
   }
   if (error) {
     return (
-      <ActionFeedback error onRetry={load} className="min-h-20">
-        Failed to load integrations: {error}
-      </ActionFeedback>
+      <UiSurface>
+        <ActionFeedback error className="min-h-20">
+          Failed to load integrations: {error}
+        </ActionFeedback>
+      </UiSurface>
     );
   }
 
   const groups = groupByCategory(data?.integrations || []);
 
   return (
-    <div className="space-y-5">
+    <UiSurface className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="max-w-3xl text-ui-body text-ink-secondary">
           Live credential health and integration configuration. Status reflects cached token-health checks plus config readiness.
@@ -99,14 +106,6 @@ export default function IntegrationHealthSection() {
           {checking ? "Checking..." : "Refresh checks"}
         </Button>
       </div>
-
-      {Object.keys(groups).length === 0 && (
-        <Card>
-          <CardBody className="py-8 text-center text-ink-secondary">
-            No integrations are configured.
-          </CardBody>
-        </Card>
-      )}
 
       {Object.entries(groups).map(([category, integrations]) => {
         const categoryId = `integration-category-${category.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -124,7 +123,7 @@ export default function IntegrationHealthSection() {
           </section>
         );
       })}
-    </div>
+    </UiSurface>
   );
 }
 
