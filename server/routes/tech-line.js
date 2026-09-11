@@ -28,7 +28,7 @@ const { techLineContext } = require('../services/tech-line');
 const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const crypto = require('crypto');
-const { isRealProviderSend } = require('../services/sms-auto-send');
+const { isRealProviderSend, isAmbiguousProviderOutcome } = require('../services/sms-auto-send');
 const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
@@ -126,13 +126,9 @@ function releaseClaim(claimKey) {
     .catch((err) => logger.warn(`[tech-line] claim release failed (${String(err?.code || err?.name || 'error')})`));
 }
 // AMBIGUOUS provider outcome — the admin composer's rule (GH Codex #3851 r4
-// P1): a retryable / deferred result that was neither accepted nor a
-// validator block (Twilio timeout, 5xx, 429) is NOT a definitive no-send;
-// the provider may hold the text. Claims stay held and parked suggestions
-// stay parked for such an outcome (codex #4072 r15 P2).
-function isAmbiguousOutcome(o) {
-  return Boolean(o) && o.sent !== true && !o.blocked && Boolean(o.retryable || o.deferred);
-}
+// P1): an explicit uncertain result is not a definitive no-send; the
+// provider may hold the text. Claims stay held and parked suggestions stay
+// parked. Legacy providers fall back to retryable/deferred classification.
 // A tech's real text is a first response to any open lead on this phone —
 // the same Speed-to-Lead stamp the admin composer makes after a real
 // provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
@@ -160,10 +156,10 @@ async function textFromLine({ req, ctx, target, body }) {
   if (reply.autoSendInFlight) {
     return { status: 409, json: { error: 'An automatic reply to this customer is being sent right now — try again in a moment', code: 'AUTO_REPLY_IN_FLIGHT' } };
   }
-  // Ambiguous: clear the reservation row only — the parked suggestions are
-  // neither reopened (an autonomous reply on top of a text the customer may
-  // already hold) nor ignored (the thread is not known to be answered).
-  const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, reviewedBy: req.technicianId }).catch(() => {});
+  // Ambiguous: retain the reservation and parked suggestions so recovery
+  // cannot reopen a reply the customer may already hold. Provider evidence
+  // can settle the held decisions later.
+  const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, ambiguous: true, reviewedBy: req.technicianId }).catch(() => {});
   let result;
   try {
     result = await sendCustomerMessage({
@@ -190,7 +186,7 @@ async function textFromLine({ req, ctx, target, body }) {
     // customer HAS the text: it is answered, and the tech must not be
     // invited to send it again (codex #4072 r2 P1).
     const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
-    if (!accepted && isAmbiguousOutcome(err?.providerOutcome)) await settleAmbiguous();
+    if (!accepted && isAmbiguousProviderOutcome(err?.providerOutcome)) await settleAmbiguous();
     else await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
     if (!accepted) throw err;
     logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
@@ -202,7 +198,7 @@ async function textFromLine({ req, ctx, target, body }) {
   // provider id — the tech must not see "Sent." for a text that never left.
   const delivered = result.sent && isRealProviderSend(result);
   if (!delivered) {
-    const ambiguous = isAmbiguousOutcome(result);
+    const ambiguous = isAmbiguousProviderOutcome(result);
     if (ambiguous) await settleAmbiguous();
     else await settleHumanReply({ ...reply, sent: false, reviewedBy: req.technicianId }).catch(() => {});
     const code = result.code || (result.sent ? 'SMS_GATE_OFF' : 'NOT_SENT');
@@ -252,7 +248,7 @@ router.post('/sms', async (req, res, next) => {
     try {
       out = await textFromLine({ req, ctx, target, body });
     } catch (err) {
-      if (!isAmbiguousOutcome(err?.providerOutcome)) await releaseClaim(claimKey);
+      if (!isAmbiguousProviderOutcome(err?.providerOutcome)) await releaseClaim(claimKey);
       throw err;
     }
     if (out.status !== 200 && !out.ambiguous) await releaseClaim(claimKey);
