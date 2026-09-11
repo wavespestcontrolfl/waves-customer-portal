@@ -650,21 +650,22 @@ function parseRawAddress(raw) {
     // "123 Main St NE" and "123 Main Ct" end in street tokens, not
     // Nebraska/Connecticut. A real locality before the state ("Lincoln
     // NE") or a comma-separated state tail still supplies geography.
-    // codex P1: the street-suffix reading is only plausible when the
-    // trailing token DIRECTLY terminates the street — house number + a
-    // single name word ("123 Main" + "Ct"), or a street whose own last word
-    // is already a suffix or number ("1234 Gulf of Mexico Dr" + "NE",
-    // "123 Route 12" + "Ct"). An unparsed word sitting right before the
-    // trailing token ("123 Route 12 Groton" + "CT") is a locality the
-    // splitter could not find, and the token is its real state.
-    const beforeStateTailTokens = beforeState.split(' ').filter(Boolean).slice(1);
-    const beforeStateTailLast = beforeStateTailTokens[beforeStateTailTokens.length - 1]
-      ?.replace(/[.,]/g, '').toLowerCase() || '';
+    // codex P1 (r7/r8): the trailing token is a street ending for any
+    // ordinary street name, however many words ("123 Royal Palm Ct",
+    // "1234 Gulf of Mexico Dr NE"). The one shape where an unparsed
+    // locality can hide before it is a NUMBERED route ("123 Route 12
+    // Groton CT", "500 Highway 41 Groton CT"): a numeric token inside the
+    // street name followed by a plain word that is neither a suffix nor a
+    // number. There the trailing token is the real state.
+    const beforeStateTailTokens = beforeState.split(' ').filter(Boolean).slice(1)
+      .map((t) => t.replace(/[.,]/g, '').toLowerCase());
+    const routeNumberIdx = beforeStateTailTokens.findIndex((t) => /^\d+[a-z]?$/.test(t));
+    const localityAfterRouteNumber = routeNumberIdx >= 0
+      && beforeStateTailTokens.slice(routeNumberIdx + 1)
+        .some((t) => !/^\d+[a-z]?$/.test(t) && !STREET_SPLIT_SUFFIXES.has(t) && !DIRECTIONALS.has(t));
     const bareStreetEnding = /^\d/.test(beforeState) && !splitStreetAndCity(beforeState).city
       && (DIRECTIONALS.has(stateToken) || STREET_SPLIT_SUFFIXES.has(stateToken))
-      && (beforeStateTailTokens.length <= 1
-        || STREET_SPLIT_SUFFIXES.has(beforeStateTailLast)
-        || /^\d+$/.test(beforeStateTailLast));
+      && !localityAfterRouteNumber;
     if (stateMatch.state && !bareStreetEnding) {
       state = stateMatch.state;
       remainder = beforeState;

@@ -240,8 +240,22 @@ describe('address normalizer', () => {
   });
 
   test('a real locality before a directional-shaped state code keeps the state ("Lincoln NE")', () => {
-    expect(parseRawAddress('400 Elm Lincoln NE')).toMatchObject({
+    expect(parseRawAddress('123 Main Street Lincoln NE')).toMatchObject({
+      city: 'Lincoln',
       state: 'NE',
+    });
+  });
+
+  // codex r8 P1: an ordinary multiword street name must keep its Court —
+  // only a numbered route followed by a plain word hides a locality.
+  test('a multiword street ending in Ct is a street, not Connecticut ("Royal Palm Ct")', () => {
+    expect(parseRawAddress('123 Royal Palm Ct')).toMatchObject({
+      line1: '123 Royal Palm Ct',
+      state: '',
+    });
+    expect(parseRawAddress('12 Lakewood Ranch Blvd Ct')).toMatchObject({
+      line1: '12 Lakewood Ranch Blvd Ct',
+      state: '',
     });
   });
 
