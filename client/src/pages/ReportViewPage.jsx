@@ -52,6 +52,7 @@ import {
   docButton,
   docTransition,
 } from '../theme-doc';
+import { CustomerColumn } from '../components/brand';
 import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -5609,7 +5610,7 @@ function LegacyReport({ data, token, glass = false }) {
       </header>
       ) : null}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <CustomerColumn>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -5643,7 +5644,7 @@ function LegacyReport({ data, token, glass = false }) {
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
-      </div>
+      </CustomerColumn>
     </div>
   );
 }
@@ -5957,13 +5958,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .sr-shell {
-          max-width: ${DOC_COLUMN_MAX}px;
-          width: 100%;
-          margin: 0 auto;
-          padding: 32px 20px 64px;
-          box-sizing: border-box;
-        }
+        /* .sr-shell's width/gutter/margin recipe moved to <CustomerColumn>
+           (audit G-01, DECISIONS 2026-09-11 "R2a"). Only the print-only
+           padding override below still targets this class name. */
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
@@ -8588,7 +8585,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-          .sr-shell { padding: 16px 16px 36px; }
           .report-action-bar { padding: 16px; }
           /* Keep the 2×2 grid on phones — four stacked full-width buttons made
              the utility bar a full screen tall (audit 2026-07-28). Slimmer
@@ -8788,7 +8784,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              is hidden in print, so the body must go with it). */
           .companion-internal { display: none; }
           .service-report-v1 { background: #fff; }
-          .sr-shell { padding: 0; }
+          /* !important: CustomerColumn authors this padding inline, which
+             plain stylesheet specificity can't beat — print needs zero
+             padding regardless. */
+          .sr-shell { padding: 0 !important; }
           .service-status-card,
           .sr-section,
           .report-card,
@@ -8829,7 +8828,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
           route wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div className="sr-shell">
+      <CustomerColumn className="sr-shell">
         {/* Staff-only shadow reports keep the internal notice on top. */}
         {mode === 'live' && data.internalOnly && <InternalReviewBar />}
 
@@ -9457,7 +9456,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-      </div>
+      </CustomerColumn>
     </div>
   );
 }

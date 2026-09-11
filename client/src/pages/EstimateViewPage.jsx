@@ -88,7 +88,8 @@ import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
-import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
+import { DOC_FONT, docTransition } from '../theme-doc';
+import { CustomerColumn } from '../components/brand';
 
 const FONT_BODY = DOC_FONT; // the one customer body stack (theme-doc alias)
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -590,9 +591,7 @@ function Page({ children, website = false, stage = null }) {
       {/* Page-local phone/logo bar removed — the WavesShell top bar (App.jsx
           gateway wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* Bottom padding is the gap above the shell footer's rule. */}
-      <div style={{ flex: 1, padding: '32px 20px 40px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
-        {children}
-      </div>
+      <CustomerColumn>{children}</CustomerColumn>
     </div>
   );
 }
