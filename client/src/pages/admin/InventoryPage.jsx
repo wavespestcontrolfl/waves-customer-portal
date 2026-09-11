@@ -1,4 +1,3 @@
-import { ActionFeedback, Badge, Button, Card, Checkbox, Input, Select, Table, TBody, TD, TH, THead, TR, Textarea, UiSurface, Field } from "../../components/ui";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -15,26 +14,25 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
-
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Input,
+  Select,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+  Field,
+} from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -47,7 +45,6 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-
 function safeExternalHref(value) {
   try {
     const url = new URL(String(value || ""));
@@ -56,13 +53,11 @@ function safeExternalHref(value) {
     return null;
   }
 }
-
 function formatMoney(value, decimals = 2) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "—";
   return `$${numeric.toFixed(decimals)}`;
 }
-
 function formatUnitCost(value, unit) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || !unit) return "—";
@@ -93,63 +88,16 @@ function formatUnitPriceList(unitPrices) {
   return parts.length ? parts.join(" · ") : null;
 }
 
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-};
-const sBtn = (bg, color) => ({
-  padding: "8px 16px",
-  background: bg,
-  color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-});
-const sBadge = (bg, color) => ({
-  fontSize: 11,
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color,
-  fontWeight: 500,
-});
-const sInput = {
-  padding: "8px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box",
-};
-const thS = {
-  fontSize: 11,
-  color: D.muted,
-  textTransform: "uppercase",
-  letterSpacing: 1,
-  textAlign: "left",
-  padding: "8px 10px",
-  borderBottom: `1px solid ${D.border}`,
-};
-const tdS = {
-  padding: "10px",
-  borderBottom: `1px solid ${D.border}22`,
-  fontSize: 13,
-  color: D.text,
-};
-
 // The flat 13-tab bar is organized into parent groups, each revealing its leaf
 // tabs in a sub-row. `tab` state still holds the LEAF key, so every
 // {tab === "..."} render block below is unchanged.
 const TAB_GROUPS = [
-  { key: "products", label: "Products", Icon: Package, tabs: ["products"] },
+  {
+    key: "products",
+    label: "Products",
+    Icon: Package,
+    tabs: ["products"],
+  },
   {
     key: "vendors",
     label: "Vendors & Pricing",
@@ -175,23 +123,60 @@ const TAB_GROUPS = [
     tabs: ["protocols", "margins"],
   },
 ];
-
 const LEAF_META = {
-  products: { label: "Products", Icon: Package },
-  "price-sync": { label: "Price Sync", Icon: Store },
-  approvals: { label: "Approvals", Icon: CheckCircle2 },
-  vendors: { label: "Vendors", Icon: Store },
-  scrape: { label: "Scrape Health", Icon: ShieldCheck },
-  forecast: { label: "Forecast", Icon: ShoppingCart },
-  "unit-review": { label: "Unit Review", Icon: ClipboardList },
-  restock: { label: "Restock", Icon: ShoppingCart },
-  registry: { label: "Registry", Icon: ClipboardList },
-  lawnFacts: { label: "Lawn Facts", Icon: ShieldCheck },
-  lawnContent: { label: "Lawn Content", Icon: FileText },
-  protocols: { label: "Protocols", Icon: FileText },
-  margins: { label: "Service Margins", Icon: Percent },
+  products: {
+    label: "Products",
+    Icon: Package,
+  },
+  "price-sync": {
+    label: "Price Sync",
+    Icon: Store,
+  },
+  approvals: {
+    label: "Approvals",
+    Icon: CheckCircle2,
+  },
+  vendors: {
+    label: "Vendors",
+    Icon: Store,
+  },
+  scrape: {
+    label: "Scrape Health",
+    Icon: ShieldCheck,
+  },
+  forecast: {
+    label: "Forecast",
+    Icon: ShoppingCart,
+  },
+  "unit-review": {
+    label: "Unit Review",
+    Icon: ClipboardList,
+  },
+  restock: {
+    label: "Restock",
+    Icon: ShoppingCart,
+  },
+  registry: {
+    label: "Registry",
+    Icon: ClipboardList,
+  },
+  lawnFacts: {
+    label: "Lawn Facts",
+    Icon: ShieldCheck,
+  },
+  lawnContent: {
+    label: "Lawn Content",
+    Icon: FileText,
+  },
+  protocols: {
+    label: "Protocols",
+    Icon: FileText,
+  },
+  margins: {
+    label: "Service Margins",
+    Icon: Percent,
+  },
 };
-
 const ALL_LEAF_TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 
 // Vendor credentials, pricing sync/approvals, scrape health, and service
@@ -212,7 +197,6 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
   // techs get protocol reference in the tech portal instead.
   "protocols",
 ]);
-
 export default function InventoryPage() {
   const [searchParams] = useSearchParams();
   // Server-verified role from the shell's Outlet context (never localStorage).
@@ -461,7 +445,6 @@ export default function InventoryPage() {
     </UiSurface>
   );
 }
-
 function LawnFactsTab({ showToast }) {
   const [facts, setFacts] = useState([]);
   const [summary, setSummary] = useState(null);
@@ -831,7 +814,6 @@ function LawnFactsTab({ showToast }) {
     </div>
   );
 }
-
 function LawnContentModulesTab({ showToast }) {
   const [modules, setModules] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1678,7 +1660,6 @@ function PriceSyncTab({ showToast }) {
     </div>
   );
 }
-
 function WaveGuardForecastTab({ showToast, onUpdate }) {
   const [days, setDays] = useState(14);
   const [forecast, setForecast] = useState(null);
@@ -1963,7 +1944,6 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
     </Card>
   );
 }
-
 function UnitReviewTab({ showToast }) {
   const [data, setData] = useState({
     products: [],
@@ -2870,7 +2850,6 @@ export function ProductsTab({
 
 // Presigned evidence URLs last 1 h server-side; treat them as stale 5 min early.
 const EVIDENCE_LINK_TTL_MS = 55 * 60 * 1000;
-
 function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   const [requests, setRequests] = useState([]);
   const [status, setStatus] = useState("active");
@@ -3293,13 +3272,34 @@ function RestockActionCell({
 
 // detectServiceLine ids (server/services/service-report/service-line-configs.js)
 const COMPLETION_SERVICE_LINES = [
-  { id: "pest", label: "Pest" },
-  { id: "lawn", label: "Lawn" },
-  { id: "mosquito", label: "Mosquito" },
-  { id: "tree_shrub", label: "Tree & shrub" },
-  { id: "termite", label: "Termite" },
-  { id: "rodent", label: "Rodent" },
-  { id: "palm", label: "Palm" },
+  {
+    id: "pest",
+    label: "Pest",
+  },
+  {
+    id: "lawn",
+    label: "Lawn",
+  },
+  {
+    id: "mosquito",
+    label: "Mosquito",
+  },
+  {
+    id: "tree_shrub",
+    label: "Tree & shrub",
+  },
+  {
+    id: "termite",
+    label: "Termite",
+  },
+  {
+    id: "rodent",
+    label: "Rodent",
+  },
+  {
+    id: "palm",
+    label: "Palm",
+  },
 ];
 
 // Auto-reorder + per-visit consumable authoring for one product: its own
@@ -3467,7 +3467,6 @@ function AutoReorderEditor({
     </div>
   );
 }
-
 function ExpandedProduct({
   labelPipelineEnabled = false,
   product,
@@ -3901,17 +3900,37 @@ function ExpandedProduct({
 // REGISTRY TAB — Customer-facing content & visibility
 // ══════════════════════════════════════════════════════════════
 const VISIBILITY_OPTIONS = [
-  { value: "internal_only", label: "Internal Only", color: D.muted },
-  { value: "portal_only", label: "Portal", color: D.teal },
-  { value: "public", label: "Public", color: D.green },
+  {
+    value: "internal_only",
+    label: "Internal Only",
+  },
+  {
+    value: "portal_only",
+    label: "Portal",
+  },
+  {
+    value: "public",
+    label: "Public",
+  },
 ];
 const STATUS_OPTIONS = [
-  { value: "draft", label: "Draft", color: D.muted },
-  { value: "approved_for_portal", label: "Approved (Portal)", color: D.teal },
-  { value: "approved_for_public", label: "Approved (Public)", color: D.green },
-  { value: "retired", label: "Retired", color: D.red },
+  {
+    value: "draft",
+    label: "Draft",
+  },
+  {
+    value: "approved_for_portal",
+    label: "Approved (Portal)",
+  },
+  {
+    value: "approved_for_public",
+    label: "Approved (Public)",
+  },
+  {
+    value: "retired",
+    label: "Retired",
+  },
 ];
-
 function RegistryTab({ showToast }) {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -4299,7 +4318,6 @@ function VendorsTab({ showToast }) {
     </div>
   );
 }
-
 function VendorEditForm({ vendor, onSave, onCancel }) {
   const [form, setForm] = useState({
     loginUsername: vendor.loginUsername || "",
@@ -4535,17 +4553,36 @@ function costSourceLabel(product) {
   if (product.costSource === "best_price_unit_size") return "Best price";
   return product.costWarning ? "Missing" : "Fallback";
 }
-
 const PROTOCOL_FILTERS = [
-  { key: "all", label: "All" },
-  { key: "pest", label: "Pest" },
-  { key: "termite", label: "Termite" },
-  { key: "lawn", label: "Lawn" },
-  { key: "mosquito", label: "Mosquito" },
-  { key: "rodent", label: "Rodent" },
-  { key: "tree_shrub", label: "Tree & Shrub" },
+  {
+    key: "all",
+    label: "All",
+  },
+  {
+    key: "pest",
+    label: "Pest",
+  },
+  {
+    key: "termite",
+    label: "Termite",
+  },
+  {
+    key: "lawn",
+    label: "Lawn",
+  },
+  {
+    key: "mosquito",
+    label: "Mosquito",
+  },
+  {
+    key: "rodent",
+    label: "Rodent",
+  },
+  {
+    key: "tree_shrub",
+    label: "Tree & Shrub",
+  },
 ];
-
 function protocolLineForService(serviceType) {
   const value = String(serviceType || "").toLowerCase();
   if (
@@ -4561,7 +4598,6 @@ function protocolLineForService(serviceType) {
   if (value.includes("tree") || value.includes("shrub")) return "tree_shrub";
   return "pest";
 }
-
 const DEFAULT_PROTOCOL_SERVICE = {
   pest: "General Pest Perimeter",
   termite: "Termite Bait Station",
@@ -4570,7 +4606,6 @@ const DEFAULT_PROTOCOL_SERVICE = {
   rodent: "Rodent Control",
   tree_shrub: "Tree & Shrub",
 };
-
 function ProtocolsTab({
   showToast,
   initialServiceLine = "all",
@@ -5198,7 +5233,6 @@ function ProtocolsTab({
     </div>
   );
 }
-
 function AddProtocolRow({
   products,
   newRow,
