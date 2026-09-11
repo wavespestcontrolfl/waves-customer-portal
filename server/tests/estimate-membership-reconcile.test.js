@@ -146,14 +146,14 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     expect(estimate.onetime_total).toBe(127.5);
   });
 
-  test('a failed membership lookup is STRICT: the row keeps its frozen snapshot, no reprice, and the result reports { ok: false } (Codex #4345 r8 P1)', async () => {
+  test('a failed membership lookup: the row keeps its frozen snapshot, no reprice, and the result reports { ok: false } (non-strict default probe — codex #4345 re-cut)', async () => {
     isActivePlanCustomer.mockRejectedValue(new Error('customers lookup timed out'));
     const estimate = estimateRow(frozenEstData());
     const before = estimate.estimate_data;
 
     const result = await reconcileFrozenMembershipSnapshot(estimate);
 
-    expect(isActivePlanCustomer).toHaveBeenCalledWith(expect.anything(), estimate.customer_id, { strict: true });
+    expect(isActivePlanCustomer).toHaveBeenCalledWith(expect.anything(), estimate.customer_id);
     expect(result).toEqual({ ok: false, error: 'customers lookup timed out' });
     expect(estimate.estimate_data).toBe(before);
     expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
