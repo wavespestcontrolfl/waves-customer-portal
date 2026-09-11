@@ -1074,7 +1074,13 @@ async function contactSlotStillAuthorized(meta, label) {
     if (!meta.customer_id || !meta.to_phone) return { eligible: true };
     const customer = await db('customers').where({ id: meta.customer_id }).first();
     if (!customer) return { eligible: false, reason: 'customer-missing' };
-    const prefsRow = await db('notification_prefs').where({ customer_id: meta.customer_id }).first() || {};
+    // Visit-aware (app property scope, PR 3): a NON-primary saved property
+    // owns notify-primary, so the recipient recheck follows it; an
+    // unreadable property under enforcement fails closed like any other
+    // recheck error (failClosed) — never texts on the profile row's answer.
+    const { visitPrefsRow, getReminderPrefs } = require('../appointment-reminders');
+    const prefsRow = await visitPrefsRow(meta.customer_id, meta.scheduled_service_id || null) || {};
+    if (prefsRow.__prefsUnavailable === true) throw new Error('notification preferences unavailable for the replay recheck');
     const { getAppointmentContacts } = require('../customer-contact');
     const { filterRecipientsByOptin } = require('../recipient-optin');
     const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -1097,8 +1103,7 @@ async function contactSlotStillAuthorized(meta, label) {
       ? 'reminder72hChannel'
       : (purpose === 'appointment_confirmation' ? 'confirmationChannel' : null);
     if (channelField) {
-      const { getReminderPrefs } = require('../appointment-reminders');
-      const prefs = await getReminderPrefs(meta.customer_id);
+      const prefs = await getReminderPrefs(meta.customer_id, { scheduledServiceId: meta.scheduled_service_id || null });
       if (prefs?.[channelField] === 'email') {
         return { eligible: false, reason: 'channel-email' };
       }
