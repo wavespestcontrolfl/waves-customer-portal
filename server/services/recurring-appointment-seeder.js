@@ -1152,33 +1152,49 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
 
 // Re-apply the parent term's coverage across the series after seeding, so
 // the new rows are stamped if — and only if — the term has slots for them.
-async function applySeededPrepayCoverage(conn, parent, columns) {
+async function applySeededPrepayCoverage(conn, parent, columns, coverageDate = null) {
   if (!columns?.annual_prepay_term_id) return;
-  const termId = parent?.annual_prepay_term_id;
-  if (!conn || !termId) return;
+  if (!conn || !parent?.id) return;
   const run = async (c) => {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-    // Resolve through coveredTermsAsOf, the same live/paid authority
-    // annualPrepayCoversVisit uses to decide whether a stamp suppresses
-    // billing. A plain terms lookup would also find a refunded or revoked
+    // The term link can sit on any visit in the series, not the root: prepay
+    // activated partway through an ongoing series links only visits inside
+    // the term window, so a root predating term_start is never linked.
+    const ids = new Set([parent.annual_prepay_term_id].filter(Boolean).map(String));
+    const linked = await c('scheduled_services')
+      .where(function inSeries() {
+        this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
+      })
+      .whereNotNull('annual_prepay_term_id')
+      .whereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'])
+      .distinct('annual_prepay_term_id')
+      .pluck('annual_prepay_term_id');
+    for (const id of linked || []) if (id) ids.add(String(id));
+    if (!ids.size) return;
+    // coveredTermsAsOf is the same live/paid authority annualPrepayCoversVisit
+    // consults. A plain terms lookup would also find a refunded or revoked
     // term — those keep their visit links for audit, and
     // applyPrepaidCoverageForTerm checks coverage CONFIG, not payment — so
-    // generating another visit would restore stamps that revocation had
-    // deliberately cleared, and findBillingCoveredVisits reads any positive
-    // prepaid_amount as money held and blocks cancelling or trimming the
-    // visit.
-    const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, null).where('t.id', termId).first('t.*');
+    // re-stamping one would restore coverage revocation deliberately cleared,
+    // and findBillingCoveredVisits reads a positive prepaid_amount as money
+    // held and blocks cancelling the visit. Passing the seeded date picks the
+    // term whose window actually contains these visits, so a series spanning
+    // a renewal boundary does not stamp against the expired term.
+    const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, coverageDate || null)
+      .whereIn('t.id', [...ids])
+      .orderBy('t.term_start', 'desc')
+      .first('t.*');
     if (!term) return;
     await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietTransientExceptions: true });
   };
   try {
-  // Inside a caller transaction the work must run on that trx (the row we
-  // just inserted is invisible elsewhere), but a coverage failure must not
-  // abort the caller — in PostgreSQL a failed statement poisons every later
-  // one with 25P02, so catching in JS is NOT enough to keep this
-  // best-effort. The WHOLE attempt, the term read included, runs inside a
-  // SAVEPOINT (knex nested transaction) and the catch swallows the
-  // rolled-back savepoint. Same shape as visit-groups.maybeGroupRow.
+    // Inside a caller transaction the work must run on that trx (the rows we
+    // just inserted are invisible elsewhere), but a coverage failure must not
+    // abort the caller — in PostgreSQL a failed statement poisons every later
+    // one with 25P02, so catching in JS is NOT enough to keep this
+    // best-effort. The WHOLE attempt, every read included, runs inside a
+    // SAVEPOINT (knex nested transaction) and the catch swallows the
+    // rolled-back savepoint. Same shape as visit-groups.maybeGroupRow.
     if (conn.isTransaction) await conn.transaction(run);
     else await run(conn);
   } catch (e) {
@@ -1310,7 +1326,10 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // remainder cents land on the final visit. Best-effort by design — an
   // uncovered visit is a billing question someone can correct, a failed
   // seed is a missing visit the customer feels.
-  await applySeededPrepayCoverage(conn, parent, columns);
+  await applySeededPrepayCoverage(
+    conn, parent, columns,
+    insertedRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean).sort()[0] || null,
+  );
   // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
   // every caller (estimate converter, admin-schedule, customer booking)
   // gets grouping for follow-ups landing on an existing groupable stop.

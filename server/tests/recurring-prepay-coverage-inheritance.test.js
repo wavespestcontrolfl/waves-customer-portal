@@ -79,19 +79,23 @@ afterEach(() => {
   coveredSpy = null;
 });
 
-function connWithTerm(term, { isTransaction = false, siblingRow = undefined } = {}) {
-  coveredSpy = jest.spyOn(AnnualPrepayRenewals, 'coveredTermsAsOf').mockImplementation(() => {
-    const b = {};
+function connWithTerm(term, { isTransaction = false, seriesTermIds: linkedIds = [] } = {}) {
+  // coveredTermsAsOf is the live/paid authority. `term` is what it yields —
+  // undefined means "no term is live, paid and covering that date".
+  coveredSpy = jest.spyOn(AnnualPrepayRenewals, 'coveredTermsAsOf').mockImplementation((c, date) => {
+    const b = { calledWithDate: date };
+    coveredSpy.lastDate = date;
     b.where = () => b;
+    b.whereIn = (_col, ids) => { coveredSpy.lastIds = ids; return b; };
+    b.orderBy = () => b;
     b.first = () => Promise.resolve(term);
     return b;
   });
-  const conn = (table) => {
+  const conn = () => {
     const b = {};
-    for (const m of ['where', 'whereNotNull', 'whereNotIn', 'orderBy']) b[m] = () => b;
-    b.first = () => Promise.resolve(
-      table === 'scheduled_services' ? siblingRow : (table === 'annual_prepay_terms' ? term : undefined),
-    );
+    for (const m of ['where', 'whereNotNull', 'whereNotIn', 'distinct', 'orderBy']) b[m] = () => b;
+    b.pluck = () => Promise.resolve(linkedIds);
+    b.first = () => Promise.resolve(undefined);
     return b;
   };
   conn.isTransaction = isTransaction;
@@ -100,7 +104,7 @@ function connWithTerm(term, { isTransaction = false, siblingRow = undefined } = 
   conn.savepoints = 0;
   conn.transaction = (run) => {
     conn.savepoints += 1;
-    const sp = connWithTerm(term);
+    const sp = connWithTerm(term, { seriesTermIds: linkedIds });
     sp.isTransaction = true;
     return Promise.resolve(run(sp));
   };
@@ -199,35 +203,67 @@ describe('the auto-extend finds the term wherever the series carries it', () => 
   });
   afterEach(() => applySpy.mockRestore());
 
-  test('the just-completed visit carries it, the unlinked root does not', async () => {
+  test('candidates come from svc, the parent AND live siblings', async () => {
+    const conn = connWithTerm(LIVE_TERM, { seriesTermIds: ['sibling-term'] });
     await applyExtensionPrepayCoverage(
-      connWithTerm(LIVE_TERM), { id: 'root', annual_prepay_term_id: null },
-      { id: 'svc', annual_prepay_term_id: TERM_ID },
+      conn, { id: 'root', annual_prepay_term_id: 'root-term' },
+      { id: 'svc', annual_prepay_term_id: 'svc-term' }, '2027-01-28',
     );
-    expect(applySpy).toHaveBeenCalledTimes(1);
-    expect(applySpy.mock.calls[0][0].id).toBe(TERM_ID);
-  });
-
-  test('neither root nor svc carries it — a linked sibling does', async () => {
-    const conn = connWithTerm(LIVE_TERM, { siblingRow: { annual_prepay_term_id: TERM_ID } });
-    await applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' });
+    expect(coveredSpy.lastIds).toEqual(expect.arrayContaining(['svc-term', 'root-term', 'sibling-term']));
     expect(applySpy).toHaveBeenCalledTimes(1);
   });
 
-  test('nothing in the series is linked — nothing is stamped', async () => {
-    await applyExtensionPrepayCoverage(connWithTerm(LIVE_TERM), { id: 'root' }, { id: 'svc' });
+  test("selection is by the NEW visit's date, not the first historical link", async () => {
+    // At a renewal boundary the completed visit still points at the OLD term,
+    // whose window excludes the extension, while a sibling carries the
+    // renewed one. coveredTermsAsOf must be asked about the extension's date.
+    const conn = connWithTerm(LIVE_TERM, { seriesTermIds: ['renewed-term'] });
+    await applyExtensionPrepayCoverage(
+      conn, { id: 'root' }, { id: 'svc', annual_prepay_term_id: 'expired-term' }, '2027-04-22',
+    );
+    expect(coveredSpy.lastDate).toBe('2027-04-22');
+  });
+
+  test('an unlinked root still resolves through a linked sibling', async () => {
+    const conn = connWithTerm(LIVE_TERM, { seriesTermIds: [TERM_ID] });
+    await applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' }, '2027-01-28');
+    expect(applySpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('nothing in the series is linked — the authority is never asked', async () => {
+    const conn = connWithTerm(LIVE_TERM, { seriesTermIds: [] });
+    await applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' }, '2027-01-28');
+    expect(coveredSpy).not.toHaveBeenCalled();
     expect(applySpy).not.toHaveBeenCalled();
   });
 
-  test('a failed sibling lookup degrades to unstamped, never throws', async () => {
-    const conn = (table) => {
-      if (table === 'scheduled_services') throw new Error('column does not exist');
-      const b = {};
-      b.where = () => b;
-      b.first = () => Promise.resolve(LIVE_TERM);
-      return b;
-    };
-    await expect(applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' })).resolves.toBeUndefined();
+  test('no term covers that date — nothing is stamped', async () => {
+    const conn = connWithTerm(undefined, { seriesTermIds: [TERM_ID] });
+    await applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' }, '2027-01-28');
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  test('the series scan runs INSIDE the savepoint, not on the outer trx', async () => {
+    // A failed statement leaves a PG transaction aborted (25P02) even when
+    // JS catches it, so a scan outside the savepoint would roll back the
+    // visit that was just inserted.
+    const conn = connWithTerm(LIVE_TERM, { isTransaction: true, seriesTermIds: [TERM_ID] });
+    let scannedOnOuter = false;
+    const outerQuery = conn;
+    const wrapped = Object.assign((...args) => { scannedOnOuter = true; return outerQuery(...args); }, conn);
+    wrapped.isTransaction = true;
+    wrapped.transaction = conn.transaction;
+    await applyExtensionPrepayCoverage(wrapped, { id: 'root' }, { id: 'svc' }, '2027-01-28');
+    expect(conn.savepoints).toBe(1);
+    expect(scannedOnOuter).toBe(false);
+  });
+
+  test('a failed series scan degrades to unstamped, never throws', async () => {
+    const exploding = () => { throw new Error('column does not exist'); };
+    exploding.isTransaction = false;
+    await expect(
+      applyExtensionPrepayCoverage(exploding, { id: 'root' }, { id: 'svc' }, '2027-01-28'),
+    ).resolves.toBeUndefined();
     expect(applySpy).not.toHaveBeenCalled();
   });
 });

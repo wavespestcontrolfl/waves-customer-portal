@@ -2478,64 +2478,70 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
 // Failing soft leaves the visit uncovered, which is a billing question
 // someone can correct; blocking the extension is a service failure the
 // customer feels.
-// The newest annual-prepay term id carried by any live visit in this series.
-// Used when the series root predates the term and so was never linked.
-async function linkedSeriesTermId(conn, parentId) {
-  if (!parentId) return null;
-  try {
-    const row = await conn('scheduled_services')
+// Every annual-prepay term id carried by a live visit anywhere in this
+// series, plus the ones the caller already has in hand. The link can sit on
+// any visit, not the root: prepay activated partway through an ongoing series
+// links only visits inside the term window (coverageRowsForTerm /
+// attachScheduledServices), so a root predating term_start is never linked.
+async function seriesTermIds(conn, parentId, ...known) {
+  const ids = new Set(known.filter(Boolean).map(String));
+  if (parentId) {
+    const rows = await conn('scheduled_services')
       .where(function inSeries() {
         this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
       })
       .whereNotNull('annual_prepay_term_id')
       .whereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'])
-      .orderBy('scheduled_date', 'desc')
-      .first('annual_prepay_term_id');
-    return row?.annual_prepay_term_id || null;
-  } catch (e) {
-    logger.warn(`[recurring] series term lookup failed for parent=${parentId}: ${e.message}`);
-    return null;
+      .distinct('annual_prepay_term_id')
+      .pluck('annual_prepay_term_id');
+    for (const id of rows || []) if (id) ids.add(String(id));
   }
+  return [...ids];
 }
 
-async function applyExtensionPrepayCoverage(conn, parent, svc = null) {
-  // The term link can live on ANY visit in the series, not the root.
-  // Annual prepay activated partway through an ongoing series links only
-  // visits inside the term window (coverageRowsForTerm /
-  // attachScheduledServices), so a root parent that predates term_start is
-  // never linked — reading the term from it alone would bail out and leave
-  // the extension unstamped, which is the exact bug this fixes. Prefer the
-  // visit that just completed, then the parent, then any linked sibling.
-  const termId = svc?.annual_prepay_term_id
-    || parent?.annual_prepay_term_id
-    || await linkedSeriesTermId(conn, parent?.id);
-  if (!termId) return;
+// The term that covers a specific DATE, chosen from the ids a series carries.
+//
+// Not "the first link found": at a renewal boundary the just-completed visit
+// still points at the OLD term, whose window excludes the new visit, while a
+// sibling already carries the renewed one. Stopping at the historical link
+// left the extension unstamped exactly when coverage was available. Passing
+// the date to coveredTermsAsOf picks the term that is live, paid AND whose
+// window contains the visit — the same authority annualPrepayCoversVisit
+// consults, so the two cannot disagree about which term is real.
+async function coveringTermForDate(conn, termIds, coverageDate) {
+  if (!termIds.length) return null;
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  return AnnualPrepayRenewals.coveredTermsAsOf(conn, coverageDate || null)
+    .whereIn('t.id', termIds)
+    .orderBy('t.term_start', 'desc')
+    .first('t.*');
+}
+
+// Re-apply the series' annual-prepay coverage after an extension row is
+// inserted, so the new visit is stamped if — and only if — a live paid term
+// covers its date and still has a slot for it.
+//
+// EVERY query, the series scan included, runs inside the savepoint. A failed
+// statement leaves a PostgreSQL transaction aborted (25P02) even when
+// JavaScript catches it, so a lookup outside the savepoint would poison the
+// caller and roll back the visit that was just inserted.
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
   const run = async (c) => {
-    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    // Resolve through coveredTermsAsOf, the same live/paid authority
-    // annualPrepayCoversVisit uses to decide whether a stamp suppresses
-    // billing. A plain terms lookup would also find a refunded or revoked
-    // term — those keep their visit links for audit, and
-    // applyPrepaidCoverageForTerm checks coverage CONFIG, not payment — so
-    // generating another visit would restore stamps that revocation had
-    // deliberately cleared, and findBillingCoveredVisits reads any positive
-    // prepaid_amount as money held and blocks cancelling or trimming the
-    // visit.
-    const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, null).where('t.id', termId).first('t.*');
+    const termIds = await seriesTermIds(
+      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id,
+    );
+    const term = await coveringTermForDate(c, termIds, coverageDate);
     if (!term) return;
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
     await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietTransientExceptions: true });
   };
   try {
-  // Inside a caller transaction the work must run on that trx (the row we
-  // just inserted is invisible elsewhere), but a coverage failure must not
-  // abort the caller — in PostgreSQL a failed statement poisons every later
-  // one with 25P02, so catching in JS is NOT enough to keep this
-  // best-effort. The WHOLE attempt, the term read included, runs inside a
-  // SAVEPOINT (knex nested transaction) and the catch swallows the
-  // rolled-back savepoint. Same shape as visit-groups.maybeGroupRow.
     if (conn && conn.isTransaction) await conn.transaction(run);
     else await run(conn);
   } catch (e) {
+    // Fail to TODAY's behavior (uncovered), never block the extension: an
+    // unstamped visit is a billing question someone can correct, a missing
+    // visit is a service failure the customer feels.
     logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
   }
 }
@@ -12706,7 +12712,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           // The transient completion-race bell is quiet (this fires per
           // generated visit and reconciliation settles that case); the
           // cancelled-paid-slot bell still rings — nothing re-seeds it.
-          await applyExtensionPrepayCoverage(conn, parent, svc);
+          await applyExtensionPrepayCoverage(conn, parent, svc, nextStr);
           // Post-insert re-check closes the remaining race: a
           // cancellation can stop the series between the pre-insert
           // read above and this insert. The row hasn't been mirrored,
@@ -18124,7 +18130,8 @@ router._test = {
   runRecurringAlertAction,
   resolveSeriesCreateInvoiceOnComplete,
   applyExtensionPrepayCoverage,
-  linkedSeriesTermId,
+  seriesTermIds,
+  coveringTermForDate,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,
