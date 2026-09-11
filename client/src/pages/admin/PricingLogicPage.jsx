@@ -45,23 +45,29 @@ function scrollToPricingSection(key) {
   else scroll();
 }
 
-const adminFetch = (path, options = {}) => fetch(`${API_BASE}${path}`, {
-  ...options,
-  headers: {
-    Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-    "Content-Type": "application/json",
-    ...options.headers,
-  },
-}).then(async (response) => {
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-  return body;
-});
+const af = (p, o = {}) =>
+  fetch(`${API_BASE}${p}`, {
+    ...o,
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      "Content-Type": "application/json",
+      ...o.headers,
+    },
+  }).then(async (r) => {
+    // A 401/429/500 JSON body is not data — throw so the callers' catch
+    // blocks render their error state instead of a blank table.
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    return body;
+  });
 
-function adminRawFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`, ...options.headers },
+function adminRawFetch(p, o = {}) {
+  return fetch(`${API_BASE}${p}`, {
+    ...o,
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+      ...o.headers,
+    },
   });
 }
 
@@ -88,10 +94,17 @@ export function MarginCalculator() {
   const fetchMargins = async () => {
     setLoading(true);
     try {
-      setMargins(await adminFetch("/admin/pricing-config/margin-check", {
+      const data = await af("/admin/pricing-config/margin-check", {
         method: "POST",
-        body: JSON.stringify({ lotSqFt, homeSqFt, lawnSqFt, bedArea, waveguardTier: tier }),
-      }));
+        body: JSON.stringify({
+          lotSqFt,
+          homeSqFt,
+          lawnSqFt,
+          bedArea,
+          waveguardTier: tier,
+        }),
+      });
+      setMargins(data);
     } catch { setMargins(null); }
     setLoading(false);
   };
@@ -153,17 +166,25 @@ function PestCalibrationPanel() {
 
   const load = async () => {
     setLoading(true); setError("");
-    try { setData(await adminFetch(`/admin/pricing-config/pest-calibration?${new URLSearchParams({ startDate, endDate, limit })}`)); }
+    try {
+      const qs = new URLSearchParams({ startDate, endDate, limit });
+      setData(
+        await af(`/admin/pricing-config/pest-calibration?${qs.toString()}`),
+      );
+    }
     catch (nextError) { setError(nextError.message || "Failed to load pest calibration"); }
     finally { setLoading(false); }
   };
   const downloadCsv = async () => {
     setDownloading(true); setError("");
     try {
-      const query = new URLSearchParams({ startDate, endDate, limit: "10000", format: "csv" });
-      const response = await adminRawFetch(`/admin/pricing-config/pest-calibration?${query}`);
+      const qs = new URLSearchParams({ startDate, endDate, limit: "10000", format: "csv" });
+      const response = await adminRawFetch(
+        `/admin/pricing-config/pest-calibration?${qs.toString()}`,
+      );
       if (!response.ok) throw new Error(`CSV export failed (${response.status})`);
-      const url = URL.createObjectURL(new Blob([await response.text()], { type: "text/csv" }));
+      const text = await response.text();
+      const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
       const anchor = document.createElement("a"); anchor.href = url; anchor.download = `pest-production-calibration-${startDate}-to-${endDate}.csv`; document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
     } catch (nextError) { setError(nextError.message || "Failed to export pest calibration CSV"); }
     finally { setDownloading(false); }
@@ -231,7 +252,7 @@ export default function PricingLogicPage({ embedded = false, onSecondaryNav } = 
       <section id="pricing-reality">{activeSection === "reality" && <PricingRealityCheckPage />}</section>
     </div>
   );
-  if (embedded) return content;
+  if (embedded) return <UiSurface density="comfortable">{content}</UiSurface>;
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
       <AdminCommandHeader variant="workspace" title="Pricing" icon={Calculator} sections={PRICING_SECTIONS} activeKey={activeSection} onSectionChange={handleSectionChange} navGridClassName="grid-cols-2 md:grid-cols-5" />

@@ -30,10 +30,12 @@ function fixtureFor(url, options = {}) {
   if (path === "/admin/pricing/dashboard") return { totalCustomers: 8, avgLTV: 900, avgCAC: 90, ltvCacRatio: 10, mrr: 1200, funnel: { leads: 10, estimates: 8, accepted: 6, active: 5, retained: 4 }, revenueByStage: {} };
   if (path === "/admin/pricing/calculate-value") return { valueScore: 54, priceRecommendation: "Market rate", positioning: "Synthetic positioning" };
   if (path === "/admin/pricing/upsell-rules") return { rules: [{ id: "rule-1", name: "Synthetic rule", trigger_event: "renewal", offer_service: "mosquito", enabled: true, times_triggered: 2, times_converted: 1 }] };
-  if (path === "/admin/pricing/upsell-opportunities") return { opportunities: [{ customerId: "customer-1", customerName: "Synthetic customer", currentTier: "Silver", serviceCount: 2, monthlyRate: 100, potentialAdd: 25, suggestedService: "Mosquito" }] };
+  // { customer, upsell } pairs and the summary/channel/retention LTV response
+  // are what server/routes/admin-pricing-strategy.js actually returns.
+  if (path === "/admin/pricing/upsell-opportunities") return { total: 1, opportunities: [{ customer: { id: "customer-1", name: "Synthetic customer", tier: "Silver", monthlyRate: 100, phone: "9415550100" }, upsell: { type: "add_service", service: "Mosquito", pitch: "Synthetic pitch", estimatedMonthlyAdd: 25, currentServiceCount: 2 } }] };
   if (path === "/admin/pricing/trigger-upsell/customer-1") return { message: "Synthetic upsell sent" };
   if (path === "/admin/pricing/offers") return { offers: [] };
-  if (path === "/admin/pricing/ltv-analysis") return { avgLTV: 900, avgCAC: 90, ltvCacRatio: 10, bestChannel: "Referral", retention12mo: 75, bySource: {} };
+  if (path === "/admin/pricing/ltv-analysis") return { totalTracked: 5, distribution: {}, channelPerformance: [{ source: "Referral", avgCAC: 90, avgLTV: 900, avgRevenue: 800, customerCount: 5, roi: 9 }], churnBreakdown: { low: 5, medium: 0, high: 0 }, retentionCurve: { "3mo": { retained: 5, pct: 100 }, "6mo": { retained: 4, pct: 80 }, "12mo": { retained: 4, pct: 75 }, "24mo": { retained: 2, pct: 40 } }, summary: { avgLTV: 900, avgCAC: 90, avgMonthlyRecurring: 120 } };
   if (path === "/admin/pricing/recalculate-ltv") return { success: true };
   if (path === "/admin/pricing-config/global_labor_rate" && options.method === "PUT") return { success: true };
   throw new Error(`Unexpected synthetic request: ${options.method || "GET"} ${path}`);

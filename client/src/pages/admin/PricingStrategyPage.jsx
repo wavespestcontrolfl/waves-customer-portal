@@ -11,6 +11,7 @@ import {
   CardTitle,
   Input,
   UiSurface,
+  cn,
 } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -75,6 +76,9 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
 
   const content = (
     <div className="space-y-5">
+      <p className="max-w-3xl text-ui-body text-ink-secondary">
+        Hormozi-style value engineering, offer architecture, and money model
+      </p>
       {!hubOwnsHeader && (
         <div className="flex flex-wrap gap-2" aria-label="Strategy section">
           {STRATEGY_TABS.map((item) => (
@@ -84,22 +88,29 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
           ))}
         </div>
       )}
-      {toast && <ActionFeedback error={toast.startsWith("Failed:")}>{toast}</ActionFeedback>}
       {tab === "money-model" && <MoneyModelTab dashboard={dashboard} loading={loading} />}
       {tab === "value-calc" && <ValueEquationTab />}
       {tab === "offers" && <OfferBuilderTab />}
       {tab === "upsells" && <UpsellEngineTab showToast={showToast} />}
       {tab === "ltv" && <LTVAnalysisTab />}
+      {toast && (
+        <Card
+          role={toast.startsWith("Failed:") ? "alert" : "status"}
+          className={cn(
+            "pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3 shadow-lg",
+            toast.startsWith("Failed:") ? "text-alert-fg" : "text-ink-primary",
+          )}
+        >
+          {toast}
+        </Card>
+      )}
     </div>
   );
 
-  if (embedded) return content;
+  if (embedded) return <UiSurface density="comfortable">{content}</UiSurface>;
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
       <AdminCommandHeader variant="workspace" title="Pricing strategy" icon={DollarSign} />
-      <p className="mb-5 max-w-3xl text-ui-body text-ink-secondary">
-        Hormozi-style value engineering, offer architecture, and money model
-      </p>
       {content}
     </UiSurface>
   );
@@ -287,6 +298,21 @@ function OfferBuilderTab() {
   );
 }
 
+// GET /admin/pricing/upsell-opportunities returns { customer, upsell } pairs
+// (server/routes/admin-pricing-strategy.js:243-253). The page had been reading a
+// flat row, so every opportunity rendered as undefined; project the real shape.
+function normalizeOpportunity({ customer = {}, upsell = {} }) {
+  return {
+    customerId: customer.id,
+    customerName: customer.name,
+    currentTier: customer.tier,
+    monthlyRate: customer.monthlyRate,
+    serviceCount: upsell.currentServiceCount,
+    potentialAdd: upsell.estimatedMonthlyAdd,
+    suggestedService: upsell.service,
+  };
+}
+
 function UpsellEngineTab({ showToast }) {
   const [rules, setRules] = useState([]);
   const [opportunities, setOpportunities] = useState([]);
@@ -295,10 +321,13 @@ function UpsellEngineTab({ showToast }) {
     Promise.all([
       adminFetch("/admin/pricing/upsell-rules").catch(() => ({ rules: [] })),
       adminFetch("/admin/pricing/upsell-opportunities").catch(() => ({ opportunities: [] })),
-    ]).then(([ruleData, opportunityData]) => { setRules(ruleData.rules || []); setOpportunities(opportunityData.opportunities || []); setLoading(false); });
+    ]).then(([ruleData, opportunityData]) => { setRules(ruleData.rules || []); setOpportunities((opportunityData.opportunities || []).map(normalizeOpportunity)); setLoading(false); });
   }, []);
   const triggerUpsell = async (customerId) => {
-    try { const response = await adminFetch(`/admin/pricing/trigger-upsell/${customerId}`, { method: "POST" }); showToast(response.message || "Upsell SMS sent!"); }
+    try { const response = await adminFetch(
+        `/admin/pricing/trigger-upsell/${customerId}`,
+        { method: "POST" },
+      ); showToast(response.message || "Upsell SMS sent!"); }
     catch (error) { showToast(`Failed: ${error.message}`); }
   };
   if (loading) return <ActionFeedback className="min-h-20">Loading upsell data...</ActionFeedback>;
@@ -329,16 +358,24 @@ function LTVAnalysisTab() {
   }, []);
   if (loading) return <ActionFeedback className="min-h-20">Loading LTV analysis...</ActionFeedback>;
   if (!data) return <ActionFeedback className="min-h-20">No LTV data yet. Click "Recalculate" to generate.</ActionFeedback>;
+  // GET /admin/pricing/ltv-analysis returns summary / channelPerformance /
+  // retentionCurve (server/routes/admin-pricing-strategy.js:451-478); the flat
+  // fields this tab used to read are not part of that response.
+  const summary = data.summary || {};
+  const channels = data.channelPerformance || [];
+  const ltvCacRatio = summary.avgCAC > 0 ? summary.avgLTV / summary.avgCAC : null;
+  const bestChannel = channels[0]?.source;
+  const retention12mo = data.retentionCurve?.["12mo"]?.pct;
   const metrics = [
-    { label: "Avg LTV", value: formatMoney(data.avgLTV) }, { label: "Avg CAC", value: formatMoney(data.avgCAC) },
-    { label: "LTV:CAC", value: data.ltvCacRatio ? `${data.ltvCacRatio.toFixed(1)}x` : "—" },
-    { label: "Best channel", value: data.bestChannel || "—" }, { label: "12mo retention", value: data.retention12mo ? `${data.retention12mo}%` : "—" },
+    { label: "Avg LTV", value: formatMoney(summary.avgLTV) }, { label: "Avg CAC", value: formatMoney(summary.avgCAC) },
+    { label: "LTV:CAC", value: ltvCacRatio ? `${ltvCacRatio.toFixed(1)}x` : "—" },
+    { label: "Best channel", value: bestChannel || "—" }, { label: "12mo retention", value: retention12mo != null ? `${retention12mo}%` : "—" },
   ];
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-18 font-medium text-zinc-900">Customer lifetime value</h2><Button onClick={recalculate} loading={recalculating}><RefreshCw size={16} aria-hidden /> {recalculating ? "Recalculating..." : "Recalculate all"}</Button></div>
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">{metrics.map((metric) => <MetricCard key={metric.label} {...metric} />)}</div>
-      {data.bySource && <Card><CardHeader><CardTitle className="text-16">LTV by acquisition channel</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{Object.entries(data.bySource).map(([source, stats]) => <div key={source} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><span className="font-medium text-zinc-900">{source}</span><div className="flex flex-wrap gap-4 text-ui-body text-ink-secondary u-nums"><span>{stats.count} customers</span><span>LTV: {formatMoney(stats.avgLTV)}</span><span>CAC: {formatMoney(stats.avgCAC)}</span><span>{stats.ratio?.toFixed(1)}x</span></div></div>)}</CardBody></Card>}
+      {channels.length > 0 && <Card><CardHeader><CardTitle className="text-16">LTV by acquisition channel</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{channels.map((stats) => <div key={stats.source} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><span className="font-medium text-zinc-900">{stats.source}</span><div className="flex flex-wrap gap-4 text-ui-body text-ink-secondary u-nums"><span>{stats.customerCount} customers</span><span>LTV: {formatMoney(stats.avgLTV)}</span><span>CAC: {formatMoney(stats.avgCAC)}</span><span>{stats.avgCAC > 0 ? `${(stats.avgLTV / stats.avgCAC).toFixed(1)}x` : "—"}</span></div></div>)}</CardBody></Card>}
     </div>
   );
 }

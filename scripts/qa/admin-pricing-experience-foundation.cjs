@@ -46,9 +46,20 @@ function fixture(api, method, body) {
   if (api === '/admin/pricing/calculate-value') return { valueScore: 54, priceRecommendation: 'Market rate', positioning: 'Synthetic positioning' };
   if (api === '/admin/pricing/offers') return { offers: [{ id: 'offer-1', name: 'Synthetic package', description: 'Synthetic custom offer', conversion_rate: 25 }] };
   if (api === '/admin/pricing/upsell-rules') return { rules: [{ id: 'rule-1', name: 'Synthetic upsell rule', trigger_event: 'renewal', offer_service: 'mosquito', enabled: true, times_triggered: 2, times_converted: 1 }] };
-  if (api === '/admin/pricing/upsell-opportunities') return { opportunities: [{ customerId: 'customer-1', customerName: 'Synthetic customer', currentTier: 'Silver', serviceCount: 2, monthlyRate: 100, potentialAdd: 25, suggestedService: 'Mosquito' }] };
+  // Shapes below mirror server/routes/admin-pricing-strategy.js exactly: the
+  // upsell list is { customer, upsell } pairs and the LTV read returns summary /
+  // channelPerformance / retentionCurve. Flattened fixtures made this proof pass
+  // against a contract the server never sends.
+  if (api === '/admin/pricing/upsell-opportunities') return { total: 1, opportunities: [{ customer: { id: 'customer-1', name: 'Synthetic customer', tier: 'Silver', monthlyRate: 100, phone: '9415550100' }, upsell: { type: 'add_service', service: 'Mosquito', pitch: 'Synthetic pitch', estimatedMonthlyAdd: 25, currentServiceCount: 2 } }] };
   if (api === '/admin/pricing/trigger-upsell/customer-1') return { message: 'Synthetic upsell sent' };
-  if (api === '/admin/pricing/ltv-analysis') return { avgLTV: 900, avgCAC: 90, ltvCacRatio: 10, bestChannel: 'Referral', retention12mo: 75, bySource: { Referral: { count: 5, avgLTV: 1000, avgCAC: 50, ratio: 20 } } };
+  if (api === '/admin/pricing/ltv-analysis') return {
+    totalTracked: 5,
+    distribution: { '<500': 1, '500-1000': 2, '1000-2000': 1, '2000-5000': 1, '5000+': 0 },
+    channelPerformance: [{ source: 'Referral', avgCAC: 50, avgLTV: 1000, avgRevenue: 800, customerCount: 5, roi: 16 }],
+    churnBreakdown: { low: 3, medium: 1, high: 1 },
+    retentionCurve: { '3mo': { retained: 5, pct: 100 }, '6mo': { retained: 4, pct: 80 }, '12mo': { retained: 3, pct: 75 }, '24mo': { retained: 2, pct: 40 } },
+    summary: { avgLTV: 900, avgCAC: 90, avgMonthlyRecurring: 120 },
+  };
   if (api === '/admin/pricing/recalculate-ltv') return { success: true };
   return null;
 }
