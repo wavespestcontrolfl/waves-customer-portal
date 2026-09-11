@@ -4,6 +4,7 @@ jest.mock('../services/triage-auto-resolve', () => ({ resolveRescheduleCards: je
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { resolveRescheduleCards } = require('../services/triage-auto-resolve');
 const links = require('../services/reschedule-link-promises');
 const { parseETDateTime } = require('../utils/datetime-et');
@@ -74,9 +75,25 @@ test('a missed appointment is still promised the link the page would honour', ()
   // for the same reason.
   expect(select({ now: parseETDateTime('2030-01-08T10:45') }).visit?.id).toBe('visit');
   // Terminal and live states are still refused, elapsed or not.
-  for (const status of ['completed', 'cancelled', 'en_route', 'rescheduled']) {
+  for (const status of ['completed', 'cancelled', 'en_route']) {
     expect(select({ candidates: [{ ...visit, status }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_not_self_service');
   }
+  // A 'rescheduled' row is eligibility()'s own missed-vs-past call, not this
+  // worker's: elapsed same-day, its answer is reason 'past' (a pending-rebook
+  // placeholder is never "missed"), which reads here as visit_elapsed rather
+  // than the generic visit_not_self_service the other terminal statuses get.
+  expect(select({ candidates: [{ ...visit, status: 'rescheduled' }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_elapsed');
+});
+
+test('a rescheduled visit still in the future is promised the link exactly like a pending one', () => {
+  // eligibility() already lets a customer self-serve a 'rescheduled' row from
+  // the public page — a local, narrower status allowlist here parked the
+  // promise anyway, refusing a link the customer could already get
+  // themselves (codex #4293 P1 r8).
+  const future = { ...visit, status: 'rescheduled', scheduled_date: '2030-01-20' };
+  const subject = { quote: 'My appointment on January 20.', visit_date: '2030-01-20' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [future] }).visit?.id).toBe('visit');
 });
 
 test('an emailed link is office work, not a silent SMS', () => {
@@ -234,7 +251,7 @@ test('an agent who takes the promise back later in the call stops the send', () 
 // keeps every existing fixture behaving exactly as before; pass it
 // explicitly to pull the two apart.
 function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null } = {}) {
-  const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], updates: [], inserts: [], resolved: [] };
+  const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], whereRawCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const build = (table) => {
     const name = String(table).split(' ')[0];
@@ -243,7 +260,8 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
     const b = {};
     const pass = (fn) => (...args) => { if (fn) fn(...args); return b; };
     Object.assign(b, {
-      whereNotNull: pass(), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(), whereRaw: pass(),
+      whereNotNull: pass(), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(),
+      whereRaw: pass((sql) => seen.whereRawCalls.push({ table: name, sql })),
       whereNull: pass(), join: pass(), leftJoin: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
       orderBy: pass((arg) => seen.orderByCalls.push({ table: name, arg })),
       onConflict: () => ({ ignore: async () => 1 }),
@@ -293,6 +311,28 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
 
 const sentRow = { id: 'outbox', status: 'sent', commitment_id: 'commitment', related_call_log_id: 'call',
   related_scheduled_service_id: 'visit', sent_at: new Date('2030-01-07T12:00:00Z') };
+
+test('a push-channel row is never counted as promised-link delivery evidence', async () => {
+  // push-channel-routing.js records its own App-delivery proof in sms_log
+  // with status 'sent' and the customer's real phone in to_phone, but
+  // from_phone is the literal string 'push', twilio_sid is always null, and
+  // metadata.channel is 'push' — never proof an actual SMS left the
+  // building. Without excluding it, a push notice that merely CONTAINS the
+  // short link's text reads as delivery evidence, settling the row 'sent'
+  // with no provider id while the real SMS is never sent at all (codex
+  // #4293 P2 r8). This shallow mock cannot simulate a real WHERE clause
+  // filtering rows out of a result set (nothing in this suite's fakeConn
+  // does), so the structural proof is that the query itself carries the
+  // same exclusion predicate twilio-webhook.js already uses for exactly
+  // this shape of row.
+  const { conn, seen } = fakeConn({});
+  const result = await links.matchingSend(conn, { visit, customer }, new Date('2030-01-07T12:00:00Z'));
+  expect(result).toBeNull();
+  const evidenceFilter = seen.whereRawCalls.find((c) => c.table === 'sms_log');
+  expect(evidenceFilter).toBeDefined();
+  expect(evidenceFilter.sql).toContain("COALESCE(from_phone, '') <> 'push'");
+  expect(evidenceFilter.sql).toContain("COALESCE(metadata->>'channel', '') <> 'push'");
+});
 
 test('a replay that moved nothing closes no cards; a real self-serve move does', async () => {
   const none = fakeConn({ outbox: [sentRow], selfServe: null });
@@ -474,6 +514,56 @@ test('a failed receipt on a reconciled row stays bookkeeping — the commitment 
   expect(seen.inserts).toEqual([]);
 });
 
+test('a promise recorded before an explicit activation boundary is cancelled without a card; one recorded after is staged normally', async () => {
+  const prior = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+  try {
+    process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = '2030-01-05T00:00:00.000Z';
+    // The extractor has been building send_reschedule_link commitments the
+    // whole time GATE_CALL_COMMITMENTS was on, independent of this delivery
+    // gate — the first live sweep must not text a backlog of days-old
+    // promises just because they are still open (codex #4293 P1 r8).
+    const stale = promiseRow('stale', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2030-01-01T00:00:00.000Z' } });
+    const { seen, result } = await sweepWith({ outbox: [stale], selfServeVisitIds: [] });
+    expect(result.processed).toBe(1);
+    expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'stale' },
+      patch: expect.objectContaining({ status: 'cancelled', last_error: 'pre_activation' }) }));
+    // Terminal and quiet: no card raised or reopened for a historical
+    // observation nobody asked this feature to act on.
+    expect(seen.inserts).toEqual([]);
+    expect(seen.updates.some((u) => u.table === 'triage_items' || u.table === 'call_log')).toBe(false);
+
+    // A commitment recorded AFTER the boundary is staged as usual — it
+    // reaches contextFor, which this shallow mock resolves to
+    // 'promise_closed' (no call_commitments row exists in it) rather than
+    // 'pre_activation', proving the boundary check let it through.
+    const fresh = promiseRow('fresh', 'second', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2030-01-06T00:00:00.000Z' } });
+    const after = await sweepWith({ outbox: [fresh], selfServeVisitIds: [] });
+    const freshUpdate = after.seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'fresh');
+    expect(freshUpdate.patch.status).toBe('cancelled');
+    expect(freshUpdate.patch.last_error).not.toBe('pre_activation');
+  } finally {
+    if (prior === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = prior;
+  }
+});
+
+test('with no activation env set, the process start time is the boundary', async () => {
+  const prior = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+  try {
+    delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    // A bare gate flip with no boundary configured must never promote real
+    // history — any commitment recorded long before this test process
+    // itself started has to read as pre-activation from the fallback alone.
+    const ancient = promiseRow('ancient', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2000-01-01T00:00:00.000Z' } });
+    const { seen } = await sweepWith({ outbox: [ancient], selfServeVisitIds: [] });
+    expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'ancient' },
+      patch: expect.objectContaining({ status: 'cancelled', last_error: 'pre_activation' }) }));
+  } finally {
+    if (prior === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = prior;
+  }
+});
+
 test('one call-level card speaks for every promise parked against the call', async () => {
   const card = { id: 'card', payload: { reschedule_link_promise: { commitment_id: 'first', commitment_ids: ['first'], reason: 'delivery_failed' } } };
   const { seen } = await sweepWith({ outbox: [promiseRow('boom', 'second')], throwOn: 'boom', cards: [card] });
@@ -587,6 +677,54 @@ test('an interlock that dies mid-send blocks at the provider boundary', async ()
   // Reading knex's private __knex__disposed returned undefined here on any
   // other pool build, and the send went to the provider anyway.
   expect(afterLoss).toMatchObject({ ok: false, code: 'LINK_LOCK_LOST' });
+});
+
+test('a timed-out interlock attempt keeps its slot until the connection actually settles', async () => {
+  // Releasing the connection cap's count on the TIMER firing (rather than
+  // the underlying connect actually resolving or rejecting) let a burst of
+  // slow connects each free their slot while the real sockets stayed open
+  // underneath, so the cap no longer bounded the true number of concurrent
+  // raw connections (codex #4293 P1 r8). Every acquireRawConnection() here
+  // hangs forever, so nothing ever settles on its own — proving the cap
+  // stays occupied is the only way to prove the slot was never freed early.
+  const core = jest.fn(async () => ({ sent: true }));
+  const admin = { customerId: 'customer', body: 'On our way.', metadata: { adminUserId: 'admin' } };
+  const client = { acquireRawConnection: jest.fn(() => new Promise(() => {})), destroyRawConnection: jest.fn(async () => {}) };
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  try {
+    await withLiveGate({ outbox: [promiseRow('outbox', 'commitment')], client }, async () => {
+      // Fill every one of the 4 slots with a connect that will never settle.
+      // Poll (rather than a fixed number of microtask ticks) until each
+      // attempt has actually reached acquireRawConnection before starting
+      // the next — the exact tick count through needsSendInterlock's own DB
+      // round trip is an implementation detail this test must not depend on.
+      const filling = [];
+      for (let i = 0; i < 4; i += 1) {
+        filling.push(links.withSendLock(admin, core));
+        while (client.acquireRawConnection.mock.calls.length <= i) await Promise.resolve(); // deliberately serialized
+      }
+      // A 5th attempt hits the cap immediately — no new connect is even tried.
+      logger.warn.mockClear();
+      expect(await links.withSendLock(admin, core)).toEqual({ sent: true });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('at its connection cap'));
+      expect(client.acquireRawConnection).toHaveBeenCalledTimes(4);
+
+      // Let all four give up waiting — each one's SEND still proceeds...
+      await jest.advanceTimersByTimeAsync(6000);
+      await Promise.all(filling);
+
+      // ...but none of the underlying connects ever actually resolved, so a
+      // NEW attempt right after must STILL see the cap occupied. Freeing the
+      // slot on the timer alone would instead let this one through to try
+      // acquireRawConnection a 5th time.
+      logger.warn.mockClear();
+      expect(await links.withSendLock(admin, core)).toEqual({ sent: true });
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('at its connection cap'));
+      expect(client.acquireRawConnection).toHaveBeenCalledTimes(4);
+    });
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('an interlock connection that never arrives does not block an admin send', async () => {

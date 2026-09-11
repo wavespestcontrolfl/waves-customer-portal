@@ -17,6 +17,26 @@ function mode() {
   const value = String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE || '').toLowerCase();
   return isEnabled('callCommitments') && ['shadow', 'true'].includes(value) ? value : 'off';
 }
+
+// The extractor has been building send_reschedule_link commitments the
+// whole time GATE_CALL_COMMITMENTS was on, independent of whether THIS
+// delivery gate was live — days of them can sit open before anyone flips
+// GATE_RESCHEDULE_LINK_ON_PROMISE. Staging them all unconditionally the
+// moment the gate goes live would text a backlog of stale reschedule links
+// at once, on a promise the caller made days ago (codex #4293 P1 r8).
+// RESCHEDULE_LINK_PROMISE_ACTIVATED_AT (an ISO instant) names the deliberate
+// activation moment; read fresh each call so a live env change takes effect
+// without a restart, exactly like mode() itself. Unset, the boundary is this
+// PROCESS's own start time — captured ONCE at module load, not re-evaluated
+// per call, so a bare gate flip can never promote history just because the
+// process happened to stay up a while: only commitments created from this
+// deploy forward are ever staged live.
+const PROCESS_STARTED_AT = new Date();
+function activationBoundary() {
+  const configured = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+  const parsed = configured ? new Date(configured) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : PROCESS_STARTED_AT;
+}
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const dateOnly = (v) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
 const snapshot = (v) => ({ id: v.id, customer_id: v.customer_id, date: dateOnly(v.scheduled_date),
@@ -231,15 +251,19 @@ function narrowBySubject(candidates, subject) {
 }
 
 // Can the customer actually move THIS row from the public page? The page's own
-// verdict answers the time question: a pending/confirmed visit whose window has
-// passed was MISSED, not served, and /reschedule/:token still lets the customer
-// pick a new time — the call that follows a missed visit is the one most likely
-// to be promised this link, and a local "two hours past the start" rule turned
-// every one of them away (codex #4293 r3 P2). Group membership and the token
-// stay here; only reschedule-eligibility decides missed-vs-past.
+// verdict answers the time AND status question: a pending/confirmed visit
+// whose window has passed was MISSED, not served, and /reschedule/:token
+// still lets the customer pick a new time — the call that follows a missed
+// visit is the one most likely to be promised this link, and a local "two
+// hours past the start" rule turned every one of them away (codex #4293 r3
+// P2). A separate local status allowlist made the same mistake for
+// 'rescheduled': the page's own eligibility() already treats a future
+// 'rescheduled' row as self-service (RESCHEDULABLE_STATUSES), so a
+// duplicate, narrower allowlist here parked a link the customer could
+// already use the page for (codex #4293 P1 r8). Group membership and the
+// token stay here; eligibility() alone decides status AND missed-vs-past.
 function visitNotSelfServiceReason(visit, now) {
-  if (!['pending', 'confirmed'].includes(visit.status) || !visit.reschedule_token
-    || (visit.visit_id && visit.follow_through_group_eligible !== true)) return 'visit_not_self_service';
+  if (!visit.reschedule_token || (visit.visit_id && visit.follow_through_group_eligible !== true)) return 'visit_not_self_service';
   const verdict = require('./reschedule-eligibility').eligibility(visit, now);
   if (verdict.ok) return null;
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
@@ -309,6 +333,16 @@ async function matchingSend(conn, context, since) {
   const messages = await conn('sms_log').where({ customer_id: context.customer.id, direction: 'outbound' })
     .where('created_at', '>=', since).whereIn('status', ['queued', 'accepted', 'sending', 'sent', 'delivered', 'read'])
     .whereIn(conn.raw("regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g')"), phoneMatchDigits(context.customer.phone))
+    // push-channel-routing's App notification records its own sms_log proof
+    // row the same way a real text does — status 'sent', the customer's real
+    // phone in to_phone — but from_phone is the literal string 'push',
+    // twilio_sid is always null, and metadata.channel is 'push' (never a
+    // Twilio SID to prove an SMS actually left the building). Without this
+    // exclusion a push notice that merely CONTAINS the short link's text
+    // reads as delivery evidence, settling the row 'sent' with no provider
+    // id while the real SMS is never sent at all (codex #4293 P2 r8). Same
+    // predicate twilio-webhook.js already uses to spot a push row.
+    .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
     .where(function carriesLink() { for (const needle of needles) this.orWhere('message_body', 'like', `%${needle}%`); })
     .orderBy('created_at', 'desc').limit(201).select('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
   if (messages.length > 200) throw new Error('Promised-link delivery evidence is truncated');
@@ -450,10 +484,14 @@ async function stagePromises(conn) {
   const rows = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('outbox_messages as o', 'o.commitment_id', 'cc.id').whereNull('o.id')
     .where({ 'cc.kind': KIND, 'cc.party': 'waves', 'cc.status': 'open' }).whereNull('cc.human_state')
-    .select('cc.id', 'cc.call_log_id', 'cl.customer_id').limit(200);
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cl.customer_id').limit(200);
+  // commitment_created_at rides along on the outbox row itself so runOne can
+  // judge pre-activation without a second call_commitments query per row —
+  // the exact check the r8 activation boundary needs to run before anything
+  // else, for every historical row a live sweep might otherwise touch at once.
   for (const row of rows) await conn('outbox_messages').insert({ channel: 'sms', status: mode() === 'shadow' ? 'shadow' : 'pending',
-    payload: { kind: KIND }, commitment_id: row.id, related_call_log_id: row.call_log_id, related_customer_id: row.customer_id,
-    available_at: new Date() }).onConflict('commitment_id').ignore();
+    payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, related_call_log_id: row.call_log_id,
+    related_customer_id: row.customer_id, available_at: new Date() }).onConflict('commitment_id').ignore();
   return rows.length;
 }
 
@@ -614,6 +652,26 @@ async function holdBeforeSend(conn, row, context, planned, now) {
   return false;
 }
 
+// True when the commitment behind this row predates the activation
+// boundary — see stagePromises for where commitment_created_at is stamped.
+function isPreActivationRow(row) {
+  const createdAt = row.payload?.commitment_created_at;
+  if (!createdAt) return false;
+  const created = new Date(createdAt);
+  return !Number.isNaN(created.getTime()) && created < activationBoundary();
+}
+
+// Terminal, exactly like a promise the office already closed
+// (applyContextSkip's promise_closed branch): no send, and no card raised,
+// because there is no new office work here — only a historical extraction
+// nobody asked this feature to act on. 'cancelled' (not 'review') so the
+// row also drops out of every future sweep's status whitelist instead of
+// costing a scan slot forever (codex #4293 P1 r8).
+async function cancelPreActivation(conn, row) {
+  await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+    .update({ status: 'cancelled', last_error: 'pre_activation', updated_at: new Date() });
+}
+
 async function runOne(conn, row, { now = new Date(), send = null, buildLink = null, render = null } = {}) {
   if (mode() === 'off') return;
   // Another sweep may have completed this item since it was listed.
@@ -634,6 +692,10 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   // r4/r5). settleReconciledReceipt still records a late carrier outcome for
   // accurate bookkeeping, but never touches triage_items or call_log.
   if (row.payload?.link_used_reconciled_at) return settleReconciledReceipt(conn, row);
+  // A commitment recorded before this delivery gate's own activation
+  // boundary is a historical observation, not a live promise to keep —
+  // see isPreActivationRow / cancelPreActivation (codex #4293 P1 r8).
+  if (isPreActivationRow(row)) return cancelPreActivation(conn, row);
   // Reconcile accepted/ambiguous attempts before planning any new send.
   if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
   const context = await contextFor(conn, row.commitment_id, now);
@@ -769,10 +831,23 @@ async function openInterlockConnection() {
       new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('interlock connect timed out')), INTERLOCK_CONNECT_MS); }),
     ]);
   } catch (err) {
-    openInterlocks -= 1;
-    // A connection that lands after the race was lost still has to be closed,
-    // or the timeout leaks the very slot it was protecting.
-    if (opening) opening.then((late) => closeInterlockConnection(late, false), () => {});
+    if (err.message === 'interlock connect timed out') {
+      // The timer winning the race proves nothing about the underlying
+      // connect — it is still in flight, and freeing the slot on the timer
+      // alone (as an earlier round did) let a burst of slow connects each
+      // release their slot while the real sockets stayed open underneath,
+      // so the cap no longer bounded the true number of concurrent raw
+      // connections (codex #4293 P1 r8). Keep the slot counted until the
+      // attempt actually settles: a late-arriving connection is destroyed —
+      // ITS destroy, not this timeout, is what frees the slot — and a late
+      // rejection (the connect failed on its own after all) frees it
+      // directly, with nothing left to destroy.
+      opening.then((late) => closeInterlockConnection(late), () => { openInterlocks -= 1; });
+    } else {
+      // acquireRawConnection() itself rejected before the timer ever fired —
+      // the attempt is already over, with nothing left to wait for.
+      openInterlocks -= 1;
+    }
     require('./logger').warn(`[reschedule-link-promises] send interlock connection unavailable (${err.code || err.name || 'error'})`);
     return null;
   } finally {
@@ -958,4 +1033,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };
