@@ -75,52 +75,87 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   // 3a. By message SID first: an unknown-sender thread has no customer_id,
   //     so the customer-scoped clear below can never reach its bells; the
   //     bell carries the SID it rang for (codex #4210 P2).
+  const unknownSenderSids = new Set();
   if (mirrorSids.length) {
     try {
-      // Retarget an unknown-sender bell BEFORE clearing (codex #4210
-      // head-round P2): the throttle rings once per 4h window, so a
-      // single-message read of exactly that alerted SID would otherwise
-      // clear the thread's only bell while a later throttled message from
-      // the SAME sender is still unread — and that later message's own
-      // read, in a future call, can never match the bell (it's keyed to
-      // the SID that just cleared). Point the bell at a still-unread SID
-      // from that sender first, mirroring the customer-scoped
-      // nothing-left-unread check below for threads that have no
-      // customer_id to key that check on. Scoped by contact_phone, not
-      // conversation_id: the throttle and the claim are keyed on the raw
-      // sender phone across every conversation it owns (one per
-      // our_endpoint_id it has texted), so a sender who has texted two
-      // business numbers within the window shares ONE bell across both
-      // conversations (pre-push audit P1).
+      // An unknown-sender thread has no customer_id, so the customer-scoped
+      // nothing-left-unread clear below can never reach its bell — it only
+      // carries the SID it rang for (codex #4210 P2). The throttle rings
+      // once per 4h window, so a single-message read of exactly that
+      // alerted SID must not clear the bell while a later throttled message
+      // from the SAME sender is still unread; it must hand the bell to that
+      // later SID instead. Scoped by contact_phone, not conversation_id or
+      // "the SID this call happened to read": the throttle/claim is keyed
+      // on the raw sender phone across every conversation it owns (one per
+      // our_endpoint_id it has texted — pre-push audit P1), and the decision
+      // of what to do with the bell must be made fresh from ITS CURRENT
+      // target, not from an assumption that this call owns that target —
+      // two concurrent reads of a sender's two messages otherwise strand
+      // the bell: whichever read did NOT originally own the alerted SID can
+      // never match it to clear it, so if a hand-off lands after that read
+      // already ran, nothing ever clears the bell again (pre-push audit
+      // P1, second round). A short-lived per-phone advisory lock (bounded
+      // by lock_timeout, releases on rollback; scoped to a few fast DB
+      // statements with no notification dispatch inside it, so holding it
+      // is cheap) makes every read for the same sender go through ONE
+      // retarget-or-clear decision instead of splitting it across two
+      // independent code paths.
       const unknownReadRows = await db('messages as m')
         .join('conversations as c', 'c.id', 'm.conversation_id')
         .whereNull('c.customer_id')
         .whereIn('m.twilio_sid', mirrorSids)
         .select('m.twilio_sid', 'c.contact_phone');
-      const readSidsByPhone = {};
+      const phones = new Set();
       for (const row of unknownReadRows) {
-        if (row.contact_phone) (readSidsByPhone[row.contact_phone] ??= []).push(row.twilio_sid);
+        unknownSenderSids.add(row.twilio_sid);
+        if (row.contact_phone) phones.add(row.contact_phone);
       }
-      for (const [phone, readSids] of Object.entries(readSidsByPhone)) {
-        const remaining = await db('messages as m')
-          .join('conversations as c', 'c.id', 'm.conversation_id')
-          .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
-          .whereNull('c.customer_id')
-          .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
-          .whereNotNull('m.twilio_sid')
-          .orderBy('m.created_at', 'asc')
-          .first('m.twilio_sid');
-        if (!remaining?.twilio_sid) continue; // nothing left unread — leave the bell keyed to a SID that will clear normally below
-        await db('notifications')
-          .where({ recipient_type: 'admin', category: 'inbound_sms' })
-          .whereNull('read_at')
-          .whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [readSids])
-          .update({ metadata: db.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
+      for (const phone of phones) {
+        try {
+          const cleared = await db.transaction(async (trx) => {
+            await trx.raw("SET LOCAL lock_timeout = '2s'");
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+            const remaining = await trx('messages as m')
+              .join('conversations as c', 'c.id', 'm.conversation_id')
+              .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
+              .whereNull('c.customer_id')
+              .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+              .whereNotNull('m.twilio_sid')
+              .orderBy('m.created_at', 'asc')
+              .first('m.twilio_sid');
+            // Match the LIVE bell by what it currently rang for, not by the
+            // SID(s) this call happened to read — those may differ from
+            // the SID the bell is actually keyed to.
+            const liveBell = () => trx('notifications')
+              .where({ recipient_type: 'admin', category: 'inbound_sms' })
+              .whereNull('read_at')
+              .whereRaw(
+                `metadata->'payload'->>'twilioSid' IN (
+                  SELECT m2.twilio_sid FROM messages m2
+                  JOIN conversations c2 ON c2.id = m2.conversation_id
+                  WHERE c2.contact_phone = ? AND c2.customer_id IS NULL
+                )`,
+                [phone],
+              );
+            if (remaining?.twilio_sid) {
+              await liveBell().update({ metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
+              return 0;
+            }
+            return liveBell().update({ read_at: new Date() });
+          });
+          notificationsCleared += cleared;
+        } catch (e) { logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed for one sender: ${e.message}`); }
       }
     } catch (e) { logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed: ${e.message}`); }
-    try {
-      notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: mirrorSids, before: now, role });
-    } catch (e) { logger.warn(`[inbound-sms-read] bell clear by sid failed: ${e.message}`); }
+    // The unknown-sender SIDs above are fully handled (retargeted or
+    // cleared) inside the per-phone lock; only known-customer SIDs still
+    // need the ordinary by-SID clear.
+    const knownSids = mirrorSids.filter((sid) => !unknownSenderSids.has(sid));
+    if (knownSids.length) {
+      try {
+        notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
+      } catch (e) { logger.warn(`[inbound-sms-read] bell clear by sid failed: ${e.message}`); }
+    }
   }
   try {
     const convIds = new Set(convs);

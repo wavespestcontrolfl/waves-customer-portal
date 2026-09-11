@@ -4,6 +4,12 @@
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   db.raw = (...args) => mockPg.raw(...args);
+  // mockPg is itself already a transaction (the whole suite runs inside one,
+  // rolled back in afterAll), so a nested db.transaction() becomes a real
+  // Postgres SAVEPOINT rather than a fresh pooled connection like production
+  // gets — enough to exercise the SQL (advisory lock + SET LOCAL) for real,
+  // though it shares one connection rather than truly running in parallel.
+  db.transaction = (...args) => mockPg.transaction(...args);
   Object.defineProperty(db, 'schema', { get: () => mockPg.schema });
   return db;
 });
@@ -14,6 +20,8 @@ const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
 const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
+const NotificationService = require('../services/notification-service');
+const realNotificationService = jest.requireActual('../services/notification-service');
 const { openBalanceSummary } = require('../services/open-balance');
 const connection = process.env.C360_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -282,6 +290,59 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
       if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
       await mockPg('conversations').whereIn('id', [firstConversationId, secondConversationId]).delete();
+    }
+  }, 30000);
+
+  test('concurrently reading both of an unknown sender\'s unread messages clears the bell instead of leaving it stuck on a retarget the other request already missed (pre-push audit P1)', async () => {
+    const conversationId = randomUUID();
+    const firstMessageId = randomUUID();
+    const secondMessageId = randomUUID();
+    const firstSid = `SM-synthetic-race-a-${randomBytes(4).toString('hex')}`;
+    const secondSid = `SM-synthetic-race-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    // Unmock NotificationService for this test only: the real
+    // markInboundSmsReadAdmin (still reading through mockPg, since
+    // '../models/db' is mocked for the whole file) is what actually clears
+    // read_at — without it, a stuck-vs-cleared bell can't be observed.
+    NotificationService.markInboundSmsReadAdmin.mockImplementation((...args) => realNotificationService.markInboundSmsReadAdmin(...args));
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: firstMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: firstSid, body: 'First synthetic text', created_at: new Date(Date.now() - 120000) },
+        { id: secondMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        metadata: JSON.stringify({ payload: { twilioSid: firstSid } }),
+      }).returning('*');
+
+      // Both messages read at once, through separate concurrent calls (the
+      // shape two staff members opening the same unknown thread at once, or
+      // one request per message, would produce). This shares mockPg's one
+      // connection (a savepoint per db.transaction() rather than production's
+      // fresh pooled connection), so it can't reproduce the exact
+      // cross-connection interleaving timing — but it does exercise the real
+      // advisory-lock SQL under real concurrent JS calls and confirms the
+      // end state converges correctly rather than assuming it from mocks.
+      await Promise.all([
+        markInboundSmsRead({ messageIds: [firstMessageId], role: 'admin' }),
+        markInboundSmsRead({ messageIds: [secondMessageId], role: 'admin' }),
+      ]);
+
+      expect((await mockPg('messages').where({ id: firstMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: secondMessageId }).first()).is_read).toBe(true);
+      // Both messages are read, so the bell must end up cleared — the bug
+      // this guards against leaves read_at permanently null because the
+      // retarget's write and the ordinary by-SID clear can land in the
+      // wrong order for whichever message "won" the race.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).not.toBeNull();
+    } finally {
+      NotificationService.markInboundSmsReadAdmin.mockReset().mockResolvedValue(0);
+      await mockPg('messages').whereIn('id', [firstMessageId, secondMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);
 });
