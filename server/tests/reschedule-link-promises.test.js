@@ -51,7 +51,11 @@ test('a stated current date must match the candidate visit exactly', () => {
   const subject = { quote: `My appointment is ${weekday} at 9 AM.`, visit_date: '2030-01-08' };
   const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
   expect(select({ call: source, commitment: { ...commitment, subject } }).visit?.id).toBe('visit');
-  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-09' } } }).reason).toBe('discussed_visit_unavailable');
+  // The quote names Jan 8's actual weekday; a mismatched extraction is now
+  // caught as ungrounded before narrowBySubject's own date filter ever runs
+  // — the sole-candidate exemption no longer covers a weekday the quote
+  // contradicts (codex #4293 P1 r4).
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-09' } } }).reason).toBe('date_not_grounded');
 });
 
 test('dispatch-owned pending and grouped visits stay in review', () => {
@@ -99,15 +103,18 @@ test('a stated appointment date binds by exact match, not the new-booking slot r
   // the new-booking slot validator even though the date matched exactly.
   expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` },
     commitment: { ...commitment, subject }, candidates: [far] }).visit?.id).toBe('visit');
-  // A quote that contradicts the stated date still binds nothing.
+  // A quote that contradicts the stated date still binds nothing — caught
+  // now as an ungrounded explicit claim before narrowBySubject's own
+  // exact-match filter ever runs, regardless of the single open candidate
+  // (codex #4293 P1 r4).
   for (const spoken of ['My September 27 appointment.', 'My October 20 appointment.', 'My appointment on the 27th.']) {
     expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` },
       commitment: { ...commitment, subject: { quote: spoken, visit_date: '2030-09-20' } }, candidates: [far] })
-      .reason).toBe('discussed_visit_unavailable');
+      .reason).toBe('date_not_grounded');
   }
 });
 
-test('an extracted date needs the quote to actually name it once more than one visit is open', () => {
+test('an extracted date needs the quote to actually name it, even against the sole open visit', () => {
   const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
   // The call happened 2030-01-07 (ET). "tomorrow" means 2030-01-08 relative
   // to THAT date — not whatever date the model happened to select.
@@ -121,10 +128,18 @@ test('an extracted date needs the quote to actually name it once more than one v
   // The same "tomorrow" DOES ground the date the caller actually meant.
   expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-08' } },
     candidates: [visit, second] }).visit?.id).toBe('visit');
-  // With only one visit open, there is nothing to disambiguate — no grounding
-  // is required at all, even for the same mismatched pick from above.
+  // A sole remaining candidate is NOT an exemption from a CONTRADICTED
+  // explicit claim: 2030-01-15 is the only open visit, but "tomorrow"
+  // (2030-01-08) still contradicts it, so the link for the wrong appointment
+  // must not go out just because it is the only row on file (codex #4293 P1
+  // r4 — this is the sole-candidate bug the earlier round's exemption missed).
   expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
-    candidates: [second] }).visit?.id).toBe('second');
+    candidates: [second] }).reason).toBe('date_not_grounded');
+  // The sole-candidate exemption still stands when the quote gives NOTHING
+  // to check the pick against at all (no explicit claim, no weekday name).
+  const noToken = { quote: 'My appointment, please.', visit_date: '2030-01-15' };
+  expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${noToken.quote}` },
+    commitment: { ...commitment, subject: noToken }, candidates: [second] }).visit?.id).toBe('second');
 });
 
 test('a bare weekday alongside an explicit relative token cannot override the relative token', () => {
@@ -391,6 +406,29 @@ test('a review row parked for the same unchanging reason is still stamped scanne
   expect(stamp.patch.last_scanned_at).toEqual(now);
   expect(seen.orderByCalls.find((c) => c.table === 'outbox_messages').arg)
     .toEqual([{ column: 'last_scanned_at', order: 'asc', nulls: 'first' }, { column: 'updated_at', order: 'asc' }]);
+});
+
+test('a reconciled row is never re-planned or re-parked by the send sweep, and its card stays closed', async () => {
+  // markLinkUsed stamps link_used_reconciled_at and clears the row's
+  // exception card, but deliberately leaves status alone (a missing carrier
+  // receipt is still not proof of delivery). Without the runOne
+  // short-circuit, the NEXT sweep would re-enter contextFor, find the (now
+  // self-served) visit's date no longer matches the original promise, and
+  // re-park it — recreating the very card just closed, and permanently:
+  // unreconciledPromiseRows never revisits a row once this stamp is set, so
+  // nothing would ever close it again (codex #4293 P1 r4).
+  const reconciled = promiseRow('reconciled', 'first', { status: 'review',
+    payload: { link_used_reconciled_at: '2030-01-08T00:00:00.000Z' } });
+  const { seen, result } = await sweepWith({ outbox: [reconciled], selfServeVisitIds: [] });
+  expect(result.processed).toBe(1);
+  // The row was still scanned (fairness bookkeeping still applies to it)...
+  const stamp2 = seen.updates.find((u) => u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch);
+  expect(stamp2.whereIn).toContainEqual({ col: 'id', values: ['reconciled'] });
+  // ...but nothing else touched it: no status change (no re-plan, no
+  // re-park, no cancel), no re-opened or new triage card, no call_log write.
+  const otherUpdates = seen.updates.filter((u) => !(u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch));
+  expect(otherUpdates).toEqual([]);
+  expect(seen.inserts).toEqual([]);
 });
 
 test('one call-level card speaks for every promise parked against the call', async () => {

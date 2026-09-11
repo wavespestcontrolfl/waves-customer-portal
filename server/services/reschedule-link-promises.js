@@ -189,10 +189,21 @@ function quoteNamesWeekday(q, weekday, candidates, ymd) {
   return onWeekday.length === 1 && dateOnly(onWeekday[0].scheduled_date) === ymd;
 }
 
-// True once the quote itself grounds the extracted date: an explicit claim
+function quoteHasWeekdayToken(q) {
+  return WEEKDAY_NAMES.some((name) => new RegExp(`\\b${name}\\b`).test(q));
+}
+
+// True once the quote itself grounds the extracted date. An explicit claim
 // (absolute date, ordinal day, or today/tomorrow/next-weekday) must equal it
-// exactly; absent any explicit claim, a bare weekday name may ground it only
-// when it names exactly one open visit.
+// exactly, with NO exemption for a sole remaining candidate: a caller on
+// 2030-01-07 saying "tomorrow" (2030-01-08) while the model extracts
+// 2030-01-15 must still park even when 2030-01-15 is the only open visit —
+// letting a single candidate through unchecked sent the link for the wrong
+// appointment the moment the model's bad pick happened to be the one row on
+// file (codex #4293 P1 r3). Absent any explicit claim, a bare weekday name
+// must likewise match the visit it names; only when the quote gives NEITHER
+// an explicit claim NOR a weekday name at all is there nothing to check the
+// pick against, and a single open candidate is trusted.
 function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
   const q = ` ${norm(quote)} `;
   const [year, month, day] = String(ymd).split('-').map(Number);
@@ -202,7 +213,8 @@ function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
     return explicit.day === day && (explicit.month == null || explicit.month === month)
       && (explicit.year == null || explicit.year === year);
   }
-  return quoteNamesWeekday(q, weekdayOf(ymd), candidates, ymd);
+  if (quoteHasWeekdayToken(q)) return quoteNamesWeekday(q, weekdayOf(ymd), candidates, ymd);
+  return candidates.length <= 1;
 }
 
 function narrowBySubject(candidates, subject) {
@@ -233,11 +245,11 @@ function visitNotSelfServiceReason(visit, now) {
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
 }
 
-// A wrong extraction cannot be trusted to disambiguate on its own once more
-// than one visit is open: the quote itself must name the picked date. Exactly
-// one open visit needs no such check — there is nothing left to disambiguate.
+// A wrong extraction cannot be trusted on the quote's own say-so — see
+// quoteGroundsVisitDate for the full rule, including why a sole remaining
+// candidate is NOT exempt from a contradicted explicit claim.
 function extractedDateUngrounded({ subject, call, candidates, callCommitments }) {
-  return !!subject?.visit_date && candidates.length > 1
+  return !!subject?.visit_date
     && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at, candidates);
 }
 
@@ -575,6 +587,18 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   if (!row || ['delivered', 'cancelled'].includes(row.status)) return;
   // Reconcile accepted/ambiguous attempts before planning any new send.
   if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
+  // The customer already used this exact link to move themselves.
+  // markLinkUsed stamps this and clears the row's exception card, but
+  // deliberately leaves status alone — a missing carrier receipt is still
+  // not proof of delivery. Re-entering contextFor here re-evaluates the
+  // ORIGINAL promise against the visit's NOW-MOVED date, finds it
+  // discussed_visit_unavailable, and reparks — resurrecting the very card
+  // markLinkUsed just closed, and permanently: unreconciledPromiseRows never
+  // revisits a row once link_used_reconciled_at is set, so nothing would
+  // ever close it again (codex #4293 P1 r4). Any delivery-receipt
+  // reconciliation this row still needs already ran in the check above;
+  // there is nothing left to plan or re-park.
+  if (row.payload?.link_used_reconciled_at) return;
   const context = await contextFor(conn, row.commitment_id, now);
   if (context.reason) return applyContextSkip(conn, row, context.reason, now);
   const { call, visit } = context;
@@ -811,7 +835,9 @@ const SELF_SERVE_INITIATOR = 'customer_self_serve';
 const ATTEMPTED_STATUSES = ['sent', 'delivered', 'review'];
 
 // At-most-once per promise row: the stamp is what makes the reconciliation
-// safe to retry from anywhere.
+// safe to retry from anywhere. It is also the row's terminal marker for
+// runOne's send-sweep path (codex #4293 P1 r4) — set it only once the promise
+// truly needs no further planning or re-parking.
 async function markLinkUsed(conn, row) {
   await require('./triage-auto-resolve').resolveRescheduleCards(conn, row.related_call_log_id, USED_LINK_NOTE, row.related_scheduled_service_id);
   // A row parked for a missing carrier receipt raised this promise's own
