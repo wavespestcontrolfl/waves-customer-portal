@@ -838,7 +838,6 @@ function LawnContentModulesTab({ showToast }) {
   const [selectedKey, setSelectedKey] = useState("all");
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
-
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/service-outlines/content-modules")
@@ -846,11 +845,9 @@ function LawnContentModulesTab({ showToast }) {
       .catch((err) => showToast(`Load failed: ${err.message}`))
       .finally(() => setLoading(false));
   }, [showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const latest = [];
   const seen = new Set();
   for (const module of modules) {
@@ -859,8 +856,10 @@ function LawnContentModulesTab({ showToast }) {
     latest.push(module);
   }
   const keys = ["all", ...latest.map((module) => module.key)];
-  const visible = selectedKey === "all" ? latest : latest.filter((module) => module.key === selectedKey);
-
+  const visible =
+    selectedKey === "all"
+      ? latest
+      : latest.filter((module) => module.key === selectedKey);
   const startEdit = (module) => {
     setEditing(module);
     setForm({
@@ -871,139 +870,210 @@ function LawnContentModulesTab({ showToast }) {
       sourceNotes: module.source_notes || "",
     });
   };
-
   const save = async (status = form.status) => {
     if (!editing?.id) return;
     try {
-      await adminFetch(`/admin/service-outlines/content-modules/${editing.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ ...form, status }),
-      });
-      showToast(status === "approved" ? "Content module approved" : "Content module saved");
+      await adminFetch(
+        `/admin/service-outlines/content-modules/${editing.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            ...form,
+            status,
+          }),
+        },
+      );
+      showToast(
+        status === "approved"
+          ? "Content module approved"
+          : "Content module saved",
+      );
       setEditing(null);
       load();
     } catch (err) {
       showToast(err.message || "Save failed");
     }
   };
-
-  if (loading) return <div style={sCard}>Loading lawn content modules...</div>;
-
+  if (loading)
+    return <ActionFeedback>Loading lawn content modules…</ActionFeedback>;
   return (
     <div>
-      <div style={sCard}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+      <Card className="p-5 mb-3">
+        <div className="flex justify-between gap-[12px] flex-wrap items-center">
           <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Lawn Outline Content Library</div>
-            <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
-              These approved modules power the public page, estimate packet, and service-report language.
+            <div className="text-18 font-medium text-zinc-900">
+              Lawn Outline Content Library
+            </div>
+            <div className="text-ui-body text-ink-secondary mt-[4px]">
+              These approved modules power the public page, estimate packet, and
+              service-report language.
             </div>
           </div>
-          <select value={selectedKey} onChange={(e) => setSelectedKey(e.target.value)} style={{ ...sInput, minWidth: 240 }}>
+          <Select
+            value={selectedKey}
+            onChange={(e) => setSelectedKey(e.target.value)}
+            className="min-w-[240px]"
+          >
             {keys.map((key) => (
-              <option key={key} value={key}>{key === "all" ? "All modules" : key}</option>
+              <option key={key} value={key}>
+                {key === "all" ? "All modules" : key}
+              </option>
             ))}
-          </select>
+          </Select>
         </div>
-      </div>
+      </Card>
 
-      <div style={sCard}>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thS}>Key</th>
-                <th style={thS}>Title</th>
-                <th style={thS}>Audience</th>
-                <th style={thS}>Status</th>
-                <th style={thS}>Copy</th>
-                <th style={thS}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+      <Card className="p-5 mb-3">
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                <TH>Key</TH>
+                <TH>Title</TH>
+                <TH>Audience</TH>
+                <TH>Status</TH>
+                <TH>Copy</TH>
+                <TH>Actions</TH>
+              </TR>
+            </THead>
+            <TBody>
               {visible.map((module) => (
-                <tr key={module.id}>
-                  <td style={tdS}>
-                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12 }}>{module.key}</div>
-                    <div style={{ fontSize: 11, color: D.muted }}>v{module.version}</div>
-                  </td>
-                  <td style={tdS}>{module.title}</td>
-                  <td style={tdS}>{module.audience}</td>
-                  <td style={tdS}>
-                    <span style={sBadge(module.status === "approved" ? "#DCFCE7" : "#FEF3C7", module.status === "approved" ? D.green : D.amber)}>
-                      {module.status}
-                    </span>
-                  </td>
-                  <td style={{ ...tdS, maxWidth: 460 }}>
-                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" }}>
-                      {module.plain_text}
+                <TR key={module.id}>
+                  <TD>
+                    <div className="text-ui-body">{module.key}</div>
+                    <div className="text-ui-body text-ink-secondary">
+                      v{module.version}
                     </div>
-                  </td>
-                  <td style={tdS}>
-                    <button type="button" style={sBtn(D.card, D.heading)} onClick={() => startEdit(module)}>Edit</button>
-                  </td>
-                </tr>
+                  </TD>
+                  <TD>{module.title}</TD>
+                  <TD>{module.audience}</TD>
+                  <TD>
+                    <Badge tone="neutral">{module.status}</Badge>
+                  </TD>
+                  <TD className="max-w-[460px]">
+                    <div className="overflow-hidden">{module.plain_text}</div>
+                  </TD>
+                  <TD>
+                    <Button
+                      type="button"
+                      onClick={() => startEdit(module)}
+                      variant="secondary"
+                    >
+                      Edit
+                    </Button>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
-      </div>
+      </Card>
 
       {editing && (
-        <div style={{ ...sCard, borderColor: D.heading }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}>
+        <Card className="p-5 mb-3">
+          <div className="flex justify-between gap-[12px] items-center mb-[14px]">
             <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Content Module</div>
-              <div style={{ fontSize: 13, color: D.muted, fontFamily: "'JetBrains Mono', monospace" }}>{editing.key}</div>
+              <div className="text-18 font-medium text-zinc-900">
+                Edit Content Module
+              </div>
+              <div className="text-ui-body text-ink-secondary">
+                {editing.key}
+              </div>
             </div>
-            <button type="button" style={sBtn(D.card, D.heading)} onClick={() => setEditing(null)}>Close</button>
+            <Button
+              type="button"
+              onClick={() => setEditing(null)}
+              variant="secondary"
+            >
+              Close
+            </Button>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-            <label>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Title</div>
-              <input value={form.title || ""} onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))} style={{ ...sInput, width: "100%" }} />
-            </label>
-            <label>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Audience</div>
-              <select value={form.audience || "estimate_packet"} onChange={(e) => setForm((f) => ({ ...f, audience: e.target.value }))} style={{ ...sInput, width: "100%" }}>
+          <div className="grid gap-[12px]">
+            <Field label="Title">
+              <Input
+                value={form.title || ""}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    title: e.target.value,
+                  }))
+                }
+                className="w-full"
+              />
+            </Field>
+            <Field label="Audience">
+              <Select
+                value={form.audience || "estimate_packet"}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    audience: e.target.value,
+                  }))
+                }
+                className="w-full"
+              >
                 <option value="public">Public</option>
                 <option value="estimate_packet">Estimate packet</option>
                 <option value="service_report">Service report</option>
                 <option value="admin">Admin</option>
-              </select>
-            </label>
-            <label>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Status</div>
-              <select value={form.status || "draft"} onChange={(e) => setForm((f) => ({ ...f, status: e.target.value }))} style={{ ...sInput, width: "100%" }}>
+              </Select>
+            </Field>
+            <Field label="Status">
+              <Select
+                value={form.status || "draft"}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    status: e.target.value,
+                  }))
+                }
+                className="w-full"
+              >
                 <option value="draft">Draft</option>
                 <option value="review">Review</option>
                 <option value="approved">Approved</option>
                 <option value="deprecated">Deprecated</option>
                 <option value="retired">Retired</option>
-              </select>
-            </label>
+              </Select>
+            </Field>
           </div>
-          <label style={{ display: "block", marginTop: 12 }}>
-            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Approved copy</div>
-            <textarea
+          <Field label="Approved copy" className="block mt-[12px]">
+            <Textarea
               value={form.plainText || ""}
-              onChange={(e) => setForm((f) => ({ ...f, plainText: e.target.value }))}
-              style={{ ...sInput, width: "100%", minHeight: 140, resize: "vertical" }}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  plainText: e.target.value,
+                }))
+              }
+              className="w-full min-h-[140px] resize-y"
             />
-          </label>
-          <label style={{ display: "block", marginTop: 12 }}>
-            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Source notes</div>
-            <textarea
+          </Field>
+          <Field label="Source notes" className="block mt-[12px]">
+            <Textarea
               value={form.sourceNotes || ""}
-              onChange={(e) => setForm((f) => ({ ...f, sourceNotes: e.target.value }))}
-              style={{ ...sInput, width: "100%", minHeight: 72, resize: "vertical" }}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  sourceNotes: e.target.value,
+                }))
+              }
+              className="w-full min-h-[72px] resize-y"
             />
-          </label>
-          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-            <button type="button" style={sBtn(D.heading, D.white)} onClick={() => save()}>Save</button>
-            <button type="button" style={sBtn(D.green, D.white)} onClick={() => save("approved")}>Save + Approve</button>
+          </Field>
+          <div className="flex gap-[10px] mt-[16px] flex-wrap">
+            <Button type="button" onClick={() => save()} variant="primary">
+              Save
+            </Button>
+            <Button
+              type="button"
+              onClick={() => save("approved")}
+              variant="primary"
+            >
+              Save + Approve
+            </Button>
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );
