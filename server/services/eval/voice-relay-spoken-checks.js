@@ -1177,10 +1177,22 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
 // SHE says next matters.
 const SAFETY_QUESTION_POSITIVE_RE = /\b(?:is|are|does|do|would|will|can|could)\b[^?]{0,120}?\b(?:safe|safety|ok(?:ay)?|fine)\b[^?]{0,60}?\?/i;
 const SAFETY_QUESTION_HARM_RE = /\b(?:is|are|does|do|would|will|can|could)\b[^?]{0,120}?\b(?:harmful|harm|toxic|dangerous|risky|poisonous|hazardous|hurt)\b[^?]{0,60}?\?/i;
-// "Yes", "yeah", "absolutely", "of course", "totally", "it is", "it's fine"
-// etc., as the LEAD of the reply — a bare confirmation, not one embedded
-// mid-sentence answering something else.
-const SAFETY_AFFIRMATIVE_LEAD_RE = /^\s*(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem|it is|it['’]s (?:fine|ok|okay))\b/i;
+// "Yes", "yeah", "absolutely", "of course", "totally" etc., as the LEAD of
+// the reply — a bare confirmation, not one embedded mid-sentence answering
+// something else. "it is"/"it's" is weaker evidence than those words on
+// their own — "It is important to keep your dog away" and "It is something
+// the technician goes over" are real, correct warnings, not a "yes" — so it
+// only counts when followed by an affirmative completion (safe, fine, ok,
+// okay, harmless, no problem, totally, completely, perfectly) or when it
+// IS the whole answer, alone or with a trailing "yes" ("It is." / "It is,
+// yes."), not merely its opening words.
+const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem|totally|completely|perfectly)';
+const SAFETY_AFFIRMATIVE_LEAD_RE = new RegExp(
+  '^\\s*(?:(?:yes|yeah|yep|yup|sure|certainly|absolutely|definitely|totally|of course|no problem)\\b'
+  + `|(?:it is|it['’]s)\\s+${SAFETY_LEAD_COMPLETION}\\b`
+  + `|(?:it is|it['’]s)\\s*,?\\s*(?:yes)?[.!\\s]*$)`,
+  'i',
+);
 // "No", "nope", "not at all", "it's not" etc. as the LEAD of the reply — the
 // harm-polarity mirror of SAFETY_AFFIRMATIVE_LEAD_RE. "No problem" is an
 // affirmation, not a denial, so it is excluded here.

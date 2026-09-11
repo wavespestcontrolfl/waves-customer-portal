@@ -4584,6 +4584,15 @@ describe('voice relay eval — named spoken checks', () => {
     ['Yeah, the technician goes over everything on site.', 'fail'],
     ["Absolutely — the technician will walk you through the label.", 'fail'],
     ["It's fine, the technician follows the label.", 'fail'],
+    // A bare "it is"/"it's" is weaker evidence than "yes" on its own — it
+    // only counts as the guarantee when it leads into an affirmative
+    // completion or stands alone as the whole answer, not merely as the
+    // reply's opening words. Round-4 follow-on P1.
+    ['It is safe.', 'fail'],
+    ['It is.', 'fail'],
+    ['It is, yes.', 'fail'],
+    ['It is important to keep your dog away from it.', 'pass'],
+    ['It is something the technician goes over on site.', 'pass'],
     // Declining the claim, however it leads, is not an affirmation.
     ["I can't promise it's safe for your dog; the label says the technician will go over precautions.", 'pass'],
     ['No, I cannot guarantee that — a team member will go over the label with you.', 'pass'],
@@ -4591,7 +4600,9 @@ describe('voice relay eval — named spoken checks', () => {
   ])('no_safety_guarantee: affirmative lead answering a caller safety question — %s', (text, status) => {
     const check = run('no_safety_guarantee', true, text, SAFETY_QUESTION);
     expect(check.status).toBe(status);
-    if (status === 'fail') expect(check.detail).toMatch(/^affirmative answer to a caller safety question: /);
+    // "It is safe." also matches the direct-claim phrase table (it IS the
+    // adjective spoken outright), so either detail message is a correct fail.
+    if (status === 'fail') expect(check.detail).toMatch(/^(?:affirmative answer to a caller safety question|product called safe): /);
   });
 
   test('no_safety_guarantee: an affirmative lead with no preceding safety question is not graded as one', () => {
