@@ -59,7 +59,7 @@ function addedDetail(entry, path, errors) {
   return { text: entry.text.trim(), zone: normalizePhotoZone(entry.zone) };
 }
 
-function appliedProduct(entry, path, errors, addressable) {
+function appliedProduct(entry, path, errors, known, ceiling) {
   if (!isText(entry.product_name, 180)) { errors.push(`${path}.product_name is required (180 characters or fewer)`); return null; }
   for (const [key, max] of [['product_id', 80], ['role', 40]]) {
     if (!optionalText(entry[key], max)) { errors.push(`${path}.${key} must be ${max} characters or fewer`); return null; }
@@ -68,12 +68,14 @@ function appliedProduct(entry, path, errors, addressable) {
   if (!Array.isArray(refs) || refs.length > 20 || refs.some((ref) => !isText(ref, 40))) {
     errors.push(`${path}.addresses_findings must be an array of at most 20 finding ids`); return null;
   }
-  // A product may only address IDs this run already issued: model findings plus
-  // technician details that were persisted with a server-assigned T id. A typo
-  // or client-invented id would otherwise be reported as unmapped treatment and
-  // would raise the technician high-water mark on a value we never issued.
+  // A product may only address IDs this run can account for: a model finding, or
+  // a technician detail at or below the highest T id this review can issue
+  // (persisted mark and stored details, plus the details sent with it — a
+  // product may map to a detail added in the same request). A typo or invented
+  // id would otherwise be reported as unmapped treatment, and because it feeds
+  // storedTechnicianHighWater it would push the mark past anything we issued.
   const addresses = [...new Set(refs.map((ref) => ref.trim()))];
-  const unknown = addresses.filter((ref) => !addressable.has(ref));
+  const unknown = addresses.filter((ref) => !known.has(ref) && !(technicianNumber(ref) && technicianNumber(ref) <= ceiling));
   if (unknown.length) {
     errors.push(`${path}.addresses_findings is not a finding of this run: ${unknown.join(', ')}`); return null;
   }
@@ -90,15 +92,21 @@ function validateReview(body = {}, run) {
   const source = isObject(body) ? body : {};
   if (!isObject(body)) errors.push('review must be an object');
   const known = new Set(parseJsonArray(run?.findings).map((finding) => finding?.finding_id).filter(Boolean));
-  const addressable = new Set([
-    ...known,
-    ...parseJsonArray(run?.added_details).map((row) => row?.finding_id).filter(Boolean).map(String),
-  ]);
   const seen = new Set();
   const sent = Object.fromEntries(REVIEW_FIELDS.map((field) => [field, source[field] != null]));
   const reviewedFindings = reviewList(source, 'reviewedFindings', 50, errors, (entry, path) => findingEdit(entry, path, known, seen, errors));
   const addedDetails = reviewList(source, 'addedDetails', 10, errors, (entry, path) => addedDetail(entry, path, errors));
-  const appliedProducts = reviewList(source, 'appliedProducts', 25, errors, (entry, path) => appliedProduct(entry, path, errors, addressable));
+  // The highest technician ID this review could legitimately reference: what the
+  // run already issued, plus one per detail sent with this review. Taken from the
+  // persisted mark and stored detail IDs only, never from product references,
+  // so a poisoned reference can never widen the range that accepts it.
+  const persisted = Number(parseJsonObject(run?.reconciliation)?.technician_finding_high_water);
+  const ceiling = Math.max(
+    Number.isSafeInteger(persisted) ? persisted : 0,
+    0,
+    ...parseJsonArray(run?.added_details).map((row) => technicianNumber(row?.finding_id)),
+  ) + (sent.addedDetails ? addedDetails.length : 0);
+  const appliedProducts = reviewList(source, 'appliedProducts', 25, errors, (entry, path) => appliedProduct(entry, path, errors, known, ceiling));
   return { errors, review: { provided: Object.values(sent).some(Boolean), sent, reviewedFindings, addedDetails, appliedProducts } };
 }
 

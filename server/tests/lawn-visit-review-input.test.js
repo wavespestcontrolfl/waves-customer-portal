@@ -120,3 +120,31 @@ test('products may only address IDs this run issued, so invented ids cannot pois
   expect(validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['T1'] }] }, { findings: run.findings }).errors)
     .toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T1']);
 });
+
+test('a product may map to a detail added in the same review, but a poisoned reference cannot widen the range that accepts it', () => {
+  const fresh = { findings: JSON.stringify([{ finding_id: 'F1' }]) };
+
+  // The IDs are assigned server-side during this same call, so mapping a product
+  // onto T1/T2 while sending two details is the ordinary technician flow.
+  expect(validateReview({
+    addedDetails: [{ text: 'Chinch confirmed' }, { text: 'Dog run' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['F1', 'T1', 'T2'] }],
+  }, fresh).errors).toEqual([]);
+
+  // One detail can only issue one ID, so T2 is past what this review can reach.
+  expect(validateReview({
+    addedDetails: [{ text: 'Chinch confirmed' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T2'] }],
+  }, fresh).errors).toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T2']);
+
+  // The ceiling is read from the persisted mark and stored detail IDs only. A
+  // stored product already carrying an invented reference must not raise it.
+  const poisoned = {
+    findings: JSON.stringify([{ finding_id: 'F1' }]),
+    added_details: JSON.stringify([{ finding_id: 'T1', name: 'Dog run' }]),
+    reconciliation: JSON.stringify({ products: [{ addresses_findings: ['T900'] }], technician_finding_high_water: 1 }),
+  };
+  expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T900'] }] }, poisoned).errors)
+    .toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T900']);
+  expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1'] }] }, poisoned).errors).toEqual([]);
+});
