@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ATTACHMENT_HELP_TEXT,
+  invoiceDiscountDollars,
+  invoiceLineAmount,
   ATTACHMENT_VISIBILITY_TEXT,
   attachmentTotalBytes,
   buildInvoiceListParams,
@@ -288,5 +290,95 @@ describe("AdminInvoicesPage ambiguous-send disposition", () => {
     expect(
       persistedSendDisposition({ status: "draft", sent_at: null, sms_sent_at: null }),
     ).toBe("unsent");
+  });
+});
+
+describe("AdminInvoicesPage stacked line-item discounts", () => {
+  const SILVER = { id: "silver", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, stack_group: "tier", is_stackable: false };
+  const MILITARY = { id: "military", name: "Military Discount", discount_type: "percentage", amount: 5, is_stackable: true };
+  const REFERRAL = { id: "referral", name: "Referral Credit", discount_type: "fixed_amount", amount: 25, is_stackable: true };
+  const CATALOG = [SILVER, MILITARY, REFERRAL];
+  const service = { client_id: "line-1", description: "Quarterly Pest", quantity: 1, unit_price: 111 };
+  const discountRow = (d, extra = {}) => ({
+    client_id: `d-${d.id}`, _kind: "discount", discount_id: d.id,
+    discount_for: "line-1", description: d.name, quantity: 1, unit_price: -1, ...extra,
+  });
+
+  it("compounds a second percentage on what is left, never additively", () => {
+    const dollars = invoiceDiscountDollars([service, discountRow(SILVER), discountRow(MILITARY)], CATALOG);
+    expect(dollars.get("d-silver")).toBe(11.1);
+    // 5% of the remaining $99.90, not 5% of $111 ($5.55).
+    expect(dollars.get("d-military")).toBe(5);
+    expect(dollars.get("d-silver") + dollars.get("d-military")).toBe(16.1);
+  });
+
+  it("takes a dollar credit before the percentage", () => {
+    const dollars = invoiceDiscountDollars([service, discountRow(SILVER), discountRow(REFERRAL)], CATALOG);
+    expect(dollars.get("d-referral")).toBe(25);
+    expect(dollars.get("d-silver")).toBe(8.6);
+  });
+
+  it("honors an operator-entered custom amount on the row", () => {
+    const custom = { id: "custom_pct", name: "Custom Percentage Discount", discount_type: "percentage", amount: 0, discount_key: "custom_percent" };
+    const dollars = invoiceDiscountDollars(
+      [service, discountRow(custom, { custom_discount_percentage: 20 })],
+      [custom],
+    );
+    expect(dollars.get("d-custom_pct")).toBe(22.2);
+  });
+
+  it("stacks each parent line independently", () => {
+    const second = { client_id: "line-2", description: "Mosquito", quantity: 1, unit_price: 60 };
+    const items = [
+      service, discountRow(SILVER),
+      second, { ...discountRow(SILVER), client_id: "d2-silver", discount_for: "line-2" },
+    ];
+    const dollars = invoiceDiscountDollars(items, CATALOG);
+    expect(dollars.get("d-silver")).toBe(11.1);
+    expect(dollars.get("d2-silver")).toBe(6);
+  });
+
+  it("leaves an orphan or catalog-less row to the caller, and tolerates junk", () => {
+    const orphan = { client_id: "d-orphan", _kind: "discount", discount_id: "gone", discount_for: "missing-line", quantity: 1, unit_price: -9 };
+    expect(invoiceDiscountDollars([service, orphan], CATALOG).has("d-orphan")).toBe(false);
+    // A row whose catalog entry is gone still stacks, at its own amount.
+    const unknown = { ...orphan, client_id: "d-unknown", discount_for: "line-1" };
+    expect(invoiceDiscountDollars([service, unknown], CATALOG).get("d-unknown")).toBe(9);
+    expect(invoiceDiscountDollars(undefined, undefined).size).toBe(0);
+  });
+
+  it("freezes a stored visit stamp and compounds the hand-added row on what it left", () => {
+    const stamp = {
+      client_id: "d-stamp", _kind: "discount", discount_for: "line-1",
+      description: "WaveGuard Silver", quantity: 1, unit_price: -11.1,
+      discount_amount: 10, discount_dollars: 11.1, use_stored_discount: true,
+    };
+    const dollars = invoiceDiscountDollars([service, stamp, discountRow(MILITARY)], CATALOG);
+    // The stamp keeps its own dollars (absent from the map) and Military
+    // takes 5% of the $99.90 it left.
+    expect(dollars.has("d-stamp")).toBe(false);
+    expect(dollars.get("d-military")).toBe(5);
+  });
+
+  it("reads a saved row's own amount when the catalog row carries none (the custom presets)", () => {
+    const custom = { id: "custom_dollar", name: "Custom Dollar Discount", discount_type: "fixed_amount", amount: 0, discount_key: "custom_dollar" };
+    const saved = { ...discountRow(custom), discount_amount: 50 };
+    expect(invoiceDiscountDollars([service, saved], [custom]).get("d-custom_dollar")).toBe(50);
+  });
+
+  it("never lets stacked discounts drive a line below zero", () => {
+    const big = { id: "big", name: "Huge", discount_type: "fixed_amount", amount: 200, is_stackable: true };
+    const dollars = invoiceDiscountDollars(
+      [service, discountRow(big), discountRow(MILITARY)],
+      [big, MILITARY],
+    );
+    expect(dollars.get("d-big")).toBe(111);
+    expect(dollars.get("d-military")).toBe(0);
+  });
+
+  it("computes a line's own signed amount", () => {
+    expect(invoiceLineAmount({ quantity: 2, unit_price: 55.5 })).toBe(111);
+    expect(invoiceLineAmount({ unit_price: -11.1 })).toBe(-11.1);
+    expect(invoiceLineAmount({})).toBe(0);
   });
 });

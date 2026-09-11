@@ -431,6 +431,37 @@ describe('appointmentGroupRequestBody', () => {
     });
   });
 
+  it('carries the appointment-level discount slot and its "Applies to" line only when one is chosen', () => {
+    expect(appointmentGroupRequestBody({
+      ...base,
+      appointmentDiscount: { id: 'mil', name: 'Military Discount', discount_type: 'percentage', amount: 5 },
+      appointmentDiscountScopeKey: 'pest_general_quarterly',
+    })).toMatchObject({
+      discountId: 'mil',
+      discountType: 'percentage',
+      discountAmount: 5,
+      discountServiceKeyFilter: 'pest_general_quarterly',
+    });
+    const whole = appointmentGroupRequestBody({
+      ...base,
+      appointmentDiscount: { id: 'mil', name: 'Military Discount', discount_type: 'percentage', amount: 5 },
+      appointmentDiscountScopeKey: '',
+    });
+    expect(whole.discountId).toBe('mil');
+    expect(whole.discountServiceKeyFilter).toBeUndefined();
+    expect(appointmentGroupRequestBody(base).discountId).toBeUndefined();
+  });
+
+  it('omits the appointment discount for a group it does not ride', () => {
+    // The submit loop passes the slot only for the group that carries it;
+    // every other group's body must be free of discount fields.
+    const body = appointmentGroupRequestBody({ ...base, appointmentDiscount: undefined });
+    expect(body.discountId).toBeUndefined();
+    expect(body.discountType).toBeUndefined();
+    expect(body.discountAmount).toBeUndefined();
+    expect(body.discountServiceKeyFilter).toBeUndefined();
+  });
+
   it('sends a blank-priced auto-mosquito primary as null regardless of groupHasPrice, with no discount block', () => {
     expect(appointmentGroupRequestBody({ ...base, primaryIsBlankAutoMosquito: true })).toMatchObject({ serviceId: 5, primaryLinePrice: null });
     expect(appointmentGroupRequestBody(base).primaryLineDiscount).toBeUndefined();

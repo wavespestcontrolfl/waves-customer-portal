@@ -45,6 +45,18 @@ Discounts in the same `stack_group` compete — only the highest-priority one wi
 
 **Stackable discounts** (combine with tier): Military (5%), Multi-Home (10%), Prepayment (5%), Senior (5%), Referral ($25 — aligned to the $25/$25 referral program 2026-07-11), WaveGuard Member WDO (100% on WDO only), Custom % and Custom $.
 
+### How stacked discounts compute (owner ruling 2026-09-11, `GATE_DISCOUNT_STACKING`)
+
+One rule, in `server/services/discount-stack.js` (client mirror `client/src/lib/discountStack.js`), used by every surface that saves an operator-picked discount — schedule create/edit (line slot + appointment slot), the Invoices page, and the Dispatch checkout mint:
+
+- Dollar credits come off first, then percentages compound on what is left. A free service takes the remainder.
+- Each discount is clamped to what remains, so a line never goes below $0.
+- Two non-stackable discounts in one `stack_group` on the same visit / invoice / checkout are refused (400 "Only one WaveGuard tier discount can apply") — the pickers hide the other tiers once one is chosen.
+
+While the gate is dark every surface keeps the pre-ruling math (each discount against the full line, the appointment discount after the line discounts, tier combinations accepted).
+
+Worked example on a $111 line: Silver 10% then Military 5% is $11.10 + $5.00 = $16.10 off ($94.90), never an additive $16.65. Silver plus the $25 Referral is $25 first, then 10% of $86 = $8.60 ($77.40). On a visit the appointment-level discount can be scoped to one line ("Applies to"), stamped in `scheduled_services.discount_service_key_filter`.
+
 ### When to Use `waveguard_member` vs Tier Discounts
 
 The tier-specific discounts (`waveguard_silver`, `waveguard_gold`, `waveguard_platinum`) auto-apply based on the customer's `waveguard_tier` field. The generic `waveguard_member` discount exists for cases where:

@@ -1,5 +1,7 @@
 const crypto = require("crypto");
 const db = require("../models/db");
+const { stackDiscounts, assertStackGroups } = require("./discount-stack");
+const { isEnabled } = require("../config/feature-gates");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
 const DiscountEngine = require("./discount-engine");
@@ -376,8 +378,9 @@ function isStoredDiscountLineItem(
   );
 }
 
-function resolveStoredDiscountLineItem(item, row) {
-  const dollars = Math.max(
+// The frozen dollars a stored (already-resolved) discount row carries.
+function storedDiscountDollars(item) {
+  return Math.max(
     0,
     roundMoney(
       hasNumericValue(item.discount_dollars)
@@ -385,6 +388,10 @@ function resolveStoredDiscountLineItem(item, row) {
         : Math.abs(Number(item.amount) || 0),
     ),
   );
+}
+
+function resolveStoredDiscountLineItem(item, row) {
+  const dollars = storedDiscountDollars(item);
   item.quantity = 1;
   item.unit_price = -dollars;
   item.amount = -dollars;
@@ -400,10 +407,12 @@ function resolveStoredDiscountLineItem(item, row) {
   };
 }
 
-function resolveLineItemDiscount(row, item, parentAmount) {
+// The (type, amount, cap) a line-item discount row contributes to its
+// parent's stack: catalog rows carry their own amount, the custom presets
+// (custom_percent / custom_dollar, or the variable_* types) take the
+// operator-entered value the editor put on the item.
+function lineItemDiscountTerm(row, item) {
   let amount = Number(row.amount) || 0;
-  let dollars = 0;
-  const itemDollars = Math.abs(Number(item.amount) || 0);
   const isCustomPercentage =
     row.discount_type === "variable_percentage" ||
     (row.discount_type === "percentage" &&
@@ -412,36 +421,65 @@ function resolveLineItemDiscount(row, item, parentAmount) {
     row.discount_type === "variable_amount" ||
     (row.discount_type === "fixed_amount" &&
       (row.discount_key === "custom_dollar" || !(amount > 0)));
-
   if (isCustomPercentage) {
     amount = firstPositiveNumber(
       item.custom_discount_percentage,
       item.discount_percentage,
       row.amount,
     );
-    dollars = roundMoney(parentAmount * (amount / 100));
-    if (row.max_discount_dollars)
-      dollars = Math.min(dollars, Number(row.max_discount_dollars));
-  } else if (row.discount_type === "percentage") {
-    dollars = roundMoney(parentAmount * (amount / 100));
-    if (row.max_discount_dollars)
-      dollars = Math.min(dollars, Number(row.max_discount_dollars));
   } else if (isCustomAmount) {
     amount = firstPositiveNumber(
       item.custom_discount_amount,
       item.discount_amount,
       row.amount,
     );
-    dollars = amount;
-  } else if (row.discount_type === "fixed_amount") {
-    dollars = amount;
-  } else if (row.discount_type === "free_service") {
-    amount = parentAmount;
-    dollars = parentAmount;
   }
+  return {
+    discountType: row.discount_type,
+    amount: roundMoney(amount),
+    maxDiscountDollars: row.max_discount_dollars,
+  };
+}
 
-  dollars = Math.min(parentAmount, Math.max(0, roundMoney(dollars)));
-  return { amount: roundMoney(amount), dollars };
+// Every discount item on one parent line, stacked together under the one
+// rule (services/discount-stack): fixed credits first, then percentages
+// compounding on what is left — never each on the full line.
+// A STORED row (a visit's own stamp, already resolved and trusted) rides the
+// stack as a frozen fixed credit AHEAD of the others, so a discount added by
+// hand to the same line compounds on what the stamp left rather than on the
+// full gross; its own dollars are never recomputed and it is absent from the
+// returned map. GATE_DISCOUNT_STACKING off → each non-stored row resolves
+// against the full parent amount, exactly as before this lane.
+// Returns Map(item → { amount, dollars }) for the non-stored rows.
+function stackLineItemDiscounts(entries, compound) {
+  const byParent = new Map();
+  for (const entry of entries) {
+    const key = String(entry.parent.client_id);
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(entry);
+  }
+  const resolved = new Map();
+  for (const group of byParent.values()) {
+    const parentAmount = Math.max(0, Number(group[0].parent.amount) || 0);
+    // Frozen stamps first, so the operator's new pick stacks on the rest.
+    const ordered = [
+      ...group.filter((entry) => entry.stored),
+      ...group.filter((entry) => !entry.stored),
+    ];
+    const terms = ordered.map(({ row, item, stored }) => (stored
+      ? { discountType: "fixed_amount", amount: storedDiscountDollars(item) }
+      : lineItemDiscountTerm(row, item)));
+    const stacked = stackDiscounts(parentAmount, terms, { compound });
+    ordered.forEach(({ item, stored }, i) => {
+      if (stored) return;
+      const term = terms[i];
+      resolved.set(item, {
+        amount: term.discountType === "free_service" ? parentAmount : term.amount,
+        dollars: stacked.items[i].dollars,
+      });
+    });
+  }
+  return resolved;
 }
 
 async function loadInvoiceDiscountRows(ids = [], database = db) {
@@ -711,10 +749,40 @@ async function calculateUpdateFinancials({
         .reduce((sum, item) => sum + Math.abs(Number(item.amount) || 0), 0) *
         100,
     ) / 100;
-  const lineItemDiscountAmount = items
-    .filter(
-      (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
-    )
+  // Same one-tier rule and per-parent stacking as create().
+  const editStackingEnabled = isEnabled('discountStacking');
+  const editNegativeItems = items.filter(
+    (item) => Number(item.amount) < 0 && item.category !== "deposit_credit",
+  );
+  // Same one-entry-per-item rule as create(). The edit path takes no
+  // invoice-level discounts, so every entry is a line lane.
+  if (editStackingEnabled) {
+    assertStackGroups(
+      editNegativeItems
+        .filter((item) => item.discount_id)
+        .map((item) => {
+          const row = lineItemDiscountRowById.get(String(item.discount_id));
+          return row ? { ...row, scope: String(item.discount_for || 'line') } : null;
+        })
+        .filter(Boolean),
+    );
+  }
+  const editStackedDiscounts = stackLineItemDiscounts(
+    editNegativeItems
+      .map((item) => ({
+        item,
+        stored: isStoredDiscountLineItem(item),
+        row: item.discount_id
+          ? lineItemDiscountRowById.get(String(item.discount_id))
+          : null,
+        parent: item.discount_for
+          ? serviceLineByClientId.get(String(item.discount_for))
+          : null,
+      }))
+      .filter((entry) => entry.parent && (entry.stored || entry.row)),
+    editStackingEnabled,
+  );
+  const lineItemDiscountAmount = editNegativeItems
     .reduce((sum, item) => {
       const row = item.discount_id
         ? lineItemDiscountRowById.get(String(item.discount_id))
@@ -722,17 +790,14 @@ async function calculateUpdateFinancials({
       if (isStoredDiscountLineItem(item)) {
         return sum + resolveStoredDiscountLineItem(item, row).dollars;
       }
-      const parent = item.discount_for
-        ? serviceLineByClientId.get(String(item.discount_for))
-        : null;
-      if (!row || !parent) {
+      const resolved = editStackedDiscounts.get(item);
+      if (!resolved) {
         if (item.discount_id || item.discount_for)
           throw new Error("Invalid line-item discount");
         return sum + Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100;
       }
 
-      const parentAmount = Math.max(0, Number(parent.amount) || 0);
-      const { dollars } = resolveLineItemDiscount(row, item, parentAmount);
+      const { dollars } = resolved;
       item.quantity = 1;
       item.unit_price = -dollars;
       item.amount = -dollars;
@@ -1367,11 +1432,46 @@ const InvoiceService = {
     const lineItemDiscountRowById = new Map(
       lineItemDiscountRows.map((row) => [String(row.id), row]),
     );
-    const lineItemDiscounts = items
-      .filter(
-        (item) =>
-          Number(item.amount) < 0 && item.category !== "deposit_credit",
-      )
+    // One WaveGuard tier per invoice, whichever lines carry the discounts
+    // (stored visit stamps and manual picks alike).
+    const stackingEnabled = isEnabled('discountStacking');
+    const negativeItems = items.filter(
+      (item) =>
+        Number(item.amount) < 0 && item.category !== "deposit_credit",
+    );
+    if (stackingEnabled) {
+      // One entry per discount ITEM (loadInvoiceDiscountRows dedupes ids, so
+      // checking its rows would miss the same tier twice on one line). A
+      // line's discounts share that line's lane; an invoice-level discount
+      // (discountIds) reaches every line, so it spans the document.
+      assertStackGroups([
+        ...negativeItems
+          .filter((item) => item.discount_id)
+          .map((item) => {
+            const row = lineItemDiscountRowById.get(String(item.discount_id));
+            return row ? { ...row, scope: String(item.discount_for || 'line') } : null;
+          })
+          .filter(Boolean),
+        ...manualDiscountRows.map((row) => ({ ...row, spansAll: true })),
+      ]);
+    }
+    const stackedLineItemDiscounts = stackLineItemDiscounts(
+      negativeItems
+        .map((item) => ({
+          item,
+          stored: isStoredDiscountLineItem(item, trustedStoredSources),
+          row: item.discount_id
+            ? lineItemDiscountRowById.get(String(item.discount_id))
+            : null,
+          parent: item.discount_for
+            ? serviceLineByClientId.get(String(item.discount_for))
+            : null,
+        }))
+        // A stamp needs only its parent; a fresh pick needs its catalog row.
+        .filter((entry) => entry.parent && (entry.stored || entry.row)),
+      stackingEnabled,
+    );
+    const lineItemDiscounts = negativeItems
       .map((item) => {
         const row = item.discount_id
           ? lineItemDiscountRowById.get(String(item.discount_id))
@@ -1379,10 +1479,8 @@ const InvoiceService = {
         if (isStoredDiscountLineItem(item, trustedStoredSources)) {
           return resolveStoredDiscountLineItem(item, row);
         }
-        const parent = item.discount_for
-          ? serviceLineByClientId.get(String(item.discount_for))
-          : null;
-        if (!row || !parent) {
+        const resolved = stackedLineItemDiscounts.get(item);
+        if (!resolved) {
           if (item.discount_id || item.discount_for) {
             throw new Error("Invalid line-item discount");
           }
@@ -1395,8 +1493,6 @@ const InvoiceService = {
             dollars: Math.round(Math.abs(Number(item.amount) || 0) * 100) / 100,
           };
         }
-        const parentAmount = Math.max(0, Number(parent.amount) || 0);
-        const resolved = resolveLineItemDiscount(row, item, parentAmount);
         const dollars = resolved.dollars;
         item.quantity = 1;
         item.unit_price = -dollars;
@@ -6652,6 +6748,9 @@ const InvoiceService = {
 InvoiceService._internals = {
   insertInvoiceRow,
   isInvoiceNumberCollision,
+  // Pure per-parent discount stacking — exercised directly so the
+  // GATE_DISCOUNT_STACKING dark path has a real assertion, not a source scan.
+  stackLineItemDiscounts,
 };
 
 // Invoice statuses that need NO further money handling when their linked

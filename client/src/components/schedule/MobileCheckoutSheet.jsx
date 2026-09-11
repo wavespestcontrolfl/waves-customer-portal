@@ -25,6 +25,8 @@
 //   leak focus.
 
 import { createPortal } from 'react-dom';
+import { stackDiscounts } from '../../lib/discountStack';
+import { useDiscountStacking } from '../../hooks/useDiscountStacking';
 import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
@@ -79,6 +81,9 @@ export default function MobileCheckoutSheet({
   // (loading / fetch failed) and renders nothing: a false "No card on file"
   // would send the tech chasing cash from an autopay customer.
   const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
+  // Deploy-wide release gate (GATE_DISCOUNT_STACKING); fails closed to the
+  // pre-lane preview, which is what the mint endpoint then stores.
+  const stackingEnabled = useDiscountStacking();
 
   if (!service) return null;
 
@@ -102,17 +107,28 @@ export default function MobileCheckoutSheet({
     : (service.serviceTypeDisplay || service.serviceType || 'General Service');
 
   // Separate extras: positive-amount services vs negative-amount discounts.
-  // All discounts are manual rows added by the operator.
-  const { extraServicesTotal, extraDiscountsTotal } = useMemo(() => {
-    let s = 0, d = 0;
-    for (const e of extras) {
-      if (Number(e.amount) >= 0) s += Number(e.amount);
-      else d += Number(e.amount);
-    }
-    return { extraServicesTotal: s, extraDiscountsTotal: d };
-  }, [extras]);
-
+  // All discounts are manual rows added by the operator. Every discount
+  // stacks on the services base the way the mint endpoint does
+  // (lib/discountStack mirrors services/discount-stack): fixed credits
+  // first, then percentages compounding on what is left — re-derived on
+  // every change so the rows always show what will be charged.
+  const extraServicesTotal = useMemo(() => extras.reduce(
+    (sum, e) => (Number(e.amount) >= 0 ? sum + Number(e.amount) : sum), 0,
+  ), [extras]);
   const servicesSubtotal = price + extraServicesTotal;
+  const { stackedDiscountRows, extraDiscountsTotal } = useMemo(() => {
+    const discountExtras = extras.filter((e) => Number(e.amount) < 0);
+    const stacked = stackDiscounts(servicesSubtotal, discountExtras.map((e) => (
+      e.discount_type
+        ? { discountType: e.discount_type, amount: e.discount_amount, maxDiscountDollars: e.max_discount_dollars }
+        : { discountType: 'fixed_amount', amount: Math.abs(Number(e.amount) || 0) }
+    )), { compound: stackingEnabled });
+    const rows = new Map();
+    discountExtras.forEach((e, i) => rows.set(e.id, stacked.items[i].dollars));
+    return { stackedDiscountRows: rows, extraDiscountsTotal: -stacked.totalDollars };
+  }, [extras, servicesSubtotal, stackingEnabled]);
+  const extraAmount = (e) => (stackedDiscountRows.has(e.id) ? -stackedDiscountRows.get(e.id) : Number(e.amount));
+
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // An open invoice already attached to this visit (accept-minted setup +
   // first-application invoice, or an earlier Charge-now mint) is what the
@@ -218,8 +234,8 @@ export default function MobileCheckoutSheet({
     const amt = Number(d.amount || 0);
     if (!amt) return;
     const isPercent = d.discount_type === 'percentage' || d.discount_type === 'variable_percentage';
-    // Percentage applies to the current services subtotal (base + positive extras).
-    // Snapshot at add-time so edits after feel deterministic.
+    // Provisional dollars — the stacked amount (extraAmount) is what the
+    // row shows and what the charge sends.
     const dollarOff = isPercent
       ? Math.round(servicesSubtotal * (amt / 100) * 100) / 100
       : amt;
@@ -233,6 +249,9 @@ export default function MobileCheckoutSheet({
       discount_key: d.discount_key || null,
       discount_type: d.discount_type || null,
       discount_amount: amt,
+      max_discount_dollars: d.max_discount_dollars ?? null,
+      stack_group: d.stack_group || null,
+      is_stackable: d.is_stackable,
       is_waveguard_tier_discount: !!d.is_waveguard_tier_discount,
       description: isPercent ? `${label} (${amt}%)` : label,
       quantity: 1,
@@ -249,7 +268,18 @@ export default function MobileCheckoutSheet({
     setMintError(null);
     try {
       const body = {
-        extraLineItems: extras.map(({ _kind: _k, id: _i, ...rest }) => rest),  
+        // Discount rows post their STACKED dollars (what the sheet showed);
+        // the mint endpoint re-resolves and clamps either way. Service rows
+        // post verbatim. Catalog-only fields stay client-side.
+        extraLineItems: extras.flatMap((e) => {
+          const { _kind, id, max_discount_dollars, stack_group, is_stackable, ...rest } = e;
+          if (_kind !== 'discount') return [rest];
+          const dollars = extraAmount(e);
+          // A row the stack resolved to nothing is dropped, not posted as a
+          // -0 that the mint endpoint would read as a $0 SERVICE line.
+          if (!(dollars < 0)) return [];
+          return [{ ...rest, quantity: 1, unit_price: dollars, amount: dollars }];
+        }),
       };
       const r = await fetch(`${API_BASE}/admin/schedule/${service.id}/invoice`, {
         method: 'POST',
@@ -456,7 +486,7 @@ export default function MobileCheckoutSheet({
                   </div>
                 </div>
                 <div className="u-nums text-zinc-900 font-medium shrink-0" style={{ fontSize: 15 }}>
-                  {isDiscount ? '−' : ''}${Math.abs(Number(e.amount)).toFixed(2)}
+                  {isDiscount ? '−' : ''}${Math.abs(extraAmount(e)).toFixed(2)}
                 </div>
                 <button
                   type="button"
@@ -533,6 +563,7 @@ export default function MobileCheckoutSheet({
       )}
       {showItemPicker && (
         <MobileItemDiscountPickerSheet
+          chosenDiscounts={stackingEnabled ? extras.filter((e) => e._kind === 'discount' && e.discount_id) : []}
           desktopVisible={desktopVisible}
           onClose={() => setShowItemPicker(false)}
           onSelect={handleAddItem}

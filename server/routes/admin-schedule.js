@@ -1370,6 +1370,9 @@ const {
   copyStampedServiceAddressFields,
 } = require('../services/booking/visit-financial-stamps');
 const { anchorSoleProperty } = require('../services/customer-properties');
+// The one stacking rule (owner 2026-09-11): fixed credits first, then
+// percentages compounding on the remainder; one WaveGuard tier per visit.
+const { stackVisitDiscounts, stackDiscounts, assertStackGroups } = require('../services/discount-stack');
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
@@ -1717,7 +1720,7 @@ function normalizeDiscountAmount(row, clientAmount) {
   // branch these resolve back to 0 on save and the line discount is dropped,
   // so the saved appointment/invoice would charge full price despite the
   // discounted modal preview. Mirrors the canonical detection in
-  // server/services/invoice.js resolveLineItemDiscount.
+  // server/services/invoice.js lineItemDiscountTerm.
   const honorsClientAmount =
     row?.discount_type === 'variable_amount' ||
     row?.discount_type === 'variable_percentage' ||
@@ -1785,8 +1788,42 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
     discountName: row.name,
     discountType: row.discount_type,
     discountAmount: resolved.amount,
+    // Standalone dollars; the visit stack (stackVisitDiscounts) restates
+    // them once every slot on the visit is known.
     discountDollars: resolved.dollars,
+    maxDiscountDollars: row.max_discount_dollars != null ? Number(row.max_discount_dollars) : null,
+    // Catalog stack identity for the one-tier-per-visit check.
+    stackRow: stackRowOf(row),
   };
+}
+
+// The catalog fields assertStackGroups reads, off a discounts row, plus the
+// lane it lands on: a per-line slot names its line, a document-wide slot
+// (the appointment discount) sets spansAll.
+function stackRowOf(row, lane = {}) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    stack_group: row.stack_group || null,
+    is_stackable: row.is_stackable,
+    scope: lane.scope,
+    spansAll: lane.spansAll === true,
+  };
+}
+
+// One catalog read for the stack-group check: every discount id on the
+// visit (line slots + appointment slot), active or not — a retired preset
+// still on a stored line keeps its tier identity.
+async function loadStackRows(slots, conn = db) {
+  const wanted = (slots || []).filter((slot) => slot && slot.discountId);
+  const ids = [...new Set(wanted.map((slot) => String(slot.discountId)))];
+  if (!ids.length) return [];
+  const rows = await conn('discounts').whereIn('id', ids).select('id', 'name', 'stack_group', 'is_stackable');
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  return wanted
+    .map((slot) => stackRowOf(byId.get(String(slot.discountId)), slot))
+    .filter(Boolean);
 }
 
 // Default price for a hand-scheduled one-time mosquito line (owner decision
@@ -1897,9 +1934,35 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false }) {
+// The appointment discount's "Applies to" line (a service key the operator
+// picked in the editor) narrows the preset's own scope: it must name a line
+// on this visit and sit inside the preset's key/category filter. Null →
+// the preset's own filter (the whole visit when it has none).
+function resolveAppointmentDiscountLineScope(preset, postedServiceKey, lines) {
+  const presetKey = preset?.service_key_filter || null;
+  const key = postedServiceKey == null || postedServiceKey === '' ? null : String(postedServiceKey);
+  if (!preset || !key) return presetKey;
+  if (presetKey && presetKey !== key) {
+    throw httpError(400, `${preset.name} applies only to ${presetKey}`);
+  }
+  const line = (lines || []).find((l) => l.serviceKey === key);
+  if (!line) throw httpError(400, 'The discount "Applies to" line is not on this visit');
+  if (preset.service_category_filter && preset.service_category_filter !== line.serviceCategory) {
+    throw httpError(400, `${preset.name} applies only to ${preset.service_category_filter} services`);
+  }
+  return key;
+}
+
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, discountServiceKeyFilter, customer, recurringMembershipBooking = false }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
+  }
+  // Refuse the stacking-only input rather than dropping it: a silently
+  // ignored scope reads to the office as a discount they just pinned to one
+  // line, and they'd find out at invoicing.
+  const stacking = isEnabled('discountStacking');
+  if (!stacking && discountServiceKeyFilter) {
+    throw httpError(409, 'Scoping a discount to one service line is turned off (GATE_DISCOUNT_STACKING). Nothing was changed.');
   }
 
   // One-time mosquito default follows the lot-based ladder (owner decision
@@ -1920,11 +1983,13 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     serviceCategory: serviceRecord?.category,
     recurringMembershipBooking,
   });
-  const primaryNet = primaryBase == null
+  let primaryNet = primaryBase == null
     ? null
     : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
   const appointmentServiceLines = [{
     amount: primaryNet || 0,
+    gross: primaryBase || 0,
+    lineDiscount: primaryDiscount,
     serviceKey: serviceRecord?.service_key || null,
     serviceCategory: serviceRecord?.category || null,
   }];
@@ -1953,6 +2018,8 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
     appointmentServiceLines.push({
       amount: net || 0,
+      gross: base || 0,
+      lineDiscount,
       serviceKey: addonService?.service_key || null,
       serviceCategory: addonService?.category || null,
     });
@@ -1979,25 +2046,40 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
+    // One WaveGuard tier per visit, whichever slots carry the discounts.
+    if (stacking) {
+      assertStackGroups([
+        primaryDiscount ? { ...primaryDiscount.stackRow, scope: 'primary' } : null,
+        ...addonLines.map((line, i) => (line.discount
+          ? { ...line.discount.stackRow, scope: `addon:${i}` }
+          : null)),
+        stackRowOf(appointmentDiscount, { spansAll: true }),
+      ]);
+    }
     let appointmentDiscountBase = subtotal;
+    // The operator's "Applies to" line narrows the preset's own scope.
+    const serviceKeyFilter = resolveAppointmentDiscountLineScope(appointmentDiscount, stacking ? discountServiceKeyFilter : null, appointmentServiceLines);
+    let lineEligible = () => true;
     if (appointmentDiscount) {
       const isServiceScoped = Boolean(
-        appointmentDiscount.service_key_filter || appointmentDiscount.service_category_filter
+        serviceKeyFilter || appointmentDiscount.service_category_filter
+      );
+      const matchesScope = (line) => (
+        (!serviceKeyFilter || serviceKeyFilter === line.serviceKey)
+        && (!appointmentDiscount.service_category_filter || appointmentDiscount.service_category_filter === line.serviceCategory)
       );
       const matchingLines = isServiceScoped
-        ? appointmentServiceLines.filter((line) => (
-          (!appointmentDiscount.service_key_filter || appointmentDiscount.service_key_filter === line.serviceKey)
-          && (!appointmentDiscount.service_category_filter || appointmentDiscount.service_category_filter === line.serviceCategory)
-        ))
+        ? appointmentServiceLines.filter(matchesScope)
         : appointmentServiceLines;
       // Percent-excluded lines (termite bond, rodent bait, ...) never sit in
       // the base of a percentage discount — same contract as
       // calculateVisitFinancialsForAddons, so the parent visit and its
       // spawned children agree (Codex #3531 r1 P1).
       if (isPercentDiscountType(appointmentDiscount.discount_type)) assertPercentExclusionCatalogReady();
-      const eligibleLines = isPercentDiscountType(appointmentDiscount.discount_type)
-        ? matchingLines.filter((line) => !lineExcludedFromPercentDiscount(line.serviceKey))
-        : matchingLines;
+      const pctExcluded = (line) => isPercentDiscountType(appointmentDiscount.discount_type)
+        && lineExcludedFromPercentDiscount(line.serviceKey);
+      const eligibleLines = matchingLines.filter((line) => !pctExcluded(line));
+      lineEligible = (line) => matchesScope(line) && !pctExcluded(line);
       const eligibilityContext = eligibleLines[0] || matchingLines[0] || {};
       appointmentDiscountBase = (isServiceScoped || eligibleLines.length !== matchingLines.length)
         ? Math.round(eligibleLines.reduce((sum, line) => sum + line.amount, 0) * 100) / 100
@@ -2012,10 +2094,46 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
       }
     }
-    const resolvedAppointmentDiscount = appointmentDiscount
-      ? calculateDiscountDollars(appointmentDiscount, appointmentDiscountBase, discountAmount)
+    // Every slot's dollars restated under the one stacking rule: fixed
+    // credits first, then percentages compounding on what is left.
+    const appointmentDiscountAmount = appointmentDiscount
+      ? Math.round(normalizeDiscountAmount(appointmentDiscount, discountAmount) * 100) / 100
       : null;
-    finalPrice = Math.max(0, Math.round((subtotal - (resolvedAppointmentDiscount?.dollars || 0)) * 100) / 100);
+    const stacked = stackVisitDiscounts({
+      lines: appointmentServiceLines.map((line) => ({
+        gross: line.gross,
+        lineDiscount: line.lineDiscount
+          ? { discountType: line.lineDiscount.discountType, amount: line.lineDiscount.discountAmount, maxDiscountDollars: line.lineDiscount.maxDiscountDollars }
+          : null,
+        eligible: lineEligible(line),
+      })),
+      appointmentDiscount: appointmentDiscount ? {
+        discountType: appointmentDiscount.discount_type,
+        amount: appointmentDiscountAmount,
+        maxDiscountDollars: appointmentDiscount.max_discount_dollars,
+      } : null,
+      compound: stacking,
+    });
+    if (primaryDiscount) primaryDiscount.discountDollars = stacked.lines[0].lineDiscountDollars;
+    if (primaryBase != null) primaryNet = stacked.lines[0].net;
+    addonLines.forEach((line, i) => {
+      const restated = stacked.lines[i + 1];
+      if (line.discount) line.discount.discountDollars = restated.lineDiscountDollars;
+      if (line.base != null) line.price = restated.net;
+    });
+    // Nothing eligible to discount → amount AND dollars are 0, the contract
+    // calculateDiscountDollars had: a stored non-zero amount on a $0 visit
+    // would otherwise be re-applied by a later stored replay.
+    const eligibleNet = appointmentServiceLines.reduce((sum, line, i) => (
+      lineEligible(line) ? sum + stacked.lines[i].net : sum
+    ), 0);
+    const resolvedAppointmentDiscount = appointmentDiscount
+      ? {
+        amount: eligibleNet > 0 ? appointmentDiscountAmount : 0,
+        dollars: stacked.appointmentDiscountDollars,
+      }
+      : null;
+    finalPrice = stacked.total;
     return {
       finalPrice,
       primaryBase,
@@ -2030,7 +2148,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         discountType: appointmentDiscount.discount_type,
         discountAmount: resolvedAppointmentDiscount.amount,
         discountDollars: resolvedAppointmentDiscount.dollars,
-        serviceKeyFilter: appointmentDiscount.service_key_filter || null,
+        serviceKeyFilter,
         serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
         maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
       } : null,
@@ -2244,13 +2362,16 @@ function lineExcludedFromPercentDiscount(serviceKey, catalog = percentExclusionC
   return alias ? serviceExcludedFromPercentDiscount(alias) : false;
 }
 
+// Visit financials under the one stacking rule (services/discount-stack).
+// Callers that know only NET line amounts (pricing.primaryNet, line.price)
+// get the legacy result: no line slot to restate, the appointment discount
+// on the eligible net remainder. Callers that also pass the line slots —
+// pricing.primaryGross + pricing.primaryLineDiscount, line.base +
+// line.discount ({ discountType, discountAmount, maxDiscountDollars }) —
+// get every slot restated (fixed credits first) in `lines`, index 0 the
+// primary, so the caller stamps the dollars the invoice will replay.
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
   const addons = Array.isArray(addonLines) ? addonLines : [];
-  const subtotal = (pricing.primaryNet || 0)
-    + addons.reduce((sum, line) => sum + (line.price || 0), 0);
-  if (!(subtotal > 0)) {
-    return { price: null, appointmentDiscountDollars: null };
-  }
   const discount = pricing.appointmentDiscount;
   const isServiceScoped = Boolean(discount?.serviceKeyFilter || discount?.serviceCategoryFilter);
   const matchesScope = (serviceKey, serviceCategory) => (
@@ -2262,18 +2383,50 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
     && lineExcludedFromPercentDiscount(serviceKey);
   const lineEligible = (serviceKey, serviceCategory) => matchesScope(serviceKey, serviceCategory)
     && !pctExcluded(serviceKey);
-  const anyPctExcluded = pctExcluded(pricing.primaryServiceKey)
-    || addons.some((line) => pctExcluded(line.serviceKey));
-  const discountBase = (isServiceScoped || anyPctExcluded)
-    ? (lineEligible(pricing.primaryServiceKey, pricing.primaryServiceCategory) ? (pricing.primaryNet || 0) : 0)
-      + addons.reduce((sum, line) => (
-        lineEligible(line.serviceKey, line.serviceCategory) ? sum + (line.price || 0) : sum
-      ), 0)
-    : subtotal;
-  const appointmentDiscountDollars = calculateAppointmentDiscountDollars(discount, discountBase);
+  const slot = (lineDiscount) => (lineDiscount && lineDiscount.discountType
+    ? { discountType: lineDiscount.discountType, amount: lineDiscount.discountAmount ?? lineDiscount.amount, maxDiscountDollars: lineDiscount.maxDiscountDollars ?? null }
+    : null);
+  // buildAppointmentPricing names these primaryBase / primaryDiscount; the
+  // edit route passes primaryGross / primaryLineDiscount. Accept both, or a
+  // child/booster recompute would restate the ADD-ON slots from gross while
+  // treating the primary as pre-netted — a half-stacked visit.
+  const primaryLineDiscount = slot(pricing.primaryLineDiscount ?? pricing.primaryDiscount);
+  const primaryGrossInput = pricing.primaryGross ?? pricing.primaryBase;
+  const primaryGross = primaryLineDiscount && primaryGrossInput != null
+    ? primaryGrossInput
+    : (pricing.primaryNet || 0);
+  const lines = [{
+    gross: primaryGross,
+    lineDiscount: primaryLineDiscount,
+    eligible: lineEligible(pricing.primaryServiceKey, pricing.primaryServiceCategory),
+  }];
+  for (const line of addons) {
+    const lineDiscount = slot(line.discount);
+    lines.push({
+      gross: lineDiscount && line.base != null ? line.base : (line.price || 0),
+      lineDiscount,
+      eligible: lineEligible(line.serviceKey, line.serviceCategory),
+    });
+  }
+  const stacked = stackVisitDiscounts({
+    lines,
+    appointmentDiscount: discount?.discountType ? {
+      discountType: discount.discountType,
+      amount: discount.discountAmount,
+      maxDiscountDollars: discount.maxDiscountDollars ?? null,
+    } : null,
+    // Gate off → the legacy order (line discounts, then the appointment
+    // discount over the eligible nets), which is what every caller that
+    // passes only NET amounts was already getting.
+    compound: isEnabled('discountStacking'),
+  });
+  if (!(stacked.subtotal > 0)) {
+    return { price: null, appointmentDiscountDollars: null, lines: stacked.lines };
+  }
   return {
-    price: Math.max(0, Math.round((subtotal - appointmentDiscountDollars) * 100) / 100),
-    appointmentDiscountDollars: appointmentDiscountDollars > 0 ? appointmentDiscountDollars : null,
+    price: stacked.total,
+    appointmentDiscountDollars: stacked.appointmentDiscountDollars > 0 ? stacked.appointmentDiscountDollars : null,
+    lines: stacked.lines,
   };
 }
 
@@ -2539,6 +2692,15 @@ function computePriceServiceGroupChanges(before, updates) {
       && moneyValuesDiffer(updates.discount_amount, before?.discount_amount))
     || (updates.line_discount_dollars !== undefined
       && moneyValuesDiffer(updates.line_discount_dollars, before?.line_discount_dollars))
+    // A same-dollar swap on the primary line slot (Military 5% → Senior 5%)
+    // still changes what the series bills, same contract as the
+    // appointment-level preset identity check below.
+    || (updates.line_discount_id !== undefined
+      && String(updates.line_discount_id ?? '') !== String(before?.line_discount_id ?? ''))
+    || (updates.line_discount_type !== undefined
+      && (updates.line_discount_type || null) !== (before?.line_discount_type || null))
+    || (updates.line_discount_amount !== undefined
+      && moneyValuesDiffer(updates.line_discount_amount, before?.line_discount_amount))
     // A preset switch with the same type/amount but a different identity or
     // service scope still changes what the series bills (Codex #3531 r2 P1).
     || (updates.discount_id !== undefined
@@ -2822,6 +2984,18 @@ function formatServiceDisplay(primaryType, addons = []) {
   if (names.length <= 1) return names[0] || primaryType || 'Service';
   if (names.length === 2) return `${names[0]} + ${names[1]}`;
   return `${names[0]} + ${names.length - 1} more`;
+}
+
+// The primary line's own discount slot, as the editor seeds it (the add-on
+// rows carry theirs through mapAddonRow).
+function primaryLineDiscountFields(row) {
+  return {
+    lineDiscountId: row.line_discount_id || null,
+    lineDiscountName: row.line_discount_name || null,
+    lineDiscountType: row.line_discount_type || null,
+    lineDiscountAmount: row.line_discount_amount != null ? Number(row.line_discount_amount) : null,
+    lineDiscountDollars: row.line_discount_dollars != null ? Number(row.line_discount_dollars) : null,
+  };
 }
 
 function mapAddonRow(row) {
@@ -3880,6 +4054,7 @@ router.get('/', async (req, res, next) => {
         serviceCategorySnapshot: s.service_category_snapshot || null,
         excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+        ...primaryLineDiscountFields(s),
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
         prepaidAt: s.prepaid_at || null,
@@ -4129,6 +4304,11 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot',
           'scheduled_services.estimated_price',
           'scheduled_services.primary_line_price',
+          // The primary line's discount slot, so Edit appointment seeds the
+          // stamp it is about to edit.
+          'scheduled_services.line_discount_id', 'scheduled_services.line_discount_name',
+          'scheduled_services.line_discount_type', 'scheduled_services.line_discount_amount',
+          'scheduled_services.line_discount_dollars',
           'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method',
           'scheduled_services.prepaid_at', 'scheduled_services.create_invoice_on_complete',
           'scheduled_services.followup_included',
@@ -4403,6 +4583,7 @@ router.get('/week', async (req, res, next) => {
           serviceCategorySnapshot: s.service_category_snapshot || null,
           excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
           primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+          ...primaryLineDiscountFields(s),
           prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
           prepaidMethod: s.prepaid_method || null,
           prepaidAt: s.prepaid_at || null,
@@ -4702,7 +4883,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       recurringNth, recurringWeekday, recurringIntervalDays,
       skipWeekends, weekendShift,
       boosterMonths,
-      discountId, discountType, discountAmount,
+      discountId, discountType, discountAmount, discountServiceKeyFilter,
       createInvoice,
       sendConfirmation, serviceId, serviceAddons, assignmentMode, primaryLineDiscount,
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
@@ -5220,6 +5401,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       discountId,
       discountType,
       discountAmount,
+      discountServiceKeyFilter,
       customer,
       recurringMembershipBooking,
     });
@@ -5746,7 +5928,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) childData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
         if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) childData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
         if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) childData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
-        if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) childData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+        if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) {
+          // The child's own restatement — a child carrying fewer add-on
+          // lines can take a different share of a fixed appointment credit.
+          childData.line_discount_dollars = childFinancials.lines?.[0]
+            ? childFinancials.lines[0].lineDiscountDollars
+            : Number(pricing.primaryDiscount.discountDollars);
+        }
         if (cols.create_invoice_on_complete) childData.create_invoice_on_complete = createInvoiceStamp;
         // Same global probe as the parent, under this child's own date lock.
         if (childData.window_start && childData.window_end) {
@@ -5826,7 +6014,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (pricing.primaryDiscount && cols.line_discount_name && pricing.primaryDiscount.discountName) boosterData.line_discount_name = String(pricing.primaryDiscount.discountName).slice(0, 200);
           if (pricing.primaryDiscount && cols.line_discount_type && pricing.primaryDiscount.discountType) boosterData.line_discount_type = String(pricing.primaryDiscount.discountType).slice(0, 30);
           if (pricing.primaryDiscount && cols.line_discount_amount && pricing.primaryDiscount.discountAmount != null) boosterData.line_discount_amount = Number(pricing.primaryDiscount.discountAmount);
-          if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) boosterData.line_discount_dollars = Number(pricing.primaryDiscount.discountDollars);
+          if (pricing.primaryDiscount && cols.line_discount_dollars && pricing.primaryDiscount.discountDollars != null) {
+            boosterData.line_discount_dollars = boosterFinancials.lines?.[0]
+              ? boosterFinancials.lines[0].lineDiscountDollars
+              : Number(pricing.primaryDiscount.discountDollars);
+          }
           // Same reasoning: boosters keep the modal's invoice intent even on
           // a covered member series (identical to createInvoiceStamp for
           // every non-member booking).
@@ -6607,6 +6799,11 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.status', 'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.estimated_duration_minutes', 'scheduled_services.service_key_snapshot', 'scheduled_services.service_category_snapshot', 'scheduled_services.estimated_price',
         'scheduled_services.primary_line_price',
+        // The primary line's discount slot, so the editor opened from the
+        // List tab seeds the same stamp the day and week payloads carry.
+        'scheduled_services.line_discount_id', 'scheduled_services.line_discount_name',
+        'scheduled_services.line_discount_type', 'scheduled_services.line_discount_amount',
+        'scheduled_services.line_discount_dollars',
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
@@ -6658,6 +6855,7 @@ router.get('/list', async (req, res, next) => {
       serviceCategorySnapshot: s.service_category_snapshot || null,
       excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key_snapshot),
       primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
+      ...primaryLineDiscountFields(s),
       serviceAddons: listAddonsByServiceId.get(s.id) || [],
       prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
       prepaidMethod: s.prepaid_method || null,
@@ -7766,9 +7964,22 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       payerId, poNumber, selfPayOverride,
       notifyCustomer,
       discountId,
+      // Per-line discount slot for the primary line (undefined = leave the
+      // stored one alone; null/{} = clear; { discountId, discountAmount } =
+      // a catalog pick) and the appointment discount's "Applies to" line.
+      primaryLineDiscount,
+      discountServiceKeyFilter,
     } = req.body;
     let { discountType, discountAmount } = req.body;
     const updates = {};
+    // The stamped appointment-discount line scope this save resolves
+    // (undefined = untouched); written after the preset stamp below.
+    let appointmentDiscountScopeKey;
+    // Same refuse-don't-drop contract the other Edit appointment gates use.
+    const stacking = isEnabled('discountStacking');
+    if (!stacking && (primaryLineDiscount !== undefined || discountServiceKeyFilter !== undefined)) {
+      throw httpError(409, 'Editing a service line discount is turned off (GATE_DISCOUNT_STACKING). Nothing was changed.');
+    }
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
     // filters, and the catalog's own type/amount as the authority. Without
@@ -7789,9 +8000,39 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // visit passes on its add-on, and out-of-scope / excluded lines can't
     // satisfy a minimum subtotal (Codex #3531 r2 P1). `lines` =
     // [{ amount, serviceKey, serviceCategory }], primary first.
-    const presetEligibilityCheck = async (lines) => {
+    // Customer + membership-sale context every eligibility check on this
+    // save shares (the appointment preset and any new line pick). Loaded
+    // once, on first use, from the EDITED state — posted values, then the
+    // pending `updates`, then the stored row.
+    let editEligibilityContextPromise = null;
+    const editEligibilityContext = () => {
+      if (!editEligibilityContextPromise) {
+        editEligibilityContextPromise = (async () => {
+          const visitRow = await db('scheduled_services').where({ id: req.params.id })
+            .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
+          const customerRow = visitRow?.customer_id
+            ? await db('customers').where({ id: visitRow.customer_id }).first()
+            : null;
+          const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
+          const effectiveServiceRecord = effectiveServiceId
+            ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
+            : null;
+          const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+            isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
+            isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
+            serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
+            serviceRecord: effectiveServiceRecord,
+            customer: customerRow,
+            scheduledDate: req.body.scheduledDate !== undefined ? req.body.scheduledDate : visitRow?.scheduled_date,
+          });
+          return { customerRow, recurringMembershipBooking };
+        })();
+      }
+      return editEligibilityContextPromise;
+    };
+    const presetEligibilityCheck = async (lines, scopeKey) => {
       if (!appointmentDiscountPreset) return;
-      const keyFilter = appointmentDiscountPreset.service_key_filter || null;
+      const keyFilter = scopeKey !== undefined ? scopeKey : (appointmentDiscountPreset.service_key_filter || null);
       const categoryFilter = appointmentDiscountPreset.service_category_filter || null;
       const matching = (lines || []).filter((line) => (
         (!keyFilter || keyFilter === line.serviceKey)
@@ -7805,29 +8046,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const subtotal = Math.round(eligible.reduce((sum, line) => sum + (Number(line.amount) || 0), 0) * 100) / 100;
       const serviceKey = context.serviceKey || null;
       const serviceCategory = context.serviceCategory || null;
-      const visitRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('customer_id', 'is_recurring', 'is_callback', 'service_type', 'scheduled_date', 'service_id');
-      const customerRow = visitRow?.customer_id
-        ? await db('customers').where({ id: visitRow.customer_id }).first()
-        : null;
       // Same membership-sale context buildAppointmentPricing passes on create
       // (pre-push Codex P1): a save that makes this visit recurring WaveGuard
       // coverage IS the membership sale, so a member-tier requirement must
-      // see it before the tier sync stamps the customer row. Evaluated on
-      // the EDITED state — posted values, then the pending `updates`, then
-      // the stored row.
-      const effectiveServiceId = updates.service_id !== undefined ? updates.service_id : (visitRow?.service_id || null);
-      const effectiveServiceRecord = effectiveServiceId
-        ? await db('services').where({ id: effectiveServiceId }).first('service_key', 'name').catch(() => null)
-        : null;
-      const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
-        isRecurring: isRecurring !== undefined ? !!isRecurring : !!visitRow?.is_recurring,
-        isCallback: updates.is_callback !== undefined ? !!updates.is_callback : !!visitRow?.is_callback,
-        serviceType: serviceType !== undefined ? serviceType : visitRow?.service_type,
-        serviceRecord: effectiveServiceRecord,
-        customer: customerRow,
-        scheduledDate: req.body.scheduledDate !== undefined ? req.body.scheduledDate : visitRow?.scheduled_date,
-      });
+      // see it before the tier sync stamps the customer row.
+      const { customerRow, recurringMembershipBooking } = await editEligibilityContext();
       const failures = await DiscountEngine.manualEligibilityFailures(appointmentDiscountPreset, customerRow || {}, {
         subtotal,
         serviceKey: serviceKey || null,
@@ -8308,6 +8531,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const n = Number(v);
         return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
       };
+      // A line that posts a catalog discount id is judged against the stored
+      // add-on row: the SAME preset with the same type/amount is a preserved
+      // stamp (kept verbatim, so a retired preset never blocks an unrelated
+      // save); anything else is a new pick, resolved through the catalog
+      // exactly as create does (authoritative amount/cap, eligibility).
+      const existingAddonRows = stacking && addons.some((a) => a?.discountId)
+        ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
+          .select('service_id', 'service_name', 'discount_id', 'discount_type', 'discount_amount')
+          .catch(() => [])
+        : [];
+      const storedAddonFor = (a, serviceName) => existingAddonRows.find((row) => (
+        a.serviceId ? String(row.service_id || '') === String(a.serviceId) : String(row.service_name || '').trim() === serviceName
+      ));
       const normalizedAddons = [];
       for (const a of addons) {
         const serviceName = (a && (a.serviceName || a.name)) ? String(a.serviceName || a.name).trim() : '';
@@ -8322,7 +8558,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
         let net = gross;
         let lineDiscount = null;
-        if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
+        const stored = a.discountId ? storedAddonFor(a, serviceName) : null;
+        const preservedStamp = !!(stored && String(stored.discount_id || '') === String(a.discountId)
+          && (stored.discount_type || null) === lineType
+          && !moneyValuesDiffer(stored.discount_amount, lineAmount));
+        if (stacking && a.discountId && !preservedStamp) {
+          const { customerRow, recurringMembershipBooking } = await editEligibilityContext();
+          lineDiscount = await resolveLineDiscount(a, gross || 0, customerRow || {}, {
+            serviceKey: catalogService?.service_key,
+            serviceCategory: catalogService?.category,
+            recurringMembershipBooking,
+          });
+          if (lineDiscount && gross != null) {
+            net = Math.max(0, Math.round((gross - (lineDiscount.discountDollars || 0)) * 100) / 100);
+          }
+        } else if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
           net = applyDiscount(gross, lineType, lineAmount);
           const dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
           lineDiscount = {
@@ -8372,6 +8622,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           'discount_amount',
           'line_discount_dollars',
         ];
+        if (cols.discount_id) existingFields.push('discount_id');
+        if (cols.line_discount_id) existingFields.push('line_discount_id');
         if (cols.service_key_snapshot) existingFields.push('service_key_snapshot');
         if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
         if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
@@ -8395,20 +8647,67 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             : null;
         }
 
-        // Primary line discount is not exposed here — back it out of the gross
-        // primary price so the subtotal matches what was originally stored
-        // (mirrors calculateStoredVisitFinancials).
-        const primaryLineDiscountDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
-          ? Math.max(0, Number(existing.line_discount_dollars))
-          : 0;
+        const primaryServiceKey = updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null;
+        const primaryServiceCategory = updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null;
+
+        // Primary line slot. Untouched (undefined): the stored dollars ride as
+        // a fixed credit on the gross, which is exactly the legacy back-out
+        // (mirrors calculateStoredVisitFinancials). Posted: cleared, or a
+        // catalog pick resolved like create's primaryLineDiscount.
+        const primaryLineDiscountProvided = primaryLineDiscount !== undefined;
+        let primaryLineSlot = null;
+        if (!primaryLineDiscountProvided) {
+          const storedDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
+            ? Math.max(0, Number(existing.line_discount_dollars))
+            : 0;
+          primaryLineSlot = storedDollars > 0 ? { discountType: 'fixed_amount', discountAmount: storedDollars } : null;
+        } else if (primaryLineDiscount && (primaryLineDiscount.discountId || primaryLineDiscount.id)) {
+          const { customerRow, recurringMembershipBooking } = await editEligibilityContext();
+          primaryLineSlot = await resolveLineDiscount(primaryLineDiscount, primaryGross || 0, customerRow || {}, {
+            serviceKey: primaryServiceKey,
+            serviceCategory: primaryServiceCategory,
+            recurringMembershipBooking,
+          });
+        }
+        // Provisional net (the stack below restates it with the other slots).
         const primaryNet = primaryGross != null
-          ? Math.max(0, Math.round((primaryGross - primaryLineDiscountDollars) * 100) / 100)
+          ? (primaryLineSlot ? applyDiscount(primaryGross, primaryLineSlot.discountType, primaryLineSlot.discountAmount) : primaryGross)
           : 0;
+
+        // The operator's "Applies to" line for the appointment discount
+        // (a preset posted in this save); undefined leaves the stored scope.
+        if (stacking && appointmentDiscountPreset && discountType !== undefined) {
+          appointmentDiscountScopeKey = resolveAppointmentDiscountLineScope(appointmentDiscountPreset, discountServiceKeyFilter, [
+            { serviceKey: primaryServiceKey, serviceCategory: primaryServiceCategory },
+            ...normalizedAddons.map((l) => ({ serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
+          ]);
+        }
+
+        // One WaveGuard tier per visit, across every slot this save leaves
+        // on the row — checked only when the save touches a discount.
+        const discountInputsPosted = primaryLineDiscountProvided || discountType !== undefined
+          || addons.some((a) => a?.discountId);
+        if (stacking && discountInputsPosted) {
+          const stackRows = await loadStackRows([
+            {
+              discountId: primaryLineDiscountProvided ? primaryLineSlot?.discountId : existing?.line_discount_id,
+              scope: 'primary',
+            },
+            ...normalizedAddons.map((l, i) => ({ discountId: l.discount?.discountId, scope: `addon:${i}` })),
+            {
+              discountId: discountType !== undefined ? discountId : existing?.discount_id,
+              spansAll: true,
+            },
+          ]);
+          assertStackGroups(stackRows);
+        }
 
         const financials = calculateVisitFinancialsForAddons({
           primaryNet,
-          primaryServiceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
-          primaryServiceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+          primaryGross,
+          primaryLineDiscount: primaryLineSlot,
+          primaryServiceKey,
+          primaryServiceCategory,
           appointmentDiscount: effDiscountType ? {
             discountType: effDiscountType,
             discountAmount: effDiscountAmount,
@@ -8416,21 +8715,44 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               ? (appointmentDiscountPreset.max_discount_dollars ?? null)
               : (appointmentDiscountChanged ? null : (existing?.discount_max_dollars ?? null)),
             serviceKeyFilter: appointmentDiscountPreset
-              ? (appointmentDiscountPreset.service_key_filter || null)
+              // undefined = no scope resolved this save (gate dark, or no
+              // preset posted) → the preset's own filter still applies.
+              ? (appointmentDiscountScopeKey !== undefined
+                ? (appointmentDiscountScopeKey || null)
+                : (appointmentDiscountPreset.service_key_filter || null))
               : (appointmentDiscountChanged ? null : (existing?.discount_service_key_filter || null)),
             serviceCategoryFilter: appointmentDiscountPreset
               ? (appointmentDiscountPreset.service_category_filter || null)
               : (appointmentDiscountChanged ? null : (existing?.discount_service_category_filter || null)),
           } : null,
         }, normalizedAddons);
+        // Every line slot restated under the stacking rule — the add-on rows
+        // and the primary line stamp the dollars the invoice will replay.
+        normalizedAddons.forEach((line, i) => {
+          const restated = financials.lines[i + 1];
+          if (!restated) return;
+          if (line.discount) line.discount.discountDollars = restated.lineDiscountDollars > 0 ? restated.lineDiscountDollars : null;
+          if (line.base != null) line.price = restated.net;
+        });
         await presetEligibilityCheck([
           {
-            amount: primaryNet,
-            serviceKey: updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null,
-            serviceCategory: updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null,
+            amount: financials.lines[0]?.net ?? primaryNet,
+            serviceKey: primaryServiceKey,
+            serviceCategory: primaryServiceCategory,
           },
           ...normalizedAddons.map((l) => ({ amount: l.price || 0, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
-        ]);
+        ], appointmentDiscountScopeKey);
+        if (primaryLineDiscountProvided) {
+          const restatedPrimary = financials.lines[0];
+          const slotDollars = primaryLineSlot && restatedPrimary && restatedPrimary.lineDiscountDollars > 0
+            ? restatedPrimary.lineDiscountDollars
+            : null;
+          if (cols.line_discount_id) updates.line_discount_id = slotDollars != null ? (primaryLineSlot.discountId || null) : null;
+          if (cols.line_discount_name) updates.line_discount_name = slotDollars != null ? String(primaryLineSlot.discountName || '').slice(0, 200) || null : null;
+          if (cols.line_discount_type) updates.line_discount_type = slotDollars != null ? String(primaryLineSlot.discountType).slice(0, 30) : null;
+          if (cols.line_discount_amount) updates.line_discount_amount = slotDollars != null ? Number(primaryLineSlot.discountAmount) : null;
+          if (cols.line_discount_dollars) updates.line_discount_dollars = slotDollars;
+        }
         if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
@@ -8441,8 +8763,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
         if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
-        // Leave the primary line_discount_* columns untouched — invoicing reads
-        // them and this editor can't resend them.
+        // An untouched primary line slot keeps its line_discount_* columns —
+        // invoicing reads them and an older editor can't resend them.
       }
     } else if (estimatedPrice !== undefined && estimatedPrice !== '' && !isNaN(Number(estimatedPrice))) {
       try {
@@ -8512,6 +8834,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const legacyExclusionApplies = isPercentDiscountType(discountType)
           && (assertPercentExclusionCatalogReady() || lineExcludedFromPercentDiscount(legacyPrimaryKey)
             || legacyLines.some((line) => lineExcludedFromPercentDiscount(line.serviceKey)));
+        if (stacking && appointmentDiscountPreset && discountType !== undefined) {
+          appointmentDiscountScopeKey = resolveAppointmentDiscountLineScope(appointmentDiscountPreset, discountServiceKeyFilter, [
+            { serviceKey: legacyPrimaryKey, serviceCategory: legacyPrimaryCategory },
+            ...legacyLines,
+          ]);
+        }
         if (discountType && discountAmount != null && discountAmount !== ''
           && (appointmentDiscountPreset || legacyExclusionApplies)) {
           const exclusionAware = calculateVisitFinancialsForAddons({
@@ -8524,7 +8852,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               maxDiscountDollars: appointmentDiscountPreset
                 ? (appointmentDiscountPreset.max_discount_dollars ?? null)
                 : (appointmentDiscountChanged ? null : (existingPrice?.discount_max_dollars ?? null)),
-              serviceKeyFilter: appointmentDiscountPreset?.service_key_filter || null,
+              serviceKeyFilter: appointmentDiscountScopeKey !== undefined
+                ? (appointmentDiscountScopeKey || null)
+                : (appointmentDiscountPreset?.service_key_filter || null),
               serviceCategoryFilter: appointmentDiscountPreset?.service_category_filter || null,
             },
           }, legacyLines);
@@ -8537,7 +8867,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             serviceCategory: legacyPrimaryCategory,
           },
           ...legacyLines.map((l) => ({ amount: l.price, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
-        ]);
+        ], appointmentDiscountScopeKey);
         const replayGross = Math.round((primaryGross + addonBaseTotal) * 100) / 100;
         const replayDiscountDollars = Math.max(0, Math.round((replayGross - finalPrice) * 100) / 100);
         if (cols.estimated_price) updates.estimated_price = finalPrice;
@@ -8577,6 +8907,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       if (presetCols.discount_service_key_filter) updates.discount_service_key_filter = appointmentDiscountPreset.service_key_filter || null;
       if (presetCols.discount_service_category_filter) updates.discount_service_category_filter = appointmentDiscountPreset.service_category_filter || null;
       if (presetCols.discount_max_dollars) updates.discount_max_dollars = appointmentDiscountPreset.max_discount_dollars ?? null;
+      // The operator's "Applies to" line narrows the preset's scope; the
+      // snapshot carries it so the series and the invoice see the same lines.
+      if (presetCols.discount_service_key_filter && appointmentDiscountScopeKey !== undefined) {
+        updates.discount_service_key_filter = appointmentDiscountScopeKey || null;
+      }
     }
     // Converting an existing priced visit to a WaveGuard re-service: the price
     // handling above may have stored the prior service's carried-over price.
@@ -11776,6 +12111,10 @@ router.post('/:id/invoice', async (req, res, next) => {
           amount,
           category: e?.category ? String(e.category).slice(0, 100) : null,
           discount_id: e?.discount_id ? String(e.discount_id) : null,
+          // A custom (id-less) discount's own shape, so it stacks like a
+          // catalog one instead of riding through as a flat credit.
+          discount_type: e?.discount_type ? String(e.discount_type).slice(0, 30) : null,
+          discount_amount: Number.isFinite(Number(e?.discount_amount)) ? Number(e.discount_amount) : null,
         };
       })
       .filter((e) => e.description && Number.isFinite(e.unit_price));
@@ -11784,28 +12123,94 @@ router.post('/:id/invoice', async (req, res, next) => {
       .filter((e) => Number(e.amount) > 0)
       .reduce((sum, e) => sum + Number(e.amount), 0);
     const extraDiscountBase = Math.max(0, amount + extraServicesSubtotal);
+    // Every discount on the checkout stacks on the services base under the
+    // one rule (fixed credits first, percentages compounding on what is
+    // left) and one WaveGuard tier per checkout — the sheet previews the
+    // same stack; an older client's larger additive number is clamped.
+    // Gate off: each discount resolves against the full base on its own and
+    // tier combinations are accepted, exactly as before this lane.
+    const checkoutStacking = isEnabled('discountStacking');
+    const discountLines = extraLines.filter((e) => Number(e.amount) < 0);
+    const discountCatalogRows = new Map();
+    for (const e of discountLines) {
+      if (e.discount_id && !discountCatalogRows.has(e.discount_id)) {
+        discountCatalogRows.set(e.discount_id, await loadInvoiceDiscount(e.discount_id));
+      }
+    }
+    if (checkoutStacking) {
+      // Every checkout discount reaches the same services base, so they all
+      // span it — two rows of one tier group never combine here.
+      assertStackGroups([...discountCatalogRows.values()].map((row) => stackRowOf(row, { spansAll: true })));
+    }
+    const stacked = stackDiscounts(extraDiscountBase, discountLines.map((e) => {
+      const discount = e.discount_id ? discountCatalogRows.get(e.discount_id) : null;
+      if (discount) {
+        return {
+          discountType: discount.discount_type,
+          amount: normalizeDiscountAmount(discount, e.discount_amount),
+          maxDiscountDollars: discount.max_discount_dollars,
+        };
+      }
+      const isPercent = isPercentDiscountType(e.discount_type);
+      return isPercent
+        ? { discountType: e.discount_type, amount: e.discount_amount || 0 }
+        : { discountType: 'fixed_amount', amount: Math.abs(Number(e.amount) || 0) };
+    }), { compound: checkoutStacking });
+    let discountIndex = 0;
     for (const e of extraLines) {
-      if (Number(e.amount) < 0 && e.discount_id) {
-        const discount = await loadInvoiceDiscount(e.discount_id);
-        const resolved = calculateDiscountDollars(discount, extraDiscountBase, discount.amount);
+      if (Number(e.amount) < 0) {
+        // One stacked slot per negative row, in submitted order.
+        const resolvedDollars = stacked.items[discountIndex++].dollars;
+        const discount = e.discount_id ? discountCatalogRows.get(e.discount_id) : null;
+        if (!checkoutStacking && !discount) {
+          // Legacy: a custom (id-less) row passed through verbatim, with no
+          // re-resolution and no dollars floor.
+          invoiceExtraLines.push({
+            description: e.description,
+            quantity: e.quantity,
+            unit_price: e.unit_price,
+            amount: e.amount,
+            category: e.category,
+            discount_id: null,
+          });
+          continue;
+        }
         const submittedDollars = Math.round(Math.abs(Number(e.amount) || 0) * 100) / 100;
-        const dollars = Math.min(submittedDollars, resolved.dollars);
+        const dollars = Math.min(submittedDollars, resolvedDollars);
         if (!(dollars > 0)) continue;
-        invoiceExtraLines.push({
-          description: e.description || discount.name || 'Discount',
-          quantity: 1,
-          unit_price: -dollars,
-          amount: -dollars,
-          category: e.category,
-          discount_id: discount.id,
-          discount_type: discount.discount_type,
-          discount_amount: Number(discount.amount) || 0,
-          discount_dollars: dollars,
-          use_stored_discount: true,
-          stored_discount_source: 'validated_checkout',
-        });
+        if (discount) {
+          invoiceExtraLines.push({
+            description: e.description || discount.name || 'Discount',
+            quantity: 1,
+            unit_price: -dollars,
+            amount: -dollars,
+            category: e.category,
+            discount_id: discount.id,
+            discount_type: discount.discount_type,
+            discount_amount: normalizeDiscountAmount(discount, e.discount_amount),
+            discount_dollars: dollars,
+            use_stored_discount: true,
+            stored_discount_source: 'validated_checkout',
+          });
+        } else {
+          invoiceExtraLines.push({
+            description: e.description,
+            quantity: 1,
+            unit_price: -dollars,
+            amount: -dollars,
+            category: e.category,
+            discount_id: null,
+          });
+        }
       } else {
-        invoiceExtraLines.push(e);
+        invoiceExtraLines.push({
+          description: e.description,
+          quantity: e.quantity,
+          unit_price: e.unit_price,
+          amount: e.amount,
+          category: e.category,
+          discount_id: null,
+        });
       }
     }
 
@@ -18007,6 +18412,9 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  resolveAppointmentDiscountLineScope,
+  stackRowOf,
+  loadStackRows,
   lineExcludedFromPercentDiscount,
   buildPercentExclusionCatalog,
   appointmentDiscountIdentityChanged,

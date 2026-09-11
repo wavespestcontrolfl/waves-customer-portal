@@ -40,6 +40,8 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { stackVisitDiscounts, stackablePresets } from "../../lib/discountStack";
+import { useDiscountStacking } from "../../hooks/useDiscountStacking";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -1620,6 +1622,10 @@ const EDIT_FALLBACK_SERVICES = [
 export function EditServiceModal({ service, technicians, onClose, onSaved, onMarkPrepaid }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  // Deploy-wide release gate (GATE_DISCOUNT_STACKING), read before any state
+  // that consults it. Fails closed, so this is exactly the pre-lane modal
+  // until the owner flips it.
+  const stackingEnabled = useDiscountStacking();
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -1803,8 +1809,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // round-trips them rather than dropping them.
   const [serviceLines, setServiceLines] = useState(() =>
     (Array.isArray(service.serviceAddons) ? service.serviceAddons : []).map((a, i) => {
-      // Seed the editable line Price from the net charge (estimated_price) so it
-      // matches what's invoiced.
+      // Seed the editable line Price from the net charge (estimated_price)
+      // so it matches what's invoiced. With stacking live, the effect below
+      // re-seeds an untouched discounted line to its GROSS price and hangs
+      // the stamp in its own slot — a line with no stored gross (legacy row,
+      // no base_price) stays a flat net either way, since re-applying its
+      // discount would double-discount it.
       const seededPrice =
         a.estimatedPrice != null
           ? String(a.estimatedPrice)
@@ -1812,6 +1822,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             ? String(a.basePrice)
             : "";
       return {
+        lineDiscount: null,
         _key: `addon-${a.id || i}`,
         id: a.id || null,
         serviceId: a.serviceId || null,
@@ -1842,6 +1853,28 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       };
     }),
   );
+  // Once the gate resolves, an UNTOUCHED discounted add-on line switches to
+  // editing its gross with the stamp in its own slot. A line the operator
+  // already edited keeps what they typed.
+  useEffect(() => {
+    if (!stackingEnabled) return;
+    setServiceLines((lines) => lines.map((l) => {
+      if (l.lineDiscount || !l._origDiscountType || l._origBasePrice == null) return l;
+      if (String(l.price) !== String(l._seededPrice ?? "")) return l;
+      const gross = String(l._origBasePrice);
+      return {
+        ...l,
+        price: gross,
+        _seededPrice: gross,
+        lineDiscount: {
+          id: l._origDiscountId || null,
+          name: l._origDiscountName || null,
+          discount_type: l._origDiscountType,
+          amount: l._origDiscountAmount != null ? l._origDiscountAmount : null,
+        },
+      };
+    }));
+  }, [stackingEnabled]);
   const hadAddonsInitially = Array.isArray(service.serviceAddons) && service.serviceAddons.length > 0;
   // Advisory only — the save button never keys off this (warn, don't block).
   // Duration mirrors the save payload's summed group duration (primary line
@@ -2023,6 +2056,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [discountAmount, setDiscountAmount] = useState("");
   const [discountPresets, setDiscountPresets] = useState([]);
   const [discountPresetId, setDiscountPresetId] = useState("");
+  // The appointment discount's "Applies to" line (a service key) — "" is
+  // the whole appointment. Never seeded: the Discount control opens empty.
+  const [discountScopeKey, setDiscountScopeKey] = useState("");
+  // The primary line's own discount slot, seeded from the stored stamp;
+  // `dirty` means this session changed it and the save must post it.
+  // Seeded only when the row stores a real GROSS for the primary line: the
+  // Price field falls back to the visit's NET total when primary_line_price
+  // is NULL (a pre-2026-05-11 row), and re-applying the stamp to that would
+  // discount an already-net price.
+  const [primaryLineDiscountState, setPrimaryLineDiscount] = useState(() =>
+    service.lineDiscountType && service.primaryLinePrice != null
+      ? {
+          id: service.lineDiscountId || null,
+          name: service.lineDiscountName || null,
+          discount_type: service.lineDiscountType,
+          amount: service.lineDiscountAmount != null ? service.lineDiscountAmount : null,
+        }
+      : null,
+  );
+  const [primaryLineDiscountDirty, setPrimaryLineDiscountDirty] = useState(false);
+  const primaryLineDiscount = stackingEnabled ? primaryLineDiscountState : null;
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
@@ -2172,6 +2226,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   const applyDiscountPreset = (id) => {
     setDiscountPresetId(id);
+    // A stale line scope must never ride a different preset (or None).
+    setDiscountScopeKey("");
     if (!id) {
       setDiscountType("");
       setDiscountAmount("");
@@ -2182,6 +2238,67 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     if (!d) return;
     setDiscountType(d.discount_type);
     setDiscountAmount(String(d.amount ?? ""));
+  };
+
+  // Catalog row for a line slot (stack group, cap) — a seeded stamp only
+  // carries id/type/amount until the presets load.
+  const presetById = (id) =>
+    id ? discountPresets.find((d) => String(d.id) === String(id)) || null : null;
+  const lineDiscountRow = (ld) => (ld ? { ...(presetById(ld.id) || {}), ...ld } : null);
+  const isCustomAmountPreset = (d) =>
+    d?.discount_type === "fixed_amount" &&
+    (d?.discount_key === "custom_dollar" || !(Number(d?.amount) > 0));
+  const isCustomPercentPreset = (d) =>
+    d?.discount_type === "percentage" &&
+    (d?.discount_key === "custom_percent" || !(Number(d?.amount) > 0));
+  const presetOptionLabel = (d) => {
+    if (isCustomPercentPreset(d)) return `${d.name} - custom %`;
+    if (isCustomAmountPreset(d)) return `${d.name} - custom $`;
+    return `${d.name} - ${
+      d.discount_type === "percentage"
+        ? `${Number(d.amount).toFixed(d.amount % 1 ? 2 : 0)}%`
+        : `$${Number(d.amount).toFixed(2)}`
+    }`;
+  };
+  // A line-slot pick: the catalog preset, or a custom preset with the
+  // operator's amount (same prompt the Create modal and Invoices use).
+  const pickLineDiscount = (presetId) => {
+    const d = presetById(presetId);
+    if (!d) return null;
+    let amount = d.amount;
+    if (isCustomAmountPreset(d)) {
+      const raw = window.prompt(`Discount amount for ${d.name} ($)`, "");
+      if (raw === null) return undefined;
+      amount = Math.round((Number(raw) || 0) * 100) / 100;
+      if (!(amount > 0)) return undefined;
+    } else if (isCustomPercentPreset(d)) {
+      const raw = window.prompt(`Discount percentage for ${d.name} (%)`, "");
+      if (raw === null) return undefined;
+      amount = Number(raw);
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 100) return undefined;
+    }
+    return {
+      id: d.id,
+      name: d.name,
+      discount_type: d.discount_type,
+      amount,
+      max_discount_dollars: d.max_discount_dollars,
+      stack_group: d.stack_group,
+      is_stackable: d.is_stackable,
+    };
+  };
+  const setLineDiscount = (key, presetId) => {
+    const picked = presetId ? pickLineDiscount(presetId) : null;
+    if (picked === undefined) return;
+    setServiceLines((lines) =>
+      lines.map((l) => (l._key === key ? { ...l, lineDiscount: picked } : l)),
+    );
+  };
+  const setPrimaryDiscount = (presetId) => {
+    const picked = presetId ? pickLineDiscount(presetId) : null;
+    if (picked === undefined) return;
+    setPrimaryLineDiscount(picked);
+    setPrimaryLineDiscountDirty(true);
   };
 
   const update = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -2285,6 +2402,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         serviceId: null,
         serviceType: "",
         price: "",
+        lineDiscount: null,
         _seededPrice: null,
         _origBasePrice: null,
         _origDiscountType: null,
@@ -2328,7 +2446,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // stored discount), so a non-empty selection is always a change made in
   // this session — without this the operator could never apply a discount
   // change to following visits.
-  const discountDirty = discountType !== "";
+  const discountDirty = discountType !== ""
+    || (stackingEnabled && primaryLineDiscountDirty);
   // Base-series rows only: boosters share recurring_parent_id but carry
   // is_recurring=false and their OWN pricing — a booster edit must stay
   // per-visit, never rewrite the base series (the server refuses a posted
@@ -2501,7 +2620,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       const cleanLines = serviceLines
         .map((l) => ({ ...l, serviceType: (l.serviceType || "").trim() }))
         .filter((l) => l.serviceType);
-      const sendAddons = cleanLines.length > 0 || hadAddonsInitially;
+      // The primary line's discount slot rides the multi-line save path
+      // (the legacy price-only path clears line discounts), so a visit that
+      // carries or changes one always posts `addons` — an empty array when
+      // it has no add-on lines.
+      const sendAddons =
+        cleanLines.length > 0 ||
+        hadAddonsInitially ||
+        (stackingEnabled && (primaryLineDiscountDirty || !!primaryLineDiscount));
       const addonsPayload = sendAddons
         ? cleanLines.map((l) => {
             const common = {
@@ -2521,15 +2647,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               skipWeekends: l.skipWeekends,
               weekendShift: l.weekendShift,
             };
+            // A line with a discount slot posts its GROSS price plus the
+            // slot: the server keeps an unchanged stamp verbatim and resolves
+            // a new pick through the catalog, then restates every slot's
+            // dollars under the stacking rule.
+            if (l.lineDiscount && l.price !== "" && !isNaN(parseFloat(l.price))) {
+              return {
+                ...common,
+                basePrice: parseFloat(l.price),
+                discountType: l.lineDiscount.discount_type,
+                discountAmount: l.lineDiscount.amount != null ? l.lineDiscount.amount : null,
+                discountId: l.lineDiscount.id || null,
+                discountName: l.lineDiscount.name || null,
+              };
+            }
             const priceUnchanged =
               !!l.id && String(l.price) === String(l._seededPrice ?? "");
-            // Unchanged existing line that has a real gross + line discount:
-            // round-trip its original breakdown so the server reconstructs the
-            // same line ($100 − $10), preserving the discount audit. We require
-            // _origBasePrice so the server re-derives net from the true gross —
-            // a legacy row with a discount but no base_price would otherwise be
-            // double-discounted, so it falls through to the flat-net path below.
-            if (priceUnchanged && l._origDiscountType && l._origBasePrice != null) {
+            // Only while the lane is DARK: an unchanged line round-trips its
+            // original gross/discount breakdown so the server reconstructs
+            // the same line ($100 − $10) and the discount audit survives.
+            // With the lane live the slot above is authoritative — replaying
+            // the stamp here would silently undo a removal. Requiring
+            // _origBasePrice keeps a gross-less legacy row on the flat-net
+            // path below, where it would otherwise be double-discounted.
+            if (!stackingEnabled && priceUnchanged && l._origDiscountType && l._origBasePrice != null) {
               return {
                 ...common,
                 basePrice: l._origBasePrice,
@@ -2539,10 +2680,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 discountName: l._origDiscountName || null,
               };
             }
-            // New or price-edited line: the editor has no per-line discount UI,
-            // so treat the Price as the final (net) charge with no discount.
-            // (Re-applying a stored discount here would double-discount rows
-            // whose seeded price was already net.)
+            // A new or price-edited line with no slot: the Price is the final
+            // (net) charge with no discount. (Re-applying a stored discount
+            // here would double-discount a row whose seeded price was net.)
             return {
               ...common,
               price:
@@ -2569,6 +2709,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   form.price !== "" && !isNaN(parseFloat(form.price))
                     ? parseFloat(form.price)
                     : undefined,
+                // Only a slot this session changed is posted; an untouched
+                // one stays as stored (null clears it).
+                primaryLineDiscount: stackingEnabled && primaryLineDiscountDirty
+                  ? primaryLineDiscount
+                    ? { discountId: primaryLineDiscount.id, discountAmount: primaryLineDiscount.amount }
+                    : null
+                  : undefined,
                 // Parent estimated_duration_minutes drives schedule-grid sizing
                 // and capacity, so send the summed group duration (primary line
                 // + add-on lines), matching the create flow.
@@ -2647,6 +2794,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           discountId:
             discountType && discountPresetId && discountPresetId !== "custom"
               ? discountPresetId
+              : undefined,
+          // "Applies to" one line: the preset's scope narrowed to that
+          // line's service key (a custom discount has no catalog scope).
+          discountServiceKeyFilter:
+            stackingEnabled && discountType && discountPresetId && discountPresetId !== "custom" && discountScopeKey
+              ? discountScopeKey
               : undefined,
           estimatedPrice:
             form.price !== "" && !isNaN(parseFloat(form.price))
@@ -2907,17 +3060,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const presetKeyFilter = selectedDiscountPreset?.service_key_filter || null;
   const presetCategoryFilter =
     selectedDiscountPreset?.service_category_filter || null;
+  const scopeKeyFilter = presetKeyFilter
+    || (stackingEnabled && selectedDiscountPreset && discountScopeKey)
+    || null;
   const lineInDiscountScope = (line) =>
-    (!presetKeyFilter || presetKeyFilter === (line.serviceKey || null)) &&
+    (!scopeKeyFilter || scopeKeyFilter === (line.serviceKey || null)) &&
     (!presetCategoryFilter ||
       presetCategoryFilter === (line.serviceCategory || null));
   // excludedFromPercentDiscount === null means UNKNOWN (static fallback
   // row while the live catalog is unavailable): a percentage preview must
   // not assume eligibility the server may refuse on save (codex #3591 r24
   // P2) — the row is withheld from the percentage base.
+  const isPercentDiscount =
+    discountType === "percentage" || discountType === "variable_percentage";
   const lineTakesDiscount = (line) =>
     lineInDiscountScope(line) &&
-    !(discountType === "percentage"
+    !(isPercentDiscount
       && (line.excludedFromPercentDiscount === true || line.excludedFromPercentDiscount === null));
   const primaryLineForDiscount = {
     serviceKey: form.serviceKey,
@@ -2929,15 +3087,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const percentExcludedLines = serviceLines.filter(
     (l) => !lineTakesDiscount(l),
   );
-  const percentDiscountBase =
-    (lineTakesDiscount(primaryLineForDiscount) ? primaryPrice : 0) +
-    serviceLines.reduce(
-      (sum, l) =>
-        !lineTakesDiscount(l) || l.price === "" || isNaN(parseFloat(l.price))
-          ? sum
-          : sum + parseFloat(l.price),
-      0,
-    );
   // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
   // never more than the lines the discount can reach.
   // A catalog preset's max_discount_dollars caps a percentage the same way
@@ -2949,21 +3098,70 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     !isNaN(Number(selectedDiscountPreset.max_discount_dollars))
       ? Math.max(0, Number(selectedDiscountPreset.max_discount_dollars))
       : null;
-  const manualDiscount =
-    discountType && discountAmount !== ""
-      ? discountType === "percentage"
-        ? Math.min(
-            percentDiscountBase,
-            presetMaxDiscountDollars != null
-              ? Math.min(
-                  presetMaxDiscountDollars,
-                  percentDiscountBase * (Number(discountAmount) / 100),
-                )
-              : percentDiscountBase * (Number(discountAmount) / 100),
-          )
-        : Math.min(percentDiscountBase, Number(discountAmount))
-      : 0;
-  const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
+  // The same stack the server saves (lib/discountStack mirrors
+  // services/discount-stack): each line's own slot, then the appointment
+  // discount on the lines it reaches — fixed credits first, percentages
+  // compounding on what is left.
+  const stackedPreview = stackVisitDiscounts({
+    lines: [
+      {
+        gross: primaryPrice,
+        lineDiscount: primaryLineDiscount,
+        eligible: lineTakesDiscount(primaryLineForDiscount),
+      },
+      ...serviceLines.map((l) => ({
+        gross: l.price !== "" && !isNaN(parseFloat(l.price)) ? parseFloat(l.price) : 0,
+        lineDiscount: l.lineDiscount,
+        eligible: lineTakesDiscount(l),
+      })),
+    ],
+    appointmentDiscount:
+      discountType && discountAmount !== ""
+        ? { discountType, amount: Number(discountAmount), maxDiscountDollars: presetMaxDiscountDollars }
+        : null,
+    compound: stackingEnabled,
+  });
+  const lineDiscountRows = [
+    { name: primaryLineDiscount?.name, dollars: stackedPreview.lines[0].lineDiscountDollars },
+    ...serviceLines.map((l, i) => ({
+      name: l.lineDiscount?.name,
+      dollars: stackedPreview.lines[i + 1].lineDiscountDollars,
+    })),
+  ].filter((row) => row.dollars > 0);
+  const manualDiscount = stackedPreview.appointmentDiscountDollars;
+  const appointmentTotal = stackedPreview.total;
+  // One WaveGuard tier per visit: a tier already on another slot is hidden
+  // here. The same tier may sit on two different lines, but never on a line
+  // AND the appointment slot — that would compound on that line. The server
+  // refuses the combination regardless.
+  const laneRow = (chosen, lane) => {
+    const row = lineDiscountRow(chosen);
+    return row ? { ...row, ...lane } : null;
+  };
+  const lineLaneRows = (exceptKey) => [
+    exceptKey === "primary" ? null : laneRow(primaryLineDiscount, { scope: "primary" }),
+    ...serviceLines.map((l) => (l._key === exceptKey ? null : laneRow(l.lineDiscount, { scope: l._key }))),
+  ].filter(Boolean);
+  const appointmentPresetOptions = stackingEnabled
+    ? stackablePresets(discountPresets, lineLaneRows(null), { spansAll: true })
+    : discountPresets;
+  const lineDiscountOptionsFor = (ownKey) =>
+    stackablePresets(
+      discountPresets,
+      [
+        ...lineLaneRows(ownKey),
+        selectedDiscountPreset ? { ...selectedDiscountPreset, spansAll: true } : null,
+      ].filter(Boolean),
+      { scope: ownKey },
+    );
+  // "Applies to" candidates: lines with a catalog identity, when there is
+  // more than one and the preset is not already service-scoped.
+  const scopeLineOptions = [
+    { key: form.serviceKey, name: form.serviceType },
+    ...serviceLines.map((l) => ({ key: l.serviceKey, name: l.serviceType })),
+  ].filter((o) => o.key && o.name);
+  const showScopeSelect = stackingEnabled
+    && !!selectedDiscountPreset && !presetKeyFilter && scopeLineOptions.length > 1;
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
 
@@ -3043,6 +3241,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     label,
     showStaff = false,
     showSeriesScope = false,
+    lineDiscount = null,
+    onLineDiscount = null,
+    lineDiscountOptions = [],
+    lineDiscountDollars = 0,
   }) => {
     const picking = pickerKey === pickerId;
     return (
@@ -3325,6 +3527,58 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>
             )}
           </div>
+          {onLineDiscount && (
+            <div>
+              <label style={labelStyle}>Line discount</label>
+              {lineDiscount ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, fontSize: 14, color: "#111827", minWidth: 0 }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {lineDiscount.name || "Discount"}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#B42318" }}>
+                      {lineDiscount.discount_type === "percentage"
+                        ? `${Number(lineDiscount.amount)}%`
+                        : `$${Number(lineDiscount.amount || 0).toFixed(2)}`}
+                      {" · "}(${Number(lineDiscountDollars || 0).toFixed(2)})
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onLineDiscount("")}
+                    aria-label="Remove line discount"
+                    className="font-medium"
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 4,
+                      background: "#fff",
+                      color: "#B42318",
+                      border: "1px solid #FCA5A5",
+                      fontSize: 12,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <select
+                  value=""
+                  onChange={(e) => onLineDiscount(e.target.value)}
+                  className="font-medium"
+                  style={inputStyle}
+                  aria-label={`Line discount for ${serviceType || "service"}`}
+                >
+                  <option value="">None</option>
+                  {lineDiscountOptions.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {presetOptionLabel(d)}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -3884,8 +4138,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 showStaff: true,
                 showSeriesScope: priceServiceScopeActive,
                 label: serviceLines.length > 0 ? "Primary service" : null,
+                lineDiscount: primaryLineDiscount,
+                // Same guard as the seed: without a stored GROSS for the
+                // primary line, the Price field is the visit's net and a
+                // slot applied to it would discount an already-net price.
+                onLineDiscount: stackingEnabled && service.primaryLinePrice != null
+                  ? setPrimaryDiscount
+                  : null,
+                lineDiscountOptions: lineDiscountOptionsFor("primary"),
+                lineDiscountDollars: stackedPreview.lines[0].lineDiscountDollars,
               })}
-              {serviceLines.map((line) =>
+              {serviceLines.map((line, idx) =>
                 <div key={line._key}>
                   {renderServiceLine({
                     pickerId: line._key,
@@ -3894,6 +4157,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     price: line.price,
                     onField: (k, v) => updateLine(line._key, k, v),
                     onRemove: () => removeServiceLine(line._key),
+                    lineDiscount: line.lineDiscount,
+                    onLineDiscount: stackingEnabled
+                      ? (presetId) => setLineDiscount(line._key, presetId)
+                      : null,
+                    lineDiscountOptions: lineDiscountOptionsFor(line._key),
+                    lineDiscountDollars: stackedPreview.lines[idx + 1].lineDiscountDollars,
                   })}
                 </div>,
               )}
@@ -4049,7 +4318,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   >
                     {" "}
                     <option value="">None</option>
-                    {discountPresets.map((d) => (
+                    {appointmentPresetOptions.map((d) => (
                       <option key={d.id} value={d.id}>
                         {d.name} -{" "}
                         {d.discount_type === "percentage"
@@ -4060,6 +4329,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <option value="custom">Custom</option>{" "}
                   </select>{" "}
                 </div>
+                {showScopeSelect && (
+                  <div>
+                    <label style={labelStyle}>Applies to</label>
+                    <select
+                      value={discountScopeKey}
+                      onChange={(e) => setDiscountScopeKey(e.target.value)}
+                      className="font-medium"
+                      style={inputStyle}
+                    >
+                      <option value="">Whole appointment</option>
+                      {scopeLineOptions.map((o) => (
+                        <option key={o.key} value={o.key}>
+                          {o.name} only
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 {discountPresetId === "custom" && (
                   <>
                     {" "}
@@ -4123,6 +4410,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   <span>Subtotal</span>
                   <strong>${servicePrice.toFixed(2)}</strong>{" "}
                 </div>
+                {lineDiscountRows.map((row, i) => (
+                  <div
+                    key={`line-discount-${i}`}
+                    style={{
+                      minWidth: 220,
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: 40,
+                      fontSize: 14,
+                      color: "#B42318",
+                    }}
+                  >
+                    <span>{row.name || "Line discount"}</span>
+                    <strong>(${row.dollars.toFixed(2)})</strong>
+                  </div>
+                ))}
                 {manualDiscount > 0 && (
                   <div
                     style={{
@@ -4139,7 +4442,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
-                {discountType === "percentage" &&
+                {isPercentDiscount &&
                   discountAmount !== "" &&
                   !catalogLive && (
                     <div

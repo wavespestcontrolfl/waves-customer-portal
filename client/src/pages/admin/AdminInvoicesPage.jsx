@@ -15,6 +15,8 @@ import {
   buttonStyles,
   cn,
 } from "../../components/ui";
+import { stackDiscounts, stackablePresets } from "../../lib/discountStack";
+import { useDiscountStacking } from "../../hooks/useDiscountStacking";
 // client/src/pages/admin/AdminInvoicesPage.jsx
 //
 // Admin Invoices page — list, search, create, edit, void, refund.
@@ -103,6 +105,85 @@ import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
+// One line item's signed dollars.
+export function invoiceLineAmount(item) {
+  return (
+    Math.round(
+      (Number(item?.quantity) || 1) * (Number(item?.unit_price) || 0) * 100,
+    ) / 100
+  );
+}
+
+// A row the SERVER already resolved (a visit's own stamp, minted with
+// use_stored_discount) — frozen dollars, never recomputed from the catalog.
+function isStoredDiscountRow(item) {
+  return item?.use_stored_discount === true;
+}
+
+// Every discount row's dollars, stacked per parent service line the way
+// InvoiceService totals them (owner ruling 2026-09-11): fixed credits first,
+// then percentages compounding on what is left — never each percentage off
+// the full line. Stored stamps ride the stack frozen and ahead of the rest,
+// so a hand-added discount compounds on what the stamp left. Keyed by the
+// discount row's client_id; stored rows and rows whose parent is missing are
+// left out — the caller keeps their own amount.
+export function invoiceDiscountDollars(lineItems, availableDiscounts, { compound = true } = {}) {
+  const items = Array.isArray(lineItems) ? lineItems : [];
+  const catalog = Array.isArray(availableDiscounts) ? availableDiscounts : [];
+  const dollars = new Map();
+  for (const parent of items.filter((i) => i._kind !== "discount")) {
+    const children = items.filter(
+      (i) => i._kind === "discount" && i.discount_for === parent.client_id,
+    );
+    if (!children.length) continue;
+    const ordered = [
+      ...children.filter(isStoredDiscountRow),
+      ...children.filter((child) => !isStoredDiscountRow(child)),
+    ];
+    const terms = ordered.map((child) => {
+      if (isStoredDiscountRow(child)) {
+        return {
+          discountType: "fixed_amount",
+          amount: child.discount_dollars != null
+            ? Math.abs(Number(child.discount_dollars))
+            : Math.abs(invoiceLineAmount(child)),
+        };
+      }
+      const row = catalog.find(
+        (d) => String(d.id) === String(child.discount_id),
+      );
+      if (!row) {
+        return {
+          discountType: "fixed_amount",
+          amount: Math.abs(invoiceLineAmount(child)),
+        };
+      }
+      return {
+        discountType: row.discount_type,
+        // The operator's entry for a custom preset, then the amount the row
+        // was saved with, then the catalog's own (0 for the custom presets).
+        amount:
+          child.custom_discount_percentage ??
+          child.custom_discount_amount ??
+          child.discount_amount ??
+          Number(row.amount) ??
+          0,
+        maxDiscountDollars: row.max_discount_dollars,
+      };
+    });
+    const stacked = stackDiscounts(
+      Math.max(0, invoiceLineAmount(parent)),
+      terms,
+      { compound },
+    );
+    ordered.forEach((child, i) => {
+      if (isStoredDiscountRow(child)) return;
+      dollars.set(child.client_id, stacked.items[i].dollars);
+    });
+  }
+  return dollars;
+}
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
@@ -5334,6 +5415,9 @@ function CreateInvoice({
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
   const [serviceResults, setServiceResults] = useState([]);
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
+  // Deploy-wide release gate (GATE_DISCOUNT_STACKING); fails closed, so the
+  // builder totals exactly as it did before this lane until it is flipped.
+  const stackingEnabled = useDiscountStacking();
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
@@ -5614,11 +5698,24 @@ function CreateInvoice({
     }
     return null;
   };
+  // One WaveGuard tier per invoice: a tier already on any line hides the
+  // other tiers from every picker (the server refuses the combination
+  // regardless).
+  const chosenDiscountRows = lineItems
+    .filter((i) => i._kind === "discount" && i.discount_id)
+    .map((i) => {
+      const row = availableDiscounts.find((d) => String(d.id) === String(i.discount_id));
+      return row ? { ...row, scope: String(i.discount_for || "") } : null;
+    })
+    .filter(Boolean);
   const matchingDiscounts = (lineIdx) => {
     const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
     const q = (discountQueries[lineKey] || "").trim().toLowerCase();
-    if (!q) return availableDiscounts.slice(0, 10);
-    return availableDiscounts
+    const offered = stackingEnabled
+      ? stackablePresets(availableDiscounts, chosenDiscountRows, { scope: String(lineKey) })
+      : availableDiscounts;
+    if (!q) return offered.slice(0, 10);
+    return offered
       .filter((d) =>
         `${d.name || ""} ${d.description || ""} ${formatDiscountLabel(d)}`
           .toLowerCase()
@@ -5703,20 +5800,35 @@ function CreateInvoice({
     };
     setLineItems(updated);
   };
-  const lineAmount = (item) =>
-    Math.round(
-      (Number(item.quantity) || 1) * (Number(item.unit_price) || 0) * 100,
-    ) / 100;
+  const lineAmount = invoiceLineAmount;
   const serviceLineItems = lineItems.filter((i) => i._kind !== "discount");
   const subtotal = serviceLineItems.reduce(
     (sum, i) => sum + Math.max(0, lineAmount(i)),
     0,
   );
-  const lineDiscountAmt = Math.abs(
-    lineItems
-      .filter((i) => i._kind === "discount")
-      .reduce((sum, i) => sum + Math.min(0, lineAmount(i)), 0),
+  const stackedDiscountDollars = invoiceDiscountDollars(
+    lineItems,
+    availableDiscounts,
+    { compound: stackingEnabled },
   );
+  const discountRowDollars = (item) =>
+    stackedDiscountDollars.has(item.client_id)
+      ? stackedDiscountDollars.get(item.client_id)
+      : Math.abs(Math.min(0, lineAmount(item)));
+  // What a line item posts: a discount row carries its stacked dollars, so
+  // the request matches the preview (the server re-resolves either way).
+  const sendableLineItem = (item) =>
+    item._kind === "discount" && !isStoredDiscountRow(item)
+      ? {
+          ...item,
+          quantity: 1,
+          unit_price: -discountRowDollars(item),
+          amount: -discountRowDollars(item),
+        }
+      : { ...item, amount: lineAmount(item) };
+  const lineDiscountAmt = lineItems
+    .filter((i) => i._kind === "discount")
+    .reduce((sum, i) => sum + discountRowDollars(i), 0);
 
   // Mirror server discount-engine math so the preview matches stored totals.
   const previewDiscount = (disc, baseAmount) => {
@@ -5940,10 +6052,7 @@ function CreateInvoice({
         serviceDate,
         lineItems: lineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
-          .map((i) => ({
-            ...i,
-            amount: lineAmount(i),
-          })),
+          .map(sendableLineItem),
         notes: notes || null,
         emailMessage: emailMessage || null,
         dueDate,
@@ -6105,10 +6214,7 @@ function CreateInvoice({
       if (JSON.stringify(lineItems) !== editLineItemsBaselineRef.current) {
         body.line_items = lineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
-          .map((i) => ({
-            ...i,
-            amount: lineAmount(i),
-          }));
+          .map(sendableLineItem);
       }
       const saved = await adminFetch(`/admin/invoices/${editInvoice.id}`, {
         method: "PUT",
@@ -6920,7 +7026,11 @@ function CreateInvoice({
                 >
                   <Input
                     type="number"
-                    value={item.unit_price || ""}
+                    value={
+                      item._kind === "discount"
+                        ? -discountRowDollars(item) || ""
+                        : item.unit_price || ""
+                    }
                     onChange={(e) =>
                       updateLineItem(i, "unit_price", e.target.value)
                     }
@@ -7703,7 +7813,12 @@ function CreateInvoice({
           {lineItems
             .filter((i) => i.description)
             .map((item, i) => {
-              const amount = lineAmount(item);
+              // Discount rows show their STACKED dollars (the number the
+              // server will store), not the add-time snapshot.
+              const amount =
+                item._kind === "discount"
+                  ? -discountRowDollars(item)
+                  : lineAmount(item);
               return (
                 <div
                   key={item.client_id || i}

@@ -10,6 +10,7 @@
 //   Custom D: { kind: 'custom_discount', discount_type, amount }
 
 import { useEffect, useState } from 'react';
+import { stackablePresets } from '../../lib/discountStack';
 import { X, Tag, Gift, Star, DollarSign } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -38,7 +39,7 @@ function formatAmount(d) {
 }
 
 export default function MobileItemDiscountPickerSheet({
-  desktopVisible = false, onClose, onSelect }) {
+  desktopVisible = false, onClose, onSelect, chosenDiscounts = [] }) {
   const [discounts, setDiscounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
@@ -71,10 +72,17 @@ export default function MobileItemDiscountPickerSheet({
   };
 
   const q = query.trim().toLowerCase();
-  const activeDiscounts = discounts
-    .filter((d) => d.is_active !== false)
-    .filter((d) => d.show_in_invoices !== false)
-    .filter((d) => !q || (d.name || '').toLowerCase().includes(q));
+  // One WaveGuard tier per checkout: a tier already on the sheet hides the
+  // other tiers here (the mint endpoint refuses the combination regardless).
+  const chosenRows = chosenDiscounts
+    .map((c) => discounts.find((d) => String(d.id) === String(c.discount_id)) || c)
+    .filter(Boolean);
+  const activeDiscounts = stackablePresets(
+    discounts
+      .filter((d) => d.is_active !== false)
+      .filter((d) => d.show_in_invoices !== false),
+    chosenRows,
+  ).filter((d) => !q || (d.name || '').toLowerCase().includes(q));
 
   const QuickRow = ({ icon, label, onClick, disabled }) => (
     <button

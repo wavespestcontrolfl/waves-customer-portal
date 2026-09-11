@@ -38,6 +38,8 @@ import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
+import { stackVisitDiscounts, stackablePresets } from '../../lib/discountStack';
+import { useDiscountStacking } from '../../hooks/useDiscountStacking';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -634,8 +636,17 @@ export function appointmentGroupRequestBody({
   groupSubtotal, groupDuration, linkedEstimate,
   propertyPickerActive, selectedPropertyId,
   customerNotes, internalNotes,
+  // The appointment-level discount slot (a catalog preset, custom amount
+  // already resolved) and its "Applies to" service key; absent → no slot.
+  appointmentDiscount, appointmentDiscountScopeKey,
 }) {
   return {
+    ...(appointmentDiscount ? {
+      discountId: appointmentDiscount.id,
+      discountType: appointmentDiscount.discount_type,
+      discountAmount: appointmentDiscount.amount,
+      discountServiceKeyFilter: appointmentDiscountScopeKey || undefined,
+    } : {}),
     ...(separateProgram?.key === key ? {
       allowDuplicateSeries: true,
       duplicateSeriesOverride: {
@@ -1297,6 +1308,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
+  // Appointment-level discount slot (on top of each line's own slot) and
+  // the line it applies to ("" = every line of the appointment). Behind the
+  // deploy-wide release gate; fails closed to the pre-lane modal.
+  const stackingEnabled = useDiscountStacking();
+  const [appointmentDiscountState, setAppointmentDiscount] = useState(null);
+  const [percentExcludedKeys, setPercentExcludedKeys] = useState(null);
+  const appointmentDiscount = stackingEnabled ? appointmentDiscountState : null;
+  const [appointmentDiscountScopeKey, setAppointmentDiscountScopeKey] = useState('');
   // Booster-months dropdown (owner request 2026-08-02): which service line's
   // month checklist is open. One open at a time, like the discount popover.
   // Keyed by STABLE lineId, never array index (Codex #3173 r2): removing an
@@ -1599,15 +1618,77 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
   );
   const lineEffectiveNetAmount = (svc) => Math.max(0, Math.round((lineEffectiveBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
+  // Catalog row (stack group, cap) behind a chosen slot.
+  const presetRowFor = (chosen) => (chosen
+    ? { ...(discountPresets.find((d) => String(d.id) === String(chosen.id)) || {}), ...chosen }
+    : null);
+  // One WaveGuard tier per appointment: a tier already on another slot is
+  // hidden here — the same tier may sit on two different lines, but never on
+  // a line AND the appointment slot, which would compound on that line. The
+  // server refuses the combination regardless.
+  const laneRow = (chosen, lane) => {
+    const row = presetRowFor(chosen);
+    return row ? { ...row, ...lane } : null;
+  };
+  const presetsStackableWith = (chosenRows, lane) => (stackingEnabled
+    ? stackablePresets(lineDiscountPresets, chosenRows.filter(Boolean), lane)
+    : lineDiscountPresets);
+  const lineLaneRows = (exceptIdx) => services
+    .map((svc, i) => (i === exceptIdx ? null : laneRow(svc.lineDiscount, { scope: `line:${i}` })))
+    .filter(Boolean);
   const matchingLineDiscounts = (idx) => {
     const svc = services[idx];
     const key = svc?.lineId || idx;
     const q = (lineDiscountQueries[key] || '').trim().toLowerCase();
-    if (!q) return lineDiscountPresets.slice(0, 10);
-    return lineDiscountPresets
+    const offered = presetsStackableWith([
+      ...lineLaneRows(idx),
+      laneRow(appointmentDiscount, { spansAll: true }),
+    ], { scope: `line:${idx}` });
+    if (!q) return offered.slice(0, 10);
+    return offered
       .filter((d) => `${d.name || ''} ${d.description || ''} ${formatDiscountLabel(d)}`.toLowerCase().includes(q))
       .slice(0, 10);
   };
+  const appointmentDiscountOptions = presetsStackableWith(lineLaneRows(-1), { spansAll: true })
+    .filter((d) => d.discount_type === 'percentage' || d.discount_type === 'fixed_amount');
+  // A custom preset takes the operator's amount, like a line pick.
+  const pickAppointmentDiscount = (presetId) => {
+    if (!presetId) { setAppointmentDiscount(null); return; }
+    const discount = discountPresets.find((d) => String(d.id) === String(presetId));
+    if (!discount) return;
+    let amount = discount.amount;
+    if (isCustomAmountDiscount(discount)) {
+      const raw = window.prompt(`Discount amount for ${discount.name} ($)`, '');
+      if (raw === null) return;
+      amount = Math.round((Number(raw) || 0) * 100) / 100;
+      if (!(amount > 0)) return;
+    } else if (isCustomPercentageDiscount(discount)) {
+      const raw = window.prompt(`Discount percentage for ${discount.name} (%)`, '');
+      if (raw === null) return;
+      amount = Number(raw);
+      if (!Number.isFinite(amount) || amount <= 0 || amount > 100) return;
+    }
+    setAppointmentDiscount({
+      id: discount.id,
+      name: discount.name,
+      discount_type: discount.discount_type,
+      amount,
+      max_discount_dollars: discount.max_discount_dollars,
+      service_key_filter: discount.service_key_filter || null,
+      service_category_filter: discount.service_category_filter || null,
+    });
+  };
+  const lineServiceKey = (svc) => (svc?.service_key ?? svc?.serviceKey) || null;
+  // A booking splits into one appointment per cadence group, and an
+  // appointment-level discount belongs to exactly ONE of them — the group
+  // holding its "Applies to" line, else the first. Attaching it to every
+  // group would apply the whole discount on each separate visit.
+  const appointmentScopeOptions = services
+    .map((svc) => ({ key: lineServiceKey(svc), name: svc.name }))
+    .filter((o) => o.key && o.name);
+  const showAppointmentScope = !!appointmentDiscount
+    && !appointmentDiscount.service_key_filter
+    && appointmentScopeOptions.length > 1;
   const applyLineDiscount = (idx, discount) => {
     const base = lineEffectiveBaseAmount(services[idx]);
     if (base <= 0) {
@@ -1675,6 +1756,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const netSubtotal = useMemo(() => {
     return services.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
   }, [services, selectedCustomer, mosquitoQuote]);
+  // The appointment-level slot previewed the way the server stacks it
+  // (fixed credits first, percentages compounding on what is left).
+  // What each line's own discount takes once the appointment slot is in the
+  // stack — the chips and the header figure must not show pre-stack dollars.
   const totalDuration = useMemo(() => {
     if (services.length === 0) return defaultDurationMinutes || 60;
     return services.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
@@ -1689,6 +1774,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (r.technicians) setTechs(r.technicians);
         else if (Array.isArray(r)) setTechs(r);
       } catch { /* techs not critical */ }
+    })();
+    (async () => {
+      try {
+        // Which catalog keys never take a PERCENTAGE discount (termite bond,
+        // palm injection, ...). Same source the Edit appointment modal uses;
+        // the server re-derives it on save either way.
+        const r = await adminFetch('/admin/schedule/services-dropdown');
+        const keys = new Set();
+        for (const group of Array.isArray(r) ? r : (r?.groups || [])) {
+          for (const item of group?.items || []) {
+            if (item?.serviceKey && item.excludedFromPercentDiscount === true) keys.add(item.serviceKey);
+          }
+        }
+        setPercentExcludedKeys(keys);
+      } catch { /* the server still applies the live rule on save */ }
     })();
     (async () => {
       try {
@@ -1983,6 +2083,56 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     });
     return groups.filter(Boolean);
   };
+
+  // Placed AFTER the cadence-grouping helpers below: these read them
+  // during render, so they must not run before those consts initialize.
+  const appointmentDiscountGroup = (() => {
+    if (!appointmentDiscount || services.length === 0) return null;
+    const groups = groupServicesForAppointmentSubmit(services);
+    const key = appointmentDiscount.service_key_filter || appointmentDiscountScopeKey || null;
+    const target = key
+      ? groups.find((group) => group.lines.some((svc) => lineServiceKey(svc) === key))
+      : groups[0];
+    return target ? { key: groupKey(target), lines: target.lines, split: groups.length > 1 } : null;
+  })();
+  const appointmentDiscountReaches = (svc) => {
+    if (!appointmentDiscount) return false;
+    // Only the group this discount actually rides.
+    if (appointmentDiscountGroup && !appointmentDiscountGroup.lines.includes(svc)) return false;
+    const key = appointmentDiscount.service_key_filter || appointmentDiscountScopeKey || null;
+    if (key && key !== lineServiceKey(svc)) return false;
+    if (appointmentDiscount.service_category_filter && appointmentDiscount.service_category_filter !== (svc?.category || svc?.serviceCategory || null)) return false;
+    // A percentage never reaches a percent-excluded line (termite bond,
+    // palm injection, ...). An unknown catalog (the fetch failed) withholds
+    // the line rather than previewing dollars the server will refuse —
+    // same conservative rule the Edit appointment modal applies.
+    if (appointmentDiscount.discount_type === 'percentage' || appointmentDiscount.discount_type === 'variable_percentage') {
+      if (percentExcludedKeys === null) return false;
+      if (percentExcludedKeys.has(lineServiceKey(svc))) return false;
+    }
+    return true;
+  };
+  const appointmentDiscountPreview = useMemo(() => {
+    if (!appointmentDiscount) return { dollars: 0, total: netSubtotal, lines: null };
+    const stacked = stackVisitDiscounts({
+      lines: services.map((s) => ({
+        gross: lineEffectiveBaseAmount(s),
+        lineDiscount: s.lineDiscount,
+        eligible: appointmentDiscountReaches(s),
+      })),
+      appointmentDiscount,
+      compound: stackingEnabled,
+    });
+    return { dollars: stacked.appointmentDiscountDollars, total: stacked.total, lines: stacked.lines };
+  }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, appointmentDiscountScopeKey, netSubtotal, stackingEnabled, percentExcludedKeys]);
+  const stackedLineDiscountAmount = (svc) => {
+    const i = services.indexOf(svc);
+    const restated = appointmentDiscountPreview.lines?.[i];
+    return restated ? restated.lineDiscountDollars : lineDiscountAmount(svc);
+  };
+  const stackedLineDiscountTotal = appointmentDiscountPreview.lines
+    ? appointmentDiscountPreview.lines.reduce((sum, l) => sum + l.lineDiscountDollars, 0)
+    : lineDiscountTotal;
 
   // Tracks cadence-group keys already POSTed during this modal session.
   // If the loop fails partway (e.g. quarterly succeeded, monthly errored),
@@ -2310,6 +2460,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             selectedPropertyId,
             customerNotes,
             internalNotes,
+            // The appointment slot rides every group, or only the group
+            // carrying its "Applies to" line.
+            appointmentDiscount: appointmentDiscountGroup?.key === key
+              ? appointmentDiscount
+              : undefined,
+            appointmentDiscountScopeKey,
           }),
           // Only the FIRST created group of a booking asks for the customer
           // confirmation text and carries the card-link flag — a split
@@ -2849,10 +3005,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             </div>
             {services.length > 0 && subtotal > 0 && (
               <div style={{ fontSize: 13, fontWeight: 500, color: '#18181B', textAlign: 'right' }}>
-                <div>Total: ${netSubtotal.toFixed(2)}</div>
-                {lineDiscountTotal > 0 && (
+                <div>Total: ${appointmentDiscountPreview.total.toFixed(2)}</div>
+                {(stackedLineDiscountTotal > 0 || appointmentDiscountPreview.dollars > 0) && (
                   <div style={{ fontSize: 11, fontWeight: 500, color: D.muted }}>
-                    Discounts: -${lineDiscountTotal.toFixed(2)}
+                    Discounts: -${(stackedLineDiscountTotal + appointmentDiscountPreview.dollars).toFixed(2)}
                   </div>
                 )}
               </div>
@@ -3332,7 +3488,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     </div>
                   </div>
                   <div style={{ fontFamily: ROBOTO_STACK, fontSize: 13, fontWeight: 500, color: D.text, textAlign: isMobile ? 'left' : 'right', whiteSpace: 'nowrap' }}>
-                    -${lineDiscountAmount(svc).toFixed(2)}
+                    -${stackedLineDiscountAmount(svc).toFixed(2)}
                   </div>
                   <div />
                   <button
@@ -3425,6 +3581,52 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 letterSpacing: 0.4,
               }}
             >+ Add service</button>
+          )}
+
+          {/* Appointment-level discount — stacks on top of the line
+              discounts above (one WaveGuard tier per appointment). */}
+          {stackingEnabled && services.length > 0 && lineDiscountPresets.length > 0 && (
+            <div style={{ borderTop: `1px solid ${D.border}`, marginTop: 12, paddingTop: 12, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={labelStyle}>Appointment discount</label>
+                <select
+                  value={appointmentDiscount?.id || ''}
+                  onChange={(e) => pickAppointmentDiscount(e.target.value)}
+                  style={inputStyle}
+                >
+                  <option value="">None</option>
+                  {appointmentDiscountOptions.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name} - {formatDiscountLabel(d)}</option>
+                  ))}
+                </select>
+                {appointmentDiscountPreview.dollars > 0 && (
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    {appointmentDiscount.name}: -${appointmentDiscountPreview.dollars.toFixed(2)}
+                  </div>
+                )}
+                {appointmentDiscountGroup?.split && (
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    These cadences book as separate appointments — this discount
+                    applies to {appointmentDiscountGroup.lines.map((svc) => svc.name).join(' + ')} only.
+                  </div>
+                )}
+              </div>
+              {showAppointmentScope && (
+                <div>
+                  <label style={labelStyle}>Applies to</label>
+                  <select
+                    value={appointmentDiscountScopeKey}
+                    onChange={(e) => setAppointmentDiscountScopeKey(e.target.value)}
+                    style={inputStyle}
+                  >
+                    <option value="">Whole appointment</option>
+                    {appointmentScopeOptions.map((o) => (
+                      <option key={o.key} value={o.key}>{o.name} only</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
           )}
 
           {/* Visit count — applies to every recurring cadence group on
