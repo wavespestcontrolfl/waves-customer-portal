@@ -1295,7 +1295,7 @@ export function ComposeView({
                 }}
                 className={INPUT_CLS}
                 placeholder="e.g. Florida spring pest alert — what to watch for"
-                aria-label="A/B test a second subject (random 50/50 split)"
+                aria-label="Newsletter subject"
               />{" "}
               <label className="mt-2 inline-flex items-center gap-2 text-ui-body text-ink-secondary">
                 {" "}
@@ -1657,7 +1657,6 @@ export function ComposeView({
                       className=""
                       title="One-click cross-sell segment"
                       variant="secondary"
-                      aria-label="One-click cross-sell segment"
                     >
                       {p.label}
                     </Button>
