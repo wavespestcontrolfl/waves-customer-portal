@@ -123,6 +123,13 @@ describe('catalogLinkForProfile — table SHARE lock replaces catalog row locks'
 });
 
 describe('lock order: catalog SHARE lock precedes scheduled_services row locks (codex #4369 r3)', () => {
+  test('commitReservation maps an early-lock failure to catalog_unavailable instead of surfacing 55P03 (pre-push codex P1)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
+    const early = src.indexOf('preRow.reservation_policy_version === 2) {');
+    const block = src.slice(early, src.indexOf('acquireScheduledInvoiceMintLock', early));
+    expect(block).toMatch(/try \{\s+await require\('\.\/scheduling\/catalog-lock'\)\.lockCatalogIdentity\(client\);\s+\} catch \(err\) \{\s+throw Object\.assign\(capacityError\('catalog_unavailable'\), \{ cause: err \}\);/);
+  });
+
   test('commitReservation takes it after the day fences and before its hold row FOR UPDATE', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
     const start = src.indexOf('async function commitReservation(');

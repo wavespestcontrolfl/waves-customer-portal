@@ -1405,7 +1405,15 @@ async function commitReservation({
     // ABBA-deadlock against one that targets this visit. Same condition
     // the resolver uses to lock at all; re-issued there as a no-op.
     if (capacityEnabled() || preRow.reservation_policy_version === 2) {
-      await require('./scheduling/catalog-lock').lockCatalogIdentity(client);
+      // Same error contract as the resolver's savepoint: a lock_timeout
+      // behind a catalog write or migration is a recoverable
+      // catalog_unavailable (409 slot recovery), never a raw 55P03 that the
+      // accept route would surface as a 500 (pre-push codex P1).
+      try {
+        await require('./scheduling/catalog-lock').lockCatalogIdentity(client);
+      } catch (err) {
+        throw Object.assign(capacityError('catalog_unavailable'), { cause: err });
+      }
     }
 
     // Canonical order with the scheduled-invoice writers (PR #3476 r21
