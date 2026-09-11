@@ -141,7 +141,12 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // clean-run resolve for one key serialize — never "deduped onto a row that
 // is being resolved" nor "fresh failure resolved by the clean run" (codex
 // P1 r6 on #4392). Without it the update runs on the shared connection.
-async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null } = {}) {
+// `notAfter`: the clean observation's timestamp. Only rows whose own
+// observation (metadata.observedAt, else created_at) is not newer than it
+// retire — the advisory lock serializes requests, not observations, so a
+// later failure whose ingest won the lock first must survive an earlier
+// clean run's resolve (codex P1 r7 on #4392).
+async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null, notAfter = null } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
   const db = require('../models/db');
@@ -152,6 +157,7 @@ async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', 
       .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
     if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
+    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
     return q.update({
       read_at: conn.raw('COALESCE(read_at, NOW())'),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never

@@ -87,3 +87,10 @@ test('no lockKey: no transaction, no lock', async () => {
   expect(mockTrxRaw).not.toHaveBeenCalled();
 });
 
+test('notAfter: only rows observed at or before the clean run retire (metadata.observedAt, else created_at)', async () => {
+  const q = chain(1);
+  mockDb.mockReturnValue(q);
+  await resolveOpsDigest({ key: 'k', source: 'ops-crons', notAfter: '2026-09-11T11:10:00.000Z' });
+  expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
+});
+
