@@ -2178,10 +2178,15 @@ export function ProductsTab({
   useEffect(() => {
     let cancelled = false;
     setLabelPipelineEnabled(false);
-    if (canAuthor) adminFetch("/admin/inventory/label-pipeline")
-      .then((data) => { if (!cancelled) setLabelPipelineEnabled(data.enabled === true); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    if (canAuthor)
+      adminFetch("/admin/inventory/label-pipeline")
+        .then((data) => {
+          if (!cancelled) setLabelPipelineEnabled(data.enabled === true);
+        })
+        .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [canAuthor]);
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -2207,7 +2212,6 @@ export function ProductsTab({
   const [page, setPage] = useState(1);
   const [totalProducts, setTotalProducts] = useState(0);
   const PER_PAGE = 50;
-
   const load = useCallback(async () => {
     const needsPricingParam =
       filter === "needs_price"
@@ -2224,7 +2228,9 @@ export function ProductsTab({
         // Vendors are owner-only under the role lockdown — a technician's
         // Products load must not hang on that 403 (codex P1). Empty vendor
         // list just hides per-vendor pricing affordances they can't use.
-        adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
+        adminFetch("/admin/inventory/vendors").catch(() => ({
+          vendors: [],
+        })),
       ]);
       setProducts(pData.products || []);
       setCategories(pData.categories || []);
@@ -2239,11 +2245,9 @@ export function ProductsTab({
       setLoading(false);
     }
   }, [search, catFilter, page, filter]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const savePrice = async (productId, vendorId, price, quantity) => {
     try {
       await adminFetch(`/admin/inventory/${productId}/pricing`, {
@@ -2262,7 +2266,6 @@ export function ProductsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-
   const startEdit = (p, e) => {
     e && e.stopPropagation();
     setEditing(p.id);
@@ -2279,7 +2282,6 @@ export function ProductsTab({
       lowStockThreshold: p.lowStockThreshold ?? "",
     });
   };
-
   const saveEdit = async (id) => {
     try {
       await adminFetch(`/admin/inventory/${id}`, {
@@ -2293,14 +2295,12 @@ export function ProductsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-
   if (loadError)
     return (
-      <div role="alert" style={{ color: D.red, padding: 40, textAlign: "center" }}>
+      <ActionFeedback error>
         Failed to load products: {loadError}{" "}
-        <button
+        <Button
           type="button"
-          style={{ ...sBtn(D.teal, D.white), marginLeft: 8 }}
           onClick={() => {
             // Clear the error first so the loading branch renders during the
             // retry; leaving it up allowed repeated clicks and overlapping loads.
@@ -2308,78 +2308,68 @@ export function ProductsTab({
             setLoading(true);
             load();
           }}
+          variant="primary"
+          className="ml-[8px]"
         >
           Retry
-        </button>
-      </div>
+        </Button>
+      </ActionFeedback>
     );
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading products...
-      </div>
-    );
-
+  if (loading) return <ActionFeedback>Loading products…</ActionFeedback>;
   return (
     <div>
       {" "}
-      <div
-        style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}
-      >
+      <div className="flex gap-[6px] mb-[12px] flex-wrap">
         {[
-          { key: "all", label: "All Products" },
-          { key: "priced", label: "Priced" },
-          { key: "needs_price", label: "Needs Price" },
-          { key: "low_stock", label: "Low Stock" },
+          {
+            key: "all",
+            label: "All Products",
+          },
+          {
+            key: "priced",
+            label: "Priced",
+          },
+          {
+            key: "needs_price",
+            label: "Needs Price",
+          },
+          {
+            key: "low_stock",
+            label: "Low Stock",
+          },
         ].map((f) => (
-          <button
+          <Button
             key={f.key}
             onClick={() => {
               onFilterChange?.(f.key);
               setPage(1);
             }}
-            style={{
-              minHeight: 40,
-              padding: "6px 14px",
-              borderRadius: 20,
-              border: "none",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: filter === f.key ? D.teal : D.card,
-              color: filter === f.key ? D.white : D.muted,
-            }}
+            variant={filter === f.key ? "primary" : "secondary"}
           >
             {f.label}
-          </button>
+          </Button>
         ))}
       </div>{" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          marginBottom: 12,
-          flexWrap: "wrap",
-          alignItems: "center",
-        }}
-      >
+      <div className="flex gap-[8px] mb-[12px] flex-wrap items-center">
         {" "}
-        <input
+        <Input
+          aria-label="Search products"
           value={search}
           onChange={(e) => {
             setSearch(e.target.value);
             setPage(1);
           }}
           placeholder="Search products..."
-          style={{ ...sInput, flex: 1, minWidth: 200 }}
+          className="flex-[1] min-w-[200px]"
         />{" "}
-        <select
+        <Select
+          aria-label="Product category"
           value={catFilter}
           onChange={(e) => {
             setCatFilter(e.target.value);
             setPage(1);
           }}
-          style={{ ...sInput, cursor: "pointer", minWidth: 150 }}
+          className="min-w-[150px]"
         >
           {" "}
           <option value="">All Categories</option>
@@ -2388,141 +2378,133 @@ export function ProductsTab({
               {c.name} ({c.count})
             </option>
           ))}
-        </select>{" "}
+        </Select>{" "}
       </div>
       {canAuthor && showAddForm && (
-        <div
-          style={{
-            background: D.card,
-            borderRadius: 10,
-            padding: 16,
-            border: `1px solid ${D.green}44`,
-            marginBottom: 16,
-          }}
-        >
+        <Card className="p-4 mb-[16px]">
           {" "}
-          <div
-            style={{
-              fontSize: 13,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 mb-[10px]">
             New Product
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 8,
-              marginBottom: 10,
-            }}
-          >
+          <div className="grid gap-3 mb-[10px] md:grid-cols-3">
             {" "}
-            <input
-              value={newProduct.name}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, name: e.target.value }))
-              }
-              placeholder="Product name *"
-              style={sInput}
-            />{" "}
-            <input
-              value={newProduct.category}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, category: e.target.value }))
-              }
-              placeholder="Category"
-              style={sInput}
-            />{" "}
-            <input
-              value={newProduct.activeIngredient}
-              onChange={(e) =>
-                setNewProduct((p) => ({
-                  ...p,
-                  activeIngredient: e.target.value,
-                }))
-              }
-              placeholder="Active ingredient"
-              style={sInput}
-            />{" "}
+            <Field label="Product name" required>
+              <Input
+                value={newProduct.name}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    name: e.target.value,
+                  }))
+                }
+                placeholder="Product name"
+              />
+            </Field>{" "}
+            <Field label="Category">
+              <Input
+                value={newProduct.category}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    category: e.target.value,
+                  }))
+                }
+                placeholder="Category"
+              />
+            </Field>{" "}
+            <Field label="Active ingredient">
+              <Input
+                value={newProduct.activeIngredient}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    activeIngredient: e.target.value,
+                  }))
+                }
+                placeholder="Active ingredient"
+              />
+            </Field>{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 8,
-            }}
-          >
+          <div className="grid gap-3 md:grid-cols-3">
             {" "}
-            <input
-              value={newProduct.moaGroup}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, moaGroup: e.target.value }))
-              }
-              placeholder="MOA/FRAC group"
-              style={sInput}
-            />{" "}
-            <select
-              value={newProduct.defaultUnit}
-              onChange={(e) =>
-                setNewProduct((p) => ({ ...p, defaultUnit: e.target.value }))
-              }
-              style={sInput}
-            >
+            <Field label="MOA/FRAC group">
+              <Input
+                value={newProduct.moaGroup}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    moaGroup: e.target.value,
+                  }))
+                }
+                placeholder="MOA/FRAC group"
+              />
+            </Field>{" "}
+            <Field label="Default unit">
+              <Select
+                value={newProduct.defaultUnit}
+                onChange={(e) =>
+                  setNewProduct((p) => ({
+                    ...p,
+                    defaultUnit: e.target.value,
+                  }))
+                }
+              >
+                {" "}
+                <option value="oz">oz</option>
+                <option value="ml">ml</option>
+                <option value="gal">gal</option>
+                <option value="lb">lb</option>
+                <option value="g">g</option>
+                <option value="each">each</option>{" "}
+              </Select>
+            </Field>{" "}
+            <div className="grid grid-cols-3 gap-2">
               {" "}
-              <option value="oz">oz</option>
-              <option value="ml">ml</option>
-              <option value="gal">gal</option>
-              <option value="lb">lb</option>
-              <option value="g">g</option>
-              <option value="each">each</option>{" "}
-            </select>{" "}
-            <div style={{ display: "flex", gap: 6 }}>
-              {" "}
-              <input
-                value={newProduct.inventoryOnHand}
-                onChange={(e) =>
-                  setNewProduct((p) => ({
-                    ...p,
-                    inventoryOnHand: e.target.value,
-                  }))
-                }
-                type="number"
-                step="0.0001"
-                placeholder="Stock"
-                style={{ ...sInput, width: "100%" }}
-              />{" "}
-              <input
-                value={newProduct.inventoryUnit}
-                onChange={(e) =>
-                  setNewProduct((p) => ({
-                    ...p,
-                    inventoryUnit: e.target.value,
-                  }))
-                }
-                placeholder="unit"
-                style={{ ...sInput, width: 70 }}
-              />{" "}
-              <input
-                value={newProduct.lowStockThreshold}
-                onChange={(e) =>
-                  setNewProduct((p) => ({
-                    ...p,
-                    lowStockThreshold: e.target.value,
-                  }))
-                }
-                type="number"
-                step="0.0001"
-                placeholder="low"
-                style={{ ...sInput, width: 70 }}
-              />{" "}
+              <Field label="Stock">
+                <Input
+                  value={newProduct.inventoryOnHand}
+                  onChange={(e) =>
+                    setNewProduct((p) => ({
+                      ...p,
+                      inventoryOnHand: e.target.value,
+                    }))
+                  }
+                  type="number"
+                  step="0.0001"
+                  placeholder="Stock"
+                />
+              </Field>{" "}
+              <Field label="Unit">
+                <Input
+                  value={newProduct.inventoryUnit}
+                  onChange={(e) =>
+                    setNewProduct((p) => ({
+                      ...p,
+                      inventoryUnit: e.target.value,
+                    }))
+                  }
+                  placeholder="unit"
+                />
+              </Field>{" "}
+              <Field label="Low at">
+                <Input
+                  value={newProduct.lowStockThreshold}
+                  onChange={(e) =>
+                    setNewProduct((p) => ({
+                      ...p,
+                      lowStockThreshold: e.target.value,
+                    }))
+                  }
+                  type="number"
+                  step="0.0001"
+                  placeholder="low"
+                />
+              </Field>{" "}
             </div>{" "}
           </div>{" "}
-          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          <div className="flex gap-[6px] mt-[8px]">
             {" "}
-            <button
+            <Button
               onClick={async () => {
                 if (!newProduct.name.trim()) {
                   showToast("Product name required");
@@ -2550,42 +2532,22 @@ export function ProductsTab({
                   showToast("Failed: " + e.message);
                 }
               }}
-              style={{
-                flex: 1,
-                padding: "10px",
-                borderRadius: 8,
-                border: "none",
-                background: D.green,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: "pointer",
-              }}
+              variant="primary"
+              className="flex-[1]"
             >
               Save
-            </button>{" "}
-            <button
-              onClick={() => setShowAddForm(false)}
-              style={{
-                padding: "10px 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: "none",
-                color: D.muted,
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
+            </Button>{" "}
+            <Button onClick={() => setShowAddForm(false)} variant="secondary">
               Cancel
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
-        </div>
+        </Card>
       )}
-      <div style={{ overflowX: "auto" }}>
+      <div className="overflow-x-auto">
         {" "}
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
+        <Table className="w-full min-w-[1120px]">
+          <THead>
+            <TR>
               {[
                 "Product",
                 "Category",
@@ -2599,48 +2561,41 @@ export function ProductsTab({
                 "Status",
                 "",
               ].map((h) => (
-                <th key={h} style={thS}>
-                  {h}
-                </th>
+                <TH key={h}>{h}</TH>
               ))}
-            </tr>
-          </thead>
-          <tbody>
+            </TR>
+          </THead>
+          <TBody>
             {products.map((p) => {
               const isEditing = editing === p.id;
               const isExpanded = expanded === p.id && !isEditing;
               return [
-                <tr
+                <TR
                   key={p.id}
                   onClick={() =>
                     !isEditing && setExpanded(expanded === p.id ? null : p.id)
                   }
-                  style={{
-                    cursor: isEditing ? "default" : "pointer",
-                    background: isEditing
-                      ? `${D.teal}10`
-                      : isExpanded
-                        ? `${D.teal}08`
-                        : "transparent",
-                  }}
                 >
-                  <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
+                  <TD className="font-medium text-zinc-900">
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.name}
                         onChange={(e) =>
-                          setEditForm((f) => ({ ...f, name: e.target.value }))
+                          setEditForm((f) => ({
+                            ...f,
+                            name: e.target.value,
+                          }))
                         }
-                        style={{ ...sInput, width: "100%", fontWeight: 500 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-full"
                       />
                     ) : (
                       p.name
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.category}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2648,18 +2603,16 @@ export function ProductsTab({
                             category: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: 100 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-[100px]"
                       />
                     ) : (
-                      <span style={sBadge(`${D.teal}22`, D.teal)}>
-                        {p.category}
-                      </span>
+                      <Badge tone="neutral">{p.category}</Badge>
                     )}
-                  </td>
-                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
+                  </TD>
+                  <TD className="text-ink-secondary">
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.activeIngredient}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2667,16 +2620,16 @@ export function ProductsTab({
                             activeIngredient: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: "100%" }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-full"
                       />
                     ) : (
                       p.activeIngredient || "—"
                     )}
-                  </td>
-                  <td style={{ ...tdS, color: D.muted, fontSize: 11 }}>
+                  </TD>
+                  <TD className="text-ink-secondary">
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.moaGroup}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2684,16 +2637,16 @@ export function ProductsTab({
                             moaGroup: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: 80 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-[80px]"
                       />
                     ) : (
                       p.moaGroup || "—"
                     )}
-                  </td>
-                  <td style={{ ...tdS, fontSize: 12 }}>
+                  </TD>
+                  <TD>
                     {isEditing ? (
-                      <input
+                      <Input
                         value={editForm.containerSize}
                         onChange={(e) =>
                           setEditForm((f) => ({
@@ -2701,21 +2654,21 @@ export function ProductsTab({
                             containerSize: e.target.value,
                           }))
                         }
-                        style={{ ...sInput, width: 80 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="w-[80px]"
                       />
                     ) : (
                       p.containerSize || "—"
                     )}
-                  </td>
-                  <td style={{ ...tdS, fontSize: 12 }}>
+                  </TD>
+                  <TD>
                     {isEditing ? (
                       <div
-                        style={{ display: "flex", gap: 4 }}
                         onClick={(e) => e.stopPropagation()}
+                        className="flex gap-[4px]"
                       >
                         {" "}
-                        <input
+                        <Input
                           value={editForm.inventoryOnHand}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -2726,9 +2679,9 @@ export function ProductsTab({
                           type="number"
                           step="0.0001"
                           placeholder="Stock"
-                          style={{ ...sInput, width: 76 }}
+                          className="w-[76px]"
                         />{" "}
-                        <input
+                        <Input
                           value={editForm.inventoryUnit}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -2737,9 +2690,9 @@ export function ProductsTab({
                             }))
                           }
                           placeholder="unit"
-                          style={{ ...sInput, width: 56 }}
+                          className="w-[56px]"
                         />{" "}
-                        <input
+                        <Input
                           value={editForm.lowStockThreshold}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -2750,196 +2703,114 @@ export function ProductsTab({
                           type="number"
                           step="0.0001"
                           placeholder="low"
-                          style={{ ...sInput, width: 66 }}
+                          className="w-[66px]"
                         />{" "}
                       </div>
                     ) : (
-                      <span
-                        style={{
-                          color: p.lowStock ? D.red : D.text,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
+                      <span>
                         {p.inventoryOnHand != null
                           ? `${p.inventoryOnHand} ${p.inventoryUnit || ""}`
                           : "—"}
                         {p.lowStock && (
-                          <span
-                            style={{
-                              ...sBadge(`${D.red}22`, D.red),
-                              marginLeft: 6,
-                            }}
-                          >
+                          <Badge tone="alert" className="ml-[6px]">
                             Low
-                          </span>
+                          </Badge>
                         )}
                       </span>
                     )}
-                  </td>
-                  <td
-                    style={{
-                      ...tdS,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      color: p.bestPrice ? D.green : D.muted,
-                  }}
-                >
-                    {formatMoney(p.bestPrice)}
-                  </td>
-                  <td
-                    style={{
-                      ...tdS,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontSize: 11,
-                      color: p.unitPrices?.length || p.costPerUnit ? D.text : D.muted,
-                    }}
-                  >
+                  </TD>
+                  <TD>{formatMoney(p.bestPrice)}</TD>
+                  <TD>
                     {formatUnitPriceList(p.unitPrices) ||
                       formatUnitCost(p.costPerUnit, p.costUnit)}
-                  </td>
-                  <td style={{ ...tdS, fontSize: 12 }}>
-                    {p.bestVendor || "—"}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>{p.bestVendor || "—"}</TD>
+                  <TD>
                     {p.needsPricing ? (
-                      <span style={sBadge(`${D.amber}22`, D.amber)}>
-                        Needs Price
-                      </span>
+                      <Badge tone="neutral">Needs Price</Badge>
                     ) : (
-                      <span style={sBadge(`${D.green}22`, D.green)}>
-                        Priced
-                      </span>
+                      <Badge tone="neutral">Priced</Badge>
                     )}
-                  </td>
-                  <td style={{ ...tdS, width: 90 }}>
+                  </TD>
+                  <TD className="min-w-[128px]">
                     {" "}
                     <div
-                      style={{ display: "flex", gap: 4 }}
                       onClick={(e) => e.stopPropagation()}
+                      className="flex gap-[4px]"
                     >
-                      {canAuthor && (isEditing ? (
-                        <>
-                          {" "}
-                          <button
-                            onClick={() => saveEdit(p.id)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 8px",
-                              borderRadius: 4,
-                              border: "none",
-                              background: D.green,
-                              color: "#fff",
-                              cursor: "pointer",
-                              fontWeight: 500,
-                            }}
-                          >
-                            Save
-                          </button>{" "}
-                          <button
-                            onClick={() => setEditing(null)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.muted,
-                              cursor: "pointer",
-                            }}
-                          >
-                            ×
-                          </button>{" "}
-                        </>
-                      ) : (
-                        <>
-                          {" "}
-                          <button
-                            onClick={(e) => startEdit(p, e)}
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.teal,
-                              cursor: "pointer",
-                            }}
-                            title="Edit"
-                          >
-                            Edit
-                          </button>
-                          {deleting === p.id ? (
-                            <>
-                              {" "}
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    await adminFetch(
-                                      `/admin/inventory/${p.id}`,
-                                      { method: "DELETE" },
-                                    );
-                                    showToast("Deleted");
-                                    load();
-                                  } catch {
-                                    showToast("Delete failed");
-                                  }
-                                  setDeleting(null);
-                                }}
-                                style={{
-                                  fontSize: 11,
-                                  padding: "2px 6px",
-                                  borderRadius: 4,
-                                  border: "none",
-                                  background: D.red,
-                                  color: "#fff",
-                                  cursor: "pointer",
-                                }}
-                              >
-                                Yes
-                              </button>{" "}
-                              <button
-                                onClick={() => setDeleting(null)}
-                                style={{
-                                  fontSize: 11,
-                                  padding: "2px 6px",
-                                  borderRadius: 4,
-                                  border: `1px solid ${D.border}`,
-                                  background: "none",
-                                  color: D.muted,
-                                  cursor: "pointer",
-                                }}
-                              >
-                                No
-                              </button>{" "}
-                            </>
-                          ) : (
-                            <button
-                              onClick={() => setDeleting(p.id)}
-                              style={{
-                                fontSize: 12,
-                                background: "none",
-                                border: "none",
-                                color: D.muted,
-                                cursor: "pointer",
-                                padding: 4,
-                              }}
+                      {canAuthor &&
+                        (isEditing ? (
+                          <>
+                            {" "}
+                            <Button
+                              onClick={() => saveEdit(p.id)}
+                              variant="primary"
+                            >
+                              Save
+                            </Button>{" "}
+                            <Button
+                              onClick={() => setEditing(null)}
+                              variant="secondary"
                             >
                               ×
-                            </button>
-                          )}
-                        </>
-                      ))}
+                            </Button>{" "}
+                          </>
+                        ) : (
+                          <>
+                            {" "}
+                            <Button
+                              onClick={(e) => startEdit(p, e)}
+                              title="Edit"
+                              variant="secondary"
+                            >
+                              Edit
+                            </Button>
+                            {deleting === p.id ? (
+                              <>
+                                {" "}
+                                <Button
+                                  onClick={async () => {
+                                    try {
+                                      await adminFetch(
+                                        `/admin/inventory/${p.id}`,
+                                        {
+                                          method: "DELETE",
+                                        },
+                                      );
+                                      showToast("Deleted");
+                                      load();
+                                    } catch {
+                                      showToast("Delete failed");
+                                    }
+                                    setDeleting(null);
+                                  }}
+                                  variant="danger"
+                                >
+                                  Yes
+                                </Button>{" "}
+                                <Button
+                                  onClick={() => setDeleting(null)}
+                                  variant="secondary"
+                                >
+                                  No
+                                </Button>{" "}
+                              </>
+                            ) : (
+                              <Button
+                                onClick={() => setDeleting(p.id)}
+                                variant="secondary"
+                              >
+                                ×
+                              </Button>
+                            )}
+                          </>
+                        ))}
                     </div>{" "}
-                  </td>
-                </tr>,
+                  </TD>
+                </TR>,
                 isExpanded && (
-                  <tr key={`${p.id}-exp`}>
-                    <td
-                      colSpan={10}
-                      style={{
-                        padding: "0 10px 16px",
-                        background: `${D.teal}05`,
-                      }}
-                    >
+                  <TR key={`${p.id}-exp`}>
+                    <TD colSpan={10}>
                       {" "}
                       <ExpandedProduct
                         product={p}
@@ -2950,76 +2821,46 @@ export function ProductsTab({
                         onInventoryChanged={load}
                         showToast={showToast}
                       />{" "}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 ),
               ];
             })}
-          </tbody>
-        </table>{" "}
+          </TBody>
+        </Table>{" "}
       </div>
       {products.length === 0 && (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No products found
-        </div>
+        </Card>
       )}
       {totalProducts > PER_PAGE && (
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "12px 0",
-          }}
-        >
+        <div className="flex justify-between items-center">
           {" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Showing {(page - 1) * PER_PAGE + 1}–
             {Math.min(page * PER_PAGE, totalProducts)} of {totalProducts}{" "}
             products
           </div>{" "}
-          <div style={{ display: "flex", gap: 6 }}>
+          <div className="flex gap-[6px]">
             {" "}
-            <button
+            <Button
               disabled={page <= 1}
               onClick={() => setPage((p) => p - 1)}
-              style={{
-                ...sBtn(
-                  page <= 1 ? D.card : D.teal,
-                  page <= 1 ? D.muted : D.white,
-                ),
-                opacity: page <= 1 ? 0.5 : 1,
-              }}
+              variant="secondary"
             >
               ← Prev
-            </button>{" "}
-            <span
-              style={{
-                fontSize: 13,
-                color: D.text,
-                padding: "8px 12px",
-                fontFamily: "'JetBrains Mono', monospace",
-              }}
-            >
+            </Button>{" "}
+            <span className="text-ui-body text-zinc-900">
               {page} / {Math.ceil(totalProducts / PER_PAGE)}
             </span>{" "}
-            <button
+            <Button
               disabled={page >= Math.ceil(totalProducts / PER_PAGE)}
               onClick={() => setPage((p) => p + 1)}
-              style={{
-                ...sBtn(
-                  page >= Math.ceil(totalProducts / PER_PAGE) ? D.card : D.teal,
-                  page >= Math.ceil(totalProducts / PER_PAGE)
-                    ? D.muted
-                    : D.white,
-                ),
-                opacity: page >= Math.ceil(totalProducts / PER_PAGE) ? 0.5 : 1,
-              }}
+              variant="secondary"
             >
               Next →
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
         </div>
       )}
