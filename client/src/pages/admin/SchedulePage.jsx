@@ -832,6 +832,21 @@ export function customerPanelHistory(customerData, currentId) {
   return buildAppointmentHistory(customerData, PANEL_HISTORY_LIMIT, { currentId });
 }
 
+// A per-gallon rate ("fl_oz/gal", "oz/gal", "g/gal") is a tank concentration:
+// it becomes a real applied quantity once the tech says how many gallons of
+// mix went out — amount = rate x gallons, in the unit before the "/". Every
+// other per-basis unit (g/spot, ml/inch dbh, oz/acre) has no carrier volume
+// to multiply by and still waits for the tech's actual.
+export function isPerGallonUnit(unit) {
+  return /\/gal$/.test(String(unit || ""));
+}
+export function derivedTankTotal(rate, gallons) {
+  const r = Number(rate);
+  const g = Number(gallons);
+  if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(g) || g <= 0) return "";
+  return Math.round(r * g * 100) / 100;
+}
+
 export function derivedTotalAmount(rate, areaSqft) {
   const r = Number(rate);
   const a = Number(areaSqft);
@@ -14713,6 +14728,10 @@ export function CompletionPanel({
           labelMaxRate ??
           null,
         totalAmount: prefillTotal,
+        // Gallons of finished mix for a per-gallon rate; blank for every
+        // other unit and never submitted (a derivation input, like the
+        // treated area is for a per-1,000 rate).
+        carrierGallons: "",
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
@@ -14795,7 +14814,19 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.map((p) => {
-        if (p.productId !== productId) return p;
+        if (p.productId !== productId) {
+          // One tank, one carrier volume: gallons entered on any per-gallon
+          // row fill the other per-gallon rows that are still blank, so a
+          // two-product tank mix is typed once. A row the tech already gave
+          // its own gallons keeps them, and so does a hand-entered total.
+          if (field === "carrierGallons" && isPerGallonUnit(p.rateUnit)
+            && !(Number(p.carrierGallons) > 0) && Number(value) > 0) {
+            const shared = { ...p, carrierGallons: value };
+            if (!shared.totalAmountManual) shared.totalAmount = derivedTankTotal(shared.rate, value);
+            return shared;
+          }
+          return p;
+        }
         const next = { ...p, [field]: value };
         // Provenance is per row: a governed row restored while the initial
         // plan request failed (`lawnDefaultsEnabled` false, no defaults
@@ -14858,7 +14889,13 @@ export function CompletionPanel({
           // before (Codex r8 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
-          if (next.areaUnit !== "sqft") {
+          if (isPerGallonUnit(next.rateUnit)
+            && ["rate", "rateUnit", "carrierGallons"].includes(field)) {
+            // The amount unit follows the rate's base unit exactly as the
+            // per-basis branch below sets it; the total is the tank dose.
+            if (field === "rateUnit") next.amountUnit = String(value).split("/")[0];
+            next.totalAmount = derivedTankTotal(next.rate, next.carrierGallons);
+          } else if (next.areaUnit !== "sqft") {
             if (field === "applicationMethod" && p.areaUnit === "sqft") {
               next.totalAmount = "";
             }
@@ -14872,6 +14909,9 @@ export function CompletionPanel({
             const perBasis = isPerBasisUnit(value);
             next.amountUnit = perBasis ? String(value).split("/")[0] : value;
             if (perBasis) next.totalAmount = "";
+            // A tank dose is meaningless under a per-1,000 unit: re-derive
+            // from the treated area, or blank, rather than relabel it.
+            else if (isPerGallonUnit(p.rateUnit)) next.totalAmount = lawnDerivedTotal(next, next.areaValue);
           }
         }
         if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
@@ -18223,6 +18263,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
+                      {isPerGallonUnit(sp.rateUnit) ? (
+                        <>
+                          <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                            Gallons mixed
+                          </span>{" "}
+                          <input
+                            type="number"
+                            placeholder="Gal"
+                            value={sp.carrierGallons ?? ""}
+                            onChange={(e) =>
+                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                            }
+                            style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
+                          />{" "}
+                        </>
+                      ) : null}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
                       </span>{" "}
@@ -20595,6 +20651,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
+                  {isPerGallonUnit(sp.rateUnit) ? (
+                    <>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                        Gallons mixed
+                      </span>{" "}
+                      <input
+                        type="number"
+                        placeholder="Gal"
+                        value={sp.carrierGallons ?? ""}
+                        onChange={(e) =>
+                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                        }
+                        style={{ ...inputStyle, width: 70, marginBottom: 0 }}
+                      />{" "}
+                    </>
+                  ) : null}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
                   </span>{" "}

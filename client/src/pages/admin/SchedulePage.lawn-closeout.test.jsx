@@ -376,6 +376,58 @@ it('a manually added product with a catalog per-1k rate prefills its rate and de
   expect(submit.mock.calls[0][1].products[2]).toMatchObject({ productId: 'manual-talak', rate: 0.5, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: '4000' });
 });
 
+// A per-gallon rate is a tank concentration; gallons of finished mix turn it
+// into an applied quantity. One tank serves the whole mix, so gallons typed on
+// one row fill the other per-gallon rows that are still blank.
+it('a per-gallon product derives its total from gallons mixed, and shares them across the tank', async () => {
+  enableDefaults();
+  const taurus = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  const surfactant = { id: 'manual-surf', name: 'Fixture surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={service} products={[...catalog, taurus, surfactant]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  let count = 2;
+  for (const product of [taurus, surfactant]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  // The label band's low end prefills the rate; the total waits for gallons.
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('0.8');
+  expect(totals()[2].value).toBe('');
+  expect(totals()[3].value).toBe('');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  // Typed once: the second per-gallon row took the same tank volume.
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('12.5');
+  // A hand-entered total is the actual and survives a gallons change.
+  fireEvent.change(totals()[3], { target: { value: '14' } });
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '30' } });
+  await waitFor(() => expect(totals()[2].value).toBe('24'));
+  expect(totals()[3].value).toBe('14');
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[2]).toMatchObject({ productId: 'manual-taurus', rate: 0.8, rateUnit: 'fl_oz/gal', totalAmount: 24, amountUnit: 'fl_oz' });
+  expect(submit.mock.calls[0][1].products[2].carrierGallons).toBeUndefined();
+});
+
+it('a rate unit moving off per-gallon does not strand the tank total', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  // 20 fl oz of tank mix is not 0.8 fl oz per 1,000 sq ft of anything.
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz' } });
+  expect(totals()[2].value).toBe('4');
+  expect(screen.queryAllByPlaceholderText('Gal')).toHaveLength(0);
+});
+
 it('a withdrawn suggestion requires actual units and method instead of displaying hidden fallbacks', async () => {
   enableDefaults();
   mount();
