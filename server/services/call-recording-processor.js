@@ -13109,10 +13109,12 @@ const CallRecordingProcessor = {
                       // (the child usually lands on a different date than the
                       // primary, so the primary's fence does not cover it).
                       // Try-only, never waits past the cap, never blocks the
-                      // seed; a miss is recorded for the card and logs.
+                      // seed; a miss is recorded for the card and logs. Its
+                      // own nested savepoint (codex r1 P2): a query error must
+                      // not abort THIS savepoint and lose the promised child.
                       try {
                         const { fenceBookingDay } = require('./scheduling/occupancy');
-                        followUpFence = await fenceBookingDay(sp, { date: fuPlan.scheduledDate, techId: followUpTechId });
+                        followUpFence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId }));
                         if (!followUpFence.acquired) {
                           logger.warn(`[call-proc] follow-up fence missed for ${maskSid(callSid)} on ${fuPlan.scheduledDate} (${followUpFence.reason}); seeding unfenced`);
                         }
@@ -13517,13 +13519,18 @@ const CallRecordingProcessor = {
                 // expires it books exactly as before — unfenced, with the
                 // post-commit recheck (recheckCallBookingConflicts) as the
                 // authoritative detector. The booking NEVER fails or stalls on
-                // this fence. Also try-only on a technician who was resolved
-                // before the txn: if the FOR SHARE recheck below books
-                // unassigned instead, the unassigned-day rung is what the
-                // certification fences anyway, so the row is re-fenced there.
+                // this fence. The attempt runs in its OWN savepoint (codex r1
+                // P2): a PostgreSQL error inside it (statement timeout) would
+                // otherwise leave `trx` aborted and fail the conflict read and
+                // insert with 25P02 — the savepoint rolls that back and the
+                // booking proceeds unfenced. Granted rungs survive the
+                // savepoint's release (xact-scoped). Fenced against the tech
+                // resolved before the txn; if the FOR SHARE recheck below
+                // books unassigned instead, it re-fences the unassigned-day
+                // rung there (codex r1 P2).
                 try {
                   const { fenceBookingDay } = require('./scheduling/occupancy');
-                  bookingFence = await fenceBookingDay(trx, { date: scheduledDate, techId: defaultTechnicianId || null });
+                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));
                   if (!bookingFence.acquired) {
                     logger.warn(`[call-proc] booking fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
                   }
@@ -13754,6 +13761,22 @@ const CallRecordingProcessor = {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
                     insertData.technician_id = null;
+                    // The fence above covered the ORIGINAL tech's day rung;
+                    // this row now lands on the unassigned-day rung, which is
+                    // what a capacity certification fences for unassigned
+                    // work. Re-fence it (rung 1 is already held and re-tries
+                    // as a no-op), same bounded try-only savepoint contract,
+                    // and let the outcome replace the recorded one (codex r1 P2).
+                    try {
+                      const { fenceBookingDay } = require('./scheduling/occupancy');
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null }));
+                      if (!bookingFence.acquired) {
+                        logger.warn(`[call-proc] unassigned-day re-fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
+                      }
+                    } catch (fenceErr) {
+                      bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      logger.warn(`[call-proc] unassigned-day re-fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                    }
                     // The staff-visible note was built before this recheck; an
                     // unassigned visit must not claim a technician owns it.
                     if (defaultTechnicianName && typeof insertData.notes === 'string') {

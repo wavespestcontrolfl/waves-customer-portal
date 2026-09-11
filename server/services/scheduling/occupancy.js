@@ -298,7 +298,11 @@ async function tryAcquireOccupancyLock(trx, dateStr) {
 // the transaction (xact advisory locks cannot be released early); `acquired`
 // is true only when EVERY key was granted, so a partial grant reports as a
 // missed fence. Sleeps happen in Node, not in Postgres (no pg_sleep on the
-// connection).
+// connection), and the last sleep is clamped to the remaining budget so the
+// cap is a HARD cap on wall time (codex #4368 r1 P2): the final try lands at
+// the deadline, never past it. A query error (statement timeout, connection
+// reset) propagates — callers run this inside a savepoint so PostgreSQL's
+// aborted-transaction state never reaches the booking itself.
 const CALL_BOOKING_FENCE_WAIT_MS = 1500;
 const CALL_BOOKING_FENCE_POLL_MS = 50;
 
@@ -327,8 +331,9 @@ async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFence
       const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
       if (techKeys) return { acquired: true, keys: keys.concat(techKeys) };
     }
-    if (now() >= deadline) return { acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy' };
-    await sleep(Math.max(1, pollMs));
+    const remaining = deadline - now();
+    if (remaining <= 0) return { acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy' };
+    await sleep(Math.max(1, Math.min(pollMs, remaining)));
   }
 }
 

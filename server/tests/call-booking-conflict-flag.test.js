@@ -405,7 +405,9 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
       src.indexOf("reason: 'existing_appointment_same_date'"),
       src.indexOf('const insertData = {'),
     );
-    const fenceIdx = txnSlice.indexOf('bookingFence = await fenceBookingDay(trx, { date: scheduledDate, techId: defaultTechnicianId || null });');
+    // In its OWN savepoint: a PostgreSQL error inside the fence must not
+    // leave the booking txn aborted (codex r1 P2).
+    const fenceIdx = txnSlice.indexOf('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));');
     expect(fenceIdx).toBeGreaterThan(-1);
     // Fence, then the in-txn conflict read, then the first row lock in this
     // txn (the re-service customer FOR UPDATE) — rung 1 precedes row locks.
@@ -420,11 +422,22 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(fenceBlock).not.toContain('__held');
   });
 
+  test('codex r1 P2: when the save-time tech recheck books UNASSIGNED, the primary re-fences the unassigned-day rung before its insert', () => {
+    const recheckIdx = src.indexOf('is no longer assignable; booking unassigned`);');
+    expect(recheckIdx).toBeGreaterThan(-1);
+    const slice = src.slice(recheckIdx, src.indexOf(".insert(insertData)", recheckIdx));
+    expect(slice).toContain('insertData.technician_id = null;');
+    expect(slice).toContain('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null }));');
+    expect(slice.indexOf('insertData.technician_id = null;')).toBeLessThan(slice.indexOf('techId: null }));'));
+    expect(slice).toContain('booking proceeds unfenced');
+    expect(slice).not.toContain('throw ');
+  });
+
   test('owner ruling 2026-09-11: the follow-up child tries the fence for ITS OWN date/tech inside the savepoint, before its insert', () => {
     const seederIdx = src.indexOf('return await trx.transaction(async (sp) => {');
     expect(seederIdx).toBeGreaterThan(-1);
     const seeder = src.slice(seederIdx, src.indexOf("scheduled_date: fuPlan.scheduledDate,", seederIdx));
-    const fenceIdx = seeder.indexOf('followUpFence = await fenceBookingDay(sp, { date: fuPlan.scheduledDate, techId: followUpTechId });');
+    const fenceIdx = seeder.indexOf('followUpFence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId }));');
     expect(fenceIdx).toBeGreaterThan(-1);
     // After the tech FOR SHARE recheck resolves the tech the row is seeded
     // onto (so the fenced rung matches the row), before the INSERT itself.

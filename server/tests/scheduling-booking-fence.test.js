@@ -69,10 +69,20 @@ describe('fenceBookingDay', () => {
     const c = clock();
     const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, ...c });
     expect(out).toEqual({ acquired: false, keys: [], reason: 'date_busy' });
-    // Tries at 0/50/100ms, then one last try at 150ms once the sleep wakes
-    // past the 120ms deadline — that final try is the miss verdict.
+    // Tries at 0/50/100ms, then the last sleep is CLAMPED to the 20ms left
+    // so the final try lands exactly at the 120ms deadline — the cap is a
+    // hard cap on wall time, never overrun by a full interval (codex r1 P2).
     expect(trx.raw).toHaveBeenCalledTimes(4);
-    expect(c.sleep).toHaveBeenCalledTimes(3);
+    expect(c.sleep.mock.calls.map((call) => call[0])).toEqual([50, 50, 20]);
+    expect(c.now()).toBe(120);
+  });
+
+  test('a rung released inside the last, clamped interval is still granted within the cap', async () => {
+    const trx = fakeTrx([false, false, false, true, true]);
+    const c = clock();
+    const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, ...c });
+    expect(out.acquired).toBe(true);
+    expect(c.now()).toBe(120);
   });
 
   test('rung 1 granted but the tech-day rung busy at the cap is a PARTIAL grant → acquired=false, key kept', async () => {
