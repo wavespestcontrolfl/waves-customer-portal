@@ -283,6 +283,28 @@ describe("KnowledgePage embedded navigation", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Bait stations" })).toHaveFocus();
   });
 
+  it("keeps a literal trailing hash in a heading and clears the sticky hub header", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    // CommonMark needs whitespace before a closing hash run, so `# C#` keeps
+    // its hash while `## Closing hashes stripped ##` drops the suffix.
+    const content = ["# C#", "Body", "## Closing hashes stripped ##", "More"].join("\n");
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/knowledge/article/fixture")
+        ? response({ article: { title: "Fixture article", content, tags: [] } })
+        : response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] })
+    ));
+    renderWiki("/admin/knowledge?wikiTab=articles");
+    fireEvent.click(await screen.findByText("Fixture article"));
+
+    const toc = await screen.findByRole("navigation", { name: "Article contents" });
+    expect(within(toc).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(["C#", "Closing hashes stripped"]);
+
+    // A TOC jump must land below the hub's sticky AdminCommandHeader.
+    expect(screen.getByRole("heading", { level: 2, name: "C#" }))
+      .toHaveClass("md:scroll-mt-32");
+  });
+
   it("keeps info-string fences closed and nests third-level headings under their section", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     // ```json reuses the active delimiter and run length but carries an info

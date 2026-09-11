@@ -39,7 +39,9 @@ function LoadingState({ children }) {
 // Wiki articles are Markdown stored as text. The reader keeps the body as
 // pre-wrapped text (no Markdown renderer on this route) but lifts ATX
 // headings into real heading elements so the §5.7 in-page TOC has targets.
-const HEADING_LINE = /^(#{1,3})\s+(.+?)\s*#*\s*$/;
+// CommonMark only treats a trailing run of hashes as a closing sequence when
+// whitespace precedes it, so `# C#` keeps its hash instead of rendering as `C`.
+const HEADING_LINE = /^(#{1,3})\s+(.+?)(?:\s+#+)?\s*$/;
 const FENCE_LINE = /^\s*(`{3,}|~{3,})(.*)$/;
 
 // The stored ATX level drives both the rendered element and the TOC depth, so a
@@ -121,7 +123,10 @@ function ArticleBody({ sections }) {
           key={section.id}
           id={section.id}
           tabIndex={-1}
-          className={`scroll-mt-4 break-words font-medium text-zinc-900 ${
+          // The hub's AdminCommandHeader is sticky from md up (heading row ~54px
+          // + nav strip ~54px), so a TOC jump has to clear roughly 108px or it
+          // parks the heading underneath it. Below md nothing sticks.
+          className={`scroll-mt-4 md:scroll-mt-32 break-words font-medium text-zinc-900 ${
             HEADING_CLASS[section.level] || HEADING_CLASS[3]
           }`}
         >
