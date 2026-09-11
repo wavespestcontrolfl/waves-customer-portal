@@ -53,9 +53,15 @@
 // task-context RECORDS map, customer_id is the customer selector itself.
 const db = require('../../models/db');
 
+const { portalUrl } = require('../../utils/portal-url');
+
 const MAX_PER_CUSTOMER = 10;
 const DEFAULT_PER_CUSTOMER = 3;
-const PUBLIC_ESTIMATE_BASE = 'https://portal.wavespestcontrol.com/estimate/';
+// The canonical portal-origin helper, not a literal: a preview/staging
+// deployment resolves its own origin, so the link handed to staff opens the
+// estimate on the environment they are actually looking at (pre-push audit
+// P1 — the first cut hardcoded the production host).
+const estimateLink = (token, query = '') => portalUrl(`/estimate/${encodeURIComponent(token)}${query}`);
 
 function money(value) {
   if (value == null || value === '') return null;
@@ -160,10 +166,10 @@ async function estimateLinks(row, data) {
   if (blocked) return { customer_link: null, staff_preview_link: null, link_state: 'blocked' };
   const publicRoute = lazy.publicRoute();
   if (publicRoute.isEstimateCustomerViewable(row)) {
-    return { customer_link: `${PUBLIC_ESTIMATE_BASE}${row.token}`, staff_preview_link: null, link_state: 'customer_viewable' };
+    return { customer_link: estimateLink(row.token), staff_preview_link: null, link_state: 'customer_viewable' };
   }
   if (publicRoute.adminDraftPreviewEligible(row, '1')) {
-    return { customer_link: null, staff_preview_link: `${PUBLIC_ESTIMATE_BASE}${row.token}?adminPreview=1`, link_state: 'staff_preview_only' };
+    return { customer_link: null, staff_preview_link: estimateLink(row.token, '?adminPreview=1'), link_state: 'staff_preview_only' };
   }
   return { customer_link: null, staff_preview_link: null, link_state: 'not_openable' };
 }

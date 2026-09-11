@@ -229,6 +229,20 @@ test('a draft is composed the way staff "Customer View" renders it, and offers o
   expect(mockCompose.mock.calls[0][1]).toMatchObject({ adminDraftPreview: true, isPdfRenderPass: false, docRenderPin: null });
 });
 
+test('links come from the canonical portal-origin helper, so a preview deployment gets its own origin', async () => {
+  const prior = process.env.PUBLIC_PORTAL_URL;
+  process.env.PUBLIC_PORTAL_URL = 'https://preview-123.up.railway.app';
+  try {
+    const sent = await shapeEstimate(estimateRow());
+    expect(sent.customer_link).toBe('https://preview-123.up.railway.app/estimate/xydejpzuxx');
+    const draft = await shapeEstimate(estimateRow({ status: 'draft' }));
+    expect(draft.staff_preview_link).toBe('https://preview-123.up.railway.app/estimate/xydejpzuxx?adminPreview=1');
+  } finally {
+    if (prior === undefined) delete process.env.PUBLIC_PORTAL_URL;
+    else process.env.PUBLIC_PORTAL_URL = prior;
+  }
+});
+
 test('a sent estimate gets the customer\'s own projection, not the staff one', async () => {
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.link_state).toBe('customer_viewable');
