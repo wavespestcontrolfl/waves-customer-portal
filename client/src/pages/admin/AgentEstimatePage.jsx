@@ -19,7 +19,7 @@ import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { useIntelligenceBar } from "../../hooks/useIntelligenceBar";
 import { adminFetch } from "../../utils/admin-fetch";
-import { cn, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../components/ui";
+import { cn, Button, Card, CardHeader, Input, Textarea, UiSurface, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../components/ui";
 import PendingActionsCard from "../../components/admin/PendingActionsCard";
 import { AttachIcon } from "../../components/admin/IntelligenceBarShell";
 
@@ -89,7 +89,7 @@ function leadName(lead) {
 }
 
 function laneDot(lane) {
-  return lane === "yellow" ? "bg-[#F59E0B]" : "bg-[#10B981]";
+  return lane === "yellow" ? "bg-zinc-500" : "bg-zinc-900";
 }
 
 function AgentInline({ children }) {
@@ -103,8 +103,8 @@ function AgentInline({ children }) {
 function AgentResponse({ text }) {
   return String(text || "").split("\n").map((line, index) => {
     if (!line.trim()) return <div key={index} className="h-2" />;
-    if (line.startsWith("### ")) return <div key={index} className="mb-1 mt-3 text-[14px] font-medium text-zinc-950"><AgentInline>{line.slice(4)}</AgentInline></div>;
-    if (line.startsWith("## ")) return <div key={index} className="mb-2 mt-4 text-[16px] font-medium text-zinc-950"><AgentInline>{line.slice(3)}</AgentInline></div>;
+    if (line.startsWith("### ")) return <div key={index} className="mb-1 mt-3 text-ui-body font-medium text-zinc-950"><AgentInline>{line.slice(4)}</AgentInline></div>;
+    if (line.startsWith("## ")) return <div key={index} className="mb-2 mt-4 text-16 font-medium text-zinc-950"><AgentInline>{line.slice(3)}</AgentInline></div>;
     if (/^[-•*]\s/.test(line)) return <div key={index} className="mb-1 flex gap-2 pl-1"><span aria-hidden="true">•</span><span><AgentInline>{line.replace(/^[-•*]\s/, "")}</AgentInline></span></div>;
     return <div key={index} className="mb-1"><AgentInline>{line}</AgentInline></div>;
   });
@@ -112,24 +112,24 @@ function AgentResponse({ text }) {
 
 function SectionCard({ title, subtitle, action, children, className = "" }) {
   return (
-    <section className={cn("min-w-0 rounded-md border border-zinc-200 bg-white", className)}>
-      <div className="flex min-h-14 items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+    <Card className={cn("min-w-0", className)}>
+      <CardHeader className="flex min-h-14 flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="text-[16px] font-medium tracking-tight text-zinc-950">{title}</h2>
-          {subtitle && <p className="mt-0.5 text-[14px] leading-5 text-zinc-500">{subtitle}</p>}
+          <h2 className="text-16 font-medium tracking-tight text-zinc-950">{title}</h2>
+          {subtitle && <p className="mt-0.5 text-ui-body leading-5 text-zinc-500">{subtitle}</p>}
         </div>
         {action}
-      </div>
+      </CardHeader>
       {children}
-    </section>
+    </Card>
   );
 }
 
 function TinyFact({ label, value }) {
   return (
     <div className="min-w-0">
-      <div className="text-[14px] text-zinc-500">{label}</div>
-      <div className="truncate text-[14px] font-medium text-zinc-900">{value || "Not found"}</div>
+      <div className="text-ui-body text-zinc-500">{label}</div>
+      <div className="truncate text-ui-body font-medium text-zinc-900">{value || "Not found"}</div>
     </div>
   );
 }
@@ -137,50 +137,50 @@ function TinyFact({ label, value }) {
 function LeadPicker({ selectedId, leads, value, loading, disabled, onValueChange, onSelect }) {
   return (
     <div className="space-y-3 p-4">
-      <label className="block text-[14px] font-medium text-zinc-800" htmlFor="agent-lead-search">
+      <label className="block text-ui-body font-medium text-zinc-800" htmlFor="agent-lead-search">
         Search open leads
       </label>
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={18} aria-hidden="true" />
-        <input
+        <Input
           id="agent-lead-search"
           value={value}
           onChange={(event) => onValueChange(event.target.value)}
           disabled={disabled}
           placeholder="Name, phone, address, or service"
-          className="h-12 w-full rounded-sm border border-zinc-300 bg-white pl-10 pr-3 text-[16px] text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
+          className="pl-10"
         />
       </div>
       <div className="max-h-64 divide-y divide-zinc-100 overflow-y-auto rounded-sm border border-zinc-200">
-        {loading && <div className="p-4 text-[14px] text-zinc-500">Loading leads…</div>}
+        {loading && <div className="p-4 text-ui-body text-zinc-500">Loading leads…</div>}
         {!loading && leads.length === 0 && (
-          <div className="p-4 text-[14px] text-zinc-500">No open leads match this search.</div>
+          <div className="p-4 text-ui-body text-zinc-500">No open leads match this search.</div>
         )}
         {!loading && leads.map((lead) => {
           const selected = String(lead.id) === String(selectedId);
           return (
-            <button
+            <Button variant="ghost"
               key={lead.id}
               type="button"
               onClick={() => onSelect(lead.id)}
               disabled={disabled}
               className={cn(
-                "block min-h-16 w-full px-3 py-3 text-left transition-colors",
+                "h-auto min-h-16 w-full whitespace-normal px-3 py-3 text-left",
                 selected ? "bg-zinc-100" : "bg-white hover:bg-zinc-50",
               )}
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-[14px] font-medium text-zinc-950">{leadName(lead)}</div>
-                  <div className="mt-0.5 truncate text-[14px] text-zinc-500">
+                  <div className="truncate text-ui-body font-medium text-zinc-950">{leadName(lead)}</div>
+                  <div className="mt-0.5 truncate text-ui-body text-zinc-500">
                     {[lead.service_interest, lead.address || lead.city].filter(Boolean).join(" · ") || "No service details"}
                   </div>
                 </div>
-                <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[14px] text-zinc-600">
+                <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-ui-body text-zinc-600">
                   {String(lead.status || "new").replaceAll("_", " ")}
                 </span>
               </div>
-            </button>
+            </Button>
           );
         })}
       </div>
@@ -200,16 +200,16 @@ function EvidencePanel({ context }) {
         <TinyFact label="SMS messages" value={context?.shared_phone_history_suppressed ? "Hidden" : String(sms.length)} />
       </div>
       {context?.shared_phone_history_suppressed && (
-        <div className="bg-zinc-50 px-4 py-3 text-[14px] leading-5 text-zinc-700">
+        <div className="bg-zinc-50 px-4 py-3 text-ui-body leading-5 text-zinc-700">
           This phone appears on more than one lead, so phone-based SMS and prior-estimate history is hidden to prevent mixing customers.
         </div>
       )}
       <details className="group">
-        <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between px-4 py-3 text-[14px] font-medium text-zinc-800">
+        <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between px-4 py-3 text-ui-body font-medium text-zinc-800">
           Review source evidence
           <ChevronDown size={18} className="transition-transform group-open:rotate-180" aria-hidden="true" />
         </summary>
-        <div className="space-y-4 border-t border-zinc-200 p-4 text-[14px] leading-6 text-zinc-700">
+        <div className="space-y-4 border-t border-zinc-200 p-4 text-ui-body leading-6 text-zinc-700">
           <div>
             <div className="mb-1 font-medium text-zinc-950">Quote form</div>
             {quoteFields.length ? quoteFields.map((row) => (
@@ -223,7 +223,7 @@ function EvidencePanel({ context }) {
             <div className="mb-1 font-medium text-zinc-950">Call transcripts</div>
             {calls.length ? calls.map((call, index) => (
               <details key={call.id || index} className="mb-2 rounded-sm border border-zinc-200 bg-white">
-                <summary className="cursor-pointer px-3 py-2 font-medium">Call {index + 1} · {call.duration_seconds || 0}s</summary>
+                <summary className="min-h-11 cursor-pointer px-3 py-3 font-medium u-focus-ring">Call {index + 1} · {call.duration_seconds || 0}s</summary>
                 <div className="max-h-72 overflow-y-auto whitespace-pre-wrap border-t border-zinc-200 p-3">
                   {call.transcript || (call.has_recording
                     ? "Recording exists, but no transcript is available. The estimator must not infer what was said."
@@ -260,7 +260,7 @@ function EvidencePanel({ context }) {
 export function CustomerAccountPanel({ account, profile }) {
   if (!account?.recognized) {
     return (
-      <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-3 text-[14px] leading-5 text-zinc-600">
+      <div className="border-b border-zinc-200 bg-zinc-50 px-4 py-3 text-ui-body leading-5 text-zinc-600">
         No unambiguous customer account match. This will price as a new-customer estimate unless staff links the correct account.
       </div>
     );
@@ -268,23 +268,23 @@ export function CustomerAccountPanel({ account, profile }) {
 
   const services = account.current_services || [];
   return (
-    <div className="border-b border-zinc-200 bg-emerald-50/60 p-4">
+    <div className="border-b border-zinc-200 bg-zinc-50 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 text-[14px] font-medium text-emerald-950">
+          <div className="flex items-center gap-2 text-ui-body font-medium text-zinc-950">
             <CheckCircle2 size={18} aria-hidden="true" /> Existing customer recognized
           </div>
-          <p className="mt-1 text-[14px] leading-5 text-emerald-900">
+          <p className="mt-1 text-ui-body leading-5 text-zinc-900">
             Current services and their paid prices stay unchanged. They establish the starting tier; the estimator applies the combined tier only to requested additions.
           </p>
         </div>
-        <span className="rounded-full border border-emerald-200 bg-white px-3 py-1 text-[14px] text-emerald-900">
+        <span className="rounded-full border border-zinc-200 bg-white px-3 py-1 text-ui-body text-zinc-900">
           {account.current_tier || profile?.waveguard_tier || (account.active_plan ? "Active plan" : "No active plan")}
           {Number(account.current_discount_pct) > 0 ? ` · ${account.current_discount_pct}% current discount` : ""}
         </span>
       </div>
-      <div className="mt-3 overflow-hidden rounded-sm border border-emerald-200 bg-white">
-        <div className="border-b border-emerald-100 px-3 py-2 text-[14px] font-medium text-zinc-900">Current service + spend</div>
+      <div className="mt-3 overflow-hidden rounded-sm border border-zinc-200 bg-white">
+        <div className="border-b border-zinc-100 px-3 py-2 text-ui-body font-medium text-zinc-900">Current service + spend</div>
         {services.length ? services.map((service) => {
           // A service active at several properties is several contracts, each
           // with its own per-application price; currentPerVisit sums them, so
@@ -298,8 +298,8 @@ export function CustomerAccountPanel({ account, profile }) {
             <div key={service.key} className="border-b border-zinc-100 px-3 py-3 last:border-b-0">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="text-[14px] font-medium text-zinc-950">{service.label || serviceTemplateLabel(service.key)}</div>
-                  <div className="text-[14px] text-zinc-500">
+                  <div className="text-ui-body font-medium text-zinc-950">{service.label || serviceTemplateLabel(service.key)}</div>
+                  <div className="text-ui-body text-zinc-500">
                     {/* Cadence belongs on the family row too, not only inside
                         the multi-property loop: a monthly-derived amount is
                         meaningless without the divisor that produced it
@@ -316,10 +316,10 @@ export function CustomerAccountPanel({ account, profile }) {
                 </div>
                 {perProperty.length ? null : (
                   <div className="text-right">
-                    <div className="text-[16px] font-medium text-zinc-950">
+                    <div className="text-16 font-medium text-zinc-950">
                       {service.currentPerVisit == null ? "Not available" : money(service.currentPerVisit)}
                     </div>
-                    <div className="text-[14px] text-zinc-500">per application</div>
+                    <div className="text-ui-body text-zinc-500">per application</div>
                   </div>
                 )}
               </div>
@@ -328,7 +328,7 @@ export function CustomerAccountPanel({ account, profile }) {
                   key={contract.serviceAddress || i}
                   className="mt-1.5 flex flex-wrap items-baseline justify-between gap-2 border-l border-zinc-200 pl-3"
                 >
-                  <div className="text-[14px] text-zinc-500">
+                  <div className="text-ui-body text-zinc-500">
                     {[
                       contract.serviceAddress || "Property not recorded",
                       contract.cadenceLabel,
@@ -338,7 +338,7 @@ export function CustomerAccountPanel({ account, profile }) {
                       spendSourceLabel(contract.spendSource),
                     ].filter(Boolean).join(" · ")}
                   </div>
-                  <div className="ml-auto text-[14px] text-zinc-950">
+                  <div className="ml-auto text-ui-body text-zinc-950">
                     {contract.perVisit == null ? "Not available" : money(contract.perVisit)}
                     <span className="text-zinc-500"> / application</span>
                   </div>
@@ -347,7 +347,7 @@ export function CustomerAccountPanel({ account, profile }) {
             </div>
           );
         }) : (
-          <div className="px-3 py-3 text-[14px] text-zinc-600">Account matched, but no active recurring service rows were found.</div>
+          <div className="px-3 py-3 text-ui-body text-zinc-600">Account matched, but no active recurring service rows were found.</div>
         )}
       </div>
     </div>
@@ -356,7 +356,7 @@ export function CustomerAccountPanel({ account, profile }) {
 
 function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sendMessage, failedChannels = [] }) {
   if (!draft) {
-    return <div className="p-4 text-[14px] leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
+    return <div className="p-4 text-ui-body leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
   }
   const canSend = draft.status === "draft" && draft.editable_here === true;
   // A partial send can settle as "viewed" (the customer opened the successful
@@ -390,11 +390,11 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
   return (
     <div className="space-y-4 p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white px-3 py-1 text-[14px] font-medium text-zinc-800">
+        <span className="inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white px-3 py-1 text-ui-body font-medium text-zinc-800">
           <span className={cn("h-2 w-2 rounded-full", laneDot(draft.lane))} />
           {draft.lane === "yellow" ? "AI Draft · Review" : "AI Draft"}
         </span>
-        <span className="rounded-full bg-zinc-100 px-3 py-1 text-[14px] text-zinc-600">{draft.status || "draft"}</span>
+        <span className="rounded-full bg-zinc-100 px-3 py-1 text-ui-body text-zinc-600">{draft.status || "draft"}</span>
       </div>
       <div className="grid grid-cols-3 gap-3 rounded-sm bg-zinc-50 p-3">
         <TinyFact label="Monthly" value={money(draft.monthly_total)} />
@@ -403,35 +403,35 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
       </div>
       {(draft.presentation_template || draft.service_template_keys?.length) && (
         <div className="rounded-sm border border-zinc-200 p-3">
-          <div className="text-[14px] font-medium text-zinc-900">Customer presentation</div>
-          <div className="mt-1 text-[14px] text-zinc-600">
+          <div className="text-ui-body font-medium text-zinc-900">Customer presentation</div>
+          <div className="mt-1 text-ui-body text-zinc-600">
             {serviceTemplateLabel(draft.presentation_template || "service")}
             {draft.service_template_keys?.length && draft.service_template_keys.length > 1
               ? ` · ${draft.service_template_keys.map(serviceTemplateLabel).join(" + ")}`
               : ""}
           </div>
           {account?.recognized && (
-            <div className="mt-1 text-[14px] text-zinc-500">Expansion estimate; current services are not duplicated in this presentation.</div>
+            <div className="mt-1 text-ui-body text-zinc-500">Expansion estimate; current services are not duplicated in this presentation.</div>
           )}
         </div>
       )}
       {draft.lane_reasons?.length > 0 && (
         <div className="rounded-sm border border-zinc-200 p-3">
-          <div className="mb-1 text-[14px] font-medium text-zinc-900">Review before sending</div>
-          <ul className="list-disc space-y-1 pl-5 text-[14px] leading-5 text-zinc-600">
+          <div className="mb-1 text-ui-body font-medium text-zinc-900">Review before sending</div>
+          <ul className="list-disc space-y-1 pl-5 text-ui-body leading-5 text-zinc-600">
             {draft.lane_reasons.map((reason) => <li key={reason}>{reason}</li>)}
           </ul>
         </div>
       )}
-      <button
+      <Button variant="secondary"
         type="button"
         onClick={onPreview}
-        className="flex h-12 w-full items-center justify-center gap-2 rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-900 hover:bg-zinc-50"
+        className="flex w-full items-center justify-center gap-2 hover:bg-zinc-50"
       >
         <ExternalLink size={18} aria-hidden="true" /> Preview customer estimate
-      </button>
+      </Button>
       {(canSend || retryChannels.length > 0) && (
-        <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
+        <div className="rounded-sm bg-zinc-50 p-3 text-ui-body leading-5 text-zinc-700">
           <div className="font-medium text-zinc-900">Delivers to the contact saved on this draft</div>
           <div>{recipientPhone || "No phone on draft"} · {recipientEmail || "No email on draft"}</div>
           {draft.address && <div>{draft.address}</div>}
@@ -444,58 +444,58 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
       )}
       {canSend && (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          <button
+          <Button variant="primary"
             type="button"
             disabled={!recipientPhone || recipientMismatch || sending}
             onClick={() => onSend("sms")}
-            className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center justify-center gap-2"
           >
             <MessageSquare size={18} aria-hidden="true" /> Send SMS
-          </button>
-          <button
+          </Button>
+          <Button variant="primary"
             type="button"
             disabled={!recipientEmail || recipientMismatch || sending}
             onClick={() => onSend("email")}
-            className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center justify-center gap-2"
           >
             <Send size={18} aria-hidden="true" /> Send email
-          </button>
-          <button
+          </Button>
+          <Button variant="secondary"
             type="button"
             disabled={!recipientPhone || !recipientEmail || recipientMismatch || sending}
             onClick={() => onSend("both")}
-            className="flex h-12 items-center justify-center gap-2 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex items-center justify-center gap-2"
           >
             Send both
-          </button>
+          </Button>
         </div>
       )}
       {retryChannels.length > 0 && (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {retryChannels.includes("sms") && (
-            <button
+            <Button variant="primary"
               type="button"
               disabled={!recipientPhone || recipientMismatch || sending}
               onClick={() => onSend("sms")}
-              className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center justify-center gap-2"
             >
               <MessageSquare size={18} aria-hidden="true" /> Retry SMS
-            </button>
+            </Button>
           )}
           {retryChannels.includes("email") && (
-            <button
+            <Button variant="primary"
               type="button"
               disabled={!recipientEmail || recipientMismatch || sending}
               onClick={() => onSend("email")}
-              className="flex h-12 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-3 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center justify-center gap-2"
             >
               <Send size={18} aria-hidden="true" /> Retry email
-            </button>
+            </Button>
           )}
         </div>
       )}
-      {sending && <div className="text-[14px] text-zinc-600">Sending estimate…</div>}
-      {sendMessage && <div role="status" className="rounded-sm bg-zinc-100 p-3 text-[14px] text-zinc-800">{sendMessage}</div>}
+      {sending && <div className="text-ui-body text-zinc-600">Sending estimate…</div>}
+      {sendMessage && <div role="status" className="rounded-sm bg-zinc-100 p-3 text-ui-body text-zinc-800">{sendMessage}</div>}
     </div>
   );
 }
@@ -546,51 +546,53 @@ export function LearningPanel({ leadId, user, memories, onReload }) {
 
   return (
     <details className="group">
-      <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between px-4 py-3 text-[14px] font-medium text-zinc-900">
+      <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between px-4 py-3 text-ui-body font-medium text-zinc-900">
         Controlled learning
         <ChevronDown size={18} className="transition-transform group-open:rotate-180" aria-hidden="true" />
       </summary>
       <div className="space-y-4 border-t border-zinc-200 p-4">
-        <p className="text-[14px] leading-6 text-zinc-600">
+        <p className="text-ui-body leading-6 text-zinc-600">
           A correction in this chat applies immediately to this estimate. Save repeatable rules here; the agent uses them only after an admin approves them.
         </p>
-        <textarea
+        <Textarea
+          aria-label="Learning rule"
           value={rule}
           onChange={(event) => setRule(event.target.value)}
           placeholder="Example: For this HOA, verify irrigated turf area separately from common-area parcel size."
-          className="min-h-24 w-full rounded-sm border border-zinc-300 p-3 text-[16px] text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
+          className="w-full min-h-24"
         />
-        <input
+        <Input
+          aria-label="Rationale (optional)"
           value={rationale}
           onChange={(event) => setRationale(event.target.value)}
           placeholder="Why this should become a repeatable rule (optional)"
-          className="h-12 w-full rounded-sm border border-zinc-300 px-3 text-[14px] outline-none focus:border-zinc-900"
+          className="w-full"
         />
-        <button
+        <Button variant="secondary"
           type="button"
           disabled={saving || rule.trim().length < 12}
           onClick={submitCandidate}
-          className="h-12 rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-900 disabled:opacity-40"
+          className=""
         >
           {saving ? "Saving…" : "Save learning candidate"}
-        </button>
-        {message && <div className="text-[14px] text-zinc-700">{message}</div>}
+        </Button>
+        {message && <div className="text-ui-body text-zinc-700">{message}</div>}
         {memories.length > 0 && (
           <div className="space-y-2">
             {memories.slice(0, 12).map((memory) => (
               <div key={memory.id} className="rounded-sm border border-zinc-200 p-3">
                 <div className="flex flex-wrap items-start justify-between gap-2">
-                  <p className="text-[14px] leading-5 text-zinc-800">{memory.rule_text}</p>
-                  <span className="rounded-full bg-zinc-100 px-2 py-1 text-[14px] text-zinc-600">{memory.status}</span>
+                  <p className="text-ui-body leading-5 text-zinc-800">{memory.rule_text}</p>
+                  <span className="rounded-full bg-zinc-100 px-2 py-1 text-ui-body text-zinc-600">{memory.status}</span>
                 </div>
                 {user?.role === "admin" && memory.status === "pending" && (
                   <>
                     <div className="mt-3 flex gap-2">
-                      <button type="button" disabled={reviewingId !== null} onClick={() => review(memory.id, "approved")} className="h-11 rounded-sm bg-zinc-900 px-4 text-[14px] font-medium text-white disabled:opacity-40">Approve</button>
-                      <button type="button" disabled={reviewingId !== null} onClick={() => review(memory.id, "rejected")} className="h-11 rounded-sm border border-zinc-300 px-4 text-[14px] font-medium text-zinc-800 disabled:opacity-40">Reject</button>
+                      <Button variant="primary" type="button" disabled={reviewingId !== null} onClick={() => review(memory.id, "approved")} className="">Approve</Button>
+                      <Button variant="secondary" type="button" disabled={reviewingId !== null} onClick={() => review(memory.id, "rejected")} className="">Reject</Button>
                     </div>
                     {reviewError?.id === memory.id && (
-                      <div role="alert" className="mt-2 text-[14px] text-zinc-700">{reviewError.message}</div>
+                      <div role="alert" className="mt-2 text-ui-body text-zinc-700">{reviewError.message}</div>
                     )}
                   </>
                 )}
@@ -847,19 +849,20 @@ export default function AgentEstimatePage() {
   ), [context]);
 
   if (!ready) {
-    return <div className="p-6 text-[14px] text-zinc-600">Checking Agent Estimate access…</div>;
+    return <UiSurface density="comfortable"><Card className="p-6 text-ui-body text-zinc-600">Checking Agent Estimate access…</Card></UiSurface>;
   }
   if (!enabled) {
     return (
-      <div className="mx-auto max-w-xl rounded-md border border-zinc-200 bg-white p-6 text-[14px] text-zinc-700">
+      <UiSurface density="comfortable" className="mx-auto max-w-xl"><Card className="p-6 text-ui-body text-zinc-700">
         Agent Estimate is off for this account. Enable the <span className="font-medium">agent_estimate</span> user flag when you are ready to test it.
-      </div>
+      </Card></UiSurface>
     );
   }
 
   return (
-    <div className="mx-auto min-w-0 max-w-[1500px] font-sans text-zinc-950">
+    <UiSurface density="comfortable" className="mx-auto min-w-0 max-w-[1500px] text-ui-body text-zinc-950">
       <AdminCommandHeader
+        variant="workspace"
         title="Agent estimate"
         icon={Bot}
         actions={
@@ -883,7 +886,7 @@ export default function AgentEstimatePage() {
             : []
         }
       />
-      <p className="mb-5 max-w-3xl text-[14px] leading-6 text-zinc-600">
+      <p className="mb-5 max-w-3xl text-ui-body leading-6 text-zinc-600">
         <span className="font-medium text-zinc-500">Manual · gated.</span>{" "}
         Pull a lead’s calls, texts, quote form, and recognized customer account into one evidence-backed estimate. Current services stay intact; the pricing engine prices additions; you preview and send.
       </p>
@@ -902,8 +905,8 @@ export default function AgentEstimatePage() {
             />
           </SectionCard>
 
-          {contextError && <div role="alert" className="rounded-sm border border-alert-fg bg-white p-4 text-[14px] text-alert-fg">{contextError}</div>}
-          {contextLoading && <div className="rounded-md border border-zinc-200 bg-white p-5 text-[14px] text-zinc-600">Loading quote form, transcripts, SMS, profile, and prior estimates…</div>}
+          {contextError && <div role="alert" className="rounded-sm border border-alert-fg bg-white p-4 text-ui-body text-alert-fg">{contextError}</div>}
+          {contextLoading && <div className="rounded-md border border-zinc-200 bg-white p-5 text-ui-body text-zinc-600">Loading quote form, transcripts, SMS, profile, and prior estimates…</div>}
 
           {context && (
             <>
@@ -921,63 +924,64 @@ export default function AgentEstimatePage() {
               <SectionCard title="3 · Ask the estimator" subtitle="Corrections here adapt this estimate immediately. Permanent learning stays approval-controlled.">
                 <div className="space-y-3 p-4">
                   {!openLead && (
-                    <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
+                    <div className="rounded-sm bg-zinc-50 p-3 text-ui-body leading-5 text-zinc-700">
                       This lead is {String(contact?.status || "closed").replaceAll("_", " ")} — Agent Estimate drafting works on open leads only. Reopen the lead to build or revise a draft here.
                     </div>
                   )}
                   {openLead && buildBlocked && (
-                    <div className="rounded-sm bg-zinc-50 p-3 text-[14px] leading-5 text-zinc-700">
+                    <div className="rounded-sm bg-zinc-50 p-3 text-ui-body leading-5 text-zinc-700">
                       This lead is linked to {draft?.status === "draft" ? "a draft from another estimator flow" : `an estimate that is already ${String(draft?.status || "in progress").replaceAll("_", " ")}`} — Agent Estimate can’t revise it. Review it from the Estimates page instead.
                     </div>
                   )}
-                  <button
+                  <Button variant="primary"
                     type="button"
                     disabled={askDisabled}
                     onClick={() => intelligence.submit(context.suggested_prompt || BUILD_PROMPT)}
-                    className="flex min-h-14 w-full items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[16px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex w-full items-center justify-center gap-2"
                   >
                     <Sparkles size={20} aria-hidden="true" />
                     {intelligence.loading ? "Building and checking…" : draft?.editable_here ? "Review or revise draft" : "Build estimate"}
-                  </button>
+                  </Button>
 
                   <div className="flex gap-2 overflow-x-auto pb-1">
                     {quickActions.filter((action) => action.id !== "build").map((action) => (
-                      <button
+                      <Button variant="secondary"
                         key={action.id}
                         type="button"
                         disabled={askDisabled}
                         onClick={() => intelligence.submit(action.prompt)}
-                        className="h-11 shrink-0 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-800 disabled:opacity-40"
+                        className="shrink-0"
                       >
                         {action.label}
-                      </button>
+                      </Button>
                     ))}
-                    <button
+                    <Button variant="secondary"
                       type="button"
                       disabled={askDisabled}
                       onClick={() => setPasteOpen((open) => !open)}
-                      className="h-11 shrink-0 rounded-sm border border-zinc-300 bg-white px-3 text-[14px] font-medium text-zinc-800 disabled:opacity-40"
+                      className="shrink-0"
                     >
                       Paste customer text…
-                    </button>
+                    </Button>
                   </div>
 
                   {pasteOpen && (
                     <div className="space-y-2 rounded-sm border border-zinc-300 bg-zinc-50 p-3">
-                      <div className="text-[14px] font-medium text-zinc-800">Paste customer text</div>
-                      <div className="text-[14px] leading-5 text-zinc-600">
+                      <div className="text-ui-body font-medium text-zinc-800">Paste customer text</div>
+                      <div className="text-ui-body leading-5 text-zinc-600">
                         An email, forwarded text, or note from this customer. The estimator reads it
                         as customer-supplied context for the selected lead — it still verifies
                         contact and address against the lead record before using them.
                       </div>
-                      <textarea
+                      <Textarea
+                        aria-label="Customer text"
                         value={pasteText}
                         onChange={(event) => setPasteText(event.target.value)}
                         placeholder="Paste the customer's email, text message, or notes here…"
-                        className="min-h-28 w-full rounded-sm border border-zinc-300 bg-white p-3 text-[16px] leading-6 text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
+                        className="w-full leading-6 min-h-28"
                       />
                       <div className="flex gap-2">
-                        <button
+                        <Button variant="primary"
                           type="button"
                           disabled={!pasteText.trim() || askDisabled}
                           onClick={() => {
@@ -994,32 +998,33 @@ export default function AgentEstimatePage() {
                             setPasteOpen(false);
                             setPasteText("");
                           }}
-                          className="flex h-11 items-center justify-center rounded-sm bg-zinc-900 px-4 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                          className="flex items-center justify-center"
                         >
                           Use in prompt
-                        </button>
-                        <button
+                        </Button>
+                        <Button variant="secondary"
                           type="button"
                           onClick={() => {
                             setPasteOpen(false);
                             setPasteText("");
                           }}
-                          className="flex h-11 items-center justify-center rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-800"
+                          className="flex items-center justify-center"
                         >
                           Cancel
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   )}
 
-                  <textarea
+                  <Textarea
+                    aria-label="Ask AI"
                     value={intelligence.prompt}
                     onChange={(event) => intelligence.setPrompt(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !askDisabled) intelligence.submit();
                     }}
                     placeholder="Ask a property question, change scope, or tell AI what to double-check…"
-                    className="min-h-28 w-full rounded-sm border border-zinc-300 bg-white p-3 text-[16px] leading-6 text-zinc-950 outline-none placeholder:text-zinc-400 focus:border-zinc-900"
+                    className="w-full leading-6 min-h-28"
                   />
 
                   {intelligence.attachments.length > 0 && (
@@ -1027,23 +1032,23 @@ export default function AgentEstimatePage() {
                       {intelligence.attachments.map((attachment, index) => (
                         <div key={`${attachment.name}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-sm border border-zinc-200">
                           <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
-                          <button type="button" aria-label={`Remove ${attachment.name}`} onClick={() => intelligence.removeAttachment(index)} className="absolute right-1 top-1 flex h-7 w-7 items-center justify-center rounded-full bg-white text-zinc-900">
+                          <Button variant="ghost" type="button" aria-label={`Remove ${attachment.name}`} onClick={() => intelligence.removeAttachment(index)} className="ui-icon-action absolute right-1 top-1 flex w-7 items-center justify-center">
                             <X size={16} aria-hidden="true" />
-                          </button>
+                          </Button>
                         </div>
                       ))}
                     </div>
                   )}
 
                   <div className="grid grid-cols-[auto_1fr] gap-2 sm:flex">
-                    <button
+                    <Button variant="secondary"
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={intelligence.loading || intelligence.attachmentsLoading}
-                      className="flex h-12 items-center justify-center gap-2 rounded-sm border border-zinc-300 bg-white px-4 text-[14px] font-medium text-zinc-800 disabled:opacity-40"
+                      className="flex items-center justify-center gap-2"
                     >
                       <AttachIcon /> Add photo
-                    </button>
+                    </Button>
                     <input
                       ref={fileInputRef}
                       type="file"
@@ -1055,31 +1060,31 @@ export default function AgentEstimatePage() {
                         event.target.value = "";
                       }}
                     />
-                    <button
+                    <Button variant="primary"
                       type="button"
                       disabled={!intelligence.prompt.trim() || askDisabled || intelligence.attachmentsLoading}
                       onClick={() => intelligence.submit()}
-                      className="flex h-12 flex-1 items-center justify-center gap-2 rounded-sm bg-zinc-900 px-5 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+                      className="flex flex-1 items-center justify-center gap-2"
                     >
                       <Bot size={18} aria-hidden="true" /> Ask AI
-                    </button>
+                    </Button>
                   </div>
 
                   {intelligence.loading && (
                     <div className="space-y-2 py-2" role="status">
                       <div className="h-3 w-11/12 animate-pulse rounded bg-zinc-100" />
                       <div className="h-3 w-9/12 animate-pulse rounded bg-zinc-100" />
-                      <div className="text-[14px] text-zinc-500">Checking evidence, property facts, protocols, inventory, and pricing…</div>
+                      <div className="text-ui-body text-zinc-500">Checking evidence, property facts, protocols, inventory, and pricing…</div>
                     </div>
                   )}
 
                   {intelligence.response && !intelligence.loading && (
                     <div className="rounded-sm border border-zinc-200 bg-zinc-50 p-4">
                       <div className="mb-3 flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2 text-[14px] font-medium text-zinc-950"><Bot size={18} aria-hidden="true" /> Estimator response</div>
-                        <button type="button" onClick={intelligence.clear} className="h-11 px-3 text-[14px] font-medium text-zinc-600">Clear chat</button>
+                        <div className="flex items-center gap-2 text-ui-body font-medium text-zinc-950"><Bot size={18} aria-hidden="true" /> Estimator response</div>
+                        <Button variant="ghost" type="button" onClick={intelligence.clear} className="">Clear chat</Button>
                       </div>
-                      <div className={cn("text-[14px] leading-6", intelligence.response.startsWith("Error:") ? "text-alert-fg" : "text-zinc-800")}>
+                      <div className={cn("text-ui-body leading-6", intelligence.response.startsWith("Error:") ? "text-alert-fg" : "text-zinc-800")}>
                         <AgentResponse text={intelligence.response} />
                       </div>
                       <PendingActionsCard
@@ -1118,7 +1123,7 @@ export default function AgentEstimatePage() {
               draft={draft}
               contact={contact}
               account={context?.customer_account}
-              onPreview={() => setPreviewOpen(true)}
+              onPreview={(event) => { event.currentTarget.focus({ preventScroll: true }); setPreviewOpen(true); }}
               onSend={sendDraft}
               sending={sending}
               sendMessage={sendMessage}
@@ -1132,7 +1137,7 @@ export default function AgentEstimatePage() {
           </SectionCard>
 
           <SectionCard title="Accuracy guardrails" subtitle="$35 loaded labor · 35% collected margin target">
-            <div className="space-y-3 p-4 text-[14px] leading-5 text-zinc-700">
+            <div className="space-y-3 p-4 text-ui-body leading-5 text-zinc-700">
               <div className="flex gap-2"><CheckCircle2 size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Pricing engine owns every dollar.</div>
               <div className="flex gap-2"><FileText size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Protocol and inventory affect feasibility/review, never price.</div>
               <div className="flex gap-2"><Camera size={18} className="mt-0.5 shrink-0" aria-hidden="true" /> Photo observations retain per-field confidence and occlusion notes.</div>
@@ -1150,12 +1155,12 @@ export default function AgentEstimatePage() {
       <Dialog open={previewOpen && !!previewUrl} onClose={() => setPreviewOpen(false)} size="lg" className="h-[calc(100dvh-2rem)] max-w-6xl overflow-hidden">
         <DialogHeader className="flex items-center justify-between gap-3">
           <DialogTitle>Customer preview</DialogTitle>
-          <button type="button" onClick={() => setPreviewOpen(false)} aria-label="Close preview" className="flex h-11 w-11 items-center justify-center rounded-sm border border-zinc-300 text-zinc-800"><X size={20} /></button>
+          <Button variant="secondary" type="button" onClick={() => setPreviewOpen(false)} aria-label="Close preview" className="ui-icon-action flex items-center justify-center"><X size={20} /></Button>
         </DialogHeader>
         <DialogBody className="h-[calc(100%-77px)] p-0">
           {previewUrl && <iframe title="Full customer estimate preview" src={previewUrl} className="h-full w-full bg-white" />}
         </DialogBody>
       </Dialog>
-    </div>
+    </UiSurface>
   );
 }

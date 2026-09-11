@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { cn } from "../../../components/ui";
+import { Badge, Button, UiSurface, cn } from "../../../components/ui";
 import { EmptyState, fmtMoney } from "../../../components/dashboard/charts";
 import { mrrBridgeVerdict } from "./scorecard-metrics";
 import Verdict from "./Verdict";
@@ -44,11 +44,11 @@ export default function MrrBridgeCard({ bridge }) {
 
   const bar = (label, amount, count, color, opts = {}) => (
     <div key={label} className={opts.dim ? "opacity-60" : undefined}>
-      <div className="flex items-baseline justify-between gap-3 text-12 mb-0.5">
-        <span className={cn("min-w-0 truncate", opts.big ? "u-label text-ink-secondary" : "text-ink-tertiary")}>
+      <div className="mb-0.5 flex items-baseline justify-between gap-3 text-ui-caption">
+        <span className={cn("min-w-0 truncate", opts.big ? "font-medium text-ink-secondary" : "text-ink-secondary")}>
           {label}
           {count > 0 && (
-            <span className="ml-1.5 text-11 text-ink-tertiary">
+            <span className="ml-1.5 text-ui-caption text-ink-secondary">
               {count} customer{count === 1 ? "" : "s"}
             </span>
           )}
@@ -64,24 +64,20 @@ export default function MrrBridgeCard({ bridge }) {
   );
 
   return (
-    <div>
+    <UiSurface>
       {/* Month strip */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 mb-2">
         {months.map((m) => (
-          <button
+          <Button
             key={m.month}
             type="button"
             onClick={() => setSelectedMonth(m.month)}
             aria-current={m.month === selected.month ? "true" : undefined}
-            className={cn(
-              "h-7 px-2.5 text-11 uppercase tracking-label font-medium rounded-sm border-hairline whitespace-nowrap shrink-0 u-focus-ring transition-colors",
-              m.month === selected.month
-                ? "bg-zinc-900 text-white border-zinc-900"
-                : cn("bg-white text-ink-secondary border-zinc-200 hover:bg-zinc-50", m.degraded && "border-dashed"),
-            )}
+            variant={m.month === selected.month ? "primary" : "secondary"}
+            className={cn("shrink-0 whitespace-nowrap px-3", m.degraded && "border-dashed")}
           >
             {m.label}
-          </button>
+          </Button>
         ))}
       </div>
 
@@ -89,9 +85,7 @@ export default function MrrBridgeCard({ bridge }) {
           on phones and would push this off-screen. */}
       {selected.inProgress && (
         <div className="flex justify-end mb-1.5">
-          <span className="text-11 px-1.5 py-0.5 rounded-sm border-hairline border-zinc-300 text-ink-tertiary">
-            in progress
-          </span>
+          <Badge tone="neutral">in progress</Badge>
         </div>
       )}
 
@@ -100,14 +94,14 @@ export default function MrrBridgeCard({ bridge }) {
           <div className="space-y-2">
             {bar("Added (approx.)", selected.new.mrr, selected.new.count, TONE.add)}
             {bar("Lost (approx.)", -selected.churned.mrr, selected.churned.count, TONE.churn)}
-            <div className="flex items-baseline justify-between text-12 pt-1 border-t border-hairline border-zinc-100">
-              <span className="u-label text-ink-secondary">Net (approx.)</span>
-              <span className={cn("u-nums font-medium text-14", selected.net < 0 ? "text-alert-fg" : "text-emerald-700")}>
+            <div className="flex items-baseline justify-between border-t border-hairline border-zinc-100 pt-1 text-ui-caption">
+              <span className="font-medium text-ink-secondary">Net (approx.)</span>
+              <span className={cn("u-nums font-medium text-14", selected.net < 0 ? "text-alert-fg" : "text-zinc-900")}>
                 {selected.net < 0 ? `−${fmtMoney(Math.abs(selected.net))}` : `+${fmtMoney(selected.net)}`}
               </span>
             </div>
           </div>
-          <p className="mt-2 text-11 text-ink-tertiary">
+          <p className="mt-2 text-ui-caption text-ink-secondary">
             Approximate — per-customer snapshots don't cover both this month
             and the one before it
             {bridge.snapshotStart ? ` (snapshots began ${bridge.snapshotStart.slice(0, 7)})` : ""}, so
@@ -124,14 +118,14 @@ export default function MrrBridgeCard({ bridge }) {
           {bar("Contraction", -selected.contraction.mrr, selected.contraction.count, TONE.contraction, { dim: selected.contraction.mrr === 0 })}
           {bar("Churned", -selected.churned.mrr, selected.churned.count, TONE.churn, { dim: selected.churned.mrr === 0 })}
           {bar("End", selected.endMrr, 0, selected.net < 0 ? TONE.churn : TONE.anchor, { big: true })}
-          <div className="flex items-baseline justify-between text-12">
-            <span className="u-label text-ink-secondary">Net</span>
-            <span className={cn("u-nums font-medium text-14", selected.net < 0 ? "text-alert-fg" : "text-emerald-700")}>
+          <div className="flex items-baseline justify-between text-ui-caption">
+            <span className="font-medium text-ink-secondary">Net</span>
+            <span className={cn("u-nums font-medium text-14", selected.net < 0 ? "text-alert-fg" : "text-zinc-900")}>
               {selected.net < 0 ? `−${fmtMoney(Math.abs(selected.net))}` : `+${fmtMoney(selected.net)}`}
             </span>
           </div>
           {selected.inProgress && (
-            <p className="text-11 text-ink-tertiary">
+            <p className="text-ui-caption text-ink-secondary">
               Updates daily until the month-end freeze — churn often lands late
               in the month.
             </p>
@@ -149,6 +143,6 @@ export default function MrrBridgeCard({ bridge }) {
         Start + movements = end to the cent. Formula:
         server/services/mrr-bridge.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }
