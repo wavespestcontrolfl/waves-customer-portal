@@ -21,12 +21,22 @@
  * This sweep is the recovery path that does not depend on either the loser
  * or the crashed winner still being alive: on a bounded interval
  * (server/services/scheduler.js), find every phone with a still-unlinked
- * (never promoted) conversation holding an unread inbound message, skip any
- * phone with a genuinely active (unexpired) claim right now, and — for the
- * rest — check whether a live bell already covers it. If not, re-run the
- * SAME throttled dispatch an ordinary inbound webhook uses for the earliest
- * such message, inheriting every existing safeguard (atomic claim,
- * secondary receipt check, fail-open behavior) for free.
+ * (never promoted) conversation holding an unread, sms_reply-eligible
+ * inbound message, skip any phone with a genuinely active (unexpired)
+ * claim right now, and — for the rest — check whether delivery ACTUALLY
+ * already succeeded since the earliest currently-unread such message (not
+ * merely whether a live bell exists for it — codex #4210 round-10 P1: a
+ * bell that staff already saw and dismissed through the admin notification
+ * feed, without opening the SMS thread itself, leaves messages.is_read
+ * false while the notification's read_at is set — findLiveBell alone
+ * would treat that as "nothing covering it" and re-alert on a message
+ * staff already acted on; the same gap hid a push-only success, where
+ * ringSmsReplyBell's "delivered" definition — stats.bellWritten OR
+ * push.sent > 0 — never required a bell row to exist at all). If nothing
+ * durably proves delivery, re-run the SAME throttled dispatch an ordinary
+ * inbound webhook uses for the earliest such message, inheriting every
+ * existing safeguard (atomic claim, secondary receipt check, fail-open
+ * behavior) for free.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -56,22 +66,6 @@ async function hasActiveClaim(phone) {
   return Boolean(row);
 }
 
-async function findLiveBell(phone) {
-  return db('notifications')
-    .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
-    .whereNull('read_at')
-    .whereRaw(
-      `metadata->'payload'->>'twilioSid' IN (
-        SELECT m2.twilio_sid FROM messages m2
-        JOIN conversations c2 ON c2.id = m2.conversation_id
-        LEFT JOIN sms_log l2 ON l2.twilio_sid = m2.twilio_sid AND l2.direction = 'inbound'
-        WHERE COALESCE(l2.from_phone, c2.contact_phone) = ?
-      )`,
-      [phone],
-    )
-    .first('id');
-}
-
 async function earliestUnreadFor(phone) {
   // Same eligibility requirement as findCandidatePhones — the earliest
   // unread message THIS SWEEP is allowed to re-alert for, not merely the
@@ -87,7 +81,28 @@ async function earliestUnreadFor(phone) {
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereNotNull('m.twilio_sid')
     .orderBy('m.created_at', 'asc')
-    .first('m.twilio_sid', 'm.body');
+    .first('m.twilio_sid', 'm.body', 'm.created_at');
+}
+
+// Durable delivery evidence, not a live-bell snapshot (codex #4210
+// round-10 P1): ringSmsReplyBell stamps sms_log.metadata.sms_reply_alerted
+// on the exact row it delivered for, and ONLY on a genuine delivery
+// (bellWritten OR push.sent > 0 — the same "delivered" definition used
+// throughout this feature, e.g. hasRecentUnknownSenderReceipt). A bell
+// notification row can be dismissed by staff (read_at set) without the
+// underlying SMS ever being opened, and a push-only delivery may never
+// have written a bell row at all — neither means the message was
+// orphaned. Bounded to `since` (the current orphan candidate's own
+// created_at) so a genuinely NEW, later contact from the same phone is
+// never suppressed by a stamp left over from an much earlier, already-
+// resolved conversation.
+async function deliveredSince(phone, since) {
+  const row = await db('sms_log')
+    .where({ direction: 'inbound', from_phone: phone })
+    .where('created_at', '>=', since)
+    .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
+    .first('id');
+  return Boolean(row);
 }
 
 // `dispatch` is injectable for tests — defaults to the real throttled
@@ -97,9 +112,9 @@ async function earliestUnreadFor(phone) {
 // recover).
 async function recoverPhone(phone, dispatch) {
   if (await hasActiveClaim(phone)) return false; // a dispatch is genuinely still in flight — don't race it
-  if (await findLiveBell(phone)) return false; // already covered — nothing to recover
   const orphan = await earliestUnreadFor(phone);
   if (!orphan) return false; // nothing unread for this phone
+  if (await deliveredSince(phone, orphan.created_at)) return false; // already delivered — a dismissed bell or push-only success is not a lost one
   const delivered = await dispatch({ From: phone, MessageSid: orphan.twilio_sid, message: orphan.body });
   return Boolean(delivered);
 }

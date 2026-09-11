@@ -654,16 +654,11 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
-  test('the sweep never races a claim that is still genuinely active, and never re-dispatches when a live bell already covers the phone (codex #4210 round-8 P1)', async () => {
+  test('the sweep never races a claim that is still genuinely active (codex #4210 round-8 P1)', async () => {
     const activeConversationId = randomUUID();
     const activeMessageId = randomUUID();
     const activeSid = `SM-synthetic-sweep-active-${randomBytes(4).toString('hex')}`;
     const activePhone = `+1941555${String(Date.now()).slice(-4)}`;
-    const coveredConversationId = randomUUID();
-    const coveredMessageId = randomUUID();
-    const coveredSid = `SM-synthetic-sweep-covered-${randomBytes(4).toString('hex')}`;
-    const coveredPhone = `+1941556${String(Date.now()).slice(-4)}`;
-    let bell;
     const dispatch = jest.fn(async () => true);
     try {
       // Genuinely in-flight: claim not yet expired.
@@ -672,26 +667,75 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await mockPg('sms_log').insert({ direction: 'inbound', from_phone: activePhone, to_phone: '+19415550196', twilio_sid: activeSid, message_body: 'In flight', metadata: JSON.stringify({ sms_reply_eligible: true }) });
       await mockPg('sms_reply_alert_claims').insert({ phone: activePhone, expires_at: new Date(Date.now() + 60000) });
 
-      // Already covered: a live bell exists, no claim.
-      await mockPg('conversations').insert({ id: coveredConversationId, customer_id: null, channel: 'sms', contact_phone: coveredPhone, our_endpoint_id: '+19415550197' });
-      await mockPg('messages').insert({ id: coveredMessageId, conversation_id: coveredConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: coveredSid, body: 'Already covered', created_at: new Date(Date.now() - 5000) });
-      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: coveredPhone, to_phone: '+19415550197', twilio_sid: coveredSid, message_body: 'Already covered', metadata: JSON.stringify({ sms_reply_eligible: true }) });
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+      expect(result.checked).toBeGreaterThanOrEqual(1);
+    } finally {
+      await mockPg('messages').where({ id: activeMessageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: activeSid }).delete();
+      await mockPg('sms_reply_alert_claims').where({ phone: activePhone }).delete();
+      await mockPg('conversations').where({ id: activeConversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never re-dispatches a message staff already dismissed the bell for, even though the SMS itself is still unread (codex #4210 round-10 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-dismissed-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // Delivered successfully (sms_reply_alerted stamped) — staff saw the
+      // ADMIN NOTIFICATION and dismissed it (read_at set) without ever
+      // opening the SMS thread, so messages.is_read stays false. The claim
+      // has since expired (staff took their time). findLiveBell alone would
+      // treat the dismissed bell as "nothing covering it" and re-alert on a
+      // message staff already acted on.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550201' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550201', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }) });
       [bell] = await mockPg('notifications').insert({
         recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
-        link: '/admin/communications',
-        metadata: JSON.stringify({ payload: { twilioSid: coveredSid } }),
+        link: '/admin/communications', read_at: new Date(),
+        metadata: JSON.stringify({ payload: { twilioSid: sid } }),
       }).returning('*');
 
       const result = await sweepUnknownSenderAlertClaims({ dispatch });
       expect(dispatch).not.toHaveBeenCalled();
       expect(result.dispatched).toBe(0);
-      expect(result.checked).toBeGreaterThanOrEqual(2);
     } finally {
-      await mockPg('messages').whereIn('id', [activeMessageId, coveredMessageId]).delete();
-      await mockPg('sms_log').whereIn('twilio_sid', [activeSid, coveredSid]).delete();
-      await mockPg('sms_reply_alert_claims').where({ phone: activePhone }).delete();
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
       if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
-      await mockPg('conversations').whereIn('id', [activeConversationId, coveredConversationId]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never re-dispatches a push-only successful delivery that never wrote a bell row at all (codex #4210 round-10 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-push-only-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // ringSmsReplyBell's own "delivered" definition is bellWritten OR
+      // push.sent > 0 — a push-only success stamps sms_reply_alerted just
+      // the same, with no notifications row ever written for it.
+      // findLiveBell would find nothing, and — pre-fix — wrongly treat this
+      // as orphaned.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550202' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550202', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);
 
