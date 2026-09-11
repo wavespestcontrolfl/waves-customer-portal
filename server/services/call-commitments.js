@@ -104,7 +104,12 @@ function slug(text) {
 // singular kinds (one estimate, one confirmation, one callback…) key on
 // party:kind alone so a reworded description on reprocess upserts the same
 // row instead of duplicating it.
-const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'other']);
+// send_reschedule_link is repeatable for a different reason: one call can
+// promise a link for TWO existing appointments, and a party:kind key would
+// upsert the second over the first, silently dropping one obligation (codex
+// #4293 r2 P2). The quote anchor gives each promise its own row, and each
+// carries its own grounded subject naming its visit.
+const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'send_reschedule_link', 'other']);
 
 function commitmentKey(item) {
   const party = item.party === 'customer' ? 'customer' : 'waves';

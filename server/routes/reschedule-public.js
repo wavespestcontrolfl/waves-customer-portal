@@ -705,7 +705,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
       // The original commit's promise hook is best-effort — if it failed, the
       // retry that lands here is the next chance to close the linked cards
-      // (the background sweep is the last one). Idempotent per promise row.
+      // (the background sweep is the last one). Idempotent per promise row,
+      // and evidence-gated: a POST of the CURRENT date/time that never moved
+      // anything finds no customer_self_serve reschedule_log row and closes
+      // nothing (codex #4293 r2 P2).
       try {
         await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
       } catch (err) {

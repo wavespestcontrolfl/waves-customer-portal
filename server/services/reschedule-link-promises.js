@@ -11,6 +11,8 @@ const { recordAuditEvent } = require('./audit-log');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 const KIND = 'send_reschedule_link';
+// How long a send waits after losing the customer's advisory interlock.
+const LOCK_RETRY_MINUTES = 5;
 const sendContext = new AsyncLocalStorage();
 function mode() {
   const value = String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE || '').toLowerCase();
@@ -24,43 +26,67 @@ const snapshot = (v) => ({ id: v.id, customer_id: v.customer_id, date: dateOnly(
 const sameVisitSnapshot = (a, b) => ['id', 'customer_id', 'date', 'start', 'end', 'property_id']
   .every((key) => (a[key] ?? null) === (b[key] ?? null));
 
-// The kind label alone never proves the promised link MOVES this
-// appointment — "I'll text you a link" fits a website or a new-booking link
-// just as well, and an account with one eligible visit would then be sent a
-// live reschedule link for a conversation that never asked for one (codex
-// #4293 r1 P1). Either the promise quote itself speaks about moving an
-// existing appointment, or the commitment carries a grounded subject that
-// names the visit; anything else is office-review work.
-const RESCHEDULE_INTENT = /\breschedul\w*\b|\bre schedul\w*\b|\b(?:move|moving|change|changing|switch|switching|push|pushing|pick|picking|choose|choosing|select|selecting)\b[a-z0-9 ]{0,40}\b(?:time|times|day|days|date|dates|slot|slots|window|appointment|appt|visit|service)\b|\b(?:new|another|different|better) (?:time|day|date|slot|window)\b/;
+// ── The promise ───────────────────────────────────────────────────────────
+// The kind label alone never proves the promised link MOVES this appointment.
+// "I'll text you a link" fits a website or a first booking just as well, and
+// an account with one eligible visit would then be sent a live reschedule
+// link for a conversation that never asked for one (codex #4293 r1/r2 P1).
 
-function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
-  const skip = (reason) => ({ reason });
+// Unambiguous — the word itself means moving something already scheduled.
+const RESCHEDULE_WORD = /\breschedul\w*\b|\bre schedul\w*\b/;
+// A move verb applied to a time or to the appointment itself. "pick a time" /
+// "choose a time" are deliberately absent: generic slot selection reads the
+// same on a first booking (codex #4293 r2 P1).
+const MOVE_INTENT = /\b(?:move|moving|change|changing|switch|switching|push|pushing)\b[a-z0-9 ]{0,40}\b(?:time|times|day|days|date|dates|slot|slots|window|appointment|appt|visit)\b/;
+// A different slot named AGAINST the appointment the caller already has.
+const EXISTING_SLOT = /\b(?:new|another|different|better) (?:time|day|date|slot|window)\b[a-z0-9 ]{0,40}\b(?:appointment|appt|visit|service)\b|\b(?:your|that|the) (?:existing|current|upcoming|scheduled) (?:appointment|appt|visit)\b/;
+// Wording that means a FIRST appointment. It vetoes the promise however the
+// rest of the quote reads — "a link to choose a time for your new service" is
+// a booking link, not a reschedule link.
+const NEW_BOOKING = /\b(?:new|first|initial) (?:service|customer|account|appointment|appt|visit|booking|job|treatment)\b|\bget (?:you |your )?(?:set up|started|scheduled|on the schedule|on our schedule)\b|\bsign (?:you )?up\b|\b(?:book|schedule) (?:a|an|your) (?:new|first)\b/;
+// The agent taking it back after promising it ("actually I can't send that
+// link, the office will call"). The caller's own refusal is handled
+// separately — this one scans the agent's LATER turns (codex #4293 r2 P1).
+const AGENT_RETRACTION = /\b(?:can t|cannot|won t|will not|unable to|not able to|don t|do not|no longer)\b[a-z0-9 ]{0,25}\b(?:send|text|email|link)\b|\b(?:scratch that|never mind|nevermind|disregard that|forget that)\b|\bthe office will (?:call|reach out|follow up|handle)\b/;
+const CONDITIONAL = /\b(?:not|never|unless|if|until|once|maybe|might|cannot)\b|\b(?:don|won|can) t\b/;
+
+// Who the call is with, and whether it can be read at all.
+function callerIdentityReason(call, customer) {
   if (!call?.customer_id || call.customer_id !== customer?.id || !normalizePhone(customer.phone)
     || !phoneMatchDigits(customer.phone).length
-    || normalizePhone(customer.phone) !== normalizePhone(String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)) return skip('customer_identity');
+    || normalizePhone(customer.phone) !== normalizePhone(String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)) return 'customer_identity';
   // /reschedule/:token refuses a non-active account (accountInactive), so a
   // link promising a cancelled customer a new time is a dead end — hold the
   // same explicit `active === true` the page requires (codex #4293 r1 P1).
-  if (customer.active !== true) return skip('customer_inactive');
+  if (customer.active !== true) return 'customer_inactive';
   if (call.v2_extraction_status !== 'valid' || call.ai_extraction_enriched?.meta?.is_spam
-    || call.ai_extraction_enriched?.meta?.is_voicemail || call.processing_token) return skip('call_not_ready');
-  const { speakerTurns } = require('./call-commitments');
-  const turns = speakerTurns(call.transcription);
-  const conditional = /\b(?:not|never|unless|if|until|once|maybe|might|cannot)\b|\b(?:don|won|can) t\b/;
-  const revoked = (turns?.caller || []).some((turn) => /\b(?:don t|do not|no need|never mind)\b/.test(turn) && /\b(?:link|text|send|email)\b/.test(turn));
-  const promisedQuotes = (commitment.evidence || []).filter((e) => e.speaker === 'agent' && turns?.agent.some((t) => t.includes(norm(e.quote)) && !conditional.test(t))
-    && /\blink\b/.test(norm(e.quote)) && /\b(send|text|email|sending|texting)\b/.test(norm(e.quote))
-    && /\b(?:i|we) (?:ll|will|am going to|are going to|am sending|m sending)\b|\blet me\b/.test(norm(e.quote))).map((e) => norm(e.quote));
-  const subject = commitment.subject;
-  if (subject && (!subject.quote || !norm(call.transcription).includes(norm(subject.quote))
-    || [subject.service, subject.address].some((value) => value && !norm(subject.quote).includes(norm(value))))) return skip('subject_not_grounded');
-  // A subject is grounded only when it NAMES the visit — a bare quote with no
-  // date/service/address binds nothing, so it cannot stand in for
-  // rescheduling language.
-  const groundedSubject = !!subject && [subject.visit_date, subject.service, subject.address].some(Boolean);
-  const aboutThisAppointment = groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_INTENT.test(quote));
-  if (revoked || !promisedQuotes.length || !aboutThisAppointment
-    || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
+    || call.ai_extraction_enriched?.meta?.is_voicemail || call.processing_token) return 'call_not_ready';
+  return null;
+}
+
+// The agent quotes that still STAND as a promise to text a link: spoken by
+// the agent, unconditional in their own turn, and not withdrawn later in the
+// call.
+function standingPromiseQuotes(commitment, turns) {
+  if (!turns?.agent?.length) return [];
+  return (commitment.evidence || []).filter((e) => e.speaker === 'agent').map((e) => norm(e.quote))
+    .filter((quote) => /\blink\b/.test(quote) && /\b(send|text|email|sending|texting)\b/.test(quote)
+      && /\b(?:i|we) (?:ll|will|am going to|are going to|am sending|m sending)\b|\blet me\b/.test(quote))
+    .filter((quote) => {
+      const spokenAt = turns.agent.findIndex((turn) => turn.includes(quote) && !CONDITIONAL.test(turn));
+      return spokenAt >= 0 && !turns.agent.slice(spokenAt + 1).some((turn) => AGENT_RETRACTION.test(turn));
+    });
+}
+
+// A subject is grounded only when it NAMES the visit — a bare quote with no
+// date/service/address binds nothing, so it cannot stand in for rescheduling
+// language.
+function subjectNotGrounded(subject, call) {
+  return !!subject && (!subject.quote || !norm(call.transcription).includes(norm(subject.quote))
+    || [subject.service, subject.address].some((value) => value && !norm(subject.quote).includes(norm(value))));
+}
+
+function narrowBySubject(candidates, subject, call) {
   let selected = candidates;
   if (subject?.visit_date) {
     const { quoteBindsConfirmedSlot, normalizeCommitmentText } = require('./call-triage-flags');
@@ -71,13 +97,36 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
   if (subject?.address) selected = selected.filter((v) => require('./estimator-engine/address-compare').sameStreetAddress(
     [v.service_address_line1 || v.property_address, v.service_address_line2 || v.property_unit].filter(Boolean).join(' '),
     subject.address, { requireExactUnit: true }));
-  if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
-  const visit = selected[0];
+  return selected;
+}
+
+// Can the customer actually move THIS row from the public page?
+function visitNotSelfServiceReason(visit, now) {
   if (!['pending', 'confirmed'].includes(visit.status) || !visit.reschedule_token || (visit.visit_id && visit.follow_through_group_eligible !== true)
-    || (visit.status === 'pending' && !visit.customer_confirmed && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action))) return skip('visit_not_self_service');
+    || (visit.status === 'pending' && !visit.customer_confirmed && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action))) return 'visit_not_self_service';
   const start = visit.window_start ? parseETDateTime(`${dateOnly(visit.scheduled_date)}T${String(visit.window_start).slice(0, 5)}`) : null;
-  if (!start || !Number.isFinite(start.getTime()) || start.getTime() + 120 * 60000 <= now.getTime()) return skip('visit_elapsed');
-  return { visit };
+  if (!start || !Number.isFinite(start.getTime()) || start.getTime() + 120 * 60000 <= now.getTime()) return 'visit_elapsed';
+  return null;
+}
+
+function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
+  const skip = (reason) => ({ reason });
+  const identity = callerIdentityReason(call, customer);
+  if (identity) return skip(identity);
+  const turns = require('./call-commitments').speakerTurns(call.transcription);
+  const revoked = (turns?.caller || []).some((turn) => /\b(?:don t|do not|no need|never mind)\b/.test(turn) && /\b(?:link|text|send|email)\b/.test(turn));
+  const promisedQuotes = standingPromiseQuotes(commitment, turns);
+  const subject = commitment.subject;
+  if (subjectNotGrounded(subject, call)) return skip('subject_not_grounded');
+  const groundedSubject = !!subject && [subject.visit_date, subject.service, subject.address].some(Boolean);
+  const aboutThisAppointment = !promisedQuotes.some((quote) => NEW_BOOKING.test(quote))
+    && (groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_WORD.test(quote) || MOVE_INTENT.test(quote) || EXISTING_SLOT.test(quote)));
+  if (revoked || !promisedQuotes.length || !aboutThisAppointment
+    || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
+  const selected = narrowBySubject(candidates, subject, call);
+  if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
+  const notReady = visitNotSelfServiceReason(selected[0], now);
+  return notReady ? skip(notReady) : { visit: selected[0] };
 }
 
 async function contextFor(conn, commitmentId, now) {
@@ -138,6 +187,61 @@ async function parkReview(conn, row, reason) {
   });
 }
 
+// The exact card this promise's own exceptions raise. Cleared when the
+// promise reaches a terminal state — delivered, or closed by the office —
+// never touching unrelated call flags, and re-syncing review_status the way
+// admin-triage transitionCore does.
+async function clearPromiseException(trx, callLogId, commitmentId, note) {
+  await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'reschedule_link_promise' }).whereIn('status', ['open', 'in_progress'])
+    .whereRaw("payload->'reschedule_link_promise'->>'commitment_id' = ?", [commitmentId])
+    .update({ status: 'resolved', resolution_source: 'auto', resolution_note: note, resolved_at: new Date(), updated_at: new Date() });
+  const remaining = await trx('triage_items').where({ call_log_id: callLogId }).whereIn('status', ['open', 'in_progress']).first('id');
+  await trx('call_log').where({ id: callLogId }).update({ review_status: remaining ? 'open' : 'resolved', updated_at: new Date() });
+}
+
+// Proof that THIS message is the promised handoff: one customer across the
+// call, the outbox row, the message and the visit; the caller's own phone on
+// both ends; the same extraction generation the plan was made from; and the
+// message itself tied to the planned visit, the claimed provider id, or the
+// minted link.
+function deliveryIdentityMatches({ call, commitment, current, visit, customer, sms, context, visitId, generation }) {
+  const link = current.payload?.link;
+  return !!customer && call.customer_id === current.related_customer_id
+    && sms.customer_id === call.customer_id && visit?.customer_id === call.customer_id
+    && normalizePhone(customer.phone) === normalizePhone(sms.to_phone)
+    && normalizePhone(customer.phone) === normalizePhone(String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)
+    && Number(call.processing_generation) === Number(generation)
+    && Number(commitment.last_seen_generation) === Number(generation)
+    && (context?.visit?.id === visitId || (current.provider_message_id && current.provider_message_id === sms.twilio_sid) || (link && String(sms.message_body).includes(link.replace(/^https?:\/\//, ''))));
+}
+
+// Delivery — and only delivery — keeps the promise.
+async function fulfilPromise(trx, row, sms, call) {
+  const updated = await trx('call_commitments').where({ id: row.commitment_id, status: 'open' }).whereNull('human_state')
+    .update({ status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(), fulfillment: {
+      kind: 'reschedule_link_delivered', strength: 'direct', record_type: 'sms_log', record_id: sms.id,
+      matched_at: new Date().toISOString(), basis: 'linked_visit_reschedule_link_delivered',
+    } });
+  if (updated) await recordAuditEvent({ actor_type: 'system', action: 'reschedule_link_delivered', resource_type: 'call_commitment', resource_id: row.commitment_id,
+    metadata: { sms_log_id: sms.id, outbox_id: row.id }, critical: true, trx });
+  // The provider recovered (or staff sent the exact link).
+  await clearPromiseException(trx, call.id, row.commitment_id, 'The promised link was delivered.');
+}
+
+// What the row looks like once the provider's own record is attached:
+// delivery closes it, anything else keeps the lane it is already in, so a
+// parked row stays parked for the office.
+function settledOutboxPatch(current, sms, context, { delivered, visitId, generation }) {
+  const parked = current.status === 'review';
+  return {
+    status: delivered ? 'delivered' : (parked ? 'review' : 'sent'),
+    ...(delivered ? { last_error: null } : {}),
+    related_scheduled_service_id: visitId, provider_message_id: sms.twilio_sid, sent_at: sms.created_at,
+    payload: { ...current.payload, call_generation: generation, visit_snapshot: current.payload?.visit_snapshot || (context?.visit ? snapshot(context.visit) : null) },
+    updated_at: new Date(),
+  };
+}
+
 async function settleDelivery(conn, row, sms, context = null) {
   const delivered = ['delivered', 'read'].includes(sms.status);
   return conn.transaction(async (trx) => {
@@ -150,34 +254,9 @@ async function settleDelivery(conn, row, sms, context = null) {
     const generation = current.payload?.call_generation ?? context?.call?.processing_generation;
     const visit = visitId ? await trx('scheduled_services').where({ id: visitId }).first('customer_id') : null;
     const customer = call?.customer_id ? await trx('customers').where({ id: call.customer_id }).whereNull('deleted_at').first('phone') : null;
-    const link = current.payload?.link;
-    const identityMatches = !!customer && call.customer_id === current.related_customer_id
-      && sms.customer_id === call.customer_id && visit?.customer_id === call.customer_id
-      && normalizePhone(customer.phone) === normalizePhone(sms.to_phone)
-      && normalizePhone(customer.phone) === normalizePhone(String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)
-      && Number(call.processing_generation) === Number(generation)
-      && Number(commitment.last_seen_generation) === Number(generation)
-      && (context?.visit?.id === visitId || (current.provider_message_id && current.provider_message_id === sms.twilio_sid) || (link && String(sms.message_body).includes(link.replace(/^https?:\/\//, ''))));
-    if (!identityMatches) return { needsReview: true };
-    await trx('outbox_messages').where({ id: row.id }).update({ status: delivered ? 'delivered' : (current.status === 'review' ? 'review' : 'sent'),
-      ...(delivered ? { last_error: null } : {}),
-      related_scheduled_service_id: visitId, provider_message_id: sms.twilio_sid, sent_at: sms.created_at,
-      payload: { ...current.payload, call_generation: generation, visit_snapshot: current.payload?.visit_snapshot || (context?.visit ? snapshot(context.visit) : null) }, updated_at: new Date() });
-    if (!delivered) return null;
-    const updated = await trx('call_commitments').where({ id: row.commitment_id, status: 'open' }).whereNull('human_state')
-      .update({ status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(), fulfillment: {
-        kind: 'reschedule_link_delivered', strength: 'direct', record_type: 'sms_log', record_id: sms.id,
-        matched_at: new Date().toISOString(), basis: 'linked_visit_reschedule_link_delivered',
-      } });
-    if (updated) await recordAuditEvent({ actor_type: 'system', action: 'reschedule_link_delivered', resource_type: 'call_commitment', resource_id: row.commitment_id,
-      metadata: { sms_log_id: sms.id, outbox_id: row.id }, critical: true, trx });
-    // The provider recovered (or staff sent the exact link). Clear its
-    // exception card without touching unrelated call flags.
-    await trx('triage_items').where({ call_log_id: call.id, reason_code: 'reschedule_link_promise' }).whereIn('status', ['open', 'in_progress'])
-      .whereRaw("payload->'reschedule_link_promise'->>'commitment_id' = ?", [row.commitment_id])
-      .update({ status: 'resolved', resolution_source: 'auto', resolution_note: 'The promised link was delivered.', resolved_at: new Date(), updated_at: new Date() });
-    const remaining = await trx('triage_items').where({ call_log_id: call.id }).whereIn('status', ['open', 'in_progress']).first('id');
-    await trx('call_log').where({ id: call.id }).update({ review_status: remaining ? 'open' : 'resolved', updated_at: new Date() });
+    if (!deliveryIdentityMatches({ call, commitment, current, visit, customer, sms, context, visitId, generation })) return { needsReview: true };
+    await trx('outbox_messages').where({ id: row.id }).update(settledOutboxPatch(current, sms, context, { delivered, visitId, generation }));
+    if (delivered) await fulfilPromise(trx, row, sms, call);
     return null;
   }).then((result) => result?.needsReview ? parkReview(conn, row, 'delivery_scope_changed') : result);
 }
@@ -217,8 +296,17 @@ async function reconcileAttempt(conn, row, now) {
 // mode records the reason without touching the customer, and live mode hands
 // the promise to the office.
 async function applyContextSkip(conn, row, reason, now) {
-  if (reason === 'promise_closed') return conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-    .update({ status: 'cancelled', updated_at: now });
+  // The office dismissed or hand-fulfilled the promise. Cancelling the outbox
+  // row alone would leave this promise's own exception card open forever —
+  // classifyTriageItem deliberately keeps it out of the generic sweep, so the
+  // call would sit in review against a decision already made (codex #4293 r2
+  // P2).
+  if (reason === 'promise_closed') return conn.transaction(async (trx) => {
+    await lockTriageCall(trx, row.related_call_log_id);
+    await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+      .update({ status: 'cancelled', updated_at: now });
+    await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, 'The promise was closed by the office.');
+  });
   if (mode() === 'shadow') return conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
     .update({ status: 'shadow', last_error: reason, updated_at: now });
   return parkReview(conn, row, reason);
@@ -263,6 +351,11 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
       return conn('outbox_messages').where({ id: row.id, status: 'sending' }).update({ status: 'sent',
         provider_message_id: result.providerMessageId, sent_at: new Date(), updated_at: new Date() });
     }
+    // The interlock was busy — nothing reached the provider, so this is a
+    // retry in a few minutes, not an unknown outcome for the office (codex
+    // #4293 r2 P2).
+    if (result.blocked && result.code === 'LINK_LOCK_BUSY') return conn('outbox_messages').where({ id: row.id, status: 'sending' })
+      .update({ status: 'pending', available_at: new Date(now.getTime() + LOCK_RETRY_MINUTES * 60000), last_error: result.code, updated_at: new Date() });
     if (result.blocked && ['LINK_QUIET_HOURS', 'QUIET_HOURS_HOLD', 'LINK_GATE_OFF'].includes(result.code)) return conn('outbox_messages').where({ id: row.id, status: 'sending' })
       .update({ status: 'pending', available_at: nextSendWindowOpenET(new Date()), last_error: result.code, updated_at: new Date() });
     return parkReview(conn, row, result.code || 'provider_outcome_unknown');
@@ -335,12 +428,55 @@ async function sweep(conn = db, options = {}) {
   return { processed: rows.length, reconciled, mode: mode() };
 }
 
+// A manual Comms message that carries the SAME visit's link while an
+// automatic send of it is in flight (or landed after this operator opened the
+// conversation) is a duplicate, not a second message.
+async function manualDuplicateOfPromisedLink(customerId, body, started) {
+  const active = await db('outbox_messages').where({ related_customer_id: customerId }).whereNotNull('commitment_id')
+    .whereIn('status', ['sending', 'sent', 'delivered']).select('status', 'sent_at', 'related_scheduled_service_id');
+  for (const row of active) {
+    if (row.status !== 'sending' && new Date(row.sent_at) < started) continue;
+    const visit = await db('scheduled_services').where({ id: row.related_scheduled_service_id, customer_id: customerId }).first('id', 'reschedule_token');
+    if (visit && carriesVisitLink(body, await visitLinkNeedles(db, visit))) return true;
+  }
+  return false;
+}
+
+// Take the customer's advisory interlock, or say so. statement_timeout aborts
+// the wait rather than queueing behind a slow unrelated send — no provider
+// attempt has been made at that point, so the caller retries instead of
+// treating it as an unknown outcome (codex #4293 r2 P2).
+async function acquireSendLock(connection, customerId) {
+  try {
+    await connection.query("SET statement_timeout = '10s'");
+    await connection.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', ['reschedule-link-send', String(customerId)]);
+    return true;
+  } catch (err) {
+    require('./logger').warn(`[reschedule-link-promises] send interlock not acquired for ${customerId} (${err.code || err.name || 'error'})`);
+    return false;
+  }
+}
+
+const LOCK_BUSY = Object.freeze({ sent: false, blocked: true, retryable: true, code: 'LINK_LOCK_BUSY',
+  reason: 'Another message to this customer is in flight. Try again shortly.' });
+const LINK_IN_PROGRESS = Object.freeze({ sent: false, blocked: true, code: 'PROMISED_LINK_IN_PROGRESS',
+  reason: 'The promised link is already being sent. Refresh the conversation before sending it again.' });
+
+// Which side of the interlock a send sits on. Anything else passes straight
+// through — the interlock exists only between the promise worker and an
+// operator's own message to the same customer.
+function sendLockRole(input) {
+  return {
+    automatic: !!input?.metadata?.followThroughCommitmentId,
+    manual: input?.operatorInitiated === true || input?.metadata?.humanAuthored === true || !!input?.metadata?.adminUserId,
+  };
+}
+
 // The automatic promise send and manual Comms send serialize for this
 // customer. A manual message already underway wins; the automated final
 // check sees its receipt. An overlapping manual duplicate is held visibly.
 async function withSendLock(input, sendCore) {
-  const automatic = !!input?.metadata?.followThroughCommitmentId;
-  const manual = input?.operatorInitiated === true || input?.metadata?.humanAuthored === true || !!input?.metadata?.adminUserId;
+  const { automatic, manual } = sendLockRole(input);
   if (mode() !== 'true' || !input?.customerId || (!automatic && !manual)
     || sendContext.getStore()?.customerId === input.customerId) return sendCore(input);
   const started = new Date();
@@ -349,18 +485,8 @@ async function withSendLock(input, sendCore) {
   // here deadlocks two simultaneous sends when that pool has two slots.
   const connection = await db.client.acquireRawConnection();
   try {
-    await connection.query("SET statement_timeout = '10s'");
-    await connection.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', ['reschedule-link-send', String(input.customerId)]);
-    if (manual && !automatic) {
-      const active = await db('outbox_messages').where({ related_customer_id: input.customerId }).whereNotNull('commitment_id')
-        .whereIn('status', ['sending', 'sent', 'delivered']).select('status', 'sent_at', 'related_scheduled_service_id');
-      for (const row of active) {
-        if (row.status !== 'sending' && new Date(row.sent_at) < started) continue;
-        const visit = await db('scheduled_services').where({ id: row.related_scheduled_service_id, customer_id: input.customerId }).first('id', 'reschedule_token');
-        if (visit && carriesVisitLink(input.body, await visitLinkNeedles(db, visit))) return { sent: false, blocked: true,
-          code: 'PROMISED_LINK_IN_PROGRESS', reason: 'The promised link is already being sent. Refresh the conversation before sending it again.' };
-      }
-    }
+    if (!(await acquireSendLock(connection, input.customerId))) return LOCK_BUSY;
+    if (manual && !automatic && await manualDuplicateOfPromisedLink(input.customerId, input.body, started)) return LINK_IN_PROGRESS;
     const lockedInput = { ...input, preProviderCheck: async (args) => {
       const verdict = typeof input.preProviderCheck === 'function' ? await input.preProviderCheck(args) : { ok: true };
       if (connection.__knex__disposed) return { ok: false, code: 'LINK_LOCK_LOST', reason: 'The send interlock was lost. Refresh before retrying.' };
@@ -378,48 +504,76 @@ const USED_LINK_NOTE = 'Customer chose a new time using the promised reschedule 
 // The mover stamps every /reschedule/:token commit with this initiator — the
 // durable proof that the customer, not the office, moved the visit.
 const SELF_SERVE_INITIATOR = 'customer_self_serve';
-const SETTLED_STATUSES = ['sent', 'delivered'];
+// Rows whose link actually reached the provider. A parked ('review') row
+// counts too — a missing carrier receipt does not stop the customer from
+// following the permanent link, and its cards are just as moot once they do
+// (codex #4293 r2 P2) — but only when an attempt was really made.
+const ATTEMPTED_STATUSES = ['sent', 'delivered', 'review'];
 
 // At-most-once per promise row: the stamp is what makes the reconciliation
 // safe to retry from anywhere.
 async function markLinkUsed(conn, row) {
   await require('./triage-auto-resolve').resolveRescheduleCards(conn, row.related_call_log_id, USED_LINK_NOTE, row.related_scheduled_service_id);
+  // A row parked for a missing carrier receipt raised this promise's own
+  // exception card, and classifyTriageItem keeps that card out of the
+  // generic sweep. The customer following the same link answers it: there
+  // is no office work left to chase. The card closes; the promise's own
+  // status does NOT move, because a missing receipt is still not proof of
+  // delivery (codex #4293 r2 P2).
+  if (row.status === 'review') {
+    await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, row.related_call_log_id);
+      await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, USED_LINK_NOTE);
+    });
+  }
   await conn('outbox_messages').where({ id: row.id })
     .update({ payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ link_used_reconciled_at: new Date().toISOString() })]), updated_at: new Date() });
 }
 
 function unreconciledPromiseRows(conn) {
-  return conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', SETTLED_STATUSES)
+  return conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', ATTEMPTED_STATUSES)
     .whereNotNull('related_scheduled_service_id').whereNotNull('related_call_log_id')
+    .where(function attempted() { this.whereNot('status', 'review').orWhereNotNull('provider_message_id'); })
     .whereRaw("(payload->>'link_used_reconciled_at') IS NULL");
 }
 
+// The customer moved the visit THEMSELVES, after the link went out. This is
+// the only evidence that closes the cards: a caller who replays the POST with
+// the appointment's current date and start never moved anything, and must not
+// be able to hide outstanding office work (codex #4293 r2 P2).
+async function selfServeMoveAfterSend(conn, row) {
+  return conn('reschedule_log')
+    .where({ scheduled_service_id: row.related_scheduled_service_id, initiated_by: SELF_SERVE_INITIATOR })
+    .modify((q) => { if (row.sent_at) q.where('created_at', '>=', row.sent_at); })
+    .first('id');
+}
+
+async function reconcileRows(conn, rows) {
+  let reconciled = 0;
+  for (const row of rows) {
+    if (!(await selfServeMoveAfterSend(conn, row))) continue;
+    await markLinkUsed(conn, row);
+    reconciled += 1;
+  }
+  return reconciled;
+}
+
+// Called straight off a committed move (and off its idempotent replay) for
+// one visit.
 async function resolveUsedLink(conn, visitId) {
-  const rows = await unreconciledPromiseRows(conn).where({ related_scheduled_service_id: visitId })
-    .select('id', 'related_call_log_id', 'related_scheduled_service_id');
-  for (const row of rows) await markLinkUsed(conn, row);
+  return reconcileRows(conn, await unreconciledPromiseRows(conn).where({ related_scheduled_service_id: visitId })
+    .select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
 }
 
 // The post-commit hook in reschedule-public is best-effort: a transient DB
 // failure or a process death after the move commits would otherwise leave the
 // linked triage cards open forever, because a delivered row has left the
 // worker sweep and a client retry returns from the idempotent-replay branch
-// (codex #4293 r1 P2). This re-derives the same verdict from the mover's own
-// reschedule_log row, so the reconciliation is retried until it lands.
+// (codex #4293 r1 P2). This is the last chance — same evidence, run from the
+// sweep until it lands.
 async function reconcileUsedLinks(conn) {
-  const rows = await unreconciledPromiseRows(conn).orderBy('updated_at')
-    .limit(100).select('id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at');
-  let reconciled = 0;
-  for (const row of rows) {
-    const used = await conn('reschedule_log')
-      .where({ scheduled_service_id: row.related_scheduled_service_id, initiated_by: SELF_SERVE_INITIATOR })
-      .modify((q) => { if (row.sent_at) q.where('created_at', '>=', row.sent_at); })
-      .first('id');
-    if (!used) continue;
-    await markLinkUsed(conn, row);
-    reconciled += 1;
-  }
-  return reconciled;
+  return reconcileRows(conn, await unreconciledPromiseRows(conn).orderBy('updated_at')
+    .limit(100).select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
 }
 
 module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };
