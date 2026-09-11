@@ -706,6 +706,11 @@ router.put('/preferences', async (req, res, next) => {
 
     await db.transaction(async (trx) => {
       for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
+      // A billing address assigned here takes the address key after the row
+      // locks, like every customer address writer: a bearer-link handoff
+      // that read the address as unowned commits before this claim or
+      // re-judges ownership after it.
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, { ...propertyDbUpdates, ...channelDbUpdates });
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });

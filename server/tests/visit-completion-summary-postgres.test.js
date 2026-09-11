@@ -425,6 +425,31 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('visit_effects').where({ visit_id: fixture.visitId }).del();
   });
 
+  test('an abandoned-row settlement re-reads the marker under the effect row and yields to a provider start', async () => {
+    const [queued] = await mockPg('email_messages').insert({
+      provider: 'sendgrid', template_key: 'service.visit_summary', trigger_event_id: `visit_summary:${fixture.visitId}`,
+      recipient_type: 'customer', recipient_id: fixture.customerId, recipient_email_snapshot: fixture.primaryEmail,
+      idempotency_key: `visit_summary:${fixture.visitId}:${randomUUID()}`, status: 'queued', queued_at: new Date(Date.now() - 3600000),
+      send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
+      from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', categories: JSON.stringify(['email_template']),
+    }).returning('*');
+    await priorClaim('completion_email', { status: 'unknown_delivery', last_error: `handoff_pending:${queued.id}` });
+    try {
+      const settle = await Summary._settleAbandonedSummaryEmailRow(fixture.visitId, mockPg);
+      expect(typeof settle).toBe('function');
+      // The delayed owner reached its provider start between the read and the settlement.
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).update({ last_error: null });
+      expect(await settle()).toBe(0);
+      expect(await mockPg('email_messages').where({ id: queued.id }).first()).toMatchObject({ status: 'queued' });
+      // With the marker intact the row settles.
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).update({ last_error: `handoff_pending:${queued.id}` });
+      expect(await settle()).toBe(1);
+      expect(await mockPg('email_messages').where({ id: queued.id }).first()).toMatchObject({ status: 'failed', error_message: ABORTED_BEFORE_DISPATCH });
+    } finally {
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId }).del();
+    }
+  });
+
   test('a billing-email save assigning the recovery destination waits for the held retry handoff', async () => {
     const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
     const destination = `${randomUUID()}@example.invalid`;

@@ -460,11 +460,24 @@ async function settleAbandonedSummaryEmailRow(visitId, database) {
   if (!effect || !VisitGroups.isHandoffPending(effect.last_error)) return null;
   if (new Date(effect.claimed_at).getTime() > Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS) return null;
   const messageId = effect.last_error.split(':')[1] || null;
+  const marker = effect.last_error;
+  // The settlement re-reads the marker under the effect row FOR UPDATE: a
+  // still-live owner delayed past the lease clears that marker on its own
+  // connection right before its provider request (markVisitNotificationProviderStart),
+  // and that clear either committed first — the proof is gone and the row
+  // is left alone — or waits for this transaction and finds the row
+  // already settled. The proof and the settlement cannot cross.
   return async () => {
     if (!messageId) return 0;
-    return database('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
-      .whereNull('provider_message_id').whereNull('sent_at')
-      .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: database.fn.now() });
+    const settle = async (trx) => {
+      const held = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
+        .forUpdate().first('last_error');
+      if (!held || held.last_error !== marker) return 0;
+      return trx('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
+        .whereNull('provider_message_id').whereNull('sent_at')
+        .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: trx.fn.now() });
+    };
+    return database.isTransaction ? settle(database) : database.transaction(settle);
   };
 }
 
@@ -711,4 +724,4 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
 module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
-  retrySummaryThroughHandoff, summaryEmailOptOutDrop };
+  retrySummaryThroughHandoff, summaryEmailOptOutDrop, _settleAbandonedSummaryEmailRow: settleAbandonedSummaryEmailRow };
