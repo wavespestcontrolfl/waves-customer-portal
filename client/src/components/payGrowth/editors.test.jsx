@@ -185,7 +185,6 @@ describe('EvidenceEditor', () => {
     render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
     await selectVisit();
     await screen.findByRole('button', { name: 'Add accepted value allocation' });
-    fireEvent.change(screen.getByLabelText('Service-value allocation'), { target: { value: 'alloc-1' } });
     fireEvent.change(screen.getByLabelText('Production exclusion'), { target: { value: 'inspection' } });
     expect(screen.queryByRole('button', { name: 'Add accepted value allocation' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Service-value allocation')).not.toBeInTheDocument();
@@ -238,6 +237,25 @@ describe('EvidenceEditor', () => {
     expect(screen.getByLabelText('Performed service')).not.toBeDisabled();
     expect(screen.getByRole('button', { name: 'Close review' })).not.toBeDisabled();
     expect(screen.getByLabelText('Application number in original allocation')).toHaveValue(1);
+    // The retained allocation must be claimed by this review: neither the selector nor an exclusion can strand it.
+    expect(screen.getByLabelText('Service-value allocation')).toBeDisabled();
+    expect(screen.getByLabelText('Production exclusion')).toBeDisabled();
+    expect(screen.getByText(/must claim the allocation it retained/)).toBeInTheDocument();
+  });
+
+  it('locks the exclusion while a pre-existing allocation is selected, until it is cleared', async () => {
+    request.mockImplementation((path, options = {}) => {
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(baseDetail());
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    fireEvent.change(await screen.findByLabelText('Service-value allocation'), { target: { value: 'alloc-1' } });
+    expect(screen.getByLabelText('Production exclusion')).toBeDisabled();
+    expect(screen.getByText(/Clear the allocation to record an exclusion/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Service-value allocation'), { target: { value: '' } });
+    expect(screen.getByLabelText('Production exclusion')).not.toBeDisabled();
   });
 
   it('disables allocation controls and participant shares once a revision is retained, and carries base_id forward', async () => {

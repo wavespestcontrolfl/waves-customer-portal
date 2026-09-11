@@ -31,6 +31,13 @@ const EXCLUSION_NOTES = {
   corrective: 'Callback visits are corrective: they receive zero production credit and never claim an application from an accepted-value allocation.',
   planned_followup: 'This service is an included follow-up or an always-free visit type: it receives zero production credit and never claims an application from an accepted-value allocation.',
 };
+// Why the exclusion selector is locked: a claimed allocation must stay claimed on this review.
+function exclusionLock(data, created, excluded) {
+  const claimed = Boolean(data?.allocation_id) && !excluded;
+  if (!claimed) return { disabled: false, hint: undefined };
+  const fresh = created.includes(data.allocation_id);
+  return { disabled: true, fresh, hint: fresh ? 'This review must claim the allocation it retained; exclusions are unavailable.' : 'Clear the allocation to record an exclusion.' };
+}
 const exclusionNote = visit => EXCLUSION_NOTES[forcedExclusion(visit)] || 'This service is excluded from production credit and never claims an application from an accepted-value allocation.';
 
 function evidenceForm(detail) {
@@ -61,6 +68,8 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [newAllocation, setNewAllocation] = useState(false);
+  // Allocations retained from this review are append-only: this review must claim them, so they lock the selector and the exclusion.
+  const [created, setCreated] = useState([]);
   const [allocationSaving, setAllocationSaving] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
@@ -98,6 +107,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   const forced = Boolean(detail) && forcedExclusion(detail.visit) !== 'none';
   // Any excluded first review (forced or reviewer-selected) cannot claim a new allocation; a retained one is kept.
   const excluded = Boolean(detail) && (forced || data.exclusion !== 'none') && !allocationLocked;
+  const lock = exclusionLock(data, created, excluded);
   return <section className="pg-card pg-form"><div className="pg-row"><h2>Review service evidence</h2><Button variant="secondary" disabled={busy || allocationSaving} onClick={onCancel}>Close review</Button></div>{error && <p role="alert" className="pg-error">{error}</p>}
     <Field label="Performed service" options={options} disabled={busy || allocationSaving} value={selected} onChange={event => setSelected(event.target.value)} />
     {selected && !detail && !error && <p role="status">Loading service evidence…</p>}
@@ -109,11 +119,12 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
       {newAllocation && <AllocationForm visit={detail.visit} onBusy={setAllocationSaving} onCancel={() => setNewAllocation(false)} onCreated={(allocation, serviceId) => {
         // The service selector is disabled while the save is pending; this guard keeps a late response from another service out of this review.
         setReview(current => current.detail?.visit.id === serviceId ? { detail: { ...current.detail, allocations: [allocation, ...current.detail.allocations] }, data: { ...current.data, allocation_id: allocation.id, ordinal: '1' } } : current);
+        setCreated(current => [...current, allocation.id]);
         setNewAllocation(false);
       }} />}
       <form onSubmit={save}><fieldset disabled={busy || newAllocation || detail.visit.status !== 'completed'}>
-        {!excluded && <div className="pg-form-grid"><Field label="Service-value allocation" value={data.allocation_id} disabled={allocationLocked} options={[{ value: '', label: 'Not yet recorded' }, ...detail.allocations.map(row => ({ value: row.id, label: `${date(row.coverage_start)} – ${date(row.coverage_end)} · $${(row.net_value_cents / 100).toFixed(2)} / ${row.planned_visits} applications` }))]} onChange={event => { change('allocation_id', event.target.value); change('ordinal', event.target.value ? '1' : ''); }} /><Field label="Application number in original allocation" type="number" min="1" max="366" disabled={allocationLocked || !data.allocation_id} value={data.ordinal} onChange={event => change('ordinal', event.target.value)} /></div>}
-        <div className="pg-form-grid"><Field label="Value provenance" value={data.provenance} options={['verified', 'backfilled', 'synthetic'].map(value => ({ value, label: words(value) }))} onChange={event => change('provenance', event.target.value)} /><Field label="Production exclusion" value={data.exclusion} options={['none', 'corrective', 'planned_followup', 'duplicate', 'unnecessary', 'inspection'].map(value => ({ value, label: words(value) }))} onChange={event => change('exclusion', event.target.value)} /></div>
+        {!excluded && <div className="pg-form-grid"><Field label="Service-value allocation" value={data.allocation_id} disabled={allocationLocked || Boolean(lock.fresh)} options={[{ value: '', label: 'Not yet recorded' }, ...detail.allocations.map(row => ({ value: row.id, label: `${date(row.coverage_start)} – ${date(row.coverage_end)} · $${(row.net_value_cents / 100).toFixed(2)} / ${row.planned_visits} applications` }))]} onChange={event => { change('allocation_id', event.target.value); change('ordinal', event.target.value ? '1' : ''); }} /><Field label="Application number in original allocation" type="number" min="1" max="366" disabled={allocationLocked || !data.allocation_id} value={data.ordinal} onChange={event => change('ordinal', event.target.value)} /></div>}
+        <div className="pg-form-grid"><Field label="Value provenance" value={data.provenance} options={['verified', 'backfilled', 'synthetic'].map(value => ({ value, label: words(value) }))} onChange={event => change('provenance', event.target.value)} /><Field label="Production exclusion" value={data.exclusion} disabled={lock.disabled} hint={lock.hint} options={['none', 'corrective', 'planned_followup', 'duplicate', 'unnecessary', 'inspection'].map(value => ({ value, label: words(value) }))} onChange={event => change('exclusion', event.target.value)} /></div>
         <Field label="Service and credited-value evidence" multiline required maxLength={2000} value={data.source_reference} onChange={event => change('source_reference', event.target.value)} />
         <h3>Employee credit shares</h3>{data.participants.map((participant, index) => <div className="pg-form-row" key={index}><div className="pg-form-grid"><Field label={`Employee ${index + 1}`} disabled={!!data.base_id} value={participant.technician_id} options={[{ value: '', label: 'Choose employee…' }, ...people.map(person => ({ value: person.id, label: person.name }))]} onChange={event => change('participants', data.participants.map((item, i) => i === index ? { ...item, technician_id: event.target.value } : item))} /><Field label={`Employee ${index + 1} share (%)`} type="number" min="0.01" max="100" step="0.01" required disabled={!!data.base_id} value={participant.share_bps == null ? '' : participant.share_bps / 100} onChange={event => change('participants', data.participants.map((item, i) => i === index ? { ...item, share_bps: percentBps(event.target.value) } : item))} /></div>{!data.base_id && index > 0 && <Button variant="secondary" onClick={() => change('participants', data.participants.filter((_, i) => i !== index))}>Remove employee {index + 1}</Button>}</div>)}
         {!data.base_id && <Button variant="secondary" disabled={data.participants.length >= 10} onClick={() => change('participants', [...data.participants, { technician_id: '', share_bps: null }])}>Split credit with another employee</Button>}
