@@ -119,3 +119,38 @@
 .tech-visit-photo-image { width: 100%; aspect-ratio: 1; object-fit: cover; }
 .tech-visit-photo-label { margin: 0; padding: 8px; font-size: 14px; overflow-wrap: anywhere; }
 .tech-visit-file-input { display: none; }
+
+/* A nested dialog (treated-spot marking, opened from inside Service Photos)
+   stacks above the dialog that spawned it. */
+.tech-visit-overlay--stacked { z-index: 1001; }
+
+/* Desktop height caps (PR #4337): prefer the dynamic viewport unit so a
+   collapsing mobile browser chrome doesn't leave Close/Save trapped below
+   the fold, falling back to the static unit on pre-15.4 WebKit. The caller
+   bridges the resolved unit in as --tech-vh (see lib/viewportUnits.js) so
+   the fallback stays expressed here rather than in an inline style object. */
+.tech-visit-dialog--photo-cap { max-height: calc(var(--tech-vh, 1vh) * 90); }
+.tech-visit-dialog--marks-cap { max-height: calc(var(--tech-vh, 1vh) * 100 - 28px); }
+
+/* Treated-point marking surface: the photo frame technicians tap to place a
+   mark, plus the pin (dot + numbered badge) positioned per mark via inline
+   left/top — the one thing genuinely per-instance, not layout. */
+.tech-visit-mark-frame { position: relative; border-radius: 9px; overflow: hidden; line-height: 0; cursor: pointer; margin-bottom: 12px; }
+.tech-visit-mark-image { width: 100%; display: block; touch-action: manipulation; }
+.tech-visit-mark-pin { position: absolute; transform: translate(-50%, -50%); cursor: pointer; }
+.tech-visit-mark-dot {
+  position: absolute; left: 50%; top: 50%;
+  width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px;
+  border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 2px rgba(8, 20, 28, .55);
+}
+.tech-visit-mark-badge {
+  position: absolute; left: 50%;
+  min-width: 25px; height: 25px; padding: 0 6px; border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, .94);
+  color: #fff; font-size: 14px; font-weight: 600; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 7px rgba(6, 16, 24, .5);
+}
+.tech-visit-mark-badge--above { bottom: 13px; }
+.tech-visit-mark-badge--below { top: 13px; }

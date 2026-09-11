@@ -185,15 +185,13 @@ async function actOnCallback(conn, id, { action, actorId, expectedAt, snooze, de
       // during a lock wait would post-date.
       metadata: { snoozed_until: until?.toISOString() || null, ...editEvent,
         ...(['edit', 'reopen'].includes(action) ? { renewed_at: new Date().toISOString() } : {}) }, critical: true, trx });
-    // Every action retires the reminder for the version staff just acted on
-    // AND releases its per-day dedupe identity: a snoozed, released or
-    // edited callback that is still open rings again the next time the
-    // watchdog finds it due, instead of deduping onto a bell nobody sees.
+    // Every action retires the reminder for the version staff just acted
+    // on. The reminder identity is versioned by owner, deadline, snooze and
+    // review (call-commitments-watchdog), so a callback left open re-arms
+    // the same bell unread at its next due sweep.
     await trx('notifications').where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'commitment_id' = ?", [id])
-      .whereRaw("metadata->>'dedupeKey' NOT LIKE '%:superseded:%'")
-      .update({ read_at: trx.raw('COALESCE(read_at, ?)', [now]),
-        metadata: trx.raw("metadata || jsonb_build_object('dedupeKey', COALESCE(metadata->>'dedupeKey', '') || ':superseded:' || ?::text)", [now.toISOString()]) });
+      .whereNull('read_at').update({ read_at: now });
     return require('./call-commitments').normalizeRow(await trx('call_commitments').where({ id }).first());
   });
 }

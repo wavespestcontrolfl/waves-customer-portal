@@ -211,7 +211,7 @@ async function main() {
           await dialog.getByRole('textbox', { name: 'Caption (optional)', exact: true }).fill('Example side gate before treatment');
           await dialog.getByLabel('Choose service photo').setInputFiles({ name: 'example.png', mimeType: 'image/png', buffer: photoBytes });
           await dialog.getByText('Uploading photo…', { exact: true }).waitFor();
-          assert.equal(await dialog.getByRole('button', { name: 'Close', exact: true }).isDisabled(), true);
+          assert.equal(await dialog.getByRole('button', { name: 'Close service photos', exact: true }).isDisabled(), true);
           await page.keyboard.press('Escape');
           assert.equal(await dialog.count(), 1);
           await screenshot('photo-pending', dialog.getByText('Uploading photo…', { exact: true }));

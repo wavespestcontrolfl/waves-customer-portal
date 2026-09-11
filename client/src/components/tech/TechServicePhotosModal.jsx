@@ -18,12 +18,14 @@
 // upload so photos categorize correctly for the missed_photo
 // detector / customer-track view downstream.
 import { useCallback, useEffect, useRef, useState, useId } from 'react';
-import { getAdminAuthToken } from '../../lib/adminAuth';
-import TechPhotoMarksModal from './TechPhotoMarksModal';
 import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
-import { UiSurface, Button, Field, Input, ActionFeedback } from '../ui';
+import { getAdminAuthToken } from '../../lib/adminAuth';
+import { DVH } from '../../lib/viewportUnits';
+import TechPhotoMarksModal from './TechPhotoMarksModal';
+import { UiSurface, Button, Field, Input, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -33,6 +35,7 @@ const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
 const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
+  const isMobile = useIsMobile();
   const [photos, setPhotos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [photoType, setPhotoType] = useState('after');
@@ -162,15 +165,32 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const dialogRef = useModalFocus(true, close);
   const titleId = useId();
   const locked = uploading || !!pendingPhoto;
+  // DVH is 'dvh' where the engine supports it, 'vh' on pre-15.4 WebKit — see
+  // lib/viewportUnits.js. Bridged in as a single CSS custom property so the
+  // desktop height cap stays expressed in tech-workflow.css rather than an
+  // inline layout object.
   return createPortal(
-    <UiSurface density="touch" className="tech-visit-surface tech-visit-overlay" onClick={(event) => {
-      event.stopPropagation();
-      if (event.target === event.currentTarget) close();
-    }}>
-      <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} className="tech-visit-dialog" aria-hidden={markTarget ? true : undefined} inert={markTarget ? '' : undefined}>
+    <UiSurface
+      density="touch"
+      className={cn('tech-visit-surface tech-visit-overlay', isMobile && 'tech-visit-overlay--fullscreen')}
+      style={{ '--tech-vh': `1${DVH}` }}
+      onClick={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget) close();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className={cn('tech-visit-dialog', isMobile ? 'tech-visit-dialog--fullscreen' : 'tech-visit-dialog--photo-cap')}
+        aria-hidden={markTarget ? true : undefined}
+        inert={markTarget ? '' : undefined}
+      >
         <header className="tech-visit-header">
           <div><h2 id={titleId} className="tech-visit-title">Service Photos</h2>{customerName && <p className="tech-visit-muted">{customerName}</p>}</div>
-          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={uploading} aria-label="Close">×</Button>
+          <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={close} disabled={uploading} aria-label="Close service photos">×</Button>
         </header>
         <div className="tech-visit-body">
           <div className="tech-visit-card">

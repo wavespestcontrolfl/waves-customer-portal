@@ -7,7 +7,7 @@ const fs = require('fs');
 const conversation = fs.readFileSync(require.resolve('../services/voice-agent/relay-conversation'), 'utf8');
 const tools = fs.readFileSync(require.resolve('../services/voice-agent/relay-tools'), 'utf8');
 
-describe('the promised-estimate watcher hands off to the Owed lane only while the gate is on; the callbacks digest never does', () => {
+describe('the promised-estimate watcher hands off to the Owed lane only while the gate is on', () => {
   test('the estimate predicate comes from commitmentsHandoffClause (empty with the gate off); the callbacks lane keeps its same-day coverage (Codex #3725 r8)', () => {
     jest.resetModules();
     jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
@@ -21,14 +21,11 @@ describe('the promised-estimate watcher hands off to the Owed lane only while th
     const promised = fs.readFileSync(require.resolve('../services/promised-estimate-watcher'), 'utf8');
     const unworked = fs.readFileSync(require.resolve('../services/unworked-comms-watcher'), 'utf8');
     expect(promised).toContain("${commitmentsHandoffClause('send_estimate')}");
-    // The EOD callbacks digest pages the same evening; the watchdog only
-    // rings the next morning, so callbacks are never handed off.
+    // Callback cards have their own gated, disposition-preserving handoff;
+    // they must not inherit the estimate watcher's handoff predicate.
     expect(unworked).not.toContain('commitmentsHandoffClause');
-    // No unconditional hand-off predicate survives in either query: the
-    // only call_commitments sub-select in the estimate watcher is the
-    // helper body itself, and the callbacks watcher has none of its own.
+    // The estimate watcher has no unconditional handoff predicate.
     expect(promised.match(/SELECT 1 FROM call_commitments/g)).toHaveLength(1);
-    expect(unworked).not.toContain("SELECT 1 FROM call_commitments");
   });
 });
 
