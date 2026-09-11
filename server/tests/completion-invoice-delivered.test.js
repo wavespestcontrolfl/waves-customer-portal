@@ -75,23 +75,48 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     db.__state.status = 'draft';
   });
 
-  test('a queued completion text carrying the pay link (send-window hold) owns the delivery: every other claim is refused as in progress until it delivers or terminally fails (GitHub r5 P1)', async () => {
+  test('a queued pay-link text (send-window hold) owns the delivery: every other claim is refused (queued_pay_link) until it delivers or terminally fails; the invoice-send path adopts its own queue and is blocked only by the completion-owned ones (GitHub r5 P1 + pre-push P1)', async () => {
     const db = require('../models/db');
     const { claimInvoiceForSend } = require('../services/invoice');
     db.__state.status = 'draft';
     db.__state.sent_at = null;
     db.__state.queuedCompletionText = { id: 'sms-q', scheduled_for: new Date('2026-09-11T12:00:00Z') };
-    await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/already in progress.*queued for the send window/i);
+    // The completion's claim (no adopt flag): every queue blocks it, incl. an earlier admin send's held SMS leg.
+    await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'queued_pay_link', message: expect.stringMatching(/already in progress.*queued for the send window/i) });
     expect(db.__state.status).toBe('draft');
-    const smsLogQuery = db.mock.results.map((r) => r.value).find((q) => q.whereRaw.mock.calls.length);
+    const queries = () => db.mock.results.map((r) => r.value).filter((q) => q.whereRaw.mock.calls.length);
+    let smsLogQuery = queries().pop();
     expect(smsLogQuery.whereIn).toHaveBeenCalledWith('status', ['scheduled', 'sending']);
     expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'invoice_id' = ?", ['inv-1']);
+    expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'entry_point' = ANY(?)", [['dispatch_completion_deferred', 'autopay_completion_decline_deferred', 'invoice_send_deferred']]);
+    // The invoice-send path's own retry: only the completion-owned queues are consulted.
+    await expect(claimInvoiceForSend('inv-1', { adoptsQueuedInvoiceSend: true })).rejects.toMatchObject({ code: 'queued_pay_link' });
+    smsLogQuery = queries().pop();
     expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'entry_point' = ANY(?)", [['dispatch_completion_deferred', 'autopay_completion_decline_deferred']]);
     // Delivered or terminally failed → the row is no longer live → claimable again.
     db.__state.queuedCompletionText = null;
     const claim = await claimInvoiceForSend('inv-1');
     expect(claim).toMatchObject({ previousStatus: 'draft', claimed: true });
     db.__state.status = 'draft';
+  });
+
+  test('behavioral: an admin send whose SMS leg was queued for the window (row back to draft) followed by the completion — the completion is refused and goes report-only; the admin retry still adopts its queue', async () => {
+    const db = require('../models/db');
+    const { claimInvoiceForSend } = require('../services/invoice');
+    db.__state.status = 'draft';
+    db.__state.sent_at = null;
+    // The queued invoice_send_deferred row is what the mock returns for any live queue; the
+    // completion's claim consults all three entry points and is refused.
+    db.__state.queuedCompletionText = { id: 'sms-invoice-send', scheduled_for: new Date('2026-09-11T12:00:00Z') };
+    let refusal = null;
+    try { await claimInvoiceForSend('inv-1'); } catch (e) { refusal = e; }
+    expect(refusal?.code).toBe('queued_pay_link');
+    // The completion classifies that code as nothing-left-to-deliver (source contract below), so no 503.
+    const fs2 = require('fs');
+    const completion = fs2.readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(completion).toMatch(/const nothingLeftToDeliver = claimErr\?\.code === 'queued_pay_link'/);
+    expect(db.__state.status).toBe('draft');
+    db.__state.queuedCompletionText = null;
   });
 });
 
@@ -126,7 +151,10 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/const allowCompletionInvoiceLink = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;/);
     expect(completion).not.toMatch(/allowCompletionInvoiceLinkBase/);
     // A refused claim is classified: settled/gone → report-only; in-flight send or transient failure → the resumable 503 (retryable delivery).
-    expect(completion).toMatch(/const nothingLeftToDeliver = \/Cannot send a \(paid\|prepaid\|voided\) invoice\|Cannot send an invoice while payment is processing\|Invoice not found\|Invoice is not sendable\/i\.test\(claimMessage\);\s*if \(!nothingLeftToDeliver\) \{[\s\S]{0,300}?return exitForCompletionSmsResume\(new Error\(`Invoice \$\{invoice\.id\} delivery claim unavailable: \$\{claimMessage\}`\)\);/);
+    // A queued pay-link text (any of the three send-window queues) is a durable delivery owner → report-only, never the 503.
+    expect(completion).toMatch(/const nothingLeftToDeliver = claimErr\?\.code === 'queued_pay_link'\s*\|\| \/Cannot send a \(paid\|prepaid\|voided\) invoice\|Cannot send an invoice while payment is processing\|Invoice not found\|Invoice is not sendable\/i\.test\(claimMessage\);\s*if \(!nothingLeftToDeliver\) \{[\s\S]{0,300}?return exitForCompletionSmsResume\(new Error\(`Invoice \$\{invoice\.id\} delivery claim unavailable: \$\{claimMessage\}`\)\);/);
+    // …and the completion's claim carries no adoptsQueuedInvoiceSend: a queued invoice_send_deferred row refuses it too.
+    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);/);
     // The link is delivered at PROVIDER ACCEPTANCE, before markDeliverySent, on both the success path and the accepted-then-threw catch (GitHub r5 P1): a failed status sync never hands the claim back on a texted link.
     expect(completion.match(/completionInvoiceLinkDelivered = true;/g)).toHaveLength(2);
     expect(completion).toMatch(/completionSmsProviderAccepted = smsResult\.sent === true;[\s\S]{0,900}?if \(completionSmsProviderAccepted && invoice\?\.id && invoiceCreated && payUrl && allowCompletionInvoiceLink\) \{\s*completionInvoiceLinkDelivered = true;\s*\}/);

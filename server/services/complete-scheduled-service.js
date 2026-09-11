@@ -10965,7 +10965,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // retryable delivery obligation — the same release-for-resume 503
             // as a rejected text; the tech's retry re-attempts the claim.
             const claimMessage = String(claimErr?.message || '');
-            const nothingLeftToDeliver = /Cannot send a (paid|prepaid|voided) invoice|Cannot send an invoice while payment is processing|Invoice not found|Invoice is not sendable/i.test(claimMessage);
+            // A pay-link text already QUEUED for the send window (an earlier
+            // admin send's held SMS leg, or this visit's own deferred text)
+            // owns the delivery durably (pre-push P1): it texts the link at
+            // the window open, so this completion is report-only — not a
+            // retryable obligation.
+            const nothingLeftToDeliver = claimErr?.code === 'queued_pay_link'
+              || /Cannot send a (paid|prepaid|voided) invoice|Cannot send an invoice while payment is processing|Invoice not found|Invoice is not sendable/i.test(claimMessage);
             if (!nothingLeftToDeliver) {
               logger.warn(`[dispatch] invoice ${invoice.id} delivery claim unavailable (${claimMessage}) — closeout saved, delivery left retryable`);
               return exitForCompletionSmsResume(new Error(`Invoice ${invoice.id} delivery claim unavailable: ${claimMessage}`));

@@ -854,26 +854,36 @@ function alreadyDeliveredForFirstSend(invoice) {
   return !!invoice && (!!invoice.sent_at || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
 }
 
-// A completion text that carries THIS invoice's pay link and is queued for
-// the send window (dispatch_completion_deferred) or a held decline notice
-// (autopay_completion_decline_deferred) still owns the delivery after the
-// completion released its 'sending' claim (GitHub r5 P1 #4131): the replay
-// body is frozen and its executor has no delivery recheck, so a send taken
-// meanwhile would text the pay link twice. The queued row is the owner
-// until it delivers (markDeliverySent finalizes) or terminally fails (the
-// row leaves scheduled/sending) — a claim while it is live is refused as an
-// in-progress send. sendViaSMS's own invoice_send_deferred row is NOT
-// covered here: that path adopts its queued row on a retry by design.
+// A text that carries THIS invoice's pay link and is queued for the send
+// window still owns the delivery after its sender released the 'sending'
+// claim (GitHub r5 P1 #4131 + pre-push P1): the replay body is frozen and
+// its executor has no delivery recheck, so a claim taken meanwhile would
+// text the pay link twice. The queued row is the owner until it delivers
+// (markDeliverySent finalizes) or terminally fails (the row leaves
+// scheduled/sending). Three queues: the completion text
+// (dispatch_completion_deferred), the held decline notice
+// (autopay_completion_decline_deferred) and the invoice send's own held SMS
+// leg (invoice_send_deferred — queued while the email leg may still fail
+// and restore the row to draft). The invoice-send path passes
+// adoptsQueuedInvoiceSend: a RETRY of that send adopts its queued row by
+// design (never re-queues), so only the completion-owned queues block it;
+// every other claimant — the completion above all — is refused by any of
+// the three with code queued_pay_link, which the completion reads as
+// "delivery owned elsewhere → report-only".
 const COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS = ["dispatch_completion_deferred", "autopay_completion_decline_deferred"];
-async function queuedCompletionPayLinkText(invoiceId) {
+const INVOICE_SEND_DEFERRED_ENTRY_POINT = "invoice_send_deferred";
+async function queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend = false } = {}) {
+  const entryPoints = adoptsQueuedInvoiceSend
+    ? COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS
+    : [...COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS, INVOICE_SEND_DEFERRED_ENTRY_POINT];
   return db("sms_log")
     .whereIn("status", ["scheduled", "sending"])
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
-    .whereRaw("metadata->>'entry_point' = ANY(?)", [COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS])
+    .whereRaw("metadata->>'entry_point' = ANY(?)", [entryPoints])
     .first("id", "scheduled_for");
 }
 
-async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliveryOnly = false } = {}) {
+async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliveryOnly = false, adoptsQueuedInvoiceSend = false } = {}) {
   const current = await db("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
 
@@ -890,9 +900,11 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
   }
-  const queued = await queuedCompletionPayLinkText(invoiceId);
+  const queued = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
   if (queued) {
-    throw new Error(`Invoice send already in progress — a completion text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
+    const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
+    e.code = "queued_pay_link";
+    throw e;
   }
 
   const [invoice] = await db("invoices")
@@ -2427,7 +2439,7 @@ const InvoiceService = {
     // down — applying before the claim strands credit the winner can't see and we
     // can't reverse off the winner's 'sending' row (reverseAppliedCredit refuses
     // 'sending').
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed });
+    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true });
     const { invoice, previousStatus, claimed } = claim;
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
@@ -2832,7 +2844,7 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, firstDeliveryOnly });
+    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, firstDeliveryOnly, adoptsQueuedInvoiceSend: true });
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross
     // total. Auto-apply otherwise only runs at dispatch completion, so invoices
