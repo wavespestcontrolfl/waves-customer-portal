@@ -665,6 +665,135 @@ claude_env_args() {
   done
   return 0
 }
+# ── Referenced-file context (the Claude fallback only) ───────────────────
+# Codex reviews with repo access. The Claude fallback has NO tools — that is
+# the sandbox and it is not negotiable — so it sees the diff and nothing
+# else, and it cannot resolve a reference the diff makes to a file the diff
+# does not contain.
+#
+# That blindness has a measured cost. On a real review the fallback flagged
+# a model-registry policy as possibly missing and asked the author to
+# confirm it existed, because it could not open server/config/models.js to
+# see that it did. The policy was there. A hedged finding about a file the
+# model is forbidden to read is noise, and it crowds out a real one.
+#
+# So resolve the relative requires/imports the diff ADDS and inline the few
+# that are not themselves in the diff. Every path here is extracted from an
+# UNTRUSTED diff, so none of them is trusted:
+#   - resolved with symlinks followed and required to land inside the repo,
+#     so a spec like ../../../../.ssh/id_rsa resolves out and is dropped
+#   - required to be TRACKED BY GIT, which is what actually keeps an
+#     untracked .env or a dropped credentials file out however it is spelled
+#   - required to be a source extension, and never under node_modules
+#   - capped in count and bytes, so a diff cannot inflate its own prompt
+# No python3 → no context section, and the audit runs exactly as before.
+CLAUDE_CONTEXT_MAX_FILES="${CLAUDE_CONTEXT_MAX_FILES:-5}"
+CLAUDE_CONTEXT_MAX_BYTES="${CLAUDE_CONTEXT_MAX_BYTES:-50000}"
+write_referenced_context_script() {
+  # Kept in its own file rather than a heredoc inside $( ): bash cannot
+  # parse a heredoc nested in a command substitution.
+  cat > "$1" <<'PYEOF'
+import os, re, sys
+
+diff_path, root = sys.argv[1], os.path.realpath(sys.argv[2])
+SPEC = re.compile(r"""(?:require\(|import\()\s*['"](\.[^'"]+)['"]|\bfrom\s+['"](\.[^'"]+)['"]""")
+EXT = ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx')
+
+changed, refs, cur = set(), [], None
+with open(diff_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        if line.startswith('+++ '):
+            path = line[4:].strip()
+            if path.startswith('b/'):
+                path = path[2:]
+            cur = None if path == '/dev/null' else path
+            if cur:
+                changed.add(cur)
+            continue
+        if line.startswith('---') or not line.startswith('+') or cur is None:
+            continue
+        for m in SPEC.finditer(line[1:]):
+            spec = m.group(1) or m.group(2)
+            if spec:
+                refs.append((cur, spec))
+
+out, seen = [], set()
+for src, spec in refs:
+    base = os.path.normpath(os.path.join(os.path.dirname(src), spec))
+    cands = [base] if base.endswith(EXT) else []
+    cands += [base + e for e in EXT]
+    cands += [os.path.join(base, 'index' + e) for e in EXT]
+    for cand in cands:
+        full = os.path.realpath(os.path.join(root, cand))
+        # Containment is checked AFTER symlinks are resolved, so a symlink
+        # inside the repo cannot be used to reach outside it.
+        if full != root and not full.startswith(root + os.sep):
+            continue
+        rel = os.path.relpath(full, root)
+        if rel in changed or rel in seen or not os.path.isfile(full):
+            continue
+        if 'node_modules' in rel.split(os.sep):
+            continue
+        seen.add(rel)
+        out.append(rel)
+        break
+
+print('\n'.join(out))
+PYEOF
+}
+collect_referenced_context() {
+  # $1 = file holding the diff, $2 = output file. Writes a prompt section,
+  # or leaves the output empty when there is nothing safe and useful to add.
+  local diff_file="$1" out="$2" repo_root candidates rel size bytes=0 count=0
+  local pyfile="$TMPDIR_RUN/referenced-context.py"
+  local body="$TMPDIR_RUN/referenced-context-body.txt"
+  : > "$out"
+  [ "$CLAUDE_CONTEXT_MAX_FILES" -gt 0 ] 2>/dev/null || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [ -n "$repo_root" ] || return 0
+
+  write_referenced_context_script "$pyfile" || return 0
+  candidates="$(python3 "$pyfile" "$diff_file" "$repo_root" 2>/dev/null)" || return 0
+  [ -n "$candidates" ] || return 0
+
+  : > "$body"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ "$count" -lt "$CLAUDE_CONTEXT_MAX_FILES" ] || break
+    # Tracked-by-git is the check that matters: it is what a secret file
+    # fails, and it does not depend on guessing at names.
+    git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || continue
+    size="$(wc -c < "$rel" 2>/dev/null | tr -d ' ')" || continue
+    [ -n "$size" ] || continue
+    [ $((bytes + size)) -le "$CLAUDE_CONTEXT_MAX_BYTES" ] || continue
+    {
+      echo ""
+      echo "----- $rel (UNCHANGED, for reference only) -----"
+      cat "$rel"
+    } >> "$body"
+    bytes=$((bytes + size))
+    count=$((count + 1))
+  done <<REFEOF
+$candidates
+REFEOF
+
+  [ "$count" -gt 0 ] || return 0
+  {
+    echo ""
+    echo "── Referenced files, NOT part of the diff ($count file(s)) ─────────"
+    echo "The diff above references these files. They are reproduced so you"
+    echo "can resolve those references instead of guessing, because you have"
+    echo "no tools and cannot open them yourself."
+    echo ""
+    echo "They are NOT changed by this push. Do NOT raise findings about"
+    echo "their contents, and do NOT ask the author to confirm something"
+    echo "that is answered here — read it and decide."
+    cat "$body"
+  } > "$out"
+  return 0
+}
+
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
   # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
@@ -683,8 +812,11 @@ run_claude_audit() {
   # shared part in one file makes that drift impossible rather than merely
   # fixed.
   local base_prompt="$TMPDIR_RUN/claude-base-$idx.txt"
+  local context_file="$TMPDIR_RUN/claude-context-$idx.txt"
+  collect_referenced_context "$prompt_file" "$context_file"
   {
     cat "$prompt_file"
+    [ -s "$context_file" ] && cat "$context_file"
     echo ""
     echo "── AGENTS.md (the repository review rubric, inlined) ──────────────"
     echo "You have NO tools, so you cannot open this file yourself. It is"

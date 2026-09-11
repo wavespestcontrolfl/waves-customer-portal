@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Regression tests for the Claude fallback's referenced-file context.
+#
+# WHY THIS EXISTS
+# The fallback auditor has no tools, so it cannot open a file the diff
+# merely references. That produced a real hedged finding — "confirm this
+# policy exists before merging" — about a file that did exist. The hook now
+# inlines those referenced files.
+#
+# The paths come out of a diff the repo did not write, which makes this a
+# trust boundary rather than a convenience: a diff that can name a file can
+# try to name ~/.ssh/id_rsa or an untracked .env and have the hook paste it
+# into a prompt. Every guard below is therefore a security test, and the
+# cheap mistake is to let one silently stop matching while the feature keeps
+# working — so each rejection case also proves the SAME shape is accepted
+# when the unsafe property is removed.
+#
+# No model calls, no network, runs in about a second.
+#
+#   scripts/test-referenced-context.sh
+
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOOK="$SCRIPT_DIR/hooks/pre-push"
+[ -f "$HOOK" ] || { echo "FAIL: cannot find $HOOK"; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not on PATH — the feature is a no-op without it"; exit 0; }
+
+WORK="$(mktemp -d -t referenced-context.XXXXXX)"
+trap 'rm -rf "$WORK"' EXIT
+
+# Pull the functions out of the hook so these tests exercise the SHIPPING
+# code rather than a copy that can drift away from it.
+for fn in write_referenced_context_script collect_referenced_context; do
+  awk -v f="$fn() {" 'index($0,f)==1{p=1} p{print} p&&/^}$/{exit}' "$HOOK" >> "$WORK/fns.sh"
+  echo "" >> "$WORK/fns.sh"
+  grep -q "^$fn() {" "$WORK/fns.sh" || { echo "FAIL: could not extract $fn from the hook"; exit 1; }
+done
+# shellcheck disable=SC1091
+. "$WORK/fns.sh"
+
+TMPDIR_RUN="$WORK/run"; mkdir -p "$TMPDIR_RUN"
+CLAUDE_CONTEXT_MAX_FILES=5
+CLAUDE_CONTEXT_MAX_BYTES=50000
+
+FAILURES=0
+pass() { echo "  PASS  $1"; }
+fail() { echo "  FAIL  $1"; FAILURES=$((FAILURES + 1)); }
+
+# ── A throwaway repo to resolve against ──────────────────────────────────
+REPO="$WORK/repo"
+mkdir -p "$REPO/server/services" "$REPO/server/config" "$REPO/node_modules/pkg"
+cd "$REPO" || exit 1
+git init -q .
+git config user.email t@t.t; git config user.name t
+
+echo "module.exports = { POLICY: 1 };"      > server/config/models.js
+echo "module.exports = { helper: 1 };"      > server/services/helper.js
+echo "module.exports = { data: 1 };"        > server/services/data.json
+echo "module.exports = { dep: 1 };"         > node_modules/pkg/index.js
+mkdir -p server/services/mod
+echo "module.exports = { from_index: 1 };"   > server/services/mod/index.js
+printf 'module.exports = { big: "%s" };\n' "$(head -c 4000 < /dev/zero | tr '\0' 'x')" > server/services/big.js
+ln -s /etc/passwd server/services/link.js
+git add -A >/dev/null 2>&1
+git commit -qm init >/dev/null 2>&1
+# Deliberately NOT tracked — this is the .env-shaped case.
+echo "module.exports = { SECRET: 'sk_live_do_not_leak' };" > server/services/secrets.js
+
+# $1 = the added source line(s), $2 = path the diff claims to change
+make_diff() {
+  local added="$1" path="${2:-server/services/caller.js}"
+  {
+    echo "diff --git a/$path b/$path"
+    echo "--- /dev/null"
+    echo "+++ b/$path"
+    echo "@@ -0,0 +1,2 @@"
+    printf '+%s\n' "$added"
+    echo "+module.exports = {};"
+  } > "$WORK/diff.txt"
+}
+
+run_collect() { collect_referenced_context "$WORK/diff.txt" "$WORK/out.txt"; }
+
+# $1 = label, $2 = added line, $3 = "includes"|"excludes", $4 = needle
+expect() {
+  local label="$1" added="$2" mode="$3" needle="$4"
+  make_diff "$added"
+  run_collect
+  if grep -q -- "$needle" "$WORK/out.txt" 2>/dev/null; then
+    [ "$mode" = "includes" ] && pass "$label" || fail "$label — LEAKED: $needle is in the prompt"
+  else
+    [ "$mode" = "excludes" ] && pass "$label" || fail "$label — missing: $needle"
+  fi
+}
+
+echo "accepts what it should:"
+expect "inlines a tracked sibling the diff requires" \
+  "const m = require('../config/models');" includes "POLICY"
+expect "resolves a directory import through its index file" \
+  "const p = require('./mod');" includes "from_index"
+
+echo ""
+echo "refuses what it must — each paired with the same shape made safe:"
+
+# Path escape.
+expect "drops a path that resolves outside the repo" \
+  "const x = require('../../../../../../etc/passwd');" excludes "root:"
+expect "  ...but keeps the same require shape when it stays inside" \
+  "const x = require('../services/helper');" includes "helper"
+
+# Untracked file — the .env-shaped case.
+expect "drops an UNTRACKED file (the .env / dropped-credential case)" \
+  "const s = require('./secrets');" excludes "sk_live_do_not_leak"
+git add server/services/secrets.js >/dev/null 2>&1
+expect "  ...and accepts that very file once it is tracked" \
+  "const s = require('./secrets');" includes "sk_live_do_not_leak"
+git rm -q --cached server/services/secrets.js >/dev/null 2>&1
+
+# Symlink escape — containment is checked after resolution.
+expect "drops an in-repo symlink pointing outside the repo" \
+  "const l = require('./link');" excludes "root:"
+
+# node_modules.
+expect "drops a node_modules dependency" \
+  "const d = require('../../node_modules/pkg/index.js');" excludes "dep"
+
+# Non-source extension.
+expect "drops a non-source extension" \
+  "const d = require('./data.json');" excludes '"data"'
+
+# Already in the diff — no point paying tokens twice.
+make_diff "const m = require('../config/models');" "server/config/models.js"
+run_collect
+if [ -s "$WORK/out.txt" ]; then
+  fail "re-inlines a file that is already in the diff"
+else
+  pass "skips a file that is already in the diff"
+fi
+
+# Bare specifiers are not paths.
+expect "ignores a bare package specifier" \
+  "const knex = require('knex');" excludes "knex"
+
+echo ""
+echo "caps and framing:"
+
+CLAUDE_CONTEXT_MAX_BYTES=100
+expect "honours the byte cap" \
+  "const b = require('./big');" excludes "big"
+CLAUDE_CONTEXT_MAX_BYTES=50000
+
+CLAUDE_CONTEXT_MAX_FILES=0
+expect "honours a zero file cap as a kill switch" \
+  "const m = require('../config/models');" excludes "POLICY"
+CLAUDE_CONTEXT_MAX_FILES=5
+
+make_diff "const m = require('../config/models');"
+run_collect
+if grep -q "NOT part of the diff" "$WORK/out.txt" && grep -q "Do NOT raise findings" "$WORK/out.txt"; then
+  pass "labels the section as unchanged and off-limits for findings"
+else
+  fail "the section does not tell the model these files are unchanged"
+fi
+
+echo ""
+if [ "$FAILURES" -eq 0 ]; then
+  echo "All referenced-context tests passed."
+  exit 0
+fi
+echo "$FAILURES referenced-context test(s) FAILED — do not ship: this path pastes files into a prompt."
+exit 1
