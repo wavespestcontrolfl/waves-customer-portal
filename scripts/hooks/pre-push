@@ -562,9 +562,18 @@ PYEOF
 # (the day after an upgrade). A loud, specific warning with the exact command
 # to run is the right trade; an unverified sandbox is still a sandbox.
 SANDBOX_STAMP="scripts/.fallback-auditor-verified"
+SANDBOX_HOOK_SRC="scripts/hooks/pre-push"
+SANDBOX_FINGERPRINT_TOOL="scripts/hooks/sandbox-fingerprint.sh"
 sandbox_fingerprint() {
-  printf '%s|%s|%s' "$CLAUDE_SANDBOX_FLAGS" "$CLAUDE_ENV_ALLOW" "$CLAUDE_DISALLOWED_TOOLS" \
-    | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}'
+  # Computed by the shared helper, not inline, so this and the verifier's
+  # stamp can never disagree about what the fingerprint covers — see the
+  # header of scripts/hooks/sandbox-fingerprint.sh. It hashes the extracted
+  # `claude -p` INVOCATION as well as the three assignments: dropping
+  # `env -i` or the flags from the actual command while leaving the
+  # assignments alone used to leave this number unchanged, so the stamp
+  # still matched and nothing warned before an untrusted diff went into a
+  # weakened sandbox.
+  bash "$SANDBOX_FINGERPRINT_TOOL" "$SANDBOX_HOOK_SRC" 2>/dev/null
 }
 warn_if_sandbox_unverified() {
   local now_version now_fp stamped_version stamped_fp
@@ -577,14 +586,24 @@ warn_if_sandbox_unverified() {
   fi
   stamped_version="$(sed -n 's/^claude_version=//p' "$SANDBOX_STAMP" | head -1)"
   stamped_fp="$(sed -n 's/^sandbox_fingerprint=//p' "$SANDBOX_STAMP" | head -1)"
+  if [ -z "$now_fp" ]; then
+    # Failing to compute it is not "no drift" — say so rather than fall
+    # through to a comparison that would silently pass on an empty string.
+    echo "[codex-review] ⚠️  could not compute the fallback sandbox fingerprint" >&2
+    echo "[codex-review]     ($SANDBOX_FINGERPRINT_TOOL missing, or the hook's sandbox" >&2
+    echo "[codex-review]     definition moved). The drift check is not running." >&2
+    echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+    return 0
+  fi
   if [ "$now_version" != "$stamped_version" ]; then
     echo "[codex-review] ⚠️  claude CLI is $now_version but the fallback sandbox was last" >&2
     echo "[codex-review]     verified on $stamped_version. An upgrade can rename or add a tool" >&2
     echo "[codex-review]     that the disallow list does not name." >&2
     echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
   elif [ "$now_fp" != "$stamped_fp" ]; then
-    echo "[codex-review] ⚠️  the sandbox flags/disallow list changed since they were last" >&2
-    echo "[codex-review]     verified. run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+    echo "[codex-review] ⚠️  the sandbox definition changed since it was last verified" >&2
+    echo "[codex-review]     (flags, env allowlist, disallow list, or the claude -p" >&2
+    echo "[codex-review]     invocation itself). run: scripts/verify-fallback-auditor-sandbox.sh" >&2
   fi
   return 0
 }

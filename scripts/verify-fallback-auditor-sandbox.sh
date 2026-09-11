@@ -430,8 +430,12 @@ if [ "$FAILURES" -eq 0 ]; then
   # depends on someone remembering to re-run this script after an upgrade
   # that could rename or add a tool the disallow list does not name.
   STAMP="$SCRIPT_DIR/.fallback-auditor-verified"
-  FINGERPRINT="$(printf '%s|%s|%s' "$SANDBOX_FLAGS" "$ENV_ALLOW" "$DISALLOWED" \
-    | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}')"
+  # Computed by the same helper the hook calls at runtime, so the stamp and
+  # the drift check can never disagree about what is covered. It hashes the
+  # extracted `claude -p` invocation as well as the three assignments.
+  FINGERPRINT="$(bash "$SCRIPT_DIR/hooks/sandbox-fingerprint.sh" "$HOOK")" || {
+    echo "FAIL: could not compute the sandbox fingerprint — not stamping."; exit 1; }
+  [ -n "$FINGERPRINT" ] || { echo "FAIL: sandbox fingerprint came back empty — not stamping."; exit 1; }
   {
     echo "# Written by scripts/verify-fallback-auditor-sandbox.sh. Do not edit by hand."
     echo "# Commit it: the pre-push hook warns when the installed claude CLI or the"
