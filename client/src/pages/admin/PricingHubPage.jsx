@@ -9,6 +9,7 @@ import { getAdminUser } from "../../lib/adminAuth";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
 import { UiSurface } from "../../components/ui";
+import { cn } from "../../components/ui/cn";
 
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic & Margins", Icon: Calculator },
@@ -54,8 +55,18 @@ export default function PricingHubPage() {
   // active area has none).
   const [secondary, setSecondary] = useState(null);
 
+  // Only Price Notices is migrated. The comfortable surface sets font-size and
+  // line-height on itself, and a nested legacy surface can only reset the
+  // token variables, not those inherited properties — so wrapping the whole hub
+  // would push Tier-1 typography through the unmigrated inline-`D` Logic and
+  // Strategy pages. Swapping the shell per area confines it without moving the
+  // header, whose sticky box has to stay a direct child of the element that
+  // also holds the area content.
+  const Shell = activeArea === "notices" ? UiSurface : "div";
+  const shellProps = activeArea === "notices" ? { density: "comfortable" } : {};
+
   return (
-    <UiSurface density="comfortable">
+    <Shell {...shellProps}>
       {/* One header card for the whole hub: area tabs on the first row; the
           active area (Logic & Margins) hands its own section tabs up for the
           second row instead of stacking a second header. */}
@@ -69,13 +80,18 @@ export default function PricingHubPage() {
           activeKey={activeArea}
           onSectionChange={selectArea}
           ariaLabel="Pricing areas"
-          navGridClassName="grid-cols-1 sm:grid-cols-3"
+          // `.ui-workspace-nav` is inline-flex, so the area strip and an area's
+          // own section strip sit side by side whenever their combined width
+          // fits the 1300px header — collapsing the two hierarchical rows the
+          // block-level framed variant used to give. Full-width strips restore
+          // the rows without touching the shared header component.
+          navGridClassName="w-full grid-cols-1 sm:grid-cols-3"
           actions={secondary?.actions}
           secondarySections={secondary?.sections || []}
           secondaryActiveKey={secondary?.activeKey}
           onSecondaryChange={secondary?.onChange}
           secondaryAriaLabel={secondary?.ariaLabel}
-          secondaryNavGridClassName={secondary?.navGridClassName}
+          secondaryNavGridClassName={cn("w-full", secondary?.navGridClassName)}
       />
 
       {activeArea === "logic" && (
@@ -85,6 +101,6 @@ export default function PricingHubPage() {
         <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
       )}
       {activeArea === "notices" && <AdminPriceChangePage embedded />}
-    </UiSurface>
+    </Shell>
   );
 }

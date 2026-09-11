@@ -9,7 +9,8 @@ const output = path.join(root, '.tmp/admin-price-notices-foundation');
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), passed: false, requests: [], unmatched: [], errors: [] };
-  const server = await previewServer(root), browser = await launchBrowser();
+  const server = await previewServer(root);
+  const browser = await launchBrowser().catch(async error => { await server.close(); throw error; });
   try {
     for (const width of [1440, 390, 820]) {
       let failSend = true;

@@ -202,30 +202,35 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
             </span>
             <Badge tone="neutral">notices only — rates unchanged</Badge>
           </div>
-          <div className="max-h-[480px] overflow-y-auto">
-            <Table layout="records" aria-label="Affected customers">
-              <THead className="bg-zinc-50 border-b border-hairline border-zinc-200 sticky top-0">
-                <TR>
-                  <TH className="px-4 py-2 text-left text-ui-body text-ink-tertiary font-medium">Customer</TH>
-                  <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">Current</TH>
-                  <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">New</TH>
-                  <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">Reach</TH>
+          {/* The bound has to live on Table's own container: that wrapper is the
+              sticky THead's nearest overflow ancestor, so a separate outer
+              scroller would scroll the headings out of view. */}
+          <Table
+            layout="records"
+            containerClassName="max-h-[480px] overflow-y-auto"
+            aria-label="Affected customers"
+          >
+            <THead className="bg-zinc-50 border-b border-hairline border-zinc-200 sticky top-0">
+              <TR>
+                <TH className="px-4 py-2 text-left text-ui-body text-ink-tertiary font-medium">Customer</TH>
+                <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">Current</TH>
+                <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">New</TH>
+                <TH className="px-4 py-2 text-right text-ui-body text-ink-tertiary font-medium">Reach</TH>
+              </TR>
+            </THead>
+            <TBody>
+              {preview.rows.map((row) => (
+                <TR key={row.customerId} className="border-b border-hairline border-zinc-100 last:border-b-0">
+                  <TD data-label="Customer" className="px-4 py-2 text-zinc-900">{row.name}</TD>
+                  <TD data-label="Current" className="px-4 py-2 text-right u-nums text-ink-secondary">{row.current}/mo</TD>
+                  <TD data-label="New" className="px-4 py-2 text-right u-nums font-medium text-zinc-900">{row.next}/mo</TD>
+                  <TD data-label="Reach" className="px-4 py-2 text-right text-ui-body text-ink-tertiary">
+                    {[row.hasEmail ? "email" : null, row.hasPhone ? "text" : null].filter(Boolean).join(" + ") || "unreachable"}
+                  </TD>
                 </TR>
-              </THead>
-              <TBody>
-                {preview.rows.map((row) => (
-                  <TR key={row.customerId} className="border-b border-hairline border-zinc-100 last:border-b-0">
-                    <TD data-label="Customer" className="px-4 py-2 text-zinc-900">{row.name}</TD>
-                    <TD data-label="Current" className="px-4 py-2 text-right u-nums text-ink-secondary">{row.current}/mo</TD>
-                    <TD data-label="New" className="px-4 py-2 text-right u-nums font-medium text-zinc-900">{row.next}/mo</TD>
-                    <TD data-label="Reach" className="px-4 py-2 text-right text-ui-body text-ink-tertiary">
-                      {[row.hasEmail ? "email" : null, row.hasPhone ? "text" : null].filter(Boolean).join(" + ") || "unreachable"}
-                    </TD>
-                  </TR>
-                ))}
-              </TBody>
-            </Table>
-          </div>
+              ))}
+            </TBody>
+          </Table>
         </Card>
       )}
     </UiSurface>
