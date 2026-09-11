@@ -49,6 +49,14 @@ test('the dedicated agent estimate workflow preloads its permitted draft tool', 
   expect(registry.initialTools('estimates', { ...scope, context: 'estimates' }).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(false);
 });
 
+test('vendor price comparison preserves the documented product ID or name alternatives', () => {
+  const scope = { role: 'admin', context: 'inventory' };
+  expect(registry.validateInput('compare_vendor_pricing', { product_id: '10000000-0000-4000-8000-000000000001' }, scope)).toBeNull();
+  expect(registry.validateInput('compare_vendor_pricing', { product_name: 'Synthetic product' }, scope)).toBeNull();
+  expect(registry.validateInput('compare_vendor_pricing', {}, scope)).toMatchObject({ code: 'invalid_input' });
+  expect(registry.validateInput('compare_vendor_pricing', { product_id: 'invalid' }, scope)).toMatchObject({ code: 'invalid_input' });
+});
+
 test('technicians cannot discover admin tools or forge a tool scope', async () => {
   const scope = { role: 'technician', context: 'estimates' };
   expect(registry.discover({ query: 'customer inventory' }, scope).result.code).toBe('permission_denied');
