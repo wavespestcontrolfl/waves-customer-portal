@@ -2,7 +2,14 @@
 
 const { gateEnvValue } = require('../config/feature-gates');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
-const { recordAuditEvent } = require('./audit-log');
+// Lazy, like this file's other write-path requires (./dispatch-alerts,
+// ./tech-visit-notifications): audit-log.js requires ../models/db at module
+// scope, and ops/agents/replay-no-show-detector.js imports THIS module for
+// its pure helpers alone — a top-level require would build a database
+// connection module for an operator running that offline CLI with no
+// DATABASE_URL, breaking the "READ-ONLY, no database access" guarantee its
+// header and ops/agents/README.md both make (pre-push audit, round 5).
+const recordAuditEvent = (...args) => require('./audit-log').recordAuditEvent(...args);
 const { phoneMatchDigits } = require('../utils/phone');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
