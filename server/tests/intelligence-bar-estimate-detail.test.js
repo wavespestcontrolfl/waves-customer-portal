@@ -36,7 +36,12 @@ jest.mock('../routes/estimate-public', () => {
   };
 });
 const mockBillingContext = jest.fn(async () => ({ billsPerApplication: false, livePricing: null }));
-jest.mock('../services/estimate-proposal-billing', () => ({ resolveProposalBillingContext: (...a) => mockBillingContext(...a) }));
+jest.mock('../services/estimate-proposal-billing', () => ({
+  resolveProposalBillingContext: (...a) => mockBillingContext(...a),
+  // Real predicate mirrored (estimate-proposal-billing.js): committed statuses
+  // or an explicit price_locked_at stamp freeze the document.
+  estimateIsPriceLocked: (estimate) => new Set(['accepted', 'declined']).has(String(estimate?.status || '').trim().toLowerCase()) || !!estimate?.price_locked_at,
+}));
 const db = require('../models/db');
 const { getEstimateDetail, shapeEstimate, GET_ESTIMATE_DETAIL_TOOL } = require('../services/intelligence-bar/estimate-detail');
 
@@ -381,6 +386,30 @@ test('a rebuilt bundle (snapshotHit not true) with no sellable cadence — every
   expect(shaped.offered_pricing.snapshot_hit).toBe(false);
   expect(shaped.offered_pricing.rebuilt_default_frequency).toBeUndefined();
   expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+});
+
+test('an ACCEPTED (price-locked) estimate never has its committed totals overridden by a rebuilt bundle\'s today-priced default cadence, even when the bundle has no snapshotHit (pre-push audit P1)', async () => {
+  // buildPricingBundle carries no price-lock guard itself (only
+  // resolveLivePricing gates on estimateIsPriceLocked before calling it), so
+  // a bundle for an accepted row can still come back rebuilt/re-priced —
+  // today's default cadence (999/11988) must not eclipse what the customer
+  // actually accepted (47/564, accepted_frequency_key quarterly).
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'monthly', monthly: 999, annual: 11988 }], // today's re-priced default differs from what was accepted
+  });
+  const accepted = await shapeEstimate(estimateRow({
+    status: 'accepted', accepted_at: '2026-09-01T00:00:00Z', accepted_frequency_key: 'quarterly',
+    monthly_total: '47.00', annual_total: '564.00',
+  }));
+  expect(accepted.offered_pricing.snapshot_hit).toBe(false);
+  expect(accepted.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(accepted.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+  // Same for a price_locked_at stamp with no 'accepted' status (declined stays locked too).
+  const declined = await shapeEstimate(estimateRow({
+    status: 'declined', price_locked_at: '2026-09-01T00:00:00Z', monthly_total: '47.00', annual_total: '564.00',
+  }));
+  expect(declined.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(declined.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
 });
 
 test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {

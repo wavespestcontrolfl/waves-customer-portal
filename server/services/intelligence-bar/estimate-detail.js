@@ -347,8 +347,17 @@ async function offeredPricing(row, data) {
   // itself would price differently — for totalsFor to prefer over the
   // (now stale) monthly_total/annual_total columns.
   const snapshotHit = bundle.snapshotHit === true;
+  // A committed estimate's totals describe what the customer ACCEPTED (or
+  // declined), never today's re-derived cadence — same predicate
+  // resolveLivePricing gates on before calling buildPricingBundle at all
+  // (estimate-proposal-billing.js estimateIsPriceLocked: status accepted /
+  // declined, or price_locked_at stamped). buildPricingBundle itself carries
+  // no such guard, so a rebuilt bundle for a locked row must never override
+  // the frozen columns with a "default" cadence acceptance may not match
+  // (pre-push audit P1).
+  const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
   let rebuiltDefaultFrequency = null;
-  if (!snapshotHit) {
+  if (!snapshotHit && !priceLocked) {
     const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
     const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
     if (candidate) rebuiltDefaultFrequency = { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
