@@ -60,7 +60,7 @@ const { publicPortalUrl } = require("../utils/portal-url");
 const OUTREACH = require("./review-outreach-templates");
 const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const ASK_HISTORY = require("./review-ask-history");
-const { ASK_SPACING_MS, deliveredAskRows, latestDeliveredAt, lastDeliveredAskAt } = ASK_HISTORY;
+const { ASK_SPACING_MS, deliveredAskRows, lastDeliveredAskAt } = ASK_HISTORY;
 const REVIEW_RETRY_PERSISTENCE_FAILED = "review_retry_persistence_failed";
 const CAP_TOUCH_SQL = OUTREACH.CAP_TOUCH_SQL;
 // Trapping-family catalog keys (owner ruling 2026-08-06: "rodent/wildlife
@@ -3265,8 +3265,9 @@ const ReviewService = {
       // aged from the LATER channel: a Both email retried after the text
       // must not leave the row instantly follow-up eligible (r17 P2).
       .whereNotNull("sms_sent_at")
-      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [cutoff])
+      .whereRaw("GREATEST(sms_sent_at, COALESCE(sent_at, sms_sent_at)) < ?", [new Date(Date.now() - ASK_SPACING_MS)])
       .where({ followup_sent: false })
+      .whereRaw("(followup_next_attempt_at IS NULL OR followup_next_attempt_at <= ?)", [new Date()])
       .whereNull("rated_at")
       // Draft score taps are durable but not final. Do not send the
       // straight-to-Google reminder when the draft score already tells us the
@@ -3283,169 +3284,174 @@ const ReviewService = {
 
     let sent = 0;
     let suppressed = 0;
+    let unrecordedDeliveries = 0;
+    let unrecordedReleases = 0;
     const sentThisRun = new Set();
     const { getServiceContactSmsRecipient } = require("./customer-contact");
-    for (const request of eligible) {
-      // Dedup #1: another row in this same batch already triggered a followup
-      if (sentThisRun.has(request.customer_id)) {
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
-        suppressed++;
-        continue;
-      }
-
-      // Dedup #2: a sibling row already sent a followup to this customer recently
-      const recentFollowup = await db("review_requests")
-        .where({ customer_id: request.customer_id, followup_sent: true })
-        .where("followup_sent_at", ">=", recentFollowupCutoff)
-        .first();
-      if (recentFollowup) {
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
-        suppressed++;
-        continue;
-      }
-
-      const customer = await db("customers")
-        .where({ id: request.customer_id })
-        .first();
-      // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
-      if (customer && customer.has_left_google_review) {
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
-        suppressed++;
-        continue;
-      }
-      const contact = getServiceContactSmsRecipient(customer);
-      if (!contact.phone) {
-        // No consented SMS recipient — mark handled so this row can't sit
-        // in the 20-row follow-up batch every run and starve later
-        // customers (#2955 r4). Mirrors the scheduled-send suppression.
-        await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
-        suppressed++;
-        continue;
-      }
-
-      // Followup points straight at the GBP review form — they ignored the
-      // tokenized rate page once, so reduce friction the second time. The
-      // ask's stamped office rides along as the last-resort stored id so the
-      // Day-3 follow-up can never target a different profile than the ask it
-      // chases (codex #3285 r2).
-      const location = resolveReviewLocationId(customer || {}, {
-        storedLocationId: request.location_id || customer?.nearest_location_id || null,
-      });
-      const googleReviewUrl =
-        REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
-
-      const body = await renderSmsTemplate(
-        "review_request_followup",
-        {
-          first_name: firstNameFrom(contact.name) || customer.first_name || "",
-          google_review_url: googleReviewUrl,
-        },
-        {
-          workflow: "review_request_followup",
-          entity_type: "review_request",
-          entity_id: request.id,
-        },
-      );
-      if (!body) {
-        logger.warn(
-          `[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`,
-        );
-        continue;
-      }
-
-      // Mark the follow-up attempted BEFORE the provider handoff and reopen
-      // it only on a definite not-sent outcome. A post-handoff bookkeeping
-      // failure then leaves the row fenced (a missed follow-up at worst)
-      // instead of eligible for the next run to send twice (codex #4338 P1,
-      // round 4). A marker that cannot be stored is skipped: nothing left.
-      const marked = await db("review_requests").where({ id: request.id, followup_sent: false })
-        .update({ followup_sent: true, followup_sent_at: new Date() })
-        .catch((markErr) => {
-          logger.warn(`[review] Follow-up pre-send marker failed (requestId=${request.id} errType=${markErr?.name || "Error"})`);
-          return 0;
-        });
-      if (!marked) continue;
-      const reopenFollowup = async () => {
-        try {
-          await db("review_requests").where({ id: request.id }).update({ followup_sent: false, followup_sent_at: null });
-        } catch (reopenErr) {
-          // Stays marked: conservative (a skipped follow-up, never a duplicate).
-          logger.error(`[review] Follow-up reopen failed (requestId=${request.id} errType=${reopenErr?.name || "Error"})`);
-        }
-      };
+    for (const candidate of eligible) {
       try {
-        const result = await sendCustomerMessage({
-          to: contact.phone,
-          body,
-          channel: "sms",
-          audience: "customer",
-          purpose: "review_request",
-          customerId: customer.id,
-          identityTrustLevel: "phone_matches_customer",
-          entryPoint: "review_request_followup",
-          metadata: {
-            original_message_type: "review_followup",
-            review_request_id: request.id,
-          },
-        });
-        if (!result.sent) {
-          logger.warn(
-            `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
-          );
-          if (isExplicitlyUncertainOutcome(result)) {
-            // The handoff never confirmed accept/reject — the customer may
-            // already hold this follow-up. The pre-send marker stays, and
-            // the customer is closed for this batch too (codex #4338 P1).
-            sentThisRun.add(request.customer_id);
+        const held = await require("./review-ask-dispatch").dispatchReviewAsk(candidate.customer_id, async () => {
+          const request = await db("review_requests").where({ id: candidate.id, followup_sent: false }).first();
+          if (!request || !["sent", "opened"].includes(request.status) || request.rated_at
+            || (request.score != null && request.score < 8)) return;
+          // Dedup #1: another row in this same batch already triggered a followup
+          if (sentThisRun.has(request.customer_id)) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
             suppressed++;
-            continue;
+            return;
           }
-          if (
-            result.blocked &&
-            result.code !== "CONSENT_LOOKUP_FAILED" &&
-            !result.retryable &&
-            !result.deferred
-          ) {
-            // Terminal block: the marker stays as the "handled" stamp.
-            suppressed++;
-            continue;
-          }
-          // Definite not-sent, retryable: hand the row back for a later run.
-          await reopenFollowup();
-          continue;
-        }
 
-        sentThisRun.add(request.customer_id);
-        sent++;
-      } catch (err) {
-        // A throw here can land AFTER the provider handoff — err.providerOutcome
-        // carries what actually happened. Sent or explicitly uncertain, and the
-        // ordinary log-only path below would leave followup_sent unset, so the
-        // NEXT run's candidate query stays eligible and re-sends this follow-up
-        // (codex #4338 P1). Mark it attempted, same as the returned-result branch
-        // above, instead of retrying blind.
-        // The pre-send marker already fences the row; nothing to write here.
-        const providerOutcome = err?.providerOutcome || null;
-        if (providerOutcome?.sent === true || isExplicitlyUncertainOutcome(providerOutcome)) {
+          // Dedup #2: a sibling row already sent a followup to this customer recently
+          const recentFollowup = await db("review_requests")
+            .where({ customer_id: request.customer_id, followup_sent: true })
+            .where("followup_sent_at", ">=", recentFollowupCutoff)
+            .first();
+          if (recentFollowup) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+            return;
+          }
+
+          const customer = await db("customers")
+            .where({ id: request.customer_id })
+            .first();
+          // Dedup #3: CSR flagged the customer as already-reviewed (Customer 360 toggle).
+          if (!customer || customer.deleted_at || customer.has_left_google_review) {
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+            return;
+          }
+          const contact = getServiceContactSmsRecipient(customer);
+          if (!contact.phone) {
+            // No consented SMS recipient — mark handled so this row can't sit
+            // in the 20-row follow-up batch every run and starve later
+            // customers (#2955 r4). Mirrors the scheduled-send suppression.
+            await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() }).catch(() => {});
+            suppressed++;
+            return;
+          }
+
+          // Followup points straight at the GBP review form — they ignored the
+          // tokenized rate page once, so reduce friction the second time. The
+          // ask's stamped office rides along as the last-resort stored id so the
+          // Day-3 follow-up can never target a different profile than the ask it
+          // chases (codex #3285 r2).
+          const location = resolveReviewLocationId(customer || {}, {
+            storedLocationId: request.location_id || customer?.nearest_location_id || null,
+          });
+          const googleReviewUrl =
+            REVIEW_LINKS[location] || REVIEW_LINKS["bradenton"];
+
+          const body = await renderSmsTemplate(
+            "review_request_followup",
+            {
+              first_name: firstNameFrom(contact.name) || customer.first_name || "",
+              google_review_url: googleReviewUrl,
+            },
+            {
+              workflow: "review_request_followup",
+              entity_type: "review_request",
+              entity_id: request.id,
+            },
+          );
+          if (!body) {
+            logger.warn(
+              `[review] review_request_followup template missing/disabled (customerId=${customer.id} requestId=${request.id})`,
+            );
+            return;
+          }
+
+          // Reserve this best-effort reminder durably before provider handoff.
+          // A crash/ambiguous provider exception keeps it handled rather than
+          // risking a duplicate; only a definite unsent outcome reopens it.
+          const reserved = await db("review_requests").where({ id: request.id, followup_sent: false }).update({
+            followup_sent: true,
+            followup_sent_at: new Date(),
+            followup_reserved_at: new Date(),
+          });
+          if (!reserved) return;
+          let result;
+          try {
+            result = await sendCustomerMessage({
+              to: contact.phone,
+              body,
+              channel: "sms",
+              audience: "customer",
+              purpose: "review_request",
+              customerId: customer.id,
+              identityTrustLevel: "phone_matches_customer",
+              entryPoint: "review_request_followup",
+              metadata: {
+                original_message_type: "review_followup",
+                review_request_id: request.id,
+              },
+            });
+          } catch (err) {
+            if (!err?.providerOutcome) throw err;
+            result = err.providerOutcome;
+          }
+          const deliveryOutcome = result?.deliveryOutcome;
+          if (deliveryOutcome !== "accepted" && deliveryOutcome !== "not_sent") {
+            logger.warn(`[review] Follow-up SMS delivery uncertain; reservation held (customerId=${customer.id} requestId=${request.id})`);
+            return;
+          }
+          if (deliveryOutcome !== "accepted") {
+            logger.warn(
+              `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
+            );
+            if (
+              result.sent === true || (result.blocked &&
+              result.code !== "CONSENT_LOOKUP_FAILED" &&
+              !result.retryable &&
+              !result.deferred)
+            ) {
+              await db("review_requests").where({ id: request.id }).update({
+                followup_sent: true,
+                followup_sent_at: new Date(), followup_reserved_at: null,
+              });
+              suppressed++;
+            } else {
+              // Definite non-delivery: release the reservation so the row
+              // stays eligible for a later attempt. A transient DB error here
+              // must not silently strand the row stamped followup_sent=true
+              // with nothing sent — retry once like the delivered stamp below.
+              const released = await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
+                followup_sent: false, followup_sent_at: null, followup_reserved_at: null,
+              }), `follow-up reservation release (requestId=${request.id})`);
+              if (!released) unrecordedReleases++;
+            }
+            return;
+          }
+
+          const deliveredAt = new Date();
+          const stamped = await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
+            followup_sent: true,
+            followup_sent_at: deliveredAt,
+            followup_delivered_at: deliveredAt,
+            followup_reserved_at: null,
+          }), `follow-up delivery stamp (requestId=${request.id})`);
           sentThisRun.add(request.customer_id);
-          if (providerOutcome.sent === true) sent++;
-          else suppressed++;
-          continue;
+          if (stamped) sent++;
+          else unrecordedDeliveries++;
+        });
+        if (held?.blocked) {
+          // Keep held customers out of the limited batch until their retry is due.
+          await db("review_requests").where({ id: candidate.id, followup_sent: false }).update({
+            followup_next_attempt_at: held.nextAllowedAt ? new Date(held.nextAllowedAt) : new Date(Date.now() + 15 * 60000),
+          });
+          logger.info(`[review] Follow-up held (requestId=${candidate.id} code=${held.code})`);
         }
-        // Only a DEFINITE not-sent hands the row back; a bare throw is
-        // ambiguous and keeps the marker (a skipped follow-up, never a
-        // duplicate).
-        if (providerOutcome?.deliveryOutcome === "not_sent") await reopenFollowup();
-        logger.error(`[review] Follow-up SMS failed: ${err.message}`);
+      } catch (err) {
+        logger.error(`[review] Follow-up dispatch failed: ${err.message}`);
       }
     }
     if (sent > 0 || suppressed > 0 || internalFollowups > 0) {
@@ -3453,7 +3459,13 @@ const ReviewService = {
         `[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup), ${internalFollowups} internal`,
       );
     }
-    return { sent, suppressed, internalFollowups };
+    return {
+      sent,
+      suppressed,
+      internalFollowups,
+      ...(unrecordedDeliveries ? { unrecordedDeliveries } : {}),
+      ...(unrecordedReleases ? { unrecordedReleases } : {}),
+    };
   },
 
   // ════════════════════════════════════════════════════════════════
@@ -5142,11 +5154,17 @@ const ReviewService = {
       return stop("stale");
     }
     let recentAskRows = [];
+    let lastAskAt = null;
     let askLookupFailed = false;
     try {
-      // Since 30 days ago — the supersede window; the 3-day anchor below is
-      // the latest delivery among them.
-      recentAskRows = await deliveredAskRows(seq.customer_id, { since: new Date(Date.now() - 30 * 86400000) });
+      const supersedeSince = new Date(Date.now() - 30 * 86400000);
+      // Confirmed deliveries can permanently supersede a cadence. An
+      // unresolved legacy follow-up reservation is separate evidence: it
+      // holds the 72-hour spacing floor below but cannot prove delivery.
+      [recentAskRows, lastAskAt] = await Promise.all([
+        deliveredAskRows(seq.customer_id, { since: supersedeSince, includeReservations: false }),
+        lastDeliveredAskAt(seq.customer_id, { since: supersedeSince }),
+      ]);
     } catch {
       askLookupFailed = true; // hygiene check is best-effort; the 3-day rule fails closed (below)
     }
@@ -5213,7 +5231,6 @@ const ReviewService = {
         .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "spacing_lookup_unavailable", nextEvalAt }), updated_at: new Date() });
       return { ran: false, deferred: true, reason: "spacing_lookup_unavailable", retryAt: nextEvalAt };
     }
-    const lastAskAt = latestDeliveredAt(recentAskRows);
     const anchorMs = Math.max(lastAskAt ? lastAskAt.getTime() : 0, manualAskAt ? manualAskAt.getTime() : 0);
     if (stepIsAsk && anchorMs && Date.now() - anchorMs < ASK_SPACING_MS) {
       let spacedAt = new Date(anchorMs + ASK_SPACING_MS);

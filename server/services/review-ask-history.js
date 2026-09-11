@@ -53,9 +53,11 @@ function looksLikeReviewAsk(body) {
 // processFollowups also stamps it as a plain "handled" marker for
 // soft-deleted customers, dedup'd siblings, no-consent contacts, and
 // blocked/failed sends (review-request.js:2810,2875,2930,2953,3015) — none
-// of those reached the customer. The real delivery timestamp instead lives
-// in messaging_audit_log.sent_at (set only once the provider actually
-// dispatches), correlated back to this row via the review_request_id the
+// of those reached the customer. Real follow-up delivery evidence lives in
+// TWO places: review_requests.followup_delivered_at, which the serialized
+// processFollowups stamps at provider accept, and messaging_audit_log.sent_at
+// (set only once the provider actually dispatches) for follow-ups delivered
+// before that column existed — correlated back via the review_request_id the
 // followup send stamps into its metadata.
 const FOLLOWUP_DELIVERED_SUBQUERY = `(
   SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
@@ -64,32 +66,46 @@ const FOLLOWUP_DELIVERED_SUBQUERY = `(
   GROUP BY metadata->>'review_request_id'
 ) followups`;
 
-function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
+function deliveredAskRows(customerId, { since = null, excludeRequestId = null, includeReservations = true } = {}) {
+  const timestampColumns = ['review_requests.sms_sent_at', 'review_requests.sent_at',
+    'review_requests.followup_delivered_at', 'followups.followup_delivered_at'];
+  if (includeReservations) timestampColumns.push('review_requests.followup_reserved_at');
   const q = db('review_requests')
     // Correlated to the customer so the derived table uses the audit log's
     // customer index instead of grouping every follow-up ever delivered.
     .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`, [customerId])
     .where({ 'review_requests.customer_id': customerId })
-    .whereRaw('(review_requests.sms_sent_at IS NOT NULL OR review_requests.sent_at IS NOT NULL OR followups.followup_delivered_at IS NOT NULL)')
+    .whereRaw(`(${timestampColumns.map(column => `${column} IS NOT NULL`).join(' OR ')})`)
     .whereRaw(ASK_TOUCH_SQL)
     .select('review_requests.id', 'review_requests.sequence_id', 'review_requests.template_key',
-      'review_requests.sms_sent_at', 'review_requests.sent_at', 'followups.followup_delivered_at');
-  if (since) q.whereRaw('GREATEST(review_requests.sms_sent_at, review_requests.sent_at, followups.followup_delivered_at) > ?', [since]);
+      'review_requests.sms_sent_at', 'review_requests.sent_at', 'review_requests.followup_reserved_at',
+      // Both delivery evidence sources ride the row: the audit-log join keeps
+      // the followup_delivered_at name (older callers/tests read it), the
+      // column this slice stamps at provider accept is followup_recorded_at.
+      'followups.followup_delivered_at', 'review_requests.followup_delivered_at as followup_recorded_at');
+  if (since) q.whereRaw(`GREATEST(${timestampColumns.join(', ')}) > ?`, [since]);
   if (excludeRequestId) q.where('review_requests.id', '!=', excludeRequestId);
   return q;
 }
 
-// A retried email leg, or the genuinely delivered legacy follow-up SMS, can
-// be later than the original ask's own sms_sent_at/sent_at on the same row.
-function latestDeliveredAt(rows) {
+// An unresolved follow-up reservation conservatively holds spacing until its
+// real outcome is recorded; it does not populate the delivery timestamp.
+// A retried email leg, or the genuinely delivered legacy follow-up SMS (from
+// either evidence source), can be later than the original ask's own
+// sms_sent_at/sent_at on the same row.
+function latestDeliveredAt(rows, { includeReservations = true } = {}) {
+  const timestampFields = ['sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_recorded_at'];
+  if (includeReservations) timestampFields.push('followup_reserved_at');
   return rows.reduce((latest, row) => {
-    const at = Math.max(...[row.sms_sent_at, row.sent_at, row.followup_delivered_at].map(value => value ? new Date(value).getTime() : 0));
+    const at = Math.max(...timestampFields.map(field => row[field] ? new Date(row[field]).getTime() : 0));
     return Number.isFinite(at) && at > (latest?.getTime() || 0) ? new Date(at) : latest;
   }, null);
 }
 
 async function lastDeliveredAskAt(customerId, options) {
-  return latestDeliveredAt(await deliveredAskRows(customerId, options));
+  return latestDeliveredAt(await deliveredAskRows(customerId, options), {
+    includeReservations: options?.includeReservations !== false,
+  });
 }
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.

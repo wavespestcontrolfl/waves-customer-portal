@@ -1,6 +1,8 @@
 // Cadence-engine behavior: start → advance → auto-stop on review → complete.
 const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' }));
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
+const mockRenderSmsTemplate = jest.fn((...args) => jest.requireActual('../services/sms-template-renderer').renderSmsTemplate(...args));
+jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: (...args) => mockRenderSmsTemplate(...args) }));
 
 jest.mock('../models/db', () => jest.fn());
 // Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
@@ -92,13 +94,21 @@ function makeMock(initial = {}, opts = {}) {
       const l = valueFor(r, k); if (l == null) return false;
       return op === '>=' ? l >= v : op === '<=' ? l <= v : op === '>' ? l > v : op === '<' ? l < v : l === v;
     }));
+    if (q.greatest) {
+      const since = new Date(q.greatest.since).getTime();
+      rows = rows.filter(r => Math.max(...q.greatest.columns.map(column => {
+        const value = valueFor(r, column);
+        return value ? new Date(value).getTime() : 0;
+      })) > since);
+    }
+    if (q.followupRetryAt) rows = rows.filter(r => !r.followup_next_attempt_at || new Date(r.followup_next_attempt_at) <= q.followupRetryAt);
     if (q.order) { const [k, d] = q.order; rows.sort((a, b) => { const av = valueFor(a, k), bv = valueFor(b, k); if (av === bv) return 0; const x = av > bv ? 1 : -1; return d === 'desc' ? -x : x; }); }
     return q.limitValue ? rows.slice(0, q.limitValue) : rows;
   }
   function make(tbl) {
     const t = String(tbl).split(/\s+as\s+/i)[0];
     const q = {
-      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], raws: [], order: null, limitValue: null,
+      table: t, equals: [], notEquals: [], notNull: [], nulls: [], ops: [], ins: [], notIns: [], raws: [], greatest: null, order: null, limitValue: null,
       where(a, op, v) {
         if (typeof a === 'function') { a.call(this, this); return this; } // knex passes the builder as both `this` and the argument
         if (a && typeof a === 'object') { Object.entries(a).forEach(([k, val]) => this.equals.push([k, val])); return this; }
@@ -107,7 +117,15 @@ function makeMock(initial = {}, opts = {}) {
       },
       orWhere() { return this; },
       orWhereNull() { return this; },
-      whereRaw(sql) { this.raws.push(sql); return this; },
+      whereRaw(sql, bindings) {
+        this.raws.push(sql);
+        if (sql.includes("followup_next_attempt_at")) this.followupRetryAt = bindings[0];
+        const greatest = sql.match(/GREATEST\(([^)]+)\) > \?/);
+        if (greatest && bindings?.length) {
+          this.greatest = { columns: greatest[1].split(',').map(column => column.trim()), since: bindings[0] };
+        }
+        return this;
+      },
       whereNot(c, v) { this.notEquals.push([c, v]); return this; },
       whereIn(c, vs) { this.ins.push([c, vs]); return this; },
       whereNotIn(c, vs) { this.notIns.push([c, vs]); return this; },
@@ -150,6 +168,7 @@ beforeEach(() => {
   mockSendCustomerMessage.mockClear();
   mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-1' });
   mockEmailSendTemplate.mockClear();
+  mockRenderSmsTemplate.mockReset().mockImplementation((...args) => jest.requireActual('../services/sms-template-renderer').renderSmsTemplate(...args));
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
   mockDraftAskBody.mockReset().mockResolvedValue(null);
@@ -952,6 +971,44 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       jest.useFakeTimers().setSystemTime(new Date(seq.next_run_at.getTime() + 1000));
       try {
         expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+        expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('an uncertain legacy follow-up holds 72h without permanently superseding the cadence', async () => {
+      const rows = fixture('seq-legacy-reservation', { lastAskAgoMs: 73 * 3600000 });
+      const reservedAt = new Date(Date.now() - 3600000);
+      rows.review_requests.push({
+        id: 'legacy-uncertain',
+        customer_id: 'seq-legacy-reservation-c',
+        status: 'sent',
+        template_key: 'day0_ask',
+        sms_sent_at: new Date(Date.now() - 40 * 86400000),
+        followup_sent: true,
+        followup_reserved_at: reservedAt,
+        followup_delivered_at: null,
+        created_at: new Date(Date.now() - 40 * 86400000),
+      });
+      const mock = makeMock(rows);
+      db.mockImplementation(mock);
+
+      expect(await ReviewService.processReviewSequences()).toMatchObject({ sent: 0, deferred: 1 });
+
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(seq.stop_reason).toBeUndefined();
+      expect(seq.current_step).toBe(1);
+      expect(seq.next_run_at.getTime()).toBe(reservedAt.getTime() + 72 * 3600000);
+      expect(parse(seq.decision)).toMatchObject({ reason: 'spacing', ownerAction: 'none' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+      jest.useFakeTimers().setSystemTime(new Date(seq.next_run_at.getTime() + 1000));
+      try {
+        expect((await ReviewService.processReviewSequences()).sent).toBe(1);
+        expect(seq.status).toBe('completed');
+        expect(seq.stop_reason).toBe('completed');
         expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
       } finally {
         jest.useRealTimers();
@@ -5180,6 +5237,14 @@ describe('shared ask history foundation', () => {
     expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
   });
 
+  test('legacy follow-up reservations are spacing evidence, not confirmed delivery', () => {
+    const deliveredAt = new Date(base);
+    const reservedAt = new Date(base + 3600000);
+    const rows = [{ sms_sent_at: deliveredAt, followup_reserved_at: reservedAt }];
+    expect(history.latestDeliveredAt(rows)).toEqual(reservedAt);
+    expect(history.latestDeliveredAt(rows, { includeReservations: false })).toEqual(deliveredAt);
+  });
+
   // codex #4326 finding 3: processFollowups (review-request.js) delivers the
   // separate review_request_followup SMS several days after the original
   // ask. The reducer must count that delivery too, or a caller enforcing
@@ -5357,6 +5422,185 @@ describe('direct outreach serialization', () => {
   });
 });
 
+
+describe('legacy follow-up delivery spacing', () => {
+  function setup({ ageHours = 80, manualAt = null, onUpdate, throwSelectWhen } = {}) {
+    const customer = { id: 'legacy-lock', first_name: 'Synthetic', phone: '+12025550101' };
+    const request = { id: 'legacy-row', customer_id: customer.id, status: 'sent', followup_sent: false,
+      sms_sent_at: new Date(Date.now() - ageHours * 3600000), score: null, rated_at: null };
+    const mock = makeMock({ customers: [customer], review_requests: [request], sms_log: manualAt ? [{
+      customer_id: customer.id, direction: 'outbound', status: 'sent', message_body: 'Please leave a review.', created_at: manualAt,
+    }] : [] }, { onUpdate, throwSelectWhen });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-legacy' });
+    mockRenderSmsTemplate.mockResolvedValue('Please leave a Google review: https://g.page/r/example/review');
+    return { mock, request };
+  }
+
+  test.each([24, 71.99])('does not dispatch only %s hours after the original delivery', async ageHours => {
+    setup({ ageHours });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a recent staff ask holds an otherwise due follow-up', async () => {
+    setup({ manualAt: new Date(Date.now() - 3600000) });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('twenty spacing-held customers leave room for later customers on the next tick', async () => {
+    const { mock, request } = setup({ manualAt: new Date(Date.now() - 3600000) });
+    const rows = mock.__state.rows;
+    for (let i = 1; i < 21; i++) {
+      const customerId = `batch-${i}`;
+      rows.customers.push({ ...rows.customers[0], id: customerId });
+      rows.review_requests.push({ ...request, id: `row-${i}`, customer_id: customerId });
+      if (i < 20) rows.sms_log.push({ ...rows.sms_log[0], customer_id: customerId });
+    }
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(rows.review_requests.slice(0, 20).every(r => r.followup_next_attempt_at > new Date())).toBe(true);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage.mock.calls[0][0].customerId).toBe('batch-20');
+    // The held row becomes eligible again when the retry and spacing floor expire.
+    rows.review_requests[0].followup_next_attempt_at = new Date(Date.now() - 1);
+    rows.sms_log[0].created_at = new Date(Date.now() - 73 * 3600000);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+  });
+
+  test('unavailable history leaves the follow-up for a later worker tick', async () => {
+    const { request } = setup({ throwSelectWhen: q => q.table === 'sms_log' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(request.followup_sent).toBe(false);
+  });
+
+  test.each([false, true])('accepted follow-up is stamped under lock, including provider audit throws (%s)', async throws => {
+    let stampedUnderLock = false;
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_delivered_at) stampedUnderLock = global.__reviewLockHeld.has('review-send:legacy-lock');
+    } });
+    if (throws) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-legacy' } }));
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+    expect(stampedUnderLock).toBe(true);
+    expect(request.followup_delivered_at).toBeInstanceOf(Date);
+    expect(request.sent_at).toBeUndefined(); // Do not clear an owed Both email leg.
+    const dispatch = jest.fn();
+    expect(await require('../services/review-ask-dispatch').dispatchReviewAsk(request.customer_id, dispatch))
+      .toMatchObject({ code: 'REVIEW_ASK_SPACING' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('a lost accepted-delivery stamp stays durably handled and reports reconciliation needed', async () => {
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_delivered_at) throw new Error('delivery stamp unavailable');
+    } });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, unrecordedDeliveries: 1 });
+    expect(request.followup_sent).toBe(true);
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(request.followup_reserved_at).toBeInstanceOf(Date);
+    const other = jest.fn();
+    expect(await require('../services/review-ask-dispatch').dispatchReviewAsk(request.customer_id, other)).toMatchObject({ code: 'REVIEW_ASK_SPACING' });
+    expect(other).not.toHaveBeenCalled();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([false, true])('a definite retryable refusal reopens the reserved follow-up, including audit throws (%s)', async auditThrows => {
+    const { request } = setup();
+    const outcome = { sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_RETRY' };
+    if (auditThrows) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
+    else mockSendCustomerMessage.mockResolvedValueOnce(outcome);
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(request.followup_sent).toBe(false);
+    expect(request.followup_reserved_at).toBeNull();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+  });
+
+  test('retries the reservation release once after a transient DB error on definite non-delivery (codex #4333 P2)', async () => {
+    let attempts = 0;
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_sent === false) {
+        attempts++;
+        if (attempts === 1) throw new Error('connection terminated');
+      }
+    } });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_RETRY' });
+
+    // The first release attempt threw; the retry inside stampWithRetry
+    // recovered it, so nothing is reported lost and the row is reopened.
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(attempts).toBe(2);
+    expect(request.followup_sent).toBe(false);
+    expect(request.followup_reserved_at).toBeNull();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+  });
+
+  test('a lost reservation-release write is reported, not silently stranded, on definite non-delivery (codex #4333 P2)', async () => {
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_sent === false) throw new Error('connection terminated');
+    } });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_RETRY' });
+
+    // Both attempts failed: the row stays stamped followup_sent=true (the
+    // pre-provider reservation) even though no SMS was ever sent — exactly
+    // the silent-loss the finding calls out — but it is now surfaced via
+    // unrecordedReleases instead of vanishing from every future eligibility
+    // scan unreported.
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, unrecordedReleases: 1 });
+    expect(request.followup_sent).toBe(true);
+    expect(request.followup_reserved_at).toBeInstanceOf(Date);
+  });
+
+  test.each([false, true])('an uncertain follow-up result keeps its reservation and cannot resend (%s)', async auditThrows => {
+    const { request } = setup();
+    const outcome = { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_RETRY' };
+    if (auditThrows) mockSendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: outcome }));
+    else mockSendCustomerMessage.mockResolvedValueOnce(outcome);
+
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 0 });
+    expect(request.followup_sent).toBe(true);
+    expect(request.followup_sent_at).toBeInstanceOf(Date);
+    expect(request.followup_reserved_at).toBeInstanceOf(Date);
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('another worker cannot send the follow-up during provider dispatch', async () => {
+    setup();
+    let entered, finish;
+    const started = new Promise(resolve => { entered = resolve; });
+    const wait = new Promise(resolve => { finish = resolve; });
+    mockSendCustomerMessage.mockImplementationOnce(async () => { entered(); await wait; return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-legacy' }; });
+    const first = ReviewService.processFollowups();
+    try {
+      await started;
+      expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    } finally { finish(); }
+    expect(await first).toMatchObject({ sent: 1 });
+  });
+
+  test.each(['gate-blocked', 'template-disabled', 'owner-silence'])('suppressed follow-up releases spacing without delivery: %s', async providerMessageId => {
+    const { request } = setup();
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'not_sent', providerMessageId });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 1 });
+    expect(request.followup_reserved_at).toBeNull();
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await require('../services/review-ask-history').lastDeliveredAskAt(request.customer_id)).toEqual(request.sms_sent_at);
+  });
+
+  test('suppression is not a delivered ask timestamp', async () => {
+    const { request } = setup();
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', blocked: true, code: 'PURPOSE_OPTED_OUT' });
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, suppressed: 1 });
+    expect(request.followup_sent_at).toBeInstanceOf(Date);
+    expect(request.followup_delivered_at).toBeUndefined();
+    expect(await require('../services/review-ask-history').lastDeliveredAskAt(request.customer_id)).toEqual(request.sms_sent_at);
+  });
+});
 
 test.each([false, true])('failed approval persistence parks an existing scheduled row, or reports parking failure (%s)', async parkingFails => {
   let parkedUnderLock = false;
