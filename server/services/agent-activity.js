@@ -301,8 +301,12 @@ function digestItem(row) {
   const subject = String(row.title || '');
   const isAct = ACTION_PREFIX.test(subject);
   const isFix = /^FIX:/i.test(subject);
-  const status = isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
   const meta = parseJson(row.metadata, {}) || {};
+  // Fall-off rule (owner 2026-09-11): a finding whose check has since run
+  // clean is retired by services/ops-digest.js resolveOpsDigest — read +
+  // metadata.resolved. It reads as done (never "failed") and says so.
+  const resolved = meta.resolved === true;
+  const status = resolved ? 'completed' : isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
   return {
     id: `digest:${row.id}`,
     kind: 'digest',
@@ -311,7 +315,7 @@ function digestItem(row) {
     notificationId: row.id,
     agent: OPS_AGENT,
     title: subject.replace(DIGEST_PREFIX, ''),
-    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
+    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
     finishedAt: row.read_at ? iso(row.read_at) : null,

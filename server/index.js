@@ -767,6 +767,9 @@ app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watc
 app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
+// External ops-cron findings → ops_digest bell rows — machine auth
+// (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
+app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));

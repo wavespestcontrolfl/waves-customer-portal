@@ -2597,6 +2597,17 @@ const gates = {
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
+  // Ops digest ingest — routes/ops-digest-ingest.js, POST /api/ops/digest.
+  // The external Waves ops crons on the owner's Mac (~/waves-ops/ops-crons,
+  // 35 read-only checks) post their FIX:/ACT:/FYI: findings here so they
+  // land as ops_digest bell rows (the Waves Ops lane in Agents → Activity)
+  // instead of emails to contact@ (owner ask 2026-09-11). Machine auth via
+  // the OPS_DIGEST_INGEST_TOKEN bearer; the route 404s while the token is
+  // unset, 409s while GATE_OPS_DIGESTS_IN_APP / GATE_AGENT_ACTIVITY are off,
+  // and the caller emails on any non-2xx. Kill switch: unset the token.
+  // Presence-only here for logGateStatus; the route reads env at CALL time.
+  opsDigestIngest: Boolean(process.env.OPS_DIGEST_INGEST_TOKEN),
+
   // Closeout money + comms alerts — services/closeout-alerts.js maps three
   // more closeout facts to operator issues: comms failed (completion notice
   // rejected by the provider), invoice pending on an actionable reason
