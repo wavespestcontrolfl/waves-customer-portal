@@ -325,32 +325,44 @@ async function authoredProposalPricing(row, data) {
   };
 }
 
-// The route stamps snapshotHit ONLY on its fast path (estimate-public.js
-// buildPricingBundleInner) — its absence means the frozen columns were
-// rejected (retired/below-floor lawn cadence, stale termite pricing, missing
-// setup fee) and this bundle was rebuilt under today's rules, same signal
-// resolveLivePricing in estimate-proposal-billing.js reads. A committed
-// estimate is exempt regardless: its totals describe what the customer
-// ACCEPTED (or declined), never today's re-derived cadence — same predicate
-// resolveLivePricing gates on before calling buildPricingBundle at all
-// (estimate-proposal-billing.js estimateIsPriceLocked); buildPricingBundle
-// itself carries no such guard, so a rebuilt bundle for a locked row must
-// never name a "default" cadence acceptance may not match (pre-push audit
-// P1). Resolves through the route's own defaultFrequencyFromList, so this
-// never names a cadence acceptance itself would price differently — for
-// totalsFor to prefer over the (now stale) monthly_total/annual_total
-// columns. A narrow LOW-confidence candidate has no exact price on the
-// customer page either (PriceCard shows the range, never the midpoint), so
-// it carries its range instead of raw monthly/annual figures.
-function rebuiltDefaultFrequencyFor(bundle, snapshotHit, priceLocked) {
-  if (snapshotHit || priceLocked) return null;
+// Resolves the bundle's own default sellable cadence for totals purposes —
+// through the route's own defaultFrequencyFromList, so this never names a
+// cadence acceptance itself would price differently.
+//
+// Two independent concerns, both keyed off that SAME candidate cadence:
+//
+//   range   — a narrow LOW-confidence candidate has no exact price on the
+//             customer page EITHER WAY (PriceCard's headline always renders
+//             the range string, never a stored midpoint): applies whenever
+//             this cadence is the one that priced, valid snapshot or
+//             rebuilt alike — a snapshot's own frozen columns can themselves
+//             be that same range's midpoint (pre-push audit P1).
+//   override — a NUMERIC replacement for the frozen monthly_total /
+//             annual_total columns, needed only when those columns are
+//             stale: the route stamps snapshotHit ONLY on its fast path
+//             (estimate-public.js buildPricingBundleInner), so its absence
+//             means the columns were rejected (retired/below-floor lawn
+//             cadence, stale termite pricing, missing setup fee) and this
+//             bundle was rebuilt under today's rules — same signal
+//             resolveLivePricing in estimate-proposal-billing.js reads. A
+//             valid snapshot's columns already agree with this candidate,
+//             so no override is needed there.
+//
+// Both are null for a price-locked (accepted/declined) estimate: its totals
+// describe what was actually committed — same predicate resolveLivePricing
+// gates on before calling buildPricingBundle at all
+// (estimate-proposal-billing.js estimateIsPriceLocked; buildPricingBundle
+// itself carries no such guard) — and a low-confidence range is resolved to
+// an exact, site-confirmed price before acceptance can go through at all.
+function defaultCadenceForTotals(bundle, snapshotHit, priceLocked) {
+  if (priceLocked) return { range: null, override: null };
   const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
   const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
-  if (!candidate) return null;
+  if (!candidate) return { range: null, override: null };
   const range = lowConfidenceRange(candidate);
-  return range
-    ? { key: candidate.key || null, low_confidence_range: range }
-    : { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
+  if (range) return { range, override: null };
+  if (snapshotHit) return { range: null, override: null };
+  return { range: null, override: { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) } };
 }
 
 async function offeredPricing(row, data) {
@@ -372,7 +384,7 @@ async function offeredPricing(row, data) {
   const fees = upfrontFees(bundle);
   const snapshotHit = bundle.snapshotHit === true;
   const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
-  const rebuiltDefaultFrequency = rebuiltDefaultFrequencyFor(bundle, snapshotHit, priceLocked);
+  const { range: defaultCadenceRange, override: rebuiltDefaultFrequency } = defaultCadenceForTotals(bundle, snapshotHit, priceLocked);
   return {
     offered_pricing: {
       default_service_mode: bundle.defaultServiceMode || null,
@@ -384,6 +396,7 @@ async function offeredPricing(row, data) {
       price_locked: priceLocked,
       waveguard_tier: bundle.waveGuardTier || null,
       snapshot_hit: snapshotHit,
+      ...(defaultCadenceRange ? { default_cadence_low_confidence_range: defaultCadenceRange } : {}),
       ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
       plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
       services: list(bundle.services).map((s) => ({
@@ -469,17 +482,20 @@ function resolveInvoiceMode(row, data) {
 // annual, AND one-time — because they describe what was actually committed;
 // buildPricingBundle re-derives today's pricing regardless of lock state, so
 // its anchorOneTimePrice is no safer to trust here than its cadence ladder
+// (pre-push audit P1). Otherwise, when the bundle's own default sellable
+// cadence is a narrow LOW-confidence line, monthly/annual are withheld and
+// the range carried instead — PriceCard's headline shows the range, never
+// an exact midpoint, and a VALID snapshot's stored columns can themselves
+// be that same range's midpoint, so this applies regardless of snapshot_hit
 // (pre-push audit P1). Otherwise monthly/annual are the stored totals the
 // send path wrote (after reconciliation), UNLESS the bundle was rejected and
 // rebuilt (offered.snapshot_hit === false — retired/below-floor lawn
 // cadence, stale termite pricing, missing setup fee:
 // estimate-proposal-billing.js:148-169), in which case the frozen columns no
 // longer describe what this bundle offers and the rebuilt default sellable
-// cadence is used instead — its OWN low_confidence_range when that cadence
-// is a narrow LOW-confidence line (PriceCard shows the range, never an exact
-// midpoint, so totals must not promote one either). One-time (unlocked) is
-// the composer's corrected figure when the bundle built (it is what the
-// page shows), the stored column otherwise. Withheld entirely when
+// cadence's own monthly/annual are used instead. One-time (unlocked) is the
+// composer's corrected figure when the bundle built (it is what the page
+// shows), the stored column otherwise. Withheld entirely when
 // membership could not be verified, OR when offered_pricing itself is
 // unavailable (an enabled authored proposal's projection failed, or the
 // pricing bundle failed / doesn't exist — pre-push audit P1): this tool
@@ -498,11 +514,21 @@ function totalsFor(row, pricing, reconciliation_error) {
     return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: money(row.onetime_total) };
   }
   const oneTime = offered.one_time_total ?? money(row.onetime_total);
-  const d = offered.snapshot_hit === false ? offered.rebuilt_default_frequency : null;
-  if (d?.low_confidence_range) {
-    return { monthly: null, annual: null, one_time: oneTime, low_confidence_range: d.low_confidence_range, source: 'rebuilt_bundle_default' };
+  // A narrow LOW-confidence default cadence withholds the exact figure and
+  // carries the range regardless of snapshot_hit — a valid snapshot's own
+  // frozen columns can themselves be that same range's midpoint, which
+  // PriceCard never shows either (pre-push audit P1).
+  if (offered.default_cadence_low_confidence_range) {
+    return {
+      monthly: null, annual: null, one_time: oneTime,
+      low_confidence_range: offered.default_cadence_low_confidence_range,
+      source: offered.snapshot_hit ? 'default_cadence_range' : 'rebuilt_bundle_default_range',
+    };
   }
-  if (d) return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
+  if (offered.rebuilt_default_frequency) {
+    const d = offered.rebuilt_default_frequency;
+    return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
+  }
   return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: oneTime };
 }
 

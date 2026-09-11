@@ -433,13 +433,37 @@ test('a rebuilt bundle whose default sellable cadence is itself a narrow LOW-con
     { key: 'monthly', monthly: 500, annual: 6000, perTreatment: 500, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 },
   ] });
   const shaped = await shapeEstimate(estimateRow());
-  expect(shaped.offered_pricing.rebuilt_default_frequency).toEqual({
-    key: 'monthly', low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
-  });
+  // Ranged: no numeric override rides on rebuilt_default_frequency — the
+  // range lives on default_cadence_low_confidence_range instead, which
+  // applies independent of snapshot_hit (see the snapshotHit:true test below).
+  expect(shaped.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(shaped.offered_pricing.default_cadence_low_confidence_range).toEqual(
+    { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
+  );
   expect(shaped.totals).toEqual({
     monthly: null, annual: null, one_time: 125,
     low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
-    source: 'rebuilt_bundle_default',
+    source: 'rebuilt_bundle_default_range',
+  });
+});
+
+test('a VALID snapshot (snapshotHit true) whose default sellable cadence is a narrow LOW-confidence line ALSO withholds the exact total — the frozen column can itself be that range\'s midpoint, which PriceCard never showed either (Codex r-head P1, cover snapshotHit:true)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'monthly', monthly: 500, annual: 6000, perTreatment: 500, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 }],
+    snapshotHit: true,
+  });
+  // The frozen columns literally ARE the range's midpoint (500/mo, 6000/yr) —
+  // exactly what a send-time low-confidence cadence would have stored.
+  const shaped = await shapeEstimate(estimateRow({ monthly_total: '500.00', annual_total: '6000.00' }));
+  expect(shaped.offered_pricing.snapshot_hit).toBe(true);
+  expect(shaped.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(shaped.offered_pricing.default_cadence_low_confidence_range).toEqual(
+    { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
+  );
+  expect(shaped.totals).toEqual({
+    monthly: null, annual: null, one_time: 125,
+    low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
+    source: 'default_cadence_range',
   });
 });
 
