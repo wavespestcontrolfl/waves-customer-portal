@@ -6436,8 +6436,23 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
       await require('./call-commitments').refreshFulfillment(db, call.id)
         .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
     }
+    // An applied move just communicated a NEW promised window to the caller
+    // — record it as promise evidence the same way a freshly booked
+    // appointment does below (appointmentResult.scheduledServiceId), or the
+    // no-show detector keeps alerting against the stale pre-move window and
+    // never sees the one the agent just spoke (codex P1). recordAgreedWindow
+    // re-derives the agreed window from the call's own V2 extraction and
+    // enforces the same trusted-speaker gate that other path already
+    // requires — result.newDate/newWindow (the plan this step just applied)
+    // exist for logging/future use but are never a second source of truth.
+    if (result.outcome === 'applied' && result.visitId && isEnabled('noShowDetector')) {
+      await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: result.visitId })
+        .catch((err) => logger.warn(`[call-proc] reschedule-apply promise-window capture failed for ${maskSid(callSid)}: ${err.message}`));
+    }
+    return result;
   } catch (err) {
     logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+    return { outcome: 'error', error: err.message };
   }
 }
 
@@ -17155,6 +17170,7 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
+  applyCallRescheduleStep,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,
