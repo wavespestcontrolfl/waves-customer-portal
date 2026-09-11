@@ -55,7 +55,12 @@ describe('bid quantity and costing authority', () => {
     expect(programRevenueIssue({ frequencyPerYear: 4, pricePerApplication: 100 })).toBeNull();
     expect(proposalRevenueIssue({ programs: [{ frequencyPerYear: 12, pricePerApplication: 80 }], correctiveWork: [{ amount: 10.005 }] })).toMatch(/whole-cent/);
     expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ quantity: 1, unitPrice: -5 }] }] })).toMatch(/negative/);
-    expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ quantity: 1, unitPrice: 5 }] }], programs: [], correctiveWork: [{ amount: 10 }] })).toBeNull();
+    expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ description: 'Monthly', quantity: 1, unitPrice: 5 }] }], programs: [], correctiveWork: [{ amount: 10 }] })).toBeNull();
+    // A priced line with a blank description is dropped by the save but
+    // summed by the sidebar (GH codex P2 r9 on #4270); a blank default line
+    // at $0 is not revenue and stays fine.
+    expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ description: 'Quarterly', quantity: 1, unitPrice: 200 }, { description: '  ', quantity: 2, unitPrice: 50 }] }] })).toMatch(/need a description before they count toward revenue/);
+    expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ description: 'Quarterly', quantity: 1, unitPrice: 200 }, { description: '', quantity: 1, unitPrice: 0 }] }] })).toBeNull();
   });
   test.each([['', null], ['abc', null], [0, null], [31, null], [2.5, null], ['3', 3], [undefined, 1]])('a present revenue period of %s never silently compares one year (GH codex P2 on #4270)', (revenueYears, expected) => {
     const rows = [{ category: 'labor', description: 'Synthetic complete cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];

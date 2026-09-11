@@ -100,6 +100,11 @@ function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = 
   for (const program of programs) { const issue = programRevenueIssue(program); if (issue) return issue; }
   const lines = buildings.flatMap((b) => (Array.isArray(b?.lineItems || b?.line_items) ? (b.lineItems || b.line_items) : []));
   if (lines.some((i) => Number(i?.unitPrice ?? i?.unit_price ?? i?.price) < 0 || Number(i?.quantity) < 0)) return 'Proposal line items cannot have negative quantities or unit prices.';
+  // The save drops a building line whose description is blank (same
+  // nonblank filter as the page payload), so an amount typed on such a line
+  // is revenue the sidebar sums but the reload never shows; hold the margin
+  // until it is described or cleared (GH codex P2 r9 on #4270).
+  if (lines.some((i) => !String(i?.description ?? '').trim() && proposalLineAmount({ quantity: i?.quantity, unitPrice: i?.unitPrice ?? i?.unit_price ?? i?.price }) > 0)) return 'Priced building lines need a description before they count toward revenue.';
   if (correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) return 'Corrective work amounts cannot be negative.';
   if (correctiveWork.some((w) => !wholeCents(Number(w?.amount ?? w?.price ?? 0)))) return 'Corrective work amounts must be whole-cent dollar values.';
   return null;
