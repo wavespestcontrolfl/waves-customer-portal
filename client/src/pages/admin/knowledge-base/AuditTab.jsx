@@ -14,7 +14,8 @@ import { adminFetch } from "../../../utils/admin-fetch";
 import { sentenceCase } from "./config";
 
 export default function AuditTab({ showFeedback, onRefresh }) {
-  const [running, setRunning] = useState(false);
+  // null | "stale" | "force": which audit request is in flight
+  const [runningMode, setRunningMode] = useState(null);
   const [results, setResults] = useState(null);
   const [maxEntries, setMaxEntries] = useState(10);
   const [error, setError] = useState("");
@@ -23,7 +24,7 @@ export default function AuditTab({ showFeedback, onRefresh }) {
   const runAudit = async (forceAll = false) => {
     if (runningRef.current) return;
     runningRef.current = true;
-    setRunning(true);
+    setRunningMode(forceAll ? "force" : "stale");
     setError("");
     try {
       const data = await adminFetch("/admin/kb/audit/run", {
@@ -39,7 +40,7 @@ export default function AuditTab({ showFeedback, onRefresh }) {
       showFeedback(`Audit failed: ${message}`, true);
     } finally {
       runningRef.current = false;
-      setRunning(false);
+      setRunningMode(null);
     }
   };
 
@@ -65,10 +66,19 @@ export default function AuditTab({ showFeedback, onRefresh }) {
                 max={50}
               />
             </Field>
-            <Button loading={running} onClick={() => runAudit(false)}>
+            <Button
+              loading={runningMode === "stale"}
+              disabled={runningMode !== null}
+              onClick={() => runAudit(false)}
+            >
               Audit stale & low-confidence
             </Button>
-            <Button variant="secondary" disabled={running} onClick={() => runAudit(true)}>
+            <Button
+              variant="secondary"
+              loading={runningMode === "force"}
+              disabled={runningMode !== null}
+              onClick={() => runAudit(true)}
+            >
               Audit all (force)
             </Button>
           </div>

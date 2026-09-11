@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UiSurface } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
+import AuditTab from "./AuditTab";
 import BrowseTab from "./BrowseTab";
 import CreateTab from "./CreateTab";
 import FieldIntelligenceTab from "./FieldIntelligenceTab";
@@ -107,6 +108,27 @@ describe("Knowledge base interactions", () => {
     await screen.findByRole("button", { name: "Delete" });
     expect(filterGrid.className).not.toMatch(/md:grid-cols-\[/);
     expect(search.closest(".col-span-2").className).not.toMatch(/md:col-span-1/);
+  });
+
+  it("marks only the audit mode that was started as pending", async () => {
+    let finishAudit;
+    adminFetch.mockReturnValue(new Promise((resolve) => { finishAudit = resolve; }));
+    surface(<AuditTab showFeedback={vi.fn()} onRefresh={vi.fn()} />);
+
+    const stale = screen.getByRole("button", { name: "Audit stale & low-confidence" });
+    const force = screen.getByRole("button", { name: "Audit all (force)" });
+    fireEvent.click(force);
+
+    await waitFor(() => expect(force).toHaveAttribute("aria-busy", "true"));
+    expect(stale).toBeDisabled();
+    expect(stale).not.toHaveAttribute("aria-busy", "true");
+    expect(adminFetch).toHaveBeenCalledWith("/admin/kb/audit/run", {
+      method: "POST",
+      body: JSON.stringify({ maxEntries: 10, forceAll: true }),
+    });
+
+    await act(async () => { finishAudit({ audited: 0, flagged: 0, results: [] }); });
+    expect(force).not.toHaveAttribute("aria-busy", "true");
   });
 
   it("guards create against two synchronous submissions", async () => {
