@@ -274,11 +274,31 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     }
     // The shell write can hit the quota too; the generation is only
     // committed once '/' points at it, so undo its new entries as well.
+    // The install's marker is part of its commit: an install whose marker
+    // did not persist would leave the active worker's older in-flight
+    // navigation free to overwrite the shell it just stored, so it fails
+    // (quota retries below; the previous worker keeps serving otherwise).
+    const previousShell = await cache.match(OFFLINE_URL);
+    const restorePreviousShell = async () => {
+      if (previousShell) await cache.put(OFFLINE_URL, previousShell.clone()).catch(() => {});
+    };
     try {
       await cache.put(OFFLINE_URL, shellResponse.clone());
+      if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
+      await restorePreviousShell();
       await withAssetWrites(rollBackCreated);
       throw err;
+    }
+    // The shell write itself yields to other fetch events; a newer
+    // navigation can advance the live build while it is pending. The
+    // check and the write cannot be atomic, so detect it afterward and
+    // put the prior shell back — no newer refresh can have run meanwhile,
+    // this refresh still holds the shell-refresh lock.
+    if (await isSuperseded()) {
+      await restorePreviousShell();
+      await withAssetWrites(rollBackCreated);
+      throw new Error('Shell refresh superseded by a newer navigation');
     }
   };
   try {
@@ -299,11 +319,6 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   }
   cachedShellSeq += 1;
   knownCachedBuild = buildId;
-  // The install commit leaves its start time for the active worker's
-  // in-flight navigations to compare against (see installCommittedAfter).
-  if (!supersedable) {
-    await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } })).catch(() => {});
-  }
   // Refreshes are queued, so an older one can finish after a newer
   // navigation already advanced the live build — writing its own build back
   // would mis-tag the newer page's chunks. Only claim the memo if no

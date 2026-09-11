@@ -967,6 +967,61 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-CCC.js']));
   });
 
+  it('restores the prior shell when a refresh is superseded while its shell write is pending', async () => {
+    // Codex #4335 r10 P1: refresh A passes the final order check, then its
+    // cache.put('/') yields; navigation B lands and advances the live
+    // build before the write completes. The check and the write cannot be
+    // atomic, so A must notice afterward and put the prior shell back.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000));
+
+    let navs = 0;
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') {
+        navs += 1;
+        return fakeResponse(shellHtml([navs === 1 ? '/assets/index-AAA.js' : '/assets/index-BBB.js']));
+      }
+      if (request.url.endsWith('/assets/index-BBB.js')) return fakeResponse('gone', false); // B's refresh fails
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    let releaseShellPut;
+    const shellGate = new Promise(resolve => { releaseShellPut = resolve; });
+    let shellPuts = 0;
+    cache.putGate = (url) => (url === 'https://portal.test/' && ++shellPuts === 1 ? shellGate : null); // park A's shell write only
+    const navAPromise = dispatchFetch('/admin/', { mode: 'navigate' });
+    await tick(); await tick(); await tick();
+    expect(shellPuts).toBe(1); // A is inside cache.put('/')
+    const navBPromise = dispatchFetch('/admin/', { mode: 'navigate' }); // B lands: live build moves on
+    await tick();
+    releaseShellPut();
+    await Promise.all([navAPromise, navBPromise]);
+
+    expect(await (await cache.match('/')).text()).toBe(shell000); // A restored the prior shell; B failed
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']);
+  });
+
+  it('fails the install when its ordering marker cannot be stored, keeping the prior shell', async () => {
+    // Codex #4335 r10 P1: with the marker swallowed, an install could
+    // succeed without the cross-worker ordering guard, and an older
+    // in-flight navigation of the active worker could overwrite the shell
+    // it just stored. The marker is part of the commit.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchInstall, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000));
+    setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    cache.failPut = (url) => url === 'https://portal.test/__waves/install-commit';
+
+    await expect(dispatchInstall()).rejects.toThrow(/Quota/);
+
+    expect(await (await cache.match('/')).text()).toBe(shell000);
+    expect(await cache.match('/__waves/install-commit')).toBeUndefined();
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']); // B's batch rolled back
+  });
+
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
     // Codex #4335 P1: navigation A begins before a deploy but its response is
     // slow; navigation B begins later, is answered by the new build and its
