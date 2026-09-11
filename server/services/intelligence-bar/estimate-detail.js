@@ -61,15 +61,64 @@ const lazy = {
 const list = (v) => (Array.isArray(v) ? v : []);
 
 // ── Offered pricing (the public bundle, verbatim in shape) ───────────
+// The per-application figure the customer page shows (PriceCard
+// perApplicationNetForFrequency): the single allocated treatment row's net
+// displayPrice when there is exactly one, else the cadence's own
+// perTreatment — and only on a cadence the composer marks billed per
+// application. A legacy monthly-billed member's bundle has that flag
+// stripped by the composer; such a cadence is a monthly charge, and no
+// per-application amount is invented for it.
+function perApplicationFor(f, rows) {
+  if (f.billedPerApplication !== true) return null;
+  if (rows.length === 1 && Number(rows[0].displayPrice) > 0 && Number(rows[0].visitsPerYear) > 0) return money(rows[0].displayPrice);
+  if (Number(f.perTreatment ?? f.perVisit) > 0 && Number(f.visitsPerYear) > 0) return money(f.perTreatment ?? f.perVisit);
+  return null;
+}
+
+// A LOW-confidence commercial cadence carries a range, not a price: the
+// composer stamps lowConfidenceRangePct + lowConfidenceFraction and the
+// customer page shows price ± price × fraction × pct (PriceCard).
+function lowConfidenceRange(f) {
+  const pct = Number(f.lowConfidenceRangePct);
+  if (!(pct > 0)) return null;
+  const rawFraction = Number(f.lowConfidenceFraction);
+  const fraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
+  const band = (price) => (price == null ? null : [money(price - price * fraction * pct), money(price + price * fraction * pct)]);
+  return { pct, fraction, monthly: band(money(f.monthly)), annual: band(money(f.annual)) };
+}
+
+function treatmentRow(r) {
+  return {
+    service: r.service || null,
+    label: r.label || null,
+    per_treatment: money(r.perTreatment),
+    display_price: money(r.displayPrice),
+    visits_per_year: Number(r.visitsPerYear) > 0 ? Number(r.visitsPerYear) : null,
+    ...(r.monthly != null ? { monthly: money(r.monthly) } : {}),
+    ...(r.monthlyBase != null ? { monthly_base: money(r.monthlyBase) } : {}),
+    ...(r.waveGuardDiscountEligible != null ? { waveguard_discount_eligible: r.waveGuardDiscountEligible === true } : {}),
+  };
+}
+
 function frequencyEntry(f) {
+  const rows = list(f.perServiceTreatments);
   const entry = {
     key: f.key || null,
     label: f.label || null,
     monthly: money(f.monthly),
     annual: money(f.annual),
-    per_visit: money(f.perTreatment ?? f.perVisit),
     visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
+    billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
+    per_application: perApplicationFor(f, rows),
+    per_service_treatments: rows.map(treatmentRow),
+    // Row-level discount state: a program minimum can cap or suppress the
+    // manual discount on SOME cadences only — the global manual_discount
+    // never speaks for an individual cadence.
+    manual_discount: f.manualDiscount || null,
   };
+  if (f.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
+  const range = lowConfidenceRange(f);
+  if (range) entry.low_confidence_range = range;
   if (f.oneTimeTotal != null) entry.one_time_total = money(f.oneTimeTotal);
   if (f.quoteRequired === true) entry.quote_required = true;
   if (f.annualPrepayEligible != null) entry.annual_prepay_eligible = f.annualPrepayEligible === true;
@@ -99,16 +148,33 @@ function comboEntry(c) {
   return entry;
 }
 
-function breakdownEntry(b) {
+// ONE canonical upfront-fee list. The composer also ships compatibility
+// aliases of the same charges (setupFee = the matching firstVisitFees
+// entry; the rodent bait setup and initial-roach fees can recur inside
+// oneTimeBreakdown) — the customer page renders the fee cards from
+// firstVisitFees and EXCLUDES those services from the breakdown card, so
+// the tool reports the same partition and never the same dollar twice.
+function upfrontFees(bundle) {
+  const fees = list(bundle.firstVisitFees).map(feeEntry);
+  const rodent = bundle.rodentBaitSetupFee && typeof bundle.rodentBaitSetupFee === 'object' ? feeEntry(bundle.rodentBaitSetupFee) : null;
+  if (rodent && !fees.some((f) => f.service === rodent.service)) fees.push(rodent);
+  return fees;
+}
+
+function breakdownEntry(b, excludedServices) {
   if (!b || typeof b !== 'object') return null;
+  const excluded = new Set(excludedServices);
   return {
-    items: list(b.items).map((i) => ({
-      service: i.service || null,
-      label: i.label || null,
-      amount: money(i.amount),
-      detail: i.detail || null,
-      ...(i.quoteRequired === true ? { quote_required: true } : {}),
-    })),
+    items: list(b.items)
+      .filter((i) => !excluded.has(i.service))
+      .map((i) => ({
+        service: i.service || null,
+        label: i.label || null,
+        amount: money(i.amount),
+        detail: i.detail || null,
+        ...(i.quoteRequired === true ? { quote_required: true } : {}),
+      })),
+    excluded_upfront_fee_services: [...excluded],
     total: money(b.total),
     quote_required: b.quoteRequired === true,
   };
@@ -122,6 +188,7 @@ async function offeredPricing(row) {
     return { offered_pricing: null, offered_pricing_unavailable: `pricing bundle failed: ${err.message}` };
   }
   if (!bundle || typeof bundle !== 'object') return { offered_pricing: null, offered_pricing_unavailable: 'no pricing bundle for this estimate' };
+  const fees = upfrontFees(bundle);
   return {
     offered_pricing: {
       default_service_mode: bundle.defaultServiceMode || null,
@@ -134,11 +201,13 @@ async function offeredPricing(row) {
         frequencies: list(s.frequencies).map(frequencyEntry),
       })),
       combos: list(bundle.serviceCadenceCombos).map(comboEntry),
-      one_time_breakdown: breakdownEntry(bundle.oneTimeBreakdown),
-      anchor_one_time_price: money(bundle.anchorOneTimePrice),
-      first_visit_fees: list(bundle.firstVisitFees).map(feeEntry),
-      setup_fee: bundle.setupFee ? feeEntry(bundle.setupFee) : null,
-      rodent_bait_setup_fee: bundle.rodentBaitSetupFee ? feeEntry(bundle.rodentBaitSetupFee) : null,
+      // The one-time total the customer page shows (the composer's
+      // corrected figure for legacy rows whose stored total still carries a
+      // setup fee that no longer applies, or lacks one now owed).
+      one_time_total: money(bundle.anchorOneTimePrice),
+      upfront_fees: fees,
+      setup_fee_service: bundle.setupFee?.service || null,
+      one_time_breakdown: breakdownEntry(bundle.oneTimeBreakdown, fees.map((f) => f.service)),
       manual_discount: bundle.manualDiscount || null,
       // The composer's own quote-required verdict (resolveEstimateQuoteRequirement:
       // lapsed-member reprice impossible, unverified setup waiver, retired
@@ -190,11 +259,19 @@ async function reconcileMembership(row) {
   }
 }
 
+function resolveInvoiceMode(row, data) {
+  try {
+    return lazy.publicRoute().resolveEstimateInvoiceMode(row, data) === true;
+  } catch {
+    return row.bill_by_invoice === true;
+  }
+}
+
 async function shapeEstimate(row, deposits = []) {
   const reconciliation_error = await reconcileMembership(row);
   const pricing = await offeredPricing(row);
   const data = parseStoredJson(row.estimate_data);
-  const oneTimeFallback = pricing.offered_pricing?.one_time_breakdown?.total ?? null;
+  const composerOneTime = pricing.offered_pricing?.one_time_total ?? null;
   return {
     id: row.id,
     customer_id: row.customer_id,
@@ -208,23 +285,32 @@ async function shapeEstimate(row, deposits = []) {
     service_interest: row.service_interest,
     tier: row.waveguard_tier,
     pricing_version: row.pricing_version || null,
-    bill_by_invoice: row.bill_by_invoice === true,
+    // Effective invoice mode, the public acceptance/payment surfaces' own
+    // resolver (a rodent-guarantee-only renewal bills by invoice even when
+    // the column says false).
+    bill_by_invoice: resolveInvoiceMode(row, data),
     // Derived from the bundle's verdict, never from a stored flag: null when
     // the bundle could not be built (unknown, not "no").
     requote_required: pricing.offered_pricing ? pricing.offered_pricing.quote_required : null,
     requote_reason: pricing.offered_pricing?.quote_required_reason ?? null,
-    // The stored totals the send path wrote (after reconciliation); the
-    // bundle's one-time breakdown total when the column is empty.
+    // Monthly / annual: the stored totals the send path wrote (after
+    // reconciliation). One-time: the composer's corrected figure when the
+    // bundle built (it is what the page shows), the stored column otherwise.
     totals: {
       monthly: money(row.monthly_total),
       annual: money(row.annual_total),
-      one_time: money(row.onetime_total) ?? oneTimeFallback,
+      one_time: composerOneTime ?? money(row.onetime_total),
     },
     ...pricing,
     ...(reconciliation_error ? { reconciliation_error } : {}),
     accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
+    // Deposits: amount is the FACE value; card_surcharge is the extra cash
+    // actually collected on top of it and refunded_surcharge how much of
+    // that fee went back (null = no explicit record).
     deposits: deposits.map((d) => ({
-      amount: money(d.amount), credited: money(d.credited_amount), refunded: money(d.refunded_amount), status: d.status, received_at: d.received_at,
+      amount: money(d.amount), card_surcharge: money(d.card_surcharge), total_paid: money(Number(d.amount || 0) + Number(d.card_surcharge || 0)),
+      credited: money(d.credited_amount), refunded: money(d.refunded_amount), refunded_surcharge: money(d.refunded_surcharge),
+      status: d.status, received_at: d.received_at,
     })),
     customer_notes: row.notes || null,
     ...(await estimateLinks(row, data)),
@@ -261,7 +347,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
   }
   const deposits = await db('estimate_deposits')
     .whereIn('estimate_id', rows.map((r) => r.id))
-    .select('estimate_id', 'amount', 'credited_amount', 'refunded_amount', 'status', 'received_at')
+    .select('estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount', 'refunded_surcharge', 'status', 'received_at')
     .orderBy('created_at', 'desc');
   const byEstimate = new Map();
   for (const d of deposits) {
@@ -275,7 +361,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences and their monthly / annual / per-visit (per-application) prices, each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, the one-time breakdown, first-visit and setup fees, totals, deposits, status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced). Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
+  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences with their monthly / annual prices and, on cadences billed per application, the per-application price the page shows (a monthly-billed plan reports billing_unit monthly and no per-application figure; a LOW-confidence commercial price reports its range), each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, one canonical upfront-fee list plus the remaining one-time breakdown (never the same fee twice), the page's one-time total, totals, deposits (face amount + card surcharge), status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced). Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. It does not itemize the internal engine rows behind those prices; offered_pricing_unavailable says when the pricing bundle could not be built.`,
   input_schema: {
     type: 'object',

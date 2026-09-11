@@ -24,6 +24,7 @@ jest.mock('../routes/estimate-public', () => {
   return {
     buildPricingBundle: (...a) => { calls.push('bundle'); return mockBuildPricingBundle(...a); },
     reconcileFrozenMembershipSnapshot: (...a) => { calls.push('reconcile'); return mockReconcile(...a); },
+    resolveEstimateInvoiceMode: (e, data) => e.bill_by_invoice === true || data?.rodentGuaranteeOnly === true,
     isEstimateCustomerViewable: (e) => !e.archived_at && !unpublished.includes(e.status) && !['expired', 'send_failed'].includes(e.status),
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
   };
@@ -50,15 +51,23 @@ const estimateRow = (overrides = {}) => ({
 const BUNDLE = {
   defaultServiceMode: 'recurring',
   waveGuardTier: 'Silver',
-  frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, perVisit: 141, oneTimeTotal: null, annualPrepayEligible: true }],
+  frequencies: [{
+    key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, perVisit: 141, visitsPerYear: 4, oneTimeTotal: null, annualPrepayEligible: true, billedPerApplication: true,
+    // one allocated treatment row: its NET displayPrice is the per-application figure the page shows, not the outer anchor
+    perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perTreatment: 141, displayPrice: 131, visitsPerYear: 4, waveGuardDiscountEligible: true }],
+    manualDiscount: { amount: 40, recurringAmount: 40 },
+  }],
   services: [
     { key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'bi_monthly', frequencies: [
-      { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4 },
-      { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, perTreatment: 110, visitsPerYear: 6 },
+      { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4, billedPerApplication: true, manualDiscountSuppressed: true },
+      { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, perTreatment: 110, visitsPerYear: 6, billedPerApplication: true },
     ] },
     { key: 'lawn_care', label: 'Lawn Care', defaultFrequencyKey: 'enhanced', frequencies: [
       { key: 'standard', label: 'Standard', monthly: 45, annual: 540, visitsPerYear: 6 },
       { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visitsPerYear: 9, quoteRequired: true },
+    ] },
+    { key: 'commercial_pest', label: 'Commercial Pest', defaultFrequencyKey: 'monthly', frequencies: [
+      { key: 'monthly', label: 'Monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 0.5 },
     ] },
   ],
   serviceCadenceCombos: [{
@@ -67,7 +76,8 @@ const BUNDLE = {
     perServiceTreatments: { pest_control: { perTreatment: 131, treatments: 4 }, lawn_care: { perTreatment: 60.45, treatments: 9 } },
     manualDiscount: { amountAnnual: 40, capped: false }, manualDiscountSuppressed: true,
   }],
-  oneTimeBreakdown: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, detail: '2 treatments' }, { service: null, label: 'Custom exclusion', amount: null, quoteRequired: true }], total: 150, quoteRequired: true },
+  // the roach fee recurs inside the breakdown (compatibility alias) — the page renders it once, as a fee card
+  oneTimeBreakdown: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, detail: '2 treatments' }, { service: 'exclusion', label: 'Exclusion work', amount: 450, detail: null }, { service: null, label: 'Custom exclusion', amount: null, quoteRequired: true }], total: 600, quoteRequired: true },
   anchorOneTimePrice: 125,
   firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true }, { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service', treatments: 2, waivedWithPrepay: false }],
   setupFee: { service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true },
@@ -92,6 +102,8 @@ test('tool definition names the per-application use, takes either selector, type
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/per-application/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/exactly as the customer's estimate page prices it/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/does not itemize the internal engine rows/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/monthly-billed plan reports billing_unit monthly/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/never the same fee twice/);
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.estimate_id.format).toBe('uuid');
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.customer_id.format).toBe('uuid');
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.required).toBeUndefined();
@@ -102,18 +114,29 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
   const row = estimateRow();
   const shaped = await shapeEstimate(row);
   expect(mockBuildPricingBundle).toHaveBeenCalledWith(row);
+  const noRows = { per_service_treatments: [], manual_discount: null };
   expect(shaped.offered_pricing).toEqual({
     default_service_mode: 'recurring',
     waveguard_tier: 'Silver',
-    plan_frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, per_visit: 141, visits_per_year: null, annual_prepay_eligible: true }],
+    plan_frequencies: [{
+      key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, visits_per_year: 4, billing_unit: 'per_application',
+      per_application: 131, // the single treatment row's net displayPrice, not the outer 141 anchor (PriceCard rule)
+      per_service_treatments: [{ service: 'pest_control', label: 'Pest Control', per_treatment: 141, display_price: 131, visits_per_year: 4, waveguard_discount_eligible: true }],
+      manual_discount: { amount: 40, recurringAmount: 40 }, annual_prepay_eligible: true,
+    }],
     services: [
       { key: 'pest_control', label: 'Pest Control', default_frequency_key: 'bi_monthly', frequencies: [
-        { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, per_visit: 141, visits_per_year: 4 },
-        { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, per_visit: 110, visits_per_year: 6 },
+        { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, visits_per_year: 4, billing_unit: 'per_application', per_application: 141, ...noRows, manual_discount_suppressed: true },
+        { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, visits_per_year: 6, billing_unit: 'per_application', per_application: 110, ...noRows },
       ] },
       { key: 'lawn_care', label: 'Lawn Care', default_frequency_key: 'enhanced', frequencies: [
-        { key: 'standard', label: 'Standard', monthly: 45, annual: 540, per_visit: null, visits_per_year: 6 },
-        { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, per_visit: null, visits_per_year: 9, quote_required: true },
+        { key: 'standard', label: 'Standard', monthly: 45, annual: 540, visits_per_year: 6, billing_unit: 'monthly', per_application: null, ...noRows },
+        { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visits_per_year: 9, billing_unit: 'monthly', per_application: null, ...noRows, quote_required: true },
+      ] },
+      { key: 'commercial_pest', label: 'Commercial Pest', default_frequency_key: 'monthly', frequencies: [
+        { key: 'monthly', label: 'Monthly', monthly: 200, annual: 2400, visits_per_year: 12, billing_unit: 'per_application', per_application: 200, ...noRows,
+          // price ± price × fraction × pct (PriceCard): 200 × 0.5 × 0.2 = 20
+          low_confidence_range: { pct: 0.2, fraction: 0.5, monthly: [180, 220], annual: [2160, 2640] } },
       ] },
     ],
     combos: [{
@@ -122,31 +145,44 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
       per_service_treatments: { pest_control: { perTreatment: 131, treatments: 4 }, lawn_care: { perTreatment: 60.45, treatments: 9 } },
       manual_discount: { amountAnnual: 40, capped: false }, manual_discount_suppressed: true,
     }],
-    one_time_breakdown: { items: [
-      { service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, detail: '2 treatments' },
-      { service: null, label: 'Custom exclusion', amount: null, detail: null, quote_required: true },
-    ], total: 150, quote_required: true },
-    anchor_one_time_price: 125,
-    first_visit_fees: [
+    one_time_total: 125,
+    upfront_fees: [
       { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waived_with_prepay: true },
       { service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, waived_with_prepay: false, treatments: 2 },
+      { service: 'rodent_bait_setup', label: 'Bait Station Setup', amount: 250, waived_with_prepay: false },
     ],
-    setup_fee: { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waived_with_prepay: true },
-    rodent_bait_setup_fee: { service: 'rodent_bait_setup', label: 'Bait Station Setup', amount: 250, waived_with_prepay: false },
+    setup_fee_service: 'waveguard_setup',
+    one_time_breakdown: {
+      items: [
+        { service: 'exclusion', label: 'Exclusion work', amount: 450, detail: null },
+        { service: null, label: 'Custom exclusion', amount: null, detail: null, quote_required: true },
+      ],
+      excluded_upfront_fee_services: ['waveguard_setup', 'pest_initial_roach', 'rodent_bait_setup'],
+      total: 600, quote_required: true,
+    },
     manual_discount: { amountAnnual: 40 },
     quote_required: false,
     quote_required_reason: null,
     quote_required_items: [],
     source: 'engine_invocation',
   });
+  // totals.one_time is the composer's corrected page figure, not the raw column
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
   expect(shaped.requote_required).toBe(false);
   expect(shaped.offered_pricing_unavailable).toBeUndefined();
   // No hand-itemized reading of estimate_data rides on the response.
   expect(shaped.recurring_services).toBeUndefined();
   expect(shaped.one_time_items).toBeUndefined();
   expect(JSON.stringify(shaped)).not.toMatch(/internal only/);
-  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
-  expect(shaped).toMatchObject({ customer: 'Avery Example', tier: 'silver', customer_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx', link_state: 'customer_viewable', view_count: 2 });
+  expect(shaped).toMatchObject({ customer: 'Avery Example', tier: 'silver', bill_by_invoice: false, customer_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx', link_state: 'customer_viewable', view_count: 2 });
+});
+
+test('a legacy monthly-billed member (composer strips billedPerApplication) reports a monthly charge, never an invented per-application price; bill_by_invoice is the effective mode', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [{ key: 'monthly', label: 'Monthly', monthly: 60, annual: 720, perTreatment: 180, visitsPerYear: 4, perServiceTreatments: [{ service: 'pest_control', perTreatment: 180, displayPrice: 180, visitsPerYear: 4 }] }] });
+  const shaped = await shapeEstimate(estimateRow({ estimate_data: JSON.stringify({ rodentGuaranteeOnly: true }) }));
+  expect(shaped.offered_pricing.plan_frequencies[0]).toMatchObject({ billing_unit: 'monthly', per_application: null, monthly: 60 });
+  expect(shaped.offered_pricing.plan_frequencies[0].per_service_treatments[0]).toMatchObject({ per_treatment: 180, display_price: 180 });
+  expect(shaped.bill_by_invoice).toBe(true); // column false, resolver true
 });
 
 test('a lapsed membership is reconciled BEFORE totals and the bundle, on the same row object the public renderers mutate (Codex r4 P1)', async () => {
@@ -190,13 +226,15 @@ test('a reconciler or bundle failure is reported on the response, never thrown a
   expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no pricing bundle/);
 });
 
-test('totals come from the stored columns; the one-time total falls back to the bundle breakdown; bad JSON still answers', async () => {
-  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], oneTimeBreakdown: { items: [], total: 300 } });
-  const fromBundle = await shapeEstimate(estimateRow({ monthly_total: null, annual_total: null, onetime_total: null }));
-  expect(fromBundle.totals).toEqual({ monthly: null, annual: null, one_time: 300 });
+test('totals: monthly/annual from the stored columns; one_time is the composer\'s corrected figure when the bundle built, the column otherwise; bad JSON still answers', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], anchorOneTimePrice: 26 }); // legacy V1 row: stored 125 still carries a setup fee the page subtracts
+  const corrected = await shapeEstimate(estimateRow({ monthly_total: null, annual_total: null }));
+  expect(corrected.totals).toEqual({ monthly: null, annual: null, one_time: 26 });
+  mockBuildPricingBundle.mockRejectedValue(new Error('no bundle'));
   const broken = await shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: '0' }));
   expect(broken.totals).toEqual({ monthly: 12.5, annual: null, one_time: 0 });
-  expect(broken.requote_required).toBe(false); // the bundle answered and did not require a quote
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [] });
+  expect(broken.requote_required).toBeNull(); // no bundle → unknown
 });
 
 test('links follow the public route: call-side block, viewable, staff preview, expired, archived (Codex r1/r3 P2)', async () => {
@@ -216,12 +254,15 @@ test('links follow the public route: call-side block, viewable, staff preview, e
 test('estimate_id reads one full row; customer_id reads latest live estimates with a bounded limit; deposits ride along', async () => {
   db.__queries = [];
   db.__rows = (q) => (q.sql.includes('"estimate_deposits"')
-    ? [{ estimate_id: 'est-1', amount: '100', credited_amount: '100', refunded_amount: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]
+    ? [{ estimate_id: 'est-1', amount: '100', card_surcharge: '3.50', credited_amount: '100', refunded_amount: null, refunded_surcharge: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]
     : [estimateRow()]);
   const one = await getEstimateDetail({ estimate_id: 'est-1' });
   expect(one.count).toBe(1);
   expect(one.estimates[0].id).toBe('est-1');
-  expect(one.estimates[0].deposits).toEqual([{ amount: 100, credited: 100, refunded: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]);
+  // face amount + the card surcharge actually collected on top of it (and how much of that fee was refunded)
+  expect(one.estimates[0].deposits).toEqual([{ amount: 100, card_surcharge: 3.5, total_paid: 103.5, credited: 100, refunded: null, refunded_surcharge: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]);
+  expect(db.__queries[1].sql).toContain('"card_surcharge"');
+  expect(db.__queries[1].sql).toContain('"refunded_surcharge"');
   expect(db.__queries[0].sql).toMatch(/^select \* from "estimates"/); // the reconciler/bundle read the row the public handlers load
   expect(db.__queries[0].sql).toContain('"id" = ');
   expect(db.__queries[0].sql).toContain('limit');
