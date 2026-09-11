@@ -182,7 +182,12 @@ export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  // Gate-off or non-admin deep links to pay-growth fall back to the
+  // group's default tab entirely (content + beacon + active-tab
+  // highlight), same as any other invalid/role-gated deep link.
+  const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
+  const tab = rawTab === "pay-growth" && !payGrowthGateOpen ? "team" : rawTab;
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -227,7 +232,7 @@ export default function TimeTrackingPage() {
             marginBottom: 16,
           }}
         >
-          {activeGroup.tabs.filter((key) => key !== "pay-growth" || (payGrowthAvailable && readStaffRole() === "admin")).map((key) => {
+          {activeGroup.tabs.filter((key) => key !== "pay-growth" || payGrowthGateOpen).map((key) => {
             const leaf = STAFF_LEAF_BY_KEY[key];
             const active = tab === key;
             const LeafIcon = leaf.Icon;
@@ -278,7 +283,7 @@ export default function TimeTrackingPage() {
           <DocumentsTab showToast={showToast} />
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
-      {tab === "pay-growth" && (payGrowthAvailable && readStaffRole() === "admin" ? <PayGrowth manage /> : <p>Pay and growth is unavailable.</p>)}
+      {tab === "pay-growth" && <PayGrowth manage />}
       <div
         style={{
           position: "fixed",

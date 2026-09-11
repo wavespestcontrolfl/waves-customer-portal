@@ -3,6 +3,7 @@ import { RefreshCw, TrendingUp } from 'lucide-react';
 import { etDateString } from '../../lib/timezone';
 import { Button } from '../ui/Button';
 import { UiSurface } from '../ui/UiSurface';
+import usePayGrowthAvailable from '../../hooks/usePayGrowthAvailable';
 import { Field, request } from './common';
 import ProgramSetup from './ProgramSetup';
 import ServiceEvidence from './ServiceEvidence';
@@ -11,6 +12,8 @@ import PayOverview from './PayOverview';
 import './pay-growth.css';
 
 export default function PayGrowth({ manage = false }) {
+  // The route and the admin tab mount this directly; the server gate decides here, not the navigation.
+  const available = usePayGrowthAvailable();
   const [month, setMonth] = useState(() => etDateString(new Date()).slice(0, 7));
   const [personId, setPersonId] = useState('');
   const [setup, setSetup] = useState(null);
@@ -22,7 +25,7 @@ export default function PayGrowth({ manage = false }) {
   const [message, setMessage] = useState('');
 
   useEffect(() => {
-    if (!manage) return undefined;
+    if (!manage || available !== true) return undefined;
     const controller = new AbortController();
     request('/setup', { signal: controller.signal }).then(data => {
       if (controller.signal.aborted) return;
@@ -30,11 +33,11 @@ export default function PayGrowth({ manage = false }) {
       setPersonId(previous => previous || data.people.find(person => person.employment_status === 'active')?.id || data.people[0]?.id || '');
     }).catch(failure => { if (!controller.signal.aborted) setSetupError(failure.message); });
     return () => controller.abort();
-  }, [manage, reload]);
+  }, [manage, reload, available]);
 
   useEffect(() => {
     setView(null); setError('');
-    if (manage && !personId) return undefined;
+    if (available !== true || (manage && !personId)) return undefined;
     const controller = new AbortController();
     const query = new URLSearchParams({ month });
     if (manage) query.set('technicianId', personId);
@@ -42,10 +45,11 @@ export default function PayGrowth({ manage = false }) {
       if (!controller.signal.aborted) setView(data);
     }).catch(failure => { if (!controller.signal.aborted) setError(failure.message); });
     return () => controller.abort();
-  }, [month, personId, manage, reload]);
+  }, [month, personId, manage, reload, available]);
 
   function saved(label) { setMessage(label); setReload(value => value + 1); }
   const readyView = view && (!manage || view.person.id === personId) && view.month === month;
+  if (available !== true) return <UiSurface density="touch" className="pay-growth" data-admin={manage || undefined}>{available === null ? <p role="status">Checking pay and growth availability…</p> : <p role="status">Pay and growth is unavailable.</p>}</UiSurface>;
   return <UiSurface density="touch" className="pay-growth" data-admin={manage || undefined}>
     <header className="pg-heading"><div><p className="pg-eyebrow">Field Team Program</p><h1>{manage ? 'Pay & Growth' : 'My Pay & Growth'}</h1><p className="pg-muted">Your work, the calculations, and your next step.</p></div><TrendingUp size={30} aria-hidden="true" /></header>
     <div className="pg-notice"><strong>Simulation only · revision 2b</strong><p>These amounts illustrate the proposed incentive formula; they are not earned compensation. Your current compensation terms remain in effect.</p></div>

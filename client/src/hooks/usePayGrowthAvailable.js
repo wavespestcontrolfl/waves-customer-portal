@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { adminFetch } from '../lib/adminFetch';
 
+// null while the availability request is pending, then true/false. Every
+// consumer must treat anything but true as unavailable so the feature fails closed.
 export default function usePayGrowthAvailable(authenticated = true) {
-  const [available, setAvailable] = useState(false);
+  const [available, setAvailable] = useState(null);
   useEffect(() => {
-    setAvailable(false);
+    setAvailable(null);
     if (!authenticated) return undefined;
     const controller = new AbortController();
     adminFetch('/tech/pay-growth/availability', { signal: controller.signal })
@@ -14,5 +16,5 @@ export default function usePayGrowthAvailable(authenticated = true) {
       }).catch(() => { if (!controller.signal.aborted) setAvailable(false); });
     return () => controller.abort();
   }, [authenticated]);
-  return authenticated && available;
+  return authenticated ? available : false;
 }

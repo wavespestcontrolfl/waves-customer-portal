@@ -5299,6 +5299,20 @@ export function ProtocolPanel({ service, onClose }) {
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const payGrowthAvailable = usePayGrowthAvailable();
+  // Score is admin-only, or the assigned technician viewing their own
+  // service — /admin/dispatch is reachable by technician-role staff too,
+  // and a tech must never see (or manage) another tech's score.
+  const currentStaffUser = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "null"); }
+    catch { return null; }
+  })();
+  const isAdmin = currentStaffUser?.role === "admin";
+  const currentTechId = currentStaffUser?.id;
+  const serviceTechnicianId = service.technicianId ?? service.technician_id;
+  const canScore = payGrowthAvailable === true && (
+    isAdmin
+    || (currentTechId != null && serviceTechnicianId != null && String(currentTechId) === String(serviceTechnicianId))
+  );
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -5503,7 +5517,7 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "photos", label: " ID Guide", count: photos.length },
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
-    ...(payGrowthAvailable ? [{ id: "score", label: "Score", count: null }] : []),
+    ...(canScore ? [{ id: "score", label: "Score", count: null }] : []),
   ];
 
   const activeSection = SECTIONS.some((section) => section.id === requestedSection)
@@ -5665,8 +5679,8 @@ export function ProtocolPanel({ service, onClose }) {
             </button>
           </div>
         )}
-        {activeSection === "score" && payGrowthAvailable ? (
-          <ServiceScore key={service.id} serviceId={service.id} manage />
+        {activeSection === "score" && canScore ? (
+          <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} />
         ) : activeSection === "job_card" && jobCardEnabled ? (
           <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (

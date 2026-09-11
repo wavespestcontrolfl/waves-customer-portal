@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,8 @@ import PayGrowth from './PayGrowth';
 import { request, date } from './common';
 
 vi.mock('./common', async () => ({ ...await vi.importActual('./common'), request: vi.fn() }));
+vi.mock('../../hooks/usePayGrowthAvailable', () => ({ default: vi.fn(() => true) }));
+import usePayGrowthAvailable from '../../hooks/usePayGrowthAvailable';
 const month = etDateString(new Date()).slice(0, 7);
 const people = [{ id: 'tech-a', name: 'First employee', employment_status: 'active' }, { id: 'tech-b', name: 'Second employee', employment_status: 'active' }];
 function view(id = 'tech-a', amount = 1000, manage = false) {
@@ -22,10 +25,23 @@ function deferred() {
 }
 const setup = { people, services: [], rules: [] };
 const mount = manage => render(<MemoryRouter><PayGrowth manage={manage} /></MemoryRouter>);
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => { vi.clearAllMocks(); usePayGrowthAvailable.mockReturnValue(true); });
 afterEach(cleanup);
 
 describe('Pay and growth selection and write boundaries', () => {
+  it('fails closed while availability is unknown and when the server gate is off', () => {
+    usePayGrowthAvailable.mockReturnValue(null);
+    const pending = mount(false);
+    expect(screen.getByRole('status')).toHaveTextContent('Checking pay and growth availability');
+    expect(request).not.toHaveBeenCalled();
+    pending.unmount();
+    usePayGrowthAvailable.mockReturnValue(false);
+    mount(true);
+    expect(screen.getByRole('status')).toHaveTextContent('Pay and growth is unavailable.');
+    expect(screen.queryByRole('heading', { name: 'Pay & Growth' })).toBeNull();
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('requests the technician’s own record and provides no management controls', async () => {
     request.mockResolvedValue(view());
     mount(false);

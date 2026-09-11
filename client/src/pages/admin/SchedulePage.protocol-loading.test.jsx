@@ -303,12 +303,17 @@ describe("Job card Tank section rigs", () => {
 });
 
 describe("Pay & Growth gate", () => {
+  afterEach(() => { localStorage.removeItem("waves_admin_user"); });
+
   it("opens the shared service score only when the pay and growth gate is enabled", async () => {
     render(<ProtocolPanel service={service} onClose={() => {}} />);
     await screen.findByText("Current mix product");
     expect(screen.queryByRole("button", { name: "Score" })).not.toBeInTheDocument();
     cleanup();
 
+    // Score is admin-only, or the assigned technician viewing their own
+    // service (/admin/dispatch is reachable by technician-role staff too).
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "admin-1", role: "admin" }));
     fetch.mockImplementation((url) => {
       const path = new URL(url, "http://localhost").pathname;
       if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
@@ -320,5 +325,31 @@ describe("Pay & Growth gate", () => {
     expect(await screen.findByText(/It has not received a passing score/)).toBeVisible();
     expect(fetch.mock.calls.some(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toBe(true);
     expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/admin/timetracking?tab=pay-growth");
+  });
+
+  it("hides the Score tab from a technician viewing a colleague's service, even with availability on", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      return reply(fixture(url));
+    });
+    render(<ProtocolPanel service={{ ...service, technician_id: "tech-2" }} onClose={() => {}} />);
+    await screen.findByText("Current mix product");
+    expect(screen.queryByRole("button", { name: "Score" })).not.toBeInTheDocument();
+  });
+
+  it("shows the Score tab, with the tech-portal link, for a technician viewing their own service", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ entries: [], can_manage: false });
+      return reply(fixture(url));
+    });
+    render(<MemoryRouter><ProtocolPanel service={{ ...service, technician_id: "tech-1" }} onClose={() => {}} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Score" }));
+    expect(await screen.findByText(/It has not received a passing score/)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/tech/pay-growth");
   });
 });

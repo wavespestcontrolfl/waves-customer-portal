@@ -645,7 +645,7 @@ export default function TechHomePage({ section = 'today' }) {
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
-            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to="/tech/pay-growth">My Pay & Growth</Link></div>}
+            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
           </>}
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
