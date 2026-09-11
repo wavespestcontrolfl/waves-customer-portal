@@ -824,6 +824,46 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('the sweep recognizes coverage even when the message persisted FIRST is the one that lost the claim race (codex #4210 round-13 P1)', async () => {
+    const conversationId = randomUUID();
+    const earlierMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const earlierSid = `SM-synthetic-sweep-earlier-loser-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-sweep-later-winner-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // Two near-simultaneous texts from the same sender: the EARLIER one
+    // (by created_at — its row landed first) is the one whose REQUEST lost
+    // the atomic per-phone claim race, so it never delivered and carries
+    // no receipt. The LATER one (by created_at, seconds after) is the one
+    // whose request reached the claim step first and won it, delivering
+    // successfully. This inversion is possible because the claim contends
+    // on concurrent REQUESTS, not on db row insert order. A one-directional
+    // "receipt must be at or before the candidate" bound (round 12) would
+    // never recognize the later receipt as covering the earlier message.
+    const earlierCreatedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const laterCreatedAt = new Date(earlierCreatedAt.getTime() + 2000);
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550205' });
+      await mockPg('messages').insert([
+        { id: earlierMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: earlierSid, body: 'Persisted first, lost the claim race', created_at: earlierCreatedAt },
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Persisted seconds later, won and delivered', created_at: laterCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: earlierSid, message_body: 'Persisted first, lost the claim race', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: earlierCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: laterSid, message_body: 'Persisted seconds later, won and delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: laterCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').whereIn('id', [earlierMessageId, laterMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [earlierSid, laterSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('the sweep never re-alerts an AI-answered message just because it is still unread (codex #4210 round-9 P1)', async () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();

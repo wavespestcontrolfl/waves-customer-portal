@@ -24,25 +24,27 @@
  * (never promoted) conversation holding an unread, sms_reply-eligible
  * inbound message, skip any phone with a genuinely active (unexpired)
  * claim right now, and — for the rest — find the earliest unread eligible
- * message that has NO delivery covering it. "Covering" is WINDOW-bounded,
- * not just "any later receipt" (codex #4210 round-12 P1, correcting round
- * -11's own overcorrection): a receipt R covers a message M when
- * `R.created_at <= M.created_at < R.created_at + WINDOW` — mirroring the
- * exact throttle window claimUnknownSenderAlertWindow/
- * hasRecentUnknownSenderReceipt already enforce in twilio-webhook.js. This
- * distinguishes the two things that look identical in the raw data (an
- * unread message with no receipt of its OWN): a message B that arrived
- * MINUTES after A's successful delivery, correctly throttled by A's still-
- * live window (B is COVERED — replaying an alert for it after A's window
- * lapses would fire a stale, no-longer-relevant bell for no new inbound
- * message), versus a message B that arrived HOURS after A's window already
- * closed and never got its own dispatch to succeed (B is NOT covered — a
- * genuine orphan). Checking only "any receipt at or after M's own arrival"
- * (round 11) fixed the second case but broke the first, since A's window
- * had already lapsed for cases like the second one is a coincidence, not a
- * requirement of round 11's predicate — restoring the window bound fixes
- * both together. Coverage itself is durable evidence (codex #4210
- * round-10 P1), not a live-bell snapshot: ringSmsReplyBell stamps
+ * message that has NO delivery covering it. "Covering" is a SYMMETRIC
+ * window bound — |R.created_at - M.created_at| < WINDOW for a receipt R
+ * and candidate M — not "any later receipt" (round 11, which missed
+ * legitimate throttling entirely — see round 12) and not a one-directional
+ * "R before M" bound either (codex #4210 round-13 P1, correcting round
+ * 12): the claim is per-PHONE, contended by every concurrent message in a
+ * burst, so the row that lands in the `messages`/`sms_log` tables FIRST
+ * (by created_at) is not necessarily the one whose request actually won
+ * the atomic claim and delivered — a message persisted moments earlier can
+ * still lose that race to one persisted moments later. A directional
+ * bound (round 12) missed exactly that inversion: once the true winner's
+ * confirmed window eventually expired, it no longer recognized the
+ * winner's (later) receipt as covering the (earlier) loser, and replayed a
+ * stale alert for a message nothing new ever arrived for. The window is
+ * still narrow enough (WINDOW, same constant either direction) that it
+ * doesn't bridge two genuinely unrelated messages: an alert whose dispatch
+ * failed HOURS after any nearby receipt (round 11's case) still reads as
+ * uncovered — receipts and their genuinely-covered siblings are always
+ * close together in time; a real failure is not. Coverage itself is
+ * durable evidence (codex #4210 round-10 P1), not a live-bell snapshot:
+ * ringSmsReplyBell stamps
  * sms_log.metadata.sms_reply_alerted on any genuine delivery (bell OR
  * push — the same definition used throughout this feature, e.g.
  * hasRecentUnknownSenderReceipt), which survives a bell being dismissed
@@ -112,18 +114,29 @@ async function findOrphanMessage(phone) {
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereNotNull('m.twilio_sid')
     .whereNotExists(function covered() {
-      // A receipt R covers this candidate when R.created_at <= candidate's
-      // created_at < R.created_at + WINDOW — the same throttle window
-      // production enforces, not merely "any receipt at or after this
-      // candidate's own arrival" (codex #4210 round-12 P1). A receipt
-      // strictly BEFORE the candidate can still cover it (an earlier
-      // successful delivery legitimately throttled this later message);
-      // one whose window has since lapsed relative to the candidate cannot.
+      // A receipt R covers this candidate M when they fall within the SAME
+      // throttle window of each other — |R.created_at - M.created_at| <
+      // WINDOW — not a one-directional "R before M" bound (codex #4210
+      // round-13 P1, correcting round 12's own directionality assumption).
+      // The claim is per-PHONE, contended by every concurrent message in a
+      // burst, and the DB row order they land in (created_at) need not
+      // match which one actually won the atomic claim and delivered: a
+      // message persisted first can still lose the race to one persisted
+      // moments later if THAT request reaches the claim step first — the
+      // "earlier" row (by created_at) is then the one covered by a
+      // "later" receipt. A one-directional bound (round 12) missed exactly
+      // that inversion and, once the winner's confirmed window eventually
+      // expired, treated the earlier, already-covered message as orphaned
+      // and replayed a stale alert. The symmetric bound still correctly
+      // treats a genuinely later, hours-away failure (round 11) as
+      // uncovered — the two messages that matter for THIS decision are
+      // never far enough apart in time for the window's radius to
+      // accidentally bridge an unrelated pair.
       this.select(1).from('sms_log as l2')
         .where({ 'l2.direction': 'inbound', 'l2.from_phone': phone })
         .whereRaw("l2.metadata->>'sms_reply_alerted' = 'true'")
-        .whereRaw('l2.created_at <= l.created_at')
-        .whereRaw('l.created_at < l2.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
+        .whereRaw('l2.created_at > l.created_at - (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS])
+        .whereRaw('l2.created_at < l.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
     })
     .orderBy('m.created_at', 'asc')
     .first('m.twilio_sid', 'm.body');
