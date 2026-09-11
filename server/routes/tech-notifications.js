@@ -19,9 +19,6 @@ router.get('/', async (req, res, next) => {
     let q = db('tech_notifications')
       .where({ technician_id: req.technicianId })
       .whereNull('dismissed_at')
-      // These live on the shared follow-through cards and disappear when
-      // tracking catches up. Keep them out of the floating geofence feed.
-      .whereNot('type', 'follow_through_tracking')
       // Storm-watch nudges are only actionable for a couple of hours
       // (sweep lookahead + service window). Without an age cutoff, unread
       // alerts from earlier days pile up into a wall of cards that buries
@@ -45,7 +42,10 @@ router.get('/', async (req, res, next) => {
     // `new_appointment` type the client never rendered) must not starve
     // every schedule-change card out of the window either. Texts on a tech's
     // own line (tech_line_sms — tech-line.js) are kept the same way and sit
-    // in the same bucket.
+    // in the same bucket. Missing-tracking notices (follow_through_tracking
+    // — no-show-detector.js) fall through to the same generic recency
+    // handling: fresh ones (<6h) surface in bucket 0 next to an actionable
+    // arrival prompt, older ones share the stale bucket.
     const rows = await q
       .orderByRaw("CASE WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
       .orderBy('created_at', 'desc')
