@@ -22,9 +22,9 @@ it.each([false, true])('ignores an older photo refresh after the next upload (ol
     }
     return { ok: true, json: async () => ({ photos: read === 1 ? [] : [first, second] }) };
   }));
-  const { container } = render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
   await screen.findByText('No photos yet.');
-  const input = container.querySelector('input[type="file"]');
+  const input = document.querySelector('input[type="file"]');
   const pick = () => fireEvent.change(input, { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
   pick();
   await waitFor(() => expect(reads).toBe(2));
@@ -46,9 +46,9 @@ it('allows closing after upload succeeds while the photo refresh is still pendin
     if (++reads > 1) await pending;
     return { ok: true, json: async () => ({ photos: [] }) };
   }));
-  const { container } = render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
   await screen.findByText('No photos yet.');
-  fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
   await screen.findByText('Photo uploaded');
   const dismiss = screen.getByRole('button', { name: /Close|×/ });
   await waitFor(() => expect(dismiss).toBeEnabled());
@@ -70,12 +70,12 @@ it('retries the same failed photo with its original caption and type, and protec
     }
     return { ok: true, json: async () => url.endsWith('photo-marks') ? { supported: false } : { photos: [] } };
   }));
-  const { container } = render(<TechServicePhotosModal serviceId="visit-a" customerName="Avery Example" onClose={close} />);
+  render(<TechServicePhotosModal serviceId="visit-a" customerName="Avery Example" onClose={close} />);
   await screen.findByText('No photos yet.');
   fireEvent.change(screen.getByPlaceholderText(/Front yard before treatment/), { target: { value: 'Example caption' } });
   fireEvent.click(screen.getByRole('button', { name: 'before', exact: true }));
   const file = new File(['example'], 'example.png', { type: 'image/png', lastModified: 1234567890 });
-  fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [file] } });
+  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
   fireEvent.click(screen.getByRole('button', { name: /Close|×/ }));
   expect(close).not.toHaveBeenCalled();
   release();
@@ -117,9 +117,9 @@ it('keeps successful upload feedback when its photo-list refresh fails', async (
     if (++reads === 1) return { ok: true, json: async () => ({ photos: [] }) };
     return { ok: false, json: async () => ({ error: 'Refresh unavailable.' }) };
   }));
-  const { container } = render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
   await screen.findByText('No photos yet.');
-  fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
   await screen.findByText('Refresh unavailable.');
   expect(screen.getByText(/Photo saved — it will attach/)).toBeInTheDocument();
   expect(screen.queryByText('No photos yet.')).not.toBeInTheDocument();
