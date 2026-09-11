@@ -365,6 +365,79 @@ function defaultCadenceForTotals(bundle, snapshotHit, priceLocked) {
   return { range: null, override: { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) } };
 }
 
+// A price-locked (accepted/declined) row whose bundle rebuilt WITHOUT a
+// valid snapshot has no reliable item-level pricing left to show:
+// totalsFor's price-lock guard already keeps totals on the frozen columns,
+// but buildPricingBundle itself carries no price-lock guard, so its cadence
+// ladder, combos, and fees can still be today's re-derived amounts — a
+// different price than what was actually offered/accepted, with no way to
+// reconstruct the historical item breakdown from here (pre-push audit P1).
+// Withhold the item-level structure rather than present it as the committed
+// offer.
+function stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) {
+  return {
+    default_service_mode: bundle.defaultServiceMode || null,
+    price_locked: priceLocked,
+    waveguard_tier: bundle.waveGuardTier || null,
+    snapshot_hit: snapshotHit,
+    item_pricing_unavailable: 'this estimate is price-locked (accepted/declined) but its pricing bundle rebuilt without a valid snapshot — item-level prices are withheld rather than shown as the committed offer; totals above still reflect the frozen columns',
+    plan_frequencies: null,
+    services: null,
+    combos: null,
+    one_time_total: null,
+    upfront_fees: null,
+    setup_fee_service: bundle.setupFee?.service || null,
+    one_time_breakdown: null,
+    manual_discount: null,
+    quote_required: false,
+    quote_required_reason: null,
+    quote_required_items: [],
+    source: bundle.source || null,
+  };
+}
+
+function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency) {
+  const fees = upfrontFees(bundle);
+  return {
+    default_service_mode: bundle.defaultServiceMode || null,
+    // A price-locked (accepted/declined) row's totals — monthly, annual,
+    // AND one-time — describe what was actually committed, never today's
+    // re-derived pricing, even when the bundle rebuilt without a
+    // snapshotHit (pre-push audit P1: buildPricingBundle carries no
+    // price-lock guard of its own).
+    price_locked: priceLocked,
+    waveguard_tier: bundle.waveGuardTier || null,
+    snapshot_hit: snapshotHit,
+    ...(defaultCadenceRange ? { default_cadence_low_confidence_range: defaultCadenceRange } : {}),
+    ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
+    plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
+    services: list(bundle.services).map((s) => ({
+      key: s.key || null,
+      label: s.label || null,
+      default_frequency_key: s.defaultFrequencyKey || null,
+      frequencies: list(s.frequencies).map(frequencyEntry),
+      ...sectionSelectors(s),
+    })),
+    combos: list(bundle.serviceCadenceCombos).map(comboEntry),
+    // The one-time total the customer page shows (the composer's
+    // corrected figure for legacy rows whose stored total still carries a
+    // setup fee that no longer applies, or lacks one now owed).
+    one_time_total: money(bundle.anchorOneTimePrice),
+    upfront_fees: fees,
+    setup_fee_service: bundle.setupFee?.service || null,
+    one_time_breakdown: breakdownEntry(bundle.oneTimeBreakdown, fees.map((f) => f.service)),
+    manual_discount: bundle.manualDiscount || null,
+    // The composer's own quote-required verdict (resolveEstimateQuoteRequirement:
+    // lapsed-member reprice impossible, unverified setup waiver, retired
+    // lawn pricing, commercial review, quote-required items…) — the state
+    // the public page fails closed on instead of self-serve accepting.
+    quote_required: bundle.quoteRequired === true,
+    quote_required_reason: bundle.quoteRequiredReason || null,
+    quote_required_items: list(bundle.quoteRequiredItems),
+    source: bundle.source || null,
+  };
+}
+
 async function offeredPricing(row, data) {
   try {
     const proposal = await authoredProposalPricing(row, data);
@@ -381,50 +454,11 @@ async function offeredPricing(row, data) {
     return { offered_pricing: null, offered_pricing_unavailable: `pricing bundle failed: ${err.message}` };
   }
   if (!bundle || typeof bundle !== 'object') return { offered_pricing: null, offered_pricing_unavailable: 'no pricing bundle for this estimate' };
-  const fees = upfrontFees(bundle);
   const snapshotHit = bundle.snapshotHit === true;
   const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
+  if (priceLocked && !snapshotHit) return { offered_pricing: stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) };
   const { range: defaultCadenceRange, override: rebuiltDefaultFrequency } = defaultCadenceForTotals(bundle, snapshotHit, priceLocked);
-  return {
-    offered_pricing: {
-      default_service_mode: bundle.defaultServiceMode || null,
-      // A price-locked (accepted/declined) row's totals — monthly, annual,
-      // AND one-time — describe what was actually committed, never today's
-      // re-derived pricing, even when the bundle rebuilt without a
-      // snapshotHit (pre-push audit P1: buildPricingBundle carries no
-      // price-lock guard of its own).
-      price_locked: priceLocked,
-      waveguard_tier: bundle.waveGuardTier || null,
-      snapshot_hit: snapshotHit,
-      ...(defaultCadenceRange ? { default_cadence_low_confidence_range: defaultCadenceRange } : {}),
-      ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
-      plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
-      services: list(bundle.services).map((s) => ({
-        key: s.key || null,
-        label: s.label || null,
-        default_frequency_key: s.defaultFrequencyKey || null,
-        frequencies: list(s.frequencies).map(frequencyEntry),
-        ...sectionSelectors(s),
-      })),
-      combos: list(bundle.serviceCadenceCombos).map(comboEntry),
-      // The one-time total the customer page shows (the composer's
-      // corrected figure for legacy rows whose stored total still carries a
-      // setup fee that no longer applies, or lacks one now owed).
-      one_time_total: money(bundle.anchorOneTimePrice),
-      upfront_fees: fees,
-      setup_fee_service: bundle.setupFee?.service || null,
-      one_time_breakdown: breakdownEntry(bundle.oneTimeBreakdown, fees.map((f) => f.service)),
-      manual_discount: bundle.manualDiscount || null,
-      // The composer's own quote-required verdict (resolveEstimateQuoteRequirement:
-      // lapsed-member reprice impossible, unverified setup waiver, retired
-      // lawn pricing, commercial review, quote-required items…) — the state
-      // the public page fails closed on instead of self-serve accepting.
-      quote_required: bundle.quoteRequired === true,
-      quote_required_reason: bundle.quoteRequiredReason || null,
-      quote_required_items: list(bundle.quoteRequiredItems),
-      source: bundle.source || null,
-    },
-  };
+  return { offered_pricing: builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency) };
 }
 
 // ── Links ────────────────────────────────────────────────────────────

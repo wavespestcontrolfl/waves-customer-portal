@@ -424,8 +424,51 @@ test('a price-locked estimate also keeps its committed ONE-TIME total — the re
     status: 'accepted', accepted_at: '2026-09-01T00:00:00Z', monthly_total: '47.00', annual_total: '564.00', onetime_total: '125.00',
   }));
   expect(shaped.offered_pricing.price_locked).toBe(true);
-  expect(shaped.offered_pricing.one_time_total).toBe(300); // still reported on offered_pricing, for reference
+  // No snapshotHit on this mock bundle, so item-level pricing (including
+  // one_time_total) is withheld entirely rather than reported as today's
+  // re-derived 300 — see the dedicated item-pricing-stale test below.
+  expect(shaped.offered_pricing.one_time_total).toBeNull();
   expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 }); // but totals stay the committed figure
+});
+
+test('a price-locked estimate whose bundle rebuilds WITHOUT a valid snapshot withholds item-level pricing entirely — plan_frequencies, services, combos, and fees can be today\'s re-derived amounts, not what was actually accepted (pre-push audit P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'monthly', monthly: 999, annual: 11988 }], // today's re-priced default, not what was accepted
+    services: [{ key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'monthly', frequencies: [{ key: 'monthly', monthly: 999, annual: 11988 }] }],
+    serviceCadenceCombos: [{ key: 'x', monthly: 999, annual: 11988 }],
+    firstVisitFees: [{ service: 'waveguard_setup', label: 'WaveGuard setup', amount: 300 }],
+    anchorOneTimePrice: 300,
+    setupFee: { service: 'waveguard_setup' },
+    // no snapshotHit → rebuilt
+  });
+  const shaped = await shapeEstimate(estimateRow({
+    status: 'accepted', accepted_at: '2026-09-01T00:00:00Z', accepted_frequency_key: 'quarterly',
+    monthly_total: '47.00', annual_total: '564.00', onetime_total: '125.00',
+  }));
+  expect(shaped.offered_pricing.price_locked).toBe(true);
+  expect(shaped.offered_pricing.snapshot_hit).toBe(false);
+  expect(shaped.offered_pricing.item_pricing_unavailable).toMatch(/price-locked.*rebuilt without a valid snapshot/);
+  expect(shaped.offered_pricing.plan_frequencies).toBeNull();
+  expect(shaped.offered_pricing.services).toBeNull();
+  expect(shaped.offered_pricing.combos).toBeNull();
+  expect(shaped.offered_pricing.upfront_fees).toBeNull();
+  expect(shaped.offered_pricing.one_time_breakdown).toBeNull();
+  expect(shaped.offered_pricing.one_time_total).toBeNull();
+  expect(JSON.stringify(shaped.offered_pricing)).not.toMatch(/999|11988/); // today's re-priced figures never leak through
+  // Totals are still the committed columns, unaffected by the withheld item detail.
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+});
+
+test('a price-locked estimate whose bundle IS a valid snapshot still reports full item-level pricing — those items are the ones that priced the committed columns', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'quarterly', monthly: 47, annual: 564 }],
+    snapshotHit: true,
+  });
+  const shaped = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-01T00:00:00Z', monthly_total: '47.00', annual_total: '564.00' }));
+  expect(shaped.offered_pricing.price_locked).toBe(true);
+  expect(shaped.offered_pricing.snapshot_hit).toBe(true);
+  expect(shaped.offered_pricing.item_pricing_unavailable).toBeUndefined();
+  expect(shaped.offered_pricing.plan_frequencies).toEqual([expect.objectContaining({ key: 'quarterly', monthly: 47, annual: 564 })]);
 });
 
 test('a rebuilt bundle whose default sellable cadence is itself a narrow LOW-confidence line withholds the exact total and carries the range instead — PriceCard shows a range, never a midpoint (pre-push audit P1)', async () => {
