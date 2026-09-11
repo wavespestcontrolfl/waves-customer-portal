@@ -15,6 +15,38 @@ const root = path.resolve(__dirname, "../.."),
 const id = "00000000-0000-4000-8000-000000000001",
   systemId = "00000000-0000-4000-8000-000000000002",
   calibrationId = "00000000-0000-4000-8000-000000000003";
+// Every date these fixtures serve is generated relative to the run. Pinning
+// them meant the runner kept asserting a response production could no longer
+// return: a schedule a few weeks out becomes overdue once that date passes, a
+// calibration expires, and mileage rows drop out of the year that
+// /mileage/summary and getFleetOverview filter on.
+const easternToday = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(
+    new Date(),
+  );
+function easternYear() {
+  return Number(easternToday().slice(0, 4));
+}
+function easternDate(offsetDays) {
+  const [year, month, day] = easternToday().split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + offsetDays))
+    .toISOString()
+    .slice(0, 10);
+}
+// Anchored to the run date but never earlier than the year start, so the
+// endpoints that filter on the current year always have the baseline row to
+// report — otherwise the analytics pass would find an empty fleet for the first
+// few days of January.
+function recentEasternDate(daysAgo) {
+  const candidate = easternDate(-daysAgo),
+    yearStart = `${easternYear()}-01-01`;
+  return candidate > yearStart ? candidate : yearStart;
+}
+const scheduleDueAt = easternDate(20),
+  mileageLogDate = recentEasternDate(3),
+  maintenanceAt = `${recentEasternDate(10)}T12:00:00Z`,
+  jobServiceDate = recentEasternDate(6),
+  calibrationExpiresAt = `${easternDate(30)}T12:00:00Z`;
 const equipment = {
   id,
   name: "Example service truck",
@@ -40,8 +72,8 @@ const equipment = {
   depreciation_method: "MACRS",
   next_maintenance: {
     task_name: "Synthetic inspection",
-    next_due_at: "2026-10-01",
-    is_overdue: false,
+    next_due_at: scheduleDueAt,
+    is_overdue: scheduleDueAt < easternToday(),
   },
 };
 const schedule = {
@@ -49,10 +81,10 @@ const schedule = {
   task_name: "Synthetic inspection",
   interval_miles: 5000,
   interval_months: 6,
-  next_due_at: "2026-10-01",
+  next_due_at: scheduleDueAt,
   priority: "normal",
   estimated_cost: 100,
-  is_overdue: false,
+  is_overdue: scheduleDueAt < easternToday(),
   equipment_name: equipment.name,
   category: "vehicle",
   asset_tag: "QA-001",
@@ -62,7 +94,7 @@ const record = {
   task_name: "Synthetic oil change",
   maintenance_type: "scheduled",
   performed_by: "Fixture operator",
-  performed_at: "2026-09-01T12:00:00Z",
+  performed_at: maintenanceAt,
   total_cost: 100,
 };
 // The real costOfOwnership divides total_cost by the SUM of this vehicle's
@@ -75,7 +107,7 @@ const mileage = {
   logs: [
     {
       id: "mileage-example",
-      log_date: "2026-09-08",
+      log_date: mileageLogDate,
       odometer_start: 11900,
       odometer_end: 11900 + vehicleTotalMiles,
       total_miles: vehicleTotalMiles,
@@ -127,15 +159,20 @@ function summarizeMileage(logs) {
         : null,
   };
 }
+const inYear = (date, year) => date.slice(0, 4) === String(year);
 // getFleetOverview() sums the same rows, so the long sticky-header set has to
 // move these YTD figures with it — navigating back to Maintenance re-fetches
-// this endpoint while those rows are installed.
+// this endpoint while those rows are installed. It is a year-to-date figure:
+// the query starts at the year boundary, so rows the long set walks back past
+// it are excluded here even though the detail summary and costOfOwnership,
+// which have no year filter, still count them.
 function fleetOverview(logs) {
-  const totals = sumMileage(logs);
+  const year = easternYear(),
+    totals = sumMileage(logs.filter((log) => inYear(log.log_date, year)));
   return {
     total_assets: 1,
     overdue_maintenance: 0,
-    ytd_maintenance_spend: maintenanceSpend,
+    ytd_maintenance_spend: inYear(maintenanceAt, year) ? maintenanceSpend : 0,
     ytd_total_miles: totals.total_miles,
     ytd_fuel_cost: totals.total_fuel_cost,
     ytd_irs_deduction: totals.total_irs_deduction,
@@ -197,7 +234,7 @@ const jobCost = {
   service_record_id: null,
   customer_id: "customer-example",
   customer_name: "Fixture Customer",
-  service_date: "2026-09-05",
+  service_date: jobServiceDate,
   service_type: "pest",
   products_cost: 40,
   labor_cost: 45,
@@ -215,7 +252,7 @@ const calibration = {
   id: calibrationId,
   carrier_gal_per_1000: 2,
   calibration_status: "estimated_not_field_verified",
-  expires_at: "2026-10-01T12:00:00Z",
+  expires_at: calibrationExpiresAt,
 };
 const system = {
   id: systemId,
@@ -244,14 +281,6 @@ const taxRegisterAsset = {
 // literal here would keep rendering "Fleet Mileage Summary (2026)" from January
 // onward, against a response shape production could no longer return for that
 // request.
-function easternYear() {
-  return Number(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      year: "numeric",
-    }).format(new Date()),
-  );
-}
 // install()'s route key is `${method} ${pathname}`, so a request whose query
 // changed still matches its fixture and still receives the happy-path body.
 // These are the query values each of those responses is only truthful for: an
@@ -431,12 +460,17 @@ function fixtures(state) {
     [
       "GET /api/admin/equipment-maintenance/mileage/summary",
       (url) => {
-        const totals = sumMileage(activeMileage());
+        // The route filters log_date to the requested year and groups by
+        // equipment, so a vehicle with no rows in that year is absent entirely
+        // rather than present with zeroes.
+        const year = Number(url.searchParams.get("year")) || easternYear(),
+          rows = activeMileage().filter((log) => inYear(log.log_date, year)),
+          totals = sumMileage(rows);
         return {
-          year: Number(url.searchParams.get("year")) || easternYear(),
-          vehicles: [
-            { id, name: equipment.name, asset_tag: "QA-001", ...totals },
-          ],
+          year,
+          vehicles: rows.length
+            ? [{ id, name: equipment.name, asset_tag: "QA-001", ...totals }]
+            : [],
           fleet_totals: totals,
         };
       },
@@ -966,7 +1000,37 @@ async function views(page, server, state, report, device) {
     console.log(device + ": " + key);
   }
   const chart = page.getByRole("region", { name: "Monthly maintenance costs chart", exact: true });
-  await chart.evaluate((node) => { node.scrollLeft = node.scrollWidth - node.clientWidth; });
+  // Setting scrollLeft proves nothing on its own: a chart that became clipped
+  // or non-scrollable would still take an ordinary screenshot and the run would
+  // report success while quietly losing the scrolled-chart evidence.
+  const scrolled = await chart.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth - node.clientWidth;
+    return {
+      overflow: node.scrollWidth - node.clientWidth,
+      scrollLeft: node.scrollLeft,
+    };
+  });
+  // The chart has a fixed minimum width, so it overflows on the phone column
+  // and fits on the desktop one. Pinning that per device makes both directions
+  // falsifiable: a desktop chart that started overflowing is a regression, and
+  // so is a phone chart that stopped scrolling — which is what the
+  // "analytics-chart" capture claims to show.
+  const mustScroll = device === "touch-webkit";
+  assert.equal(
+    scrolled.overflow > 0,
+    mustScroll,
+    `${device} chart overflow: ${JSON.stringify(scrolled)}`,
+  );
+  if (mustScroll)
+    assert.ok(
+      Math.abs(scrolled.scrollLeft - scrolled.overflow) <= 1,
+      `Chart reaches its end position: ${JSON.stringify(scrolled)}`,
+    );
+  state.checks.push(
+    mustScroll
+      ? "Monthly cost chart scrolls to its end position on the phone column"
+      : "Monthly cost chart fits the desktop column without scrolling",
+  );
   await shot(page, report, device + "-analytics-chart", chart);
   await section(page, "Assets", null, "assets");
   for (const [label, key] of [
