@@ -234,13 +234,30 @@ describe('EvidenceEditor', () => {
     expect(screen.getByRole('button', { name: 'Close review' })).toBeDisabled();
     resolveAllocation({ id: 'alloc-new', coverage_start: '2026-04-05', coverage_end: '2026-04-05', net_value_cents: 60000, planned_visits: 1 });
     await waitFor(() => expect(screen.getByLabelText('Service-value allocation')).toHaveValue('alloc-new'));
-    expect(screen.getByLabelText('Performed service')).not.toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Close review' })).not.toBeDisabled();
     expect(screen.getByLabelText('Application number in original allocation')).toHaveValue(1);
-    // The retained allocation must be claimed by this review: neither the selector nor an exclusion can strand it.
+    // The retained allocation must be claimed by this review: neither the selector, an exclusion, nor leaving can strand it.
     expect(screen.getByLabelText('Service-value allocation')).toBeDisabled();
     expect(screen.getByLabelText('Production exclusion')).toBeDisabled();
     expect(screen.getByText(/must claim the allocation it retained/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close review' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    expect(screen.getByLabelText('Performed service')).toBeDisabled();
+  });
+
+  it('offers only allocations whose coverage contains the service date', async () => {
+    const detail = baseDetail({ allocations: [
+      { id: 'alloc-old', coverage_start: '2025-01-01', coverage_end: '2025-12-31', net_value_cents: 50000, planned_visits: 4 },
+      { id: 'alloc-1', coverage_start: '2026-04-01', coverage_end: '2026-06-30', net_value_cents: 60000, planned_visits: 4 },
+    ] });
+    request.mockImplementation((path, options = {}) => {
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(detail);
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    const values = Array.from((await screen.findByLabelText('Service-value allocation')).querySelectorAll('option')).map(option => option.value);
+    expect(values).toEqual(['', 'alloc-1']);
   });
 
   it('locks the exclusion while a pre-existing allocation is selected, until it is cleared', async () => {
