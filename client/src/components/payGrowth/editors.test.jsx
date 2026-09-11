@@ -175,6 +175,45 @@ describe('EvidenceEditor', () => {
     expect(lastCallBody('/service-evidence').base_id).toBe('rev-1');
   });
 
+  it('withdraws allocation controls once the reviewer selects an exclusion, and submits no allocation', async () => {
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(baseDetail());
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    await screen.findByRole('button', { name: 'Add accepted value allocation' });
+    fireEvent.change(screen.getByLabelText('Service-value allocation'), { target: { value: 'alloc-1' } });
+    fireEvent.change(screen.getByLabelText('Production exclusion'), { target: { value: 'inspection' } });
+    expect(screen.queryByRole('button', { name: 'Add accepted value allocation' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Service-value allocation')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Service and credited-value evidence'), { target: { value: 'Inspection only.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retain service evidence' }));
+    await waitFor(() => expect(lastCallBody('/service-evidence')).toBeTruthy());
+    expect(lastCallBody('/service-evidence').exclusion).toBe('inspection');
+    expect(lastCallBody('/service-evidence').allocation_id).toBeNull();
+    expect(lastCallBody('/service-evidence').ordinal).toBeNull();
+  });
+
+  it('keeps a retained manual exclusion on a free visit instead of the forced follow-up default', async () => {
+    const detail = baseDetail({
+      visit: { ...baseDetail().visit, forced_exclusion: 'planned_followup' },
+      revisions: [{ id: 'rev-1', allocation_id: null, ordinal: null, facts: { participants: [{ technician_id: 'tech-a', share_bps: 10000 }], provenance: 'verified', source_reference: 'Duplicate stop.', exclusion: 'duplicate', cutoff_at: null, complete_at_cutoff: null, repair_reason: 'unresolved', repair_reference: '', rework_outcome: 'unobserved', return_service_id: null, same_issue_confirmed: false, rework_reference: '' } }],
+    });
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(detail);
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    await screen.findByText(/included follow-up or an always-free visit type/);
+    expect(screen.getByLabelText('Production exclusion')).toHaveValue('duplicate');
+  });
+
   it('locks the service selector while an allocation save is pending and selects the saved allocation', async () => {
     const detail = baseDetail({ allocations: [] });
     let resolveAllocation;
