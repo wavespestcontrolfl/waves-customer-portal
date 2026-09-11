@@ -197,3 +197,21 @@ it('withholds the costing margin while any program row is incomplete, exactly as
   expect(screen.queryByText('$399.00')).not.toBeInTheDocument();
   expect(screen.getByText(/Fix the quoted itemization before comparing costs: Every program row needs a name/)).toBeInTheDocument();
 });
+
+it('offers neither Review and send nor Mark won while the saved fixed date has passed, and again once a later date is saved (GH codex P2 r5 on #4309)', async () => {
+  saved.estimate.status = 'sent';
+  saved.proposal.validThrough = '2020-01-01';
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  expect(screen.getByText(/The bid validity date has passed/)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Review and send' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Mark won' })).not.toBeInTheDocument();
+  expect(screen.getByLabelText(/Valid through \(Eastern time\)/)).toBeEnabled();
+  fireEvent.change(screen.getByLabelText(/Valid through \(Eastern time\)/), { target: { value: '2099-12-21' } });
+  // Not yet saved: the server still holds the old date.
+  expect(screen.queryByRole('button', { name: 'Review and send' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
+  await screen.findByRole('button', { name: 'Saved' });
+  expect(screen.getByRole('button', { name: 'Review and send' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Mark won' })).toBeInTheDocument();
+});
