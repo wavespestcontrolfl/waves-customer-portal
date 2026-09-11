@@ -4744,28 +4744,27 @@ function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultS
 // Annual protection plan basis (ruling A-1 = P1): the replayed snapshot's
 // plan constants where stamped, else the live TERMITE.annualPlan (which the
 // DB bridge may have overlaid from pricing_config.termite_annual_plan).
-// [key, default, min, max, integer] — the SAME bands the admin validator
-// enforces at write time (admin-pricing-config `termite_annual_plan`), so a
-// value outside them can only be a forged or corrupted stamp, never a saved
-// config; it is ignored and the live value (or default) prices instead.
-// The engine is the dollar authority: a replay stamp may pin WHICH saved
-// constants price a quote, never invent amounts the config could not hold.
+// [key, default] — a stamped or live value is accepted only inside
+// TERMITE.annualPlanBounds, the SAME bands the admin validator enforces at
+// write time (one home, constants.js), so a value outside them can only be a
+// forged or corrupted stamp, never a saved config; it is ignored and the live
+// value (or default) prices instead. The engine is the dollar authority: a
+// replay stamp may pin WHICH saved constants price a quote, never invent
+// amounts the config could not hold.
 const TERMITE_ANNUAL_PLAN_KNOBS = Object.freeze([
-  ['setupPerStation', 30, 1, 200, false],
-  ['annualBase', 249, 1, 2000, false],
-  ['annualStep', 50, 0, 500, false],
-  ['bracketStations', 5, 1, 50, true],
-  ['bracketFloor', 10, 0, 100, true],
+  ['setupPerStation', 30], ['annualBase', 249], ['annualStep', 50], ['bracketStations', 5], ['bracketFloor', 10],
 ]);
 function resolveTermiteAnnualPlanBasis(knobs) {
   const live = TERMITE.annualPlan || {};
+  const bounds = TERMITE.annualPlanBounds || {};
   const snap = knobs && typeof knobs === 'object' && knobs.plan === 'annual_protection' ? knobs : null;
   const basis = {
     visitsPerYear: Number(live.visitsPerYear) > 0 ? Number(live.visitsPerYear) : 1,
     coverageMonths: Number(live.coverageMonths) > 0 ? Number(live.coverageMonths) : 12,
     label: live.label || 'Subterranean Termite Protection',
   };
-  for (const [key, fallback, min, max, integer] of TERMITE_ANNUAL_PLAN_KNOBS) {
+  for (const [key, fallback] of TERMITE_ANNUAL_PLAN_KNOBS) {
+    const { min = 0, max = Infinity, integer = false } = bounds[key] || {};
     const accept = (v) => {
       const n = Number(v);
       return Number.isFinite(n) && n >= min && n <= max && (!integer || Number.isInteger(n));
@@ -4789,7 +4788,9 @@ function termiteAnnualPlanFeeForStations(stations, plan = resolveTermiteAnnualPl
 //   annual_protection: station SETUP fee + prepaid annual fee × 1 (ruling A-1 = P1)
 // Margin on what is actually BILLED for the hardware — the outright install
 // on the quarterly program, the station setup fee on the annual plan (ruling
-// A-1 accepts its ≈ −10 %), 0 on a rental (nothing billed).
+// A-1 accepts its ≈ −10 %). A RENTAL keeps reporting the retail install
+// margin exactly as it did before this lane (the amortized uplift carries the
+// hardware; nothing here changes the shipped rental feature's figures).
 const billedMargin = (billed, cost) => (billed > 0 ? (billed - cost) / billed : 0);
 function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, installCost, ownership }) {
   if (isAnnualPlan) {
@@ -4826,7 +4827,7 @@ function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPric
     stationsOwnedBy: isRentedStations ? 'waves' : 'customer',
     installKind: 'install',
     billedInstallPrice: isRentedStations ? 0 : installPrice,
-    billedInstallMargin: billedMargin(isRentedStations ? 0 : installPrice, installCost),
+    billedInstallMargin: billedMargin(installPrice, installCost),
     visitsPerYear: TERMITE.monitoringVisitsPerYear,
     monitoringMonthly,
     monitoringAnnual: monitoringMonthly * 12,

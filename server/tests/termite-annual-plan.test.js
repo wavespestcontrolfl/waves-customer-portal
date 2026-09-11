@@ -73,6 +73,23 @@ describe('annual plan — pricing (ruling A-1 = P1)', () => {
     expect(b.installation.price).toBe(480);
   });
 
+  test('a quarterly RENTAL line keeps its pre-lane installation.margin (retail), unchanged by the program refactor', () => {
+    process.env.GATE_TERMITE_STATION_RENTAL = 'true';
+    const planGate = process.env.GATE_TERMITE_ANNUAL_PLAN;
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    try {
+      const rented = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', ownership: 'rent' } } })));
+      const owned = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', ownership: 'own' } } })));
+      expect(rented.installation.price).toBe(0);
+      expect(rented.installation.margin).toBeGreaterThan(0);
+      expect(rented.installation.margin).toBe(owned.installation.margin);
+      expect(rented.installation.retailMargin).toBe(owned.installation.retailMargin);
+    } finally {
+      delete process.env.GATE_TERMITE_STATION_RENTAL;
+      if (planGate !== undefined) process.env.GATE_TERMITE_ANNUAL_PLAN = planGate;
+    }
+  });
+
   test('rental and the bond rider are retired on the plan even when requested', () => {
     process.env.GATE_TERMITE_STATION_RENTAL = 'true';
     process.env.GATE_TERMITE_BOND_OPTION = 'true';
@@ -212,6 +229,9 @@ describe('annual plan — DB overlay and admin validation', () => {
 
   test('admin validation bounds the plan knobs', () => {
     expect(validatePricingConfigData('termite_annual_plan', { setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10 }, null)).toEqual({ ok: true });
+    // One home for the bands: the validator and the replay resolver read
+    // TERMITE.annualPlanBounds, so the write-time caps are the replay caps.
+    expect(constants.TERMITE.annualPlanBounds).toMatchObject({ setupPerStation: { min: 1, max: 200 }, annualBase: { min: 1, max: 2000 }, annualStep: { min: 0, max: 500 }, bracketStations: { min: 1, max: 50 }, bracketFloor: { min: 0, max: 100 } });
     for (const [patch, key] of [
       [{ setup_per_station: 0 }, 'setup_per_station'],
       [{ setup_per_station: 30.5 }, 'setup_per_station'],

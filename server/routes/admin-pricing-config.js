@@ -4,7 +4,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { costLineFromUsage } = require('../services/product-costing');
-const { BED_BUG } = require('../services/pricing-engine/constants');
+const { BED_BUG, TERMITE } = require('../services/pricing-engine/constants');
 
 // Reads and the calculators (margin-check / estimate / quick-quote) stay
 // tech-or-admin — the tech portal estimators price off them. WRITES are
@@ -378,19 +378,23 @@ function validatePricingConfigData(configKey, data, oldConfig) {
   } else if (configKey === 'termite_annual_plan') {
     // Ruling A-1 (owner 2026-09-11): P1 — setup per station + bracketed
     // annual fee. Whole dollars (doorstep figures), bounded against typos.
-    const wholeDollar = (v) => Number.isFinite(num(v)) && Math.abs(num(v) - Math.round(num(v))) < 1e-9;
-    const checkPlan = (keys, predicate, label) => {
+    // The bands live with the engine (TERMITE.annualPlanBounds) — the same
+    // ones the replay resolver accepts a stamp against — so they cannot drift.
+    const bounds = TERMITE.annualPlanBounds;
+    const withinBand = (b) => (v) => Number.isFinite(num(v)) && num(v) >= b.min && num(v) <= b.max
+      && (!b.integer || Math.abs(num(v) - Math.round(num(v))) < 1e-9);
+    const checkPlan = (keys, b) => {
       for (const key of keys) {
         if (data?.[key] == null) continue;
-        if (!predicate(data[key])) return fail(`termite_annual_plan.${key} must be ${label}`);
+        if (!withinBand(b)(data[key])) return fail(`termite_annual_plan.${key} must be ${b.label}`);
       }
       return null;
     };
-    const failedPlan = checkPlan(['setup_per_station', 'setupPerStation'], (v) => isPositive(v) && wholeDollar(v) && num(v) <= 200, 'a positive whole-dollar $/station setup no greater than 200')
-      || checkPlan(['annual_base', 'annualBase'], (v) => isPositive(v) && wholeDollar(v) && num(v) <= 2000, 'a positive whole-dollar annual fee no greater than 2000')
-      || checkPlan(['annual_step', 'annualStep'], (v) => isNonNegative(v) && wholeDollar(v) && num(v) <= 500, 'a non-negative whole-dollar bracket step no greater than 500')
-      || checkPlan(['bracket_stations', 'bracketStations'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 50, 'a whole number of stations between 1 and 50')
-      || checkPlan(['bracket_floor', 'bracketFloor'], (v) => Number.isInteger(num(v)) && num(v) >= 0 && num(v) <= 100, 'a whole number of stations between 0 and 100');
+    const failedPlan = checkPlan(['setup_per_station', 'setupPerStation'], bounds.setupPerStation)
+      || checkPlan(['annual_base', 'annualBase'], bounds.annualBase)
+      || checkPlan(['annual_step', 'annualStep'], bounds.annualStep)
+      || checkPlan(['bracket_stations', 'bracketStations'], bounds.bracketStations)
+      || checkPlan(['bracket_floor', 'bracketFloor'], bounds.bracketFloor);
     if (failedPlan) return failedPlan;
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly

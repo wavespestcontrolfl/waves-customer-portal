@@ -1128,6 +1128,19 @@ const TERMITE = {
     coverageMonths: 12,
     label: 'Subterranean Termite Protection',
   },
+  // Admin-editable bands for annualPlan — ONE source for the write-time
+  // validator (admin-pricing-config `termite_annual_plan`) and the replay-
+  // stamp acceptance (service-pricing resolveTermiteAnnualPlanBasis): a value
+  // the config could never hold is never priced, and widening a band for a
+  // promo is one edit. Plain numbers (no processing adjustment): whole
+  // dollars for the money knobs, whole stations for the bracket knobs.
+  annualPlanBounds: Object.freeze({
+    setupPerStation: Object.freeze({ min: 1, max: 200, integer: true, label: 'a positive whole-dollar $/station setup no greater than 200' }),
+    annualBase: Object.freeze({ min: 1, max: 2000, integer: true, label: 'a positive whole-dollar annual fee no greater than 2000' }),
+    annualStep: Object.freeze({ min: 0, max: 500, integer: true, label: 'a non-negative whole-dollar bracket step no greater than 500' }),
+    bracketStations: Object.freeze({ min: 1, max: 50, integer: true, label: 'a whole number of stations between 1 and 50' }),
+    bracketFloor: Object.freeze({ min: 0, max: 100, integer: true, label: 'a whole number of stations between 0 and 100' }),
+  }),
 };
 
 // ============================================================
