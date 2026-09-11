@@ -58,7 +58,8 @@ const ingestLimiter = rateLimit({
   message: { ok: false, reason: 'rate_limited' },
   // The bearer is a shared secret, not a JWT: key by client IP (/64).
   keyGenerator: unauthenticatedAuthLimitKey,
-  skip: () => process.env.NODE_ENV !== 'production',
+  // Off under jest only — staging / PR environments keep the limiter.
+  skip: () => process.env.NODE_ENV === 'test',
 });
 
 // Dark-route check FIRST, ahead of the limiter: while the token is unset
