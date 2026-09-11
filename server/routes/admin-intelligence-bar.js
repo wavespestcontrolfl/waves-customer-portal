@@ -190,6 +190,8 @@ const PII_TOOL_NAMES = new Set([
   'switch_appointment_property',
   'update_property_access',
   'add_customer_property',
+  'get_customer_estimate_context',
+  'save_customer_estimate',
   'update_customer_property',
   'set_primary_property',
   // cancel_plan previews/results echo the customer's name and free-text note.
@@ -472,6 +474,7 @@ async function agentEstimateEnabled(req) {
 }
 
 function summarizeProposal(toolName, params, displayParams = params) {
+  if (toolName === 'save_customer_estimate') return params.estimate_id ? 'Revise saved lawn estimate' : 'Save lawn estimate draft';
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
   // changed (the confirmation card must show everything the commit will do).
@@ -1284,6 +1287,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
   }
+  if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolUse.name)) {
+    const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
+      toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
+    });
+    if (target.error) return { failed: true, modelResult: target };
+    if (toolUse.name !== 'update_restock_request') {
+      params.product_id = target.productId;
+      delete params.product_name;
+      taskContext = { ...taskContext, requestedRecords: { ...taskContext?.requestedRecords, product_id: target.productId } };
+    }
+  }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
   } else if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
@@ -2082,7 +2096,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeSeoTool(toolName, input, actionContext);
   }
   if (PROCUREMENT_TOOL_NAMES.has(toolName)) {
-    return executeProcurementTool(toolName, input);
+    return executeProcurementTool(toolName, input, actionContext);
   }
   if (REVENUE_TOOL_NAMES.has(toolName)) {
     return executeRevenueTool(toolName, input);
@@ -2529,6 +2543,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             // authenticated request, never from model-supplied input.
             result = await executeToolByName(toolUse.name, executionInput, techContext, {
               actorId: getAdminActorId(req), readCustomerIds: taskContext?.targets?.map(target => target.customer_id) || [],
+              isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
             if (isToolFailure(result)) {
               failed = true;
@@ -3105,6 +3120,7 @@ router.post('/confirm-action', async (req, res, next) => {
         if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
           execParams._verified_property_version = livePreview._version;
         }
+        if (action.tool_name === 'save_customer_estimate') execParams._verified_estimate_version = livePreview._version;
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments, assign_technician).
@@ -3146,48 +3162,18 @@ router.post('/confirm-action', async (req, res, next) => {
             execParams._verified_rows_matched = livePreview.rows_matched;
           }
         }
-        // update_restock_request receive: the verified preview's stock
-        // delta rides to the executor to re-assert under the
-        // request+product row locks (GH r11 P1) — the confirmed executor
-        // re-derives the receive amount from unlocked reads, so a request
-        // or product edited after this preflight could otherwise add a
-        // different amount than the card showed.
-        if (action.tool_name === 'update_restock_request' && livePreview?.adds !== undefined) {
-          // stock_before rides too (pre-push r11 P1): the card shows exact
-          // before/after totals, so a concurrent inventory movement must
-          // refuse rather than apply the approved delta to a different
-          // starting balance.
-          execParams._verified_receive = {
-            adds: livePreview.adds,
-            unit: livePreview.unit,
-            stock_before: livePreview.stock_before,
-          };
-        }
-        // Same contract for the OTHER inventory writers (GH r12 P1):
-        // adjust_stock re-derives the movement from the freshly locked
-        // balance, and create_restock_request rereads current_stock/unit/
-        // vendor unlocked — either could apply/store values different
-        // from the card's. The verified preview's snapshot rides to the
-        // executor to re-assert under the product row lock.
-        if (action.tool_name === 'adjust_stock' && livePreview?.stock_after !== undefined) {
-          execParams._verified_adjustment = {
-            stock_before: livePreview.stock_before,
-            stock_after: livePreview.stock_after,
-            unit: livePreview.unit,
-          };
-        }
-        if (action.tool_name === 'create_restock_request' && livePreview?.preview === true) {
-          execParams._verified_request = {
-            current_stock: livePreview.current_stock ?? null,
-            unit: livePreview.unit,
-            vendor: livePreview.vendor ?? null,
-          };
+        // Bind every inventory write to the exact resolved product and
+        // full-precision preview, then recheck that version under domain locks.
+        if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(action.tool_name)) {
+          execParams._verified_inventory_version = livePreview?._version;
+          if (action.tool_name !== 'update_restock_request' && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
         }
       }
     }
 
     const result = await executeApprovedTool(action.tool_name, execParams, techContextForExecution(req), {
       actorId: getAdminActorId(req),
+      operationId: action.id,
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,
@@ -3195,7 +3181,11 @@ router.post('/confirm-action', async (req, res, next) => {
         ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }
         : {}),
     });
-    const receiptSaved = await PendingActions.recordResult(action.id, result);
+    let receiptSaved = await PendingActions.recordResult(action.id, result);
+    if (receiptSaved === false) {
+      // Some domains save the receipt atomically with their mutation.
+      receiptSaved = !!(await PendingActions.getActionReceipt(action.id, getAdminActorId(req)).catch(() => null))?.result;
+    }
 
     const outcome = executionOutcome(result);
     const success = ['completed', 'partially_completed', 'provider_accepted'].includes(outcome);
@@ -3211,7 +3201,13 @@ router.post('/confirm-action', async (req, res, next) => {
     if (claimedAction) {
       const result = { outcome_unknown: true, code: 'execution_interrupted',
         error: 'The action outcome could not be established. Check its status before taking further action.' };
-      await PendingActions.recordResult(claimedAction.id, result);
+      // A domain transaction may have committed its receipt before the runner
+      // stopped. Never replace that evidence, including if recovery reads fail.
+      const saved = await PendingActions.getActionReceipt(claimedAction.id, getAdminActorId(req)).catch(() => null);
+      if (saved?.result && saved.outcome !== 'outcome_unknown') {
+        return res.status(200).json({ success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
+      }
+      await PendingActions.recordResult(claimedAction.id, result, { onlyIfEmpty: true });
       return res.status(200).json({ success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
     }
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);

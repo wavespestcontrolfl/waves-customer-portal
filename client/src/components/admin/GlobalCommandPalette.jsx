@@ -1,4 +1,4 @@
-import { useIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
+import { useIntelligenceBarPageData, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 /**
  * Global Command Palette (⌘K / mobile bottom sheet)
  * client/src/components/admin/GlobalCommandPalette.jsx
@@ -355,12 +355,12 @@ function GlobalCommandPalette({ user }, ref) {
   const attachmentsLoadingRef = useRef(false);
   const location = useLocation();
   const isMobile = useIsMobile(768);
-  // Dialog semantics: trap Tab focus inside the palette while open and restore
-  // focus to the opener on close. Escape stays handled by the palette's own
-  // key handlers, so no onEscape is passed here.
-  const paletteRef = useModalFocus(open);
+  // The shared modal stack consumes Escape before an underlying customer
+  // drawer can see it; closing the bar must leave that record open.
+  const paletteRef = useModalFocus(open, () => setOpen(false));
 
   const ibPageData = useIntelligenceBarPageData();
+  const { notifyMutation } = useIntelligenceBarActions();
   const context = detectContext(location.pathname, location.search, location.hash, user);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
@@ -382,13 +382,10 @@ function GlobalCommandPalette({ user }, ref) {
         e.preventDefault();
         setOpen((prev) => !prev);
       }
-      if (e.key === "Escape" && open) {
-        setOpen(false);
-      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open]);
+  }, []);
 
   // Focus input when opening + refresh recents
   useEffect(() => {
@@ -457,7 +454,7 @@ function GlobalCommandPalette({ user }, ref) {
       threadSeqRef.current = null;
     }
     resetAttachments();
-  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.appointment_id, ibPageData?.viewed_date, resetAttachments]);
+  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.property_id, ibPageData?.estimate_id, ibPageData?.appointment_id, ibPageData?.product_id, ibPageData?.viewed_date, resetAttachments]);
 
   // Load a server thread into the palette (resume-on-open and the picker
   // share this). Shows the thread's last reply — otherwise the palette
@@ -671,6 +668,11 @@ function GlobalCommandPalette({ user }, ref) {
 
   const actionEpoch = threadEpochRef.current;
   const onActionResolved = (action, decision, body) => {
+    if (body?.success && body?.result?.verification?.persisted) {
+      notifyMutation?.({ id: action.id, customer_id: body.result.customer_id,
+        product_id: body.result.verification.product_id, estimate_id: body.result.estimate_id,
+        domain: body.result.verification.product_id ? 'inventory' : body.result.estimate_id ? 'estimate' : undefined });
+    }
     // A retained legacy card still needs its receipt after navigation. Mapping
     // by ID cannot restore a card removed by Clear or task-context isolation.
     setPendingActions(previous => previous.map(item => item.id === action.id
