@@ -194,9 +194,14 @@ describe('commercial bid authoring', () => {
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
   const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
   const costing = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'PRIVATE CREW COST', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 4 }] };
-  test.each([['costing only', false], ['a changed line', true]])('re-saving a delivered proposal with %s keeps or drops the emailed-PDF marker (GH codex P2 on #4270)', async (name, changed) => {
-    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_data: { proposal: proposal(), proposalDelivery: { pdfEmailed: true } } });
+  test.each([['costing only', false, false], ['a changed line', true, false], ['costing only, legacy lines given ids on load', false, true]])('re-saving a delivered proposal with %s keeps or drops the emailed-PDF marker (GH codex P2 on #4270)', async (name, changed, legacy) => {
+    const savedProposal = proposal();
+    // A legacy delivered proposal has no line ids; the editor mints them on
+    // load and the next cost-only save sends them (GH codex P2 r12 on #4270).
+    if (legacy) delete savedProposal.buildings[0].lineItems[0].id;
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_data: { proposal: savedProposal, proposalDelivery: { pdfEmailed: true } } });
     const incoming = proposal();
+    if (legacy) incoming.buildings[0].lineItems[0].id = 'generated-on-load';
     if (changed) incoming.buildings[0].lineItems[0].unitPrice = 101;
     const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: incoming, projectCosting: costing });
     expect(res.statusCode).toBe(200);

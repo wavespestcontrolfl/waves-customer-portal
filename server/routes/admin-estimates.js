@@ -4125,7 +4125,15 @@ router.put('/:id/proposal', async (req, res, next) => {
     // A private-cost-only save leaves the customer proposal and its PDF
     // exactly as delivered, so the emailed marker stays true (GH codex P2 on
     // #4270). Anything that changes the normalized proposal drops it.
-    const proposalContent = (value) => { const { updatedAt, provenance, ...rest } = value || {}; return JSON.stringify(rest); };
+    // Customer-visible content only: line `id`s exist for the bid-form row
+    // mapping and are minted client-side for legacy lines on load, so they
+    // must not turn a cost-only save into a "changed proposal" (GH codex P2
+    // r12 on #4270).
+    const proposalContent = (value) => {
+      const { updatedAt, provenance, buildings, ...rest } = value || {};
+      const visibleLine = (line) => { const { id, ...visible } = line || {}; return visible; };
+      return JSON.stringify({ ...rest, buildings: (Array.isArray(buildings) ? buildings : []).map((b) => ({ ...b, lineItems: (Array.isArray(b?.lineItems) ? b.lineItems : []).map(visibleLine) })) });
+    };
     if (!(Object.hasOwn(req.body || {}, 'projectCosting') && proposalContent(normalized) === proposalContent({ ...savedProposal, enabled: true, synthesized: false }))) {
       clearStaleProposalDelivery(nextData);
     }
