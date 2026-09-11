@@ -739,6 +739,46 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('a later, genuinely failed message is still recovered even though an older message from the same phone already delivered successfully (codex #4210 round-11 P1)', async () => {
+    const conversationId = randomUUID();
+    const olderMessageId = randomUUID();
+    const newerMessageId = randomUUID();
+    const olderSid = `SM-synthetic-sweep-older-delivered-${randomBytes(4).toString('hex')}`;
+    const newerSid = `SM-synthetic-sweep-newer-failed-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const olderCreatedAt = new Date(Date.now() - 600000);
+    const newerCreatedAt = new Date(Date.now() - 60000);
+    let dispatchedWith = null;
+    const dispatch = jest.fn(async (args) => { dispatchedWith = args; return true; });
+    try {
+      // The OLDER message delivered successfully and is simply still
+      // unread (staff hasn't looked yet — normal). A LATER message from
+      // the SAME phone then had its own dispatch genuinely fail (claim
+      // released, no receipt). A phone-wide "has anything ever delivered"
+      // check would let the older receipt wrongly cover the newer,
+      // unrelated failure — coverage must be checked per message, at or
+      // after THAT message's own arrival.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550203' });
+      await mockPg('messages').insert([
+        { id: olderMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: olderSid, body: 'Delivered, still unread', created_at: olderCreatedAt },
+        { id: newerMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: newerSid, body: 'Failed, needs recovery', created_at: newerCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: olderSid, message_body: 'Delivered, still unread', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: olderCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: newerSid, message_body: 'Failed, needs recovery', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: newerCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatchedWith).toMatchObject({ From: unknownPhone, MessageSid: newerSid });
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').whereIn('id', [olderMessageId, newerMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [olderSid, newerSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('the sweep never re-alerts an AI-answered message just because it is still unread (codex #4210 round-9 P1)', async () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();
