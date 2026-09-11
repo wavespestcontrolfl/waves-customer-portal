@@ -1,4 +1,5 @@
-/** Stored provenance for a newly created lawn visit assessment. */
+/** Lawn visit provenance, review/confirmation transactions, and delivery ownership. */
+const { randomUUID } = require('crypto');
 const { SCORE_KEYS, confirmScores } = require('./lawn-visit-scores');
 const lawnAssessment = require('./lawn-assessment');
 const { validateReview } = require('./lawn-visit-review-input');
@@ -266,6 +267,57 @@ async function confirmRun(args, knex) {
   });
 }
 
+const PIPELINE_STALE_MS = 15 * 60 * 1000;
+function leaseDuration(staleAfterMs) {
+  if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs <= 0) throw new TypeError('Pipeline lease duration must be positive milliseconds');
+  return staleAfterMs;
+}
+
+// One conditional write elects the owner across instances. The database clock
+// defines the lease, so pod clock skew cannot reclaim an active delivery. Old
+// timestamp-only claims wait out their lease; missing DDL fails closed instead
+// of letting every caller deliver. A savepoint protects an enclosing writer.
+async function claimPipeline(assessmentId, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  leaseDuration(staleAfterMs);
+  return knex.transaction(async (trx) => {
+    const [run] = await trx('lawn_assessment_runs')
+      .where({ assessment_id: assessmentId }).whereNull('pipeline_completed_at')
+      .whereExists(trx('lawn_assessments').select(trx.raw('1'))
+        .whereColumn('lawn_assessments.id', 'lawn_assessment_runs.assessment_id').where({ confirmed_by_tech: true }))
+      .where((q) => q.whereNull('pipeline_claimed_at')
+        .orWhereRaw("pipeline_claimed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]))
+      .update({ pipeline_owner_token: randomUUID(), pipeline_claimed_at: trx.raw('clock_timestamp()'), updated_at: trx.raw('clock_timestamp()') })
+      .returning('*');
+    return run || null;
+  });
+}
+
+function ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs) {
+  leaseDuration(staleAfterMs);
+  if (typeof ownerToken !== 'string' || !ownerToken) throw new TypeError('Pipeline ownership token is required');
+  return knex('lawn_assessment_runs').where({ assessment_id: assessmentId, pipeline_owner_token: ownerToken })
+    .whereNull('pipeline_completed_at')
+    .whereRaw("pipeline_claimed_at >= clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]);
+}
+
+// Renew while external work runs, and check ownership before each next step.
+// An expired owner cannot revive itself or release its replacement's claim.
+async function renewPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_claimed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
+async function ownsPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  return !!(await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs).first('id'));
+}
+
+async function releasePipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_owner_token: null, pipeline_claimed_at: null, updated_at: knex.raw('clock_timestamp()') }).returning('id');
+  return rows.length === 1;
+}
+
 // Eligibility to compare a reconstructed prompt with the original input
 // hash, not proof that the photos or current rubric still match that hash.
 function replayContextForRun(run) {
@@ -280,4 +332,7 @@ function replayContextForRun(run) {
   return { visionContext: storedContext(context), omitted, exactInputEligible: omitted.length === 0 };
 }
 
-module.exports = { billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun, reviewRun, confirmRun, replayContextForRun };
+module.exports = {
+  billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun,
+  reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline,
+};

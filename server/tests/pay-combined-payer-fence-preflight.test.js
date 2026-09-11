@@ -30,15 +30,20 @@ function combinedPi(id, status) {
 
 // Minimal knex stand-in: the invoice scan resolves to `rows`, and every
 // stamp-clearing update is recorded instead of executed.
-function mockDb(rows, { onInvoiceQuery = () => {} } = {}) {
+function mockDb(rowsByCustomer, { onInvoiceQuery = () => {} } = {}) {
   const updates = [];
   db.mockImplementation((table) => {
     if (table !== 'invoices') throw new Error(`unexpected table ${table}`);
-    const q = { _where: {} };
-    ['where', 'whereIn', 'whereNotIn', 'whereNotNull'].forEach((m) => {
-      q[m] = jest.fn((...args) => { onInvoiceQuery(m, args); return q; });
+    const q = { customerId: null };
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy'].forEach((m) => {
+      q[m] = jest.fn((...args) => {
+        if (m === 'where' && args[0] && args[0].customer_id) q.customerId = String(args[0].customer_id);
+        onInvoiceQuery(m, args);
+        return q;
+      });
     });
-    q.select = jest.fn(async () => rows);
+    // The stamp cleanup re-queries by PaymentIntent id, not by customer.
+    q.select = jest.fn(async () => (q.customerId ? rowsByCustomer[q.customerId] || [] : []));
     q.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
     return q;
   });
@@ -48,11 +53,11 @@ function mockDb(rows, { onInvoiceQuery = () => {} } = {}) {
 
 beforeEach(() => { jest.clearAllMocks(); });
 
-test('an in-flight session refuses the change without canceling a sibling session first', async () => {
-  mockDb([
-    { id: ANCHOR_ID, invoice_number: 'WPC-1', stripe_payment_intent_id: 'pi_confirmable' },
-    { id: SIBLING_ID, invoice_number: 'WPC-2', stripe_payment_intent_id: 'pi_processing' },
-  ]);
+test('an in-flight session on ONE customer refuses the change without canceling another customer\'s session', async () => {
+  mockDb({
+    'cust-1': [{ id: ANCHOR_ID, invoice_number: 'WPC-1', stripe_payment_intent_id: 'pi_confirmable' }],
+    'cust-2': [{ id: SIBLING_ID, invoice_number: 'WPC-2', stripe_payment_intent_id: 'pi_processing' }],
+  });
   mockRetrievePaymentIntent.mockImplementation(async (id) => (id === 'pi_processing'
     ? combinedPi(id, 'processing') : combinedPi(id, 'requires_confirmation')));
 
@@ -64,10 +69,12 @@ test('an in-flight session refuses the change without canceling a sibling sessio
 });
 
 test('with nothing in flight every unconfirmed session is canceled and unstamped', async () => {
-  const updates = mockDb([
-    { id: ANCHOR_ID, invoice_number: 'WPC-1', stripe_payment_intent_id: 'pi_one' },
-    { id: SIBLING_ID, invoice_number: 'WPC-2', stripe_payment_intent_id: 'pi_two' },
-  ]);
+  const updates = mockDb({
+    'cust-1': [
+      { id: ANCHOR_ID, invoice_number: 'WPC-1', stripe_payment_intent_id: 'pi_one' },
+      { id: SIBLING_ID, invoice_number: 'WPC-2', stripe_payment_intent_id: 'pi_two' },
+    ],
+  });
   mockRetrievePaymentIntent.mockImplementation(async (id) => combinedPi(id, id === 'pi_two' ? 'canceled' : 'requires_payment_method'));
   mockCancelPaymentIntent.mockResolvedValue({ status: 'canceled' });
 
@@ -80,7 +87,7 @@ test('with nothing in flight every unconfirmed session is canceled and unstamped
 
 test('the scheduled-service scan covers every invoice in the edited member\'s packet', async () => {
   const seen = [];
-  mockDb([], { onInvoiceQuery: (method, args) => seen.push([method, args]) });
+  mockDb({}, { onInvoiceQuery: (method, args) => seen.push([method, args]) });
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') {
       const q = {};
@@ -96,7 +103,7 @@ test('the scheduled-service scan covers every invoice in the edited member\'s pa
       return q;
     }
     const q = {};
-    ['where', 'whereIn', 'whereNotIn', 'whereNotNull'].forEach((m) => {
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'orderBy'].forEach((m) => {
       q[m] = jest.fn((...args) => { seen.push([m, args]); return q; });
     });
     q.select = jest.fn(async () => []);

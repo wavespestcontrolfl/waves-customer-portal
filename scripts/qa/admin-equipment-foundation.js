@@ -1,5 +1,5 @@
 "use strict";
-/* global document, localStorage, navigator, getComputedStyle, innerWidth, requestAnimationFrame, history, window */
+/* global document, localStorage, navigator, getComputedStyle, innerWidth, requestAnimationFrame, history, window, MutationObserver */
 const assert = require("node:assert/strict"),
   fs = require("node:fs"),
   path = require("node:path");
@@ -526,6 +526,33 @@ async function install(page, server, state) {
     key.startsWith("GET "),
   );
   await page.addInitScript(() => {
+    // Toasts live for 3.5s and a second toast can be cleared early by the
+    // first one's timer, so record every status render instead of racing it.
+    window.__toasts = [];
+    const record = (node, type) => {
+      if (!node || node.nodeType !== 1) return;
+      const found = node.matches?.('[role="status"]') ? [node] : [];
+      node.querySelectorAll?.('[role="status"]').forEach((n) => found.push(n));
+      for (const el of found) {
+        const text = (el.textContent || "").trim();
+        if (text) window.__toasts.push({ text, type, at: Date.now() });
+      }
+    };
+    const observe = () =>
+      new MutationObserver((records) => {
+        for (const entry of records) {
+          entry.addedNodes.forEach((n) => record(n, "shown"));
+          entry.removedNodes.forEach((n) => record(n, "removed"));
+          if (entry.type === "characterData")
+            record(entry.target.parentElement, "shown");
+        }
+      }).observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    if (document.documentElement) observe();
+    else document.addEventListener("DOMContentLoaded", observe);
     localStorage.setItem("waves_admin_token", "synthetic-token");
     // Chromium can let keepalive fetches outlive Playwright interception.
     // Drop synthetic auth before the app's pagehide usage-beacon listener.
@@ -582,10 +609,25 @@ async function install(page, server, state) {
       query: url.search,
       body,
     });
+    // The query contract is checked before the injection branches below, so a
+    // request that is about to be held or failed is still judged on what it
+    // asked for.
     const contract = contracts.get(key);
     if (contract) {
       const violation = contract(url.searchParams);
       if (violation) state.badQuery.push(`${key} (${violation})`);
+    }
+    if (state.hold?.key === key) await state.hold.promise;
+    if (state.failures.has(key)) {
+      if (request.method() !== "GET") state.failures.delete(key);
+      state.expectedFailures.push(url.href);
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Synthetic request failed. Try again.",
+        }),
+      });
     }
     if (!handlers.has(key)) {
       state.unmatched.push(key);
@@ -852,6 +894,65 @@ async function widths(page, state, surface) {
   }
   await page.setViewportSize(original);
 }
+async function retryWrite(page, state, key, button, verify, pending) {
+  const before = state.requests.filter((r) => r.key === key).length;
+  const original = await button.boundingBox();
+  state.failures.add(key);
+  let release;
+  state.hold = {
+    key,
+    promise: new Promise((r) => {
+      release = r;
+    }),
+  };
+  state.hold.release = release;
+  await button.evaluate((n) => {
+    n.click();
+    n.click();
+  });
+  await button.and(page.locator('[aria-busy="true"]')).waitFor();
+  assert.equal(await button.isDisabled(), true, key + " disabled while saving");
+  const held = await button.boundingBox();
+  assert.ok(
+    Math.abs(original.width - held.width) < 1 &&
+      Math.abs(original.height - held.height) < 1,
+    key + " stable pending button",
+  );
+  if (pending) await pending();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(
+    state.requests.filter((r) => r.key === key).length,
+    before + 1,
+    key + " single pending write",
+  );
+  release();
+  state.hold = null;
+  await page
+    .getByRole("alert")
+    .filter({
+      hasText: /Synthetic request failed|HTTP 503/,
+    })
+    .waitFor();
+  if (verify) await verify();
+  const first = state.requests.filter((r) => r.key === key).at(-1).body;
+  await button.click();
+  await page.waitForTimeout(250);
+  assert.equal(
+    state.requests.filter((r) => r.key === key).length,
+    before + 2,
+    key + " retry",
+  );
+  assert.deepEqual(
+    state.requests.filter((r) => r.key === key).at(-1).body,
+    first,
+    key + " preserved payload",
+  );
+  state.checks.push(
+    key + " pending, failed draft, retry and preserved payload",
+  );
+  console.log(key + " retry passed");
+  return first;
+}
 function gallery(report) {
   const files = report.screenshots.map((f) => path.basename(f));
   const keys = [
@@ -1108,6 +1209,688 @@ async function views(page, server, state, report, device) {
     page.getByRole("button", { name: "Mark Field Verified", exact: true }));
   await mileageHeader(page, server, state, report, device);
 }
+async function toast(page, text) {
+  await page.waitForFunction(
+    (expected) =>
+      (window.__toasts || []).some(
+        (entry) => entry.type === "shown" && entry.text.includes(expected),
+      ),
+    text,
+    { timeout: 15000 },
+  );
+}
+async function fillFields(page, fields) {
+  for (const [label, value] of Object.entries(fields))
+    await page.getByLabel(label, { exact: true }).fill(value);
+}
+async function writes(page, server, state, report, device) {
+  await page.goto(server.baseUrl + "/admin/equipment?source=synthetic");
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(
+    await page.locator("main").getByText("toast &&", { exact: true }).count(),
+    0,
+  );
+  assert.equal(
+    await page.locator("main").getByRole("status").count(),
+    0,
+    "No empty toast",
+  );
+  await page
+    .getByRole("button", { name: "Add Equipment", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await dialog
+    .getByRole("alert")
+    .filter({ hasText: "Name is required" })
+    .waitFor();
+  assert.equal(
+    state.requests.filter(
+      (r) => r.key === "POST /api/admin/equipment/equipment",
+    ).length,
+    0,
+  );
+  await fillFields(page, {
+    "Name *": "Example spare sprayer",
+    "Purchase Price ($)": "1250.50",
+    "Current Hours": "0",
+    Notes: "Synthetic asset draft",
+  });
+  const created = await retryWrite(
+    page,
+    state,
+    "POST /api/admin/equipment/equipment",
+    dialog.getByRole("button", { name: "Save", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Name *", { exact: true }).inputValue(),
+        "Example spare sprayer",
+      );
+      await shot(page, report, device + "-failed-equipment-save");
+    },
+    async () => {
+      await page.keyboard.press("Escape");
+      assert.equal(await dialog.isVisible(), true, "Pending dialog stays open");
+      assert.equal(
+        await dialog
+          .locator("input,select,textarea")
+          .evaluateAll((nodes) => nodes.every((n) => n.disabled)),
+        true,
+      );
+    },
+  );
+  assert.deepEqual(created, {
+    name: "Example spare sprayer",
+    category: "other",
+    make: "",
+    model: "",
+    serial_number: "",
+    purchase_date: null,
+    purchase_price: 1250.5,
+    current_hours: 0,
+    next_service_hours: null,
+    next_service_type: "",
+    assigned_to: "",
+    status: "active",
+    book_value: null,
+    notes: "Synthetic asset draft",
+  });
+  await dialog.waitFor({ state: "hidden" });
+  await toast(page, "Equipment added");
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page
+    .getByLabel("Name *", { exact: true })
+    .fill("Example updated truck");
+  const updated = await retryWrite(
+    page,
+    state,
+    `PUT /api/admin/equipment/equipment/${id}`,
+    dialog.getByRole("button", { name: "Save", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Name *", { exact: true }).inputValue(),
+        "Example updated truck",
+      );
+    },
+  );
+  assert.deepEqual(updated, { ...equipment, name: "Example updated truck" });
+  await dialog.waitFor({ state: "hidden" });
+  await toast(page, "Equipment updated");
+
+  await section(page, "Tank Mixes", null, "tank-mixes");
+  const recalculated = await retryWrite(
+    page,
+    state,
+    "POST /api/admin/equipment/tank-mixes/mix-example/recalculate",
+    page.getByRole("button", { name: "Recalc", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByText("Synthetic tank mix", { exact: true }).isVisible(),
+        true,
+      );
+    },
+  );
+  assert.equal(recalculated, null);
+  await toast(page, "Costs recalculated");
+
+  await section(page, "Maintenance", null, "maintenance");
+  const resolved = await retryWrite(
+    page,
+    state,
+    "PUT /api/admin/equipment-maintenance/alerts/alert-example",
+    page.getByRole("button", { name: "Dismiss", exact: true }),
+  );
+  assert.deepEqual(resolved, { status: "resolved", resolved_by: "admin" });
+  assert.equal(
+    await page
+      .getByText("Synthetic maintenance review", { exact: true })
+      .count(),
+    0,
+  );
+  await fleetDetail(page);
+  await page
+    .getByRole("button", { name: "Record Maintenance", exact: true })
+    .click();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Save Record", exact: true })
+      .isDisabled(),
+    true,
+  );
+  await page
+    .getByLabel("Schedule (optional)", { exact: true })
+    .selectOption(schedule.id);
+  await fillFields(page, {
+    "Performed By": "Fixture operator",
+    "Miles at Service": "12010",
+    "Parts Cost": "12.50",
+    "Labor Cost": "0",
+  });
+  const maintenance = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-maintenance/${id}/records`,
+    page.getByRole("button", { name: "Save Record", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Task Name *", { exact: true }).inputValue(),
+        schedule.task_name,
+      );
+      assert.equal(
+        await page.getByLabel("Parts Cost", { exact: true }).inputValue(),
+        "12.50",
+      );
+      await shot(page, report, device + "-failed-maintenance-save",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-maintenance-save-actions",
+        page.getByRole("button", { name: "Save Record", exact: true }));
+    },
+    async () => {
+      assert.equal(await page.getByRole("button", { name: "Cancel", exact: true }).isDisabled(), true);
+      assert.equal(
+        await page
+          .getByRole("button", {
+            name: new RegExp("^(Expand|Collapse) .*" + equipment.name),
+          })
+          .isDisabled(),
+        true,
+        "Card toggle disabled while a form save is pending",
+      );
+    },
+  );
+  assert.deepEqual(maintenance, {
+    scheduleId: schedule.id,
+    maintenanceType: "scheduled",
+    taskName: schedule.task_name,
+    description: null,
+    performedBy: "Fixture operator",
+    vendorName: null,
+    milesAtService: 12010,
+    hoursAtService: null,
+    conditionBefore: null,
+    conditionAfter: null,
+    partsCost: 12.5,
+    laborCost: 0,
+    vendorCost: 0,
+    downtimeHours: 0,
+    followUpNeeded: false,
+    followUpNotes: null,
+    followUpDate: null,
+    warrantyClaim: false,
+  });
+  await toast(page, "Maintenance recorded");
+  await page.getByRole("button", { name: "Log Mileage", exact: true }).click();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Save Mileage", exact: true })
+      .isDisabled(),
+    true,
+  );
+  const logDate = await page.getByLabel("Date", { exact: true }).inputValue();
+  await fillFields(page, {
+    "Odometer End": "12100",
+    "Personal Miles": "10",
+    "Fuel Gallons": "5",
+    "Fuel Cost ($)": "20",
+    "Jobs Serviced": "3",
+    "Logged By": "Fixture operator",
+    Notes: "Synthetic mileage draft",
+  });
+  const logged = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-maintenance/${id}/mileage`,
+    page.getByRole("button", { name: "Save Mileage", exact: true }),
+    async () => {
+      assert.equal(
+        await page.getByLabel("Odometer End", { exact: true }).inputValue(),
+        "12100",
+      );
+      assert.equal(
+        await page.getByLabel("Notes", { exact: true }).inputValue(),
+        "Synthetic mileage draft",
+      );
+      await shot(page, report, device + "-failed-mileage-save",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-mileage-save-actions",
+        page.getByRole("button", { name: "Save Mileage", exact: true }));
+    },
+    async () => {
+      assert.equal(await page.getByRole("button", { name: "Cancel", exact: true }).isDisabled(), true);
+      assert.equal(
+        await page
+          .getByRole("button", {
+            name: new RegExp("^(Expand|Collapse) .*" + equipment.name),
+          })
+          .isDisabled(),
+        true,
+        "Card toggle disabled while a form save is pending",
+      );
+    },
+  );
+  assert.deepEqual(logged, {
+    logDate,
+    odometerStart: 12000,
+    odometerEnd: 12100,
+    personalMiles: 10,
+    fuelGallons: 5,
+    fuelCost: 20,
+    jobsServiced: 3,
+    loggedBy: "Fixture operator",
+    notes: "Synthetic mileage draft",
+    source: "manual",
+  });
+  await toast(page, "Mileage logged");
+
+  await section(page, "Maintenance", "Calibrations", "calibrations");
+  const saveCalibration = page.getByRole("button", {
+    name: "Save Calibration (expires in 30 days)",
+    exact: true,
+  });
+  assert.equal(await saveCalibration.isDisabled(), true);
+  await page
+    .getByLabel("Equipment system", { exact: true })
+    .selectOption(systemId);
+  await page.getByText("Current active calibration", { exact: true }).waitFor();
+  await fillFields(page, {
+    "Test area (sqft)": "1500",
+    "Captured gallons": "3",
+    "Pressure (PSI, optional)": "40",
+    "Engine RPM (optional)": "1800",
+    "Notes (optional)": "Synthetic calibration draft",
+  });
+  const calibrated = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-systems/${systemId}/calibrations`,
+    saveCalibration,
+    async () => {
+      assert.equal(
+        await page.getByLabel("Test area (sqft)", { exact: true }).inputValue(),
+        "1500",
+      );
+      assert.equal(
+        await page.getByLabel("Notes (optional)", { exact: true }).inputValue(),
+        "Synthetic calibration draft",
+      );
+      await shot(page, report, device + "-failed-calibration-save",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-calibration-save-actions",
+        page.getByRole("button", { name: "Save Calibration (expires in 30 days)", exact: true }));
+    },
+    async () =>
+      assert.equal(
+        await page.getByLabel("Equipment system", { exact: true }).isDisabled(),
+        true,
+      ),
+  );
+  assert.deepEqual(calibrated, {
+    carrier_gal_per_1000: 2,
+    test_area_sqft: 1500,
+    captured_gallons: 3,
+    pressure_psi: 40,
+    engine_rpm_setting: "1800",
+    notes: "Synthetic calibration draft",
+  });
+  await page.getByText(/Calibration saved at/).waitFor();
+  assert.equal(
+    await page.getByLabel("Test area (sqft)", { exact: true }).inputValue(),
+    "",
+  );
+  assert.equal(
+    await page.getByLabel("Equipment system", { exact: true }).inputValue(),
+    systemId,
+  );
+  await page
+    .getByRole("button", { name: "Verify Calibration", exact: true })
+    .click();
+  const verifyCalibration = page.getByRole("button", {
+    name: "Mark Field Verified",
+    exact: true,
+  });
+  assert.equal(await verifyCalibration.isDisabled(), true);
+  const verifyDate = await page
+    .getByLabel("Verification date", { exact: true })
+    .inputValue();
+  await fillFields(page, {
+    "Measured sqft": "2000",
+    "Measured gallons": "4",
+    "Verification notes": "Synthetic verification draft",
+  });
+  const verified = await retryWrite(
+    page,
+    state,
+    `POST /api/admin/equipment-systems/calibrations/${calibrationId}/verify`,
+    verifyCalibration,
+    async () => {
+      assert.equal(
+        await page.getByLabel("Measured sqft", { exact: true }).inputValue(),
+        "2000",
+      );
+      assert.equal(
+        await page
+          .getByLabel("Verification notes", { exact: true })
+          .inputValue(),
+        "Synthetic verification draft",
+      );
+      await shot(page, report, device + "-failed-calibration-verification",
+        page.getByRole("alert").filter({ hasText: /Synthetic request failed|HTTP 503/ }));
+      await shot(page, report, device + "-failed-calibration-verification-actions",
+        page.getByRole("button", { name: "Mark Field Verified", exact: true }));
+    },
+  );
+  assert.deepEqual(verified, {
+    verified_test_area_sqft: 2000,
+    verified_captured_gallons: 4,
+    // The fixture browser uses America/New_York; noon must be serialized with its DST offset.
+    verified_at: await page.evaluate((date) => new Date(`${date}T12:00:00`).toISOString(), verifyDate),
+    verification_notes: "Synthetic verification draft",
+  });
+  await verifyCalibration.waitFor({ state: "hidden" });
+  await page.getByText("Field verified", { exact: true }).waitFor();
+  state.toasts = await page.evaluate(() => window.__toasts || []);
+}
+async function analyticsIndependence(page, server, state) {
+  for (const key of [
+    "GET /api/admin/equipment-maintenance/alerts",
+    "GET /api/admin/equipment-maintenance",
+    "GET /api/admin/equipment-maintenance/analytics/overview",
+  ]) {
+    for (const mode of ["failure", "pending"]) {
+      const matches = (request) =>
+        `${request.method()} ${new URL(request.url()).pathname}` === key;
+      let response;
+      if (mode === "failure") {
+        state.failures.add(key);
+        response = page.waitForResponse((r) => matches(r.request()) && r.status() === 503);
+      } else {
+        state.hold = { key };
+        state.hold.promise = new Promise((resolve) => { state.hold.release = resolve; });
+        response = page.waitForRequest(matches);
+      }
+      try {
+        await page.goto(server.baseUrl + "/admin/equipment?tab=analytics");
+        await response;
+        await page.getByText("Cost of Ownership", { exact: true }).waitFor();
+        await page.getByRole("row").filter({ hasText: equipment.name }).first().waitFor();
+        assert.equal(await page.getByText("Loading equipment analytics…", { exact: true }).isVisible(), false);
+        assert.equal(await page.getByRole("alert").filter({ hasText: "Could not load fleet:" }).count(), 0);
+        assert.equal(await page.getByRole("alert").filter({ hasText: "Could not load analytics:" }).count(), 0);
+        state.checks.push(`Analytics stays available during ${key} ${mode}`);
+      } finally {
+        state.failures.delete(key);
+        if (state.hold) {
+          const released = page.waitForResponse((r) => matches(r.request()));
+          state.hold.release();
+          state.hold = null;
+          await released;
+        }
+      }
+    }
+  }
+}
+async function readsAndNavigation(page, server, state, report, device) {
+  await analyticsIndependence(page, server, state);
+  for (const [tab, key, message, ready] of [
+    [
+      "assets",
+      "GET /api/admin/equipment/equipment",
+      "Could not load equipment:",
+      equipment.name,
+    ],
+    [
+      "maintenance",
+      "GET /api/admin/equipment-maintenance",
+      "Could not load fleet:",
+      equipment.name,
+    ],
+    [
+      "calibrations",
+      "GET /api/admin/equipment-systems",
+      "Could not load equipment systems:",
+      "Equipment Calibration",
+    ],
+    [
+      "calibrations",
+      "GET /api/admin/equipment-systems/reconciliation",
+      "Could not load equipment reconciliation:",
+      "Equipment Calibration",
+    ],
+    [
+      "tank-mixes",
+      "GET /api/admin/equipment/tank-mixes",
+      "Could not load tank mixes.",
+      "Synthetic tank mix",
+    ],
+    [
+      "job-costs",
+      "GET /api/admin/equipment/job-costs/summary",
+      "Could not load job costs:",
+      "Avg Margin",
+    ],
+    [
+      "analytics",
+      "GET /api/admin/equipment-maintenance/analytics/costs",
+      "Could not load analytics:",
+      "Cost of Ownership",
+    ],
+  ]) {
+    state.failures.add(key);
+    await page.goto(
+      server.baseUrl + `/admin/equipment?tab=${tab}&source=synthetic`,
+    );
+    const alert = page.getByRole("alert").filter({ hasText: message });
+    await alert.waitFor();
+    await geometry(page, state, tab + "-read-error");
+    if (tab === "assets") await shot(page, report, device + "-read-error");
+    const before = state.requests.filter((r) => r.key === key).length;
+    state.failures.delete(key);
+    await alert.getByRole("button", { name: /Try again|Retry/ }).click();
+    await alert.waitFor({ state: "hidden" });
+    await page.getByText(ready, { exact: true }).first().waitFor();
+    assert.ok(
+      state.requests.filter((r) => r.key === key).length > before,
+      key + " retries",
+    );
+    state.checks.push(key + " failure and read retry");
+  }
+  state.empty = true;
+  for (const [tab, text] of [
+    ["assets", "No equipment recorded."],
+    ["maintenance", "No equipment found"],
+    ["tank-mixes", "No tank mixes configured"],
+    ["calibrations", "No equipment systems are available for calibration."],
+  ]) {
+    await page.goto(server.baseUrl + `/admin/equipment?tab=${tab}`);
+    await page.getByText(text, { exact: false }).waitFor();
+    assert.equal(
+      await page.locator("main").getByRole("alert").count(),
+      0,
+      tab + " true empty",
+    );
+    state.checks.push(tab + " empty");
+  }
+  state.empty = false;
+  for (const [alias, group] of [
+    ["equipment", "Assets"],
+    ["fleet", "Maintenance"],
+    ["vehicles", "Maintenance"],
+    ["mileage", "Maintenance"],
+    ["invalid", "Assets"],
+  ]) {
+    await page.goto(
+      server.baseUrl + `/admin/equipment?tab=${alias}&source=synthetic`,
+    );
+    await page.getByText(equipment.name, { exact: true }).waitFor();
+    assert.equal(
+      await page
+        .getByRole("navigation", { name: "Equipment section", exact: true })
+        .getByRole("button", { name: group, exact: true })
+        .getAttribute("aria-current"),
+      "page",
+    );
+  }
+  await section(page, "Maintenance", null, "maintenance");
+  const historyLength = await page.evaluate(() => history.length);
+  const maintenanceTab = page.getByRole("tab", {
+    name: "Maintenance",
+    exact: true,
+  });
+  await maintenanceTab.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.getByLabel("Equipment system", { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "calibrations");
+  assert.equal(new URL(page.url()).searchParams.get("source"), "synthetic");
+  assert.equal(
+    await page.evaluate(() => history.length),
+    historyLength,
+    "Leaf selection replaces history",
+  );
+  await page.keyboard.press("Home");
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "maintenance");
+  await page.reload();
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(
+    await page
+      .getByRole("tab", { name: "Maintenance", exact: true })
+      .getAttribute("aria-selected"),
+    "true",
+  );
+  await page.goto(server.baseUrl + "/admin/equipment?tab=analytics");
+  await page.getByText("Cost of Ownership", { exact: true }).waitFor();
+  await page.goBack();
+  await page.getByText(equipment.name, { exact: true }).waitFor();
+  assert.equal(new URL(page.url()).searchParams.get("tab"), "maintenance");
+  await page.goForward();
+  await page.getByText("Cost of Ownership", { exact: true }).waitFor();
+  state.checks.push(
+    "Aliases, keyboard tabs, unrelated query preservation, refresh and history",
+  );
+  for (const role of ["technician", "csr"]) {
+    state.role = role;
+    const before = state.requests.length;
+    await page.goto(server.baseUrl + "/admin/equipment?tab=analytics");
+    await page.getByText(equipment.name, { exact: true }).waitFor();
+    assert.equal(
+      await page
+        .getByRole("navigation", { name: "Equipment section", exact: true })
+        .getByRole("button", { name: "Costs", exact: true })
+        .count(),
+      0,
+    );
+    assert.equal(
+      state.requests
+        .slice(before)
+        .some((r) =>
+          /\/job-costs|\/analytics\/(costs|reliability)/.test(r.key),
+        ),
+      false,
+      role + " does not fetch owner-only panels",
+    );
+    await section(page, "Maintenance", "Calibrations", "calibrations");
+    await page.getByLabel("Equipment system", { exact: true }).waitFor();
+    state.checks.push(
+      role + " uses verified role despite cached admin identity",
+    );
+  }
+  state.role = "admin";
+  // A failed fleet-card detail read is logged, not surfaced: the card expands
+  // with no detail block and no alert, and the read is only retried when the
+  // card is collapsed and expanded again (registered as ADMIN-BUG-006).
+  const detailKey = `GET /api/admin/equipment-maintenance/${id}`;
+  state.failures.add(detailKey);
+  await page.goto(server.baseUrl + "/admin/equipment?tab=maintenance");
+  const cardToggle = page.getByRole("button", {
+    name: new RegExp("^(Expand|Collapse) .*" + equipment.name),
+  });
+  const detailFailed = page.waitForResponse(
+    (r) =>
+      new URL(r.request().url()).pathname ===
+        `/api/admin/equipment-maintenance/${id}` && r.status() === 503,
+  );
+  await cardToggle.click();
+  await detailFailed;
+  await page.waitForTimeout(250);
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Record Maintenance", exact: true })
+      .count(),
+    0,
+    "Failed detail read renders no detail block",
+  );
+  assert.equal(
+    await page.locator("main").getByRole("alert").count(),
+    0,
+    "Failed detail read surfaces no alert",
+  );
+  await geometry(page, state, "maintenance-detail-error");
+  state.failures.delete(detailKey);
+  await cardToggle.click();
+  await cardToggle.click();
+  await page
+    .getByRole("button", { name: "Record Maintenance", exact: true })
+    .waitFor();
+  state.checks.push("Fleet detail read failure and re-expansion recovery");
+
+  state.failures.add(`GET /api/admin/equipment-systems/${systemId}`);
+  await page.goto(server.baseUrl + "/admin/equipment?tab=calibrations");
+  await page.getByLabel("Equipment system", { exact: true }).selectOption(systemId);
+  const calibrationAlert = page
+    .getByRole("alert")
+    .filter({ hasText: "Could not load current calibration:" });
+  await calibrationAlert.waitFor();
+  await geometry(page, state, "calibrations-detail-error");
+  state.failures.delete(`GET /api/admin/equipment-systems/${systemId}`);
+  await calibrationAlert
+    .getByRole("button", { name: "Try again", exact: true })
+    .click();
+  await page.getByText("Current active calibration", { exact: true }).waitFor();
+  await calibrationAlert.waitFor({ state: "hidden" });
+  state.checks.push("Calibration detail failure and retry");
+  state.jobSummary = {
+    totalJobs: 1,
+    avgRevenue: 0,
+    avgCost: null,
+    avgMargin: null,
+  };
+  await page.goto(server.baseUrl + "/admin/equipment?tab=job-costs");
+  await page.getByText("Avg Revenue/Job", { exact: true }).waitFor();
+  assert.match(
+    await page
+      .getByText("Avg Revenue/Job", { exact: true })
+      .locator("..")
+      .innerText(),
+    /\$0\.00/,
+  );
+  assert.match(
+    await page
+      .getByText("Avg Cost/Job", { exact: true })
+      .locator("..")
+      .innerText(),
+    /—/,
+  );
+  assert.match(
+    await page
+      .getByText("Avg Margin", { exact: true })
+      .locator("..")
+      .innerText(),
+    /—/,
+  );
+  state.checks.push("Missing job metrics remain distinct from zero");
+  state.jobSummary = null;
+  state.assetName =
+    "Synthetic asset with a long equipment name and identifier " +
+    "QA0123456789".repeat(5);
+  await page.goto(server.baseUrl + "/admin/equipment");
+  await page.getByText(state.assetName, { exact: true }).waitFor();
+  await widths(page, state, "long-asset-name");
+  await shot(page, report, device + "-long-asset-name");
+  state.assetName = null;
+  state.checks.push(
+    "Long asset name preserves visible controls and page bounds",
+  );
+}
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const sourceFiles = [
@@ -1149,7 +1932,9 @@ async function main() {
         dialogs: [],
         pageErrors: [],
         consoleErrors: [],
+        expectedFailures: [],
         unmatched: [],
+        failures: new Set(),
         geometry: [],
         checks: [],
       };
@@ -1172,27 +1957,11 @@ async function main() {
         page.setDefaultNavigationTimeout(45000);
         await install(page, server, state);
         await views(page, server, state, report, device);
-        assert.deepEqual(state.pageErrors, [], "Page errors");
-        assert.deepEqual(state.unmatched, [], "Unmatched API");
-        assert.deepEqual(state.badQuery, [], "Query contract");
-        assert.deepEqual(state.dialogs, [], "Unexpected native dialog");
-        // A leaf that stops fetching leaves its fixture simply unused: the
-        // geometry and malformed-text checks still pass and the run still
-        // reports success while no longer exercising that response contract at
-        // all. Only GETs — the write routes are asserted absent above.
-        const requested = new Set(
-          state.requests.map((request) => request.key),
-        );
-        assert.deepEqual(
-          state.fixtureGets.filter((key) => !requested.has(key)),
-          [],
-          "Unexercised fixture",
-        );
-        // This is a view-only run: it opens dialogs but always Cancels, so the
-        // only write it may issue is the admin usage beacon. The write handlers
-        // below answer 200, so without this an accidental Save/Recalc/Dismiss
-        // would be quietly accepted instead of landing in state.unmatched —
-        // the writes runner asserts each of those requests individually.
+        // Up to here the run has only viewed: the view pass opens dialogs but
+        // always Cancels, so the one write it may have issued is the admin
+        // usage beacon. Asserted between the passes rather than at the end,
+        // because the writes pass below performs and asserts each of those
+        // requests deliberately.
         assert.deepEqual(
           state.requests
             .map((request) => request.key)
@@ -1202,9 +1971,39 @@ async function main() {
                 key !== "POST /api/admin/usage/track",
             ),
           [],
-          "Unexpected write",
+          "Unexpected write during the view pass",
         );
-        assert.deepEqual(state.consoleErrors, [], "Unexpected console errors");
+        await writes(page, server, state, report, device);
+        await readsAndNavigation(page, server, state, report, device);
+        assert.deepEqual(state.pageErrors, [], "Page errors");
+        assert.deepEqual(state.unmatched, [], "Unmatched API");
+        assert.deepEqual(state.badQuery, [], "Query contract");
+        assert.deepEqual(state.dialogs, [], "Unexpected native dialog");
+        // A leaf that stops fetching leaves its fixture simply unused: the
+        // geometry and malformed-text checks still pass and the run still
+        // reports success while no longer exercising that response contract at
+        // all. Only GETs — the writes pass asserts its own requests.
+        const requested = new Set(
+          state.requests.map((request) => request.key),
+        );
+        assert.deepEqual(
+          state.fixtureGets.filter((key) => !requested.has(key)),
+          [],
+          "Unexercised fixture",
+        );
+        // The injected 503s are expected, so their console noise is filtered by
+        // the exact URLs this run failed on rather than by matching text.
+        assert.deepEqual(
+          state.consoleErrors.filter(
+            (e) =>
+              !(
+                e.text.includes("503") &&
+                (!e.url || state.expectedFailures.includes(e.url))
+              ),
+          ),
+          [],
+          "Unexpected console errors",
+        );
       } catch (error) {
         report.error = error.stack;
         report.failedDevice = device;
@@ -1212,6 +2011,7 @@ async function main() {
           await shot(page, report, device + "-failure").catch(() => {});
         throw error;
       } finally {
+        state.hold?.release?.();
         if (page)
           await page
             .evaluate(() => localStorage.removeItem("waves_admin_token"))

@@ -6,7 +6,13 @@ jest.mock('../models/db', () => {
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
-jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn() }));
+// isScheduledTick/scheduleInterval arrive with the customer send lock main
+// now wraps _runSequenceStep in (#4330): cron-lock reads isScheduledTick()
+// for its default waitForSlot, so a mock without it throws inside the step.
+jest.mock('../utils/scheduled-cron', () => ({
+  schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn(),
+  isScheduledTick: () => false, runAsScheduledTick: (fn) => fn(),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => null) }));
@@ -3155,7 +3161,13 @@ postgres('visit summary recipient recovery', () => {
       const touch = jest.spyOn(Review, 'sendOutreachTouch').mockResolvedValue(outcome);
       const customer = await mockPg('customers').where({ id: fixture.customerId }).first();
       jest.spyOn(Review, 'manualReviewAskSentRecently').mockResolvedValue(false);
-      const ran = await Review._runSequenceStep(sequenceId).catch((err) => ({ threw: err.message }));
+      // The UNLOCKED runner: main now wraps _runSequenceStep in the
+      // per-customer send lock (#4330), which fails fast without a lock slot
+      // in this suite's environment and would report a deferral instead of
+      // the step's own verdict. The wrapper itself is covered in
+      // review-sequences.test.js; what this test asserts is the step's
+      // handling of an uncertain provider outcome.
+      const ran = await Review._runSequenceStepUnlocked(sequenceId).catch((err) => ({ threw: err.message }));
       touch.mockRestore();
       expect(ran).toMatchObject({ ran: false, uncertain: true });
       expect(await mockPg('review_sequences').where({ id: sequenceId }).first()).toMatchObject({ status: 'active', current_step: 0, next_run_at: null });
