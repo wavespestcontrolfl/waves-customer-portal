@@ -1217,7 +1217,34 @@ async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, e
       invoiceId: minted.invoice.id,
     });
   }
-  return { invoice: minted.invoice };
+  return settleDepositCoveredInvoice(minted.invoice);
+}
+
+// A pending estimate deposit that covers the whole invoice leaves the mint
+// with nothing due (total 0 after the deposit is consumed) but still
+// 'draft' (Codex P1 r6 #4131). Exposing that row would text the customer a
+// $0 pay link on send-now, flip it to 'sent' and enrol it in the dunning
+// sequence (which checks status and payer, not the amount); the draft path
+// would do the same when the completion later reuses it. Close it through
+// the existing zero-balance transition instead — the same non-cash 'prepaid'
+// state the completion uses — and tell the client so it skips the send.
+// Best-effort: a refused settlement (reminder lease in flight, payment work
+// already recorded) leaves the row as minted and is logged; the completion
+// settles it again on the same authority.
+async function settleDepositCoveredInvoice(invoice) {
+  const { invoiceAmountDue } = require('../services/invoice-helpers');
+  if (!invoice || invoice.status !== 'draft' || invoiceAmountDue(invoice) > 0) return { invoice };
+  try {
+    const settlement = await InvoiceService.settleZeroBalance(invoice.id);
+    if (settlement.settled) {
+      logger.info(`[admin-invoices] invoice ${invoice.id} fully covered by the estimate deposit — settled (prepaid), nothing to send`);
+      return { invoice: settlement.invoice, settledByDeposit: true };
+    }
+    logger.warn(`[admin-invoices] invoice ${invoice.id} is fully deposit-covered but zero-balance settlement was refused: ${settlement.reason}`);
+  } catch (err) {
+    logger.error(`[admin-invoices] zero-balance settlement failed for deposit-covered invoice ${invoice.id}: ${err.message}`);
+  }
+  return { invoice };
 }
 
 // Step 6 — the unlinked / record-linked create. A record-linked invoice
@@ -1270,7 +1297,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       outcome = { invoice: await createInvoiceUnlinked({ createArgs, serviceRecordId, stampedEstimateId }) };
     }
     if (outcome.refusal) return res.status(outcome.refusal.status).json(outcome.refusal.body);
-    const { invoice } = outcome;
+    const { invoice, settledByDeposit = false } = outcome;
 
     if (stampedEstimateId) {
       // Post-commit retirement: the new coverage rewrites/resolves the
@@ -1293,6 +1320,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
     res.status(201).json({
       ...invoice,
       payUrl,
+      // True when the linked visit's estimate deposit covered the whole
+      // invoice and it was settled at creation — the client skips its
+      // send-now call (there is no balance to text a pay link for).
+      settledByDeposit,
     });
   } catch (err) {
     if (err?.isOperational && err.statusCode) {

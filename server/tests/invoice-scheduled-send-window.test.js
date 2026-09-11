@@ -320,6 +320,8 @@ describe('processScheduledSends send-window handling', () => {
         .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
         .mockReturnValueOnce(chain({ first: undefined })) // replay re-check under the claim (none)
+        .mockReturnValueOnce(chain({ returning: [] })) // adoption: consume the send's own scheduled held leg (none to cancel)
+        .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
         .mockReturnValueOnce(chain()) // finalize update
@@ -373,6 +375,8 @@ describe('processScheduledSends send-window handling', () => {
         .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
         .mockReturnValueOnce(chain({ first: undefined })) // replay re-check under the claim (none)
+        .mockReturnValueOnce(chain({ returning: [] })) // adoption: consume the send's own scheduled held leg (none to cancel)
+        .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(failingInsert) // held-SMS scheduled-rail insert THROWS
         .mockReturnValue(restoreChain); // restoreSendClaim + anything after

@@ -198,6 +198,10 @@ describe("AdminInvoicesPage CreateInvoice flattening (Codex P2 r3)", () => {
     expect(createInvoiceBlocker({ ...ready, sendTiming: "custom", scheduledFor: null })).toMatch(/send time/);
     expect(createInvoiceBlocker({ ...ready, sendTiming: "custom", scheduledFor: "2040-03-05T08:00" })).toBeNull();
     expect(createInvoiceBlocker({ ...ready, sendTiming: "now", requestReview: true, reviewDelay: null })).toMatch(/review request time/);
+    // A linked OPEN visit blocks the ask: the checkbox renders off, so a
+    // still-true underlying state (enabled → Custom with no date → visit
+    // linked) must not block Create on a review time (Codex P2 r6).
+    expect(createInvoiceBlocker({ ...ready, sendTiming: "now", requestReview: true, reviewDelay: null, selectedOpenVisit: { id: "v1" } })).toBeNull();
     expect(createInvoiceBlocker({ ...ready, linkedVisitGone: true })).toMatch(/no longer open/);
     expect(createInvoiceBlocker({ ...ready, sendTiming: "custom", scheduledFor: "2040-03-05T08:00", selectedOpenVisit: { id: "v1" } }))
       .toMatch(/sent now or saved as a draft/);

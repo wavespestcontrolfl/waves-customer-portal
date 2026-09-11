@@ -127,6 +127,53 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
+  describe('a deposit that covers the whole invoice settles it at creation (Codex P1 r6)', () => {
+    const minted = (invoice) => mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ svc }) => ({
+      invoice: { id: 'inv-new', token: 'tok', customer_id: CUSTOMER, invoice_number: 'WPC-TEST-1', scheduled_service_id: svc.id, status: 'draft', credit_applied: 0, ...invoice },
+      reused: false,
+    }));
+
+    test('nothing due after the deposit → the zero-balance transition runs and the response says so (the client skips its send)', async () => {
+      minted({ total: 0 });
+      const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({
+        settled: true, reason: null, invoice: { id: 'inv-new', token: 'tok', customer_id: CUSTOMER, invoice_number: 'WPC-TEST-1', scheduled_service_id: VISIT, status: 'prepaid', total: 0, prepaid_by: 'system:zero_balance' },
+      });
+      try {
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, { scheduledServiceId: VISIT });
+          expect(res.status).toBe(201);
+          expect(settle).toHaveBeenCalledWith('inv-new');
+          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'prepaid', settledByDeposit: true });
+        });
+      } finally { settle.mockRestore(); }
+    });
+
+    test('a refused settlement leaves the row as minted and reports settledByDeposit false — never a throw', async () => {
+      minted({ total: 0 });
+      const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: false, reason: 'followup_in_flight', retryable: true, invoice: null });
+      try {
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, { scheduledServiceId: VISIT });
+          expect(res.status).toBe(201);
+          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false });
+        });
+      } finally { settle.mockRestore(); }
+    });
+
+    test('a balance still due after the deposit never touches the settlement path', async () => {
+      minted({ total: 67 });
+      const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true });
+      try {
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, { scheduledServiceId: VISIT });
+          expect(res.status).toBe(201);
+          expect(settle).not.toHaveBeenCalled();
+          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false });
+        });
+      } finally { settle.mockRestore(); }
+    });
+  });
+
   test('ownership and open status are re-verified ROW-LOCKED inside the mint chain — a visit cancelled in between is refused', async () => {
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
       // The chain calls the hook on its transaction after the advisory lock.

@@ -468,7 +468,12 @@ export function createInvoiceBlocker({
   if (!serviceDate) return "Choose a service date";
   if (!dueDate) return "Choose a due date";
   if (sendTiming === "custom" && !scheduledFor) return "Choose an invoice send time";
-  if (sendTiming !== "draft" && requestReview && reviewDelay === null) return "Choose a review request time";
+  // The review ask is validated on the same effective value the form
+  // renders (Codex P2 r6 #4131): a linked open visit blocks the ask, so a
+  // still-true underlying state must not demand a review time the operator
+  // cannot see or set.
+  const reviewAsk = requestReview && !openVisitReviewRequestBlocked(selectedOpenVisit);
+  if (sendTiming !== "draft" && reviewAsk && reviewDelay === null) return "Choose a review request time";
   if (linkedVisitGone) return "The linked visit is no longer open (completed or prepaid since) — re-check the visit link before creating.";
   if (openVisitSendTimingBlocked(sendTiming, selectedOpenVisit)) {
     return "An invoice linked to an open visit is sent now or saved as a draft — the completion sends it, so a future send time would not be kept.";
@@ -5599,6 +5604,14 @@ function CreateInvoice({
   const [dueTiming, setDueTiming] = useState("today");
   const [dueCustomDate, setDueCustomDate] = useState("");
   const [requestReview, setRequestReview] = useState(false);
+  // ONE effective value for the review ask (Codex P2 r6 #4131): a linked
+  // open visit blocks the ask, and the checkbox renders unchecked +
+  // disabled — but the underlying state may still be true (enabled, Custom
+  // chosen with no date, THEN the visit linked). Rendering the controls
+  // and validating Create from the raw state while the checkbox shows the
+  // ask as off blocked Create on "Choose a review request time" for an ask
+  // the form said was not being made. Every reader below uses this.
+  const reviewRequestActive = requestReview && !openVisitReviewRequestBlocked(selectedOpenVisit);
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
@@ -6217,7 +6230,7 @@ function CreateInvoice({
     const scheduledFor = invoiceScheduledFor();
     const reviewDelay = reviewDelayMinutes();
     const blocker = createInvoiceBlocker({
-      selectedCustomer, lineItems, serviceDate, dueDate, sendTiming, scheduledFor, requestReview, reviewDelay, linkedVisitGone, selectedOpenVisit,
+      selectedCustomer, lineItems, serviceDate, dueDate, sendTiming, scheduledFor, requestReview: reviewRequestActive, reviewDelay, linkedVisitGone, selectedOpenVisit,
     });
     if (blocker) {
       showToast(blocker);
@@ -6270,6 +6283,18 @@ function CreateInvoice({
           return;
         }
       }
+      if (sendTiming === "now" && invoice.id && invoice.settledByDeposit) {
+        // The linked visit's estimate deposit covered the whole invoice: the
+        // server settled it at creation (prepaid) — there is no balance to
+        // text a pay link for, and a send would be refused as not sendable.
+        showToast(
+          `Invoice created: ${invoice.invoice_number} — fully covered by the estimate deposit, nothing to send`,
+        );
+        onCreated();
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
       if (sendTiming === "now" && invoice.id) {
         let sendRes;
         try {
@@ -6280,7 +6305,7 @@ function CreateInvoice({
               // visit's completion already texted between the create and
               // this request is reported already_delivered, not sent again.
               firstDelivery: true,
-              requestReview: openVisitReviewRequestBlocked(selectedOpenVisit) ? false : requestReview,
+              requestReview: reviewRequestActive,
               reviewDelayMinutes: reviewDelay,
               reviewTiming,
               reviewScheduledFor:
@@ -7832,19 +7857,19 @@ function CreateInvoice({
                   display: "flex",
                   alignItems: "center",
                   gap: 8,
-                  marginBottom: requestReview ? 8 : 0,
+                  marginBottom: reviewRequestActive ? 8 : 0,
                 }}
               >
                 {" "}
                 <Checkbox
-                  checked={requestReview && !openVisitReviewRequestBlocked(selectedOpenVisit)}
+                  checked={reviewRequestActive}
                   onChange={(e) => setRequestReview(e.target.checked)}
                   id="review-toggle"
                   label={openVisitReviewRequestBlocked(selectedOpenVisit) ? "Send review request (after the visit completes)" : "Send review request"}
                   disabled={builderBusy || sendTiming === "draft" || openVisitReviewRequestBlocked(selectedOpenVisit)}
                 />{" "}
               </div>
-              {requestReview && (
+              {reviewRequestActive && (
                 <div
                   style={{
                     display: "grid",

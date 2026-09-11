@@ -860,27 +860,68 @@ function alreadyDeliveredForFirstSend(invoice) {
 // its executor has no delivery recheck, so a claim taken meanwhile would
 // text the pay link twice. The queued row is the owner until it delivers
 // (markDeliverySent finalizes) or terminally fails (the row leaves
-// scheduled/sending). Three queues: the completion text
+// scheduled/sending). A row the worker has already settled as 'sent' but
+// not yet finalized (finalize_pending stamped atomically with the
+// settlement; markDeliverySent runs AFTER it) is still an owner (Codex P1
+// r6 #4131): a claim taken in that gap — or after a crash before the
+// finalizer ran — would find the invoice still draft and text the same
+// pay link again. Three queues: the completion text
 // (dispatch_completion_deferred), the held decline notice
 // (autopay_completion_decline_deferred) and the invoice send's own held SMS
 // leg (invoice_send_deferred — queued while the email leg may still fail
 // and restore the row to draft). The invoice-send path passes
 // adoptsQueuedInvoiceSend: a RETRY of that send adopts its queued row by
-// design (never re-queues), so only the completion-owned queues block it;
-// every other claimant — the completion above all — is refused by any of
-// the three with code queued_pay_link, which the completion reads as
+// design (never re-queues) — adoption CONSUMES a still-scheduled row
+// (consumeQueuedInvoiceSend, under the claim) so the live send owns the
+// only delivery; a row the worker has already claimed ('sending', or sent
+// awaiting finalization) refuses the adopter like any other queue (Codex
+// P1 r6 #4131: an operator retry after the hold expired but before the
+// worker consumed the row used to send live AND leave the frozen text to
+// go out). Every other claimant — the completion above all — is refused
+// by any live row with code queued_pay_link, which the completion reads as
 // "delivery owned elsewhere → report-only".
 const COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS = ["dispatch_completion_deferred", "autopay_completion_decline_deferred"];
 const INVOICE_SEND_DEFERRED_ENTRY_POINT = "invoice_send_deferred";
+const PAY_LINK_QUEUE_ENTRY_POINTS = [...COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS, INVOICE_SEND_DEFERRED_ENTRY_POINT];
+// Live = queued, mid-send, or delivered-but-unfinalized.
+const LIVE_PAY_LINK_QUEUE_ROW_SQL = "(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))";
+// The adopter's view: the same, except a still-scheduled invoice_send_deferred
+// row is its own (about to be consumed), not a blocker.
+const ADOPTABLE_PAY_LINK_QUEUE_ROW_SQL = "(status = 'sending' OR (status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND metadata->>'entry_point' <> ?))";
 async function queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend = false } = {}) {
-  const entryPoints = adoptsQueuedInvoiceSend
-    ? COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS
-    : [...COMPLETION_DEFERRED_PAY_LINK_ENTRY_POINTS, INVOICE_SEND_DEFERRED_ENTRY_POINT];
-  return db("sms_log")
-    .whereIn("status", ["scheduled", "sending"])
+  const query = db("sms_log")
     .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
-    .whereRaw("metadata->>'entry_point' = ANY(?)", [entryPoints])
-    .first("id", "scheduled_for");
+    .whereRaw("metadata->>'entry_point' = ANY(?)", [PAY_LINK_QUEUE_ENTRY_POINTS]);
+  if (adoptsQueuedInvoiceSend) query.whereRaw(ADOPTABLE_PAY_LINK_QUEUE_ROW_SQL, [INVOICE_SEND_DEFERRED_ENTRY_POINT]);
+  else query.whereRaw(LIVE_PAY_LINK_QUEUE_ROW_SQL);
+  return query.first("id", "scheduled_for");
+}
+
+// The adopting send consumes its own still-scheduled held SMS leg: the row
+// is cancelled (terminal for the executor and the stranded-finalization
+// sweep) with the reason stamped, and the live send that holds the invoice
+// claim now owns the delivery. If the live SMS leg is held again it
+// re-queues a fresh row (the existing-queue check sees none). Only rows
+// still 'scheduled' are consumable — one the worker has flipped to
+// 'sending' stays its own, and the strict re-check after this refuses.
+async function consumeQueuedInvoiceSend(invoiceId) {
+  const rows = await db("sms_log")
+    .where({ status: "scheduled" })
+    .whereRaw("metadata->>'entry_point' = ?", [INVOICE_SEND_DEFERRED_ENTRY_POINT])
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+    .update({
+      status: "cancelled",
+      updated_at: new Date(),
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'superseded_by_live_send', 'cancelled_at', ?::text)", [new Date().toISOString()]),
+    })
+    .returning("id");
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
+function queuedPayLinkError(queued) {
+  const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
+  e.code = "queued_pay_link";
+  return e;
 }
 
 async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliveryOnly = false, adoptsQueuedInvoiceSend = false } = {}) {
@@ -900,11 +941,6 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
   }
-  const queuedPayLinkError = (queued) => {
-    const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
-    e.code = "queued_pay_link";
-    return e;
-  };
   const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
   if (queuedBefore) throw queuedPayLinkError(queuedBefore);
 
@@ -942,6 +978,26 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   if (queuedUnderClaim) {
     await restoreSendClaim(invoiceId, current.status, true);
     throw queuedPayLinkError(queuedUnderClaim);
+  }
+  // Adoption consumes the send's own still-scheduled held SMS leg UNDER the
+  // claim, then re-checks strictly: a worker that flipped that row to
+  // 'sending' between the check above and the cancel keeps the delivery,
+  // and this claim is given back (Codex P1 r6 #4131). A throw anywhere
+  // here gives the claim back too — the caller never receives it.
+  if (adoptsQueuedInvoiceSend) {
+    let stillQueued;
+    try {
+      const consumed = await consumeQueuedInvoiceSend(invoiceId);
+      if (consumed) logger.info(`[invoice] Queued pay-link SMS for invoice ${invoiceId} consumed by a live send (${consumed} row${consumed === 1 ? "" : "s"} cancelled)`);
+      stillQueued = await queuedPayLinkText(invoiceId);
+    } catch (adoptErr) {
+      await restoreSendClaim(invoiceId, current.status, true);
+      throw adoptErr;
+    }
+    if (stillQueued) {
+      await restoreSendClaim(invoiceId, current.status, true);
+      throw queuedPayLinkError(stillQueued);
+    }
   }
   return { invoice, previousStatus: current.status, claimed: true };
 }

@@ -86,13 +86,19 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     expect(db.__state.status).toBe('draft');
     const queries = () => db.mock.results.map((r) => r.value).filter((q) => q.whereRaw.mock.calls.length);
     let smsLogQuery = queries().pop();
-    expect(smsLogQuery.whereIn).toHaveBeenCalledWith('status', ['scheduled', 'sending']);
+    // Live = queued, mid-send, or settled 'sent' with finalization still
+    // pending (the worker stamps finalize_pending BEFORE markDeliverySent
+    // runs — a claim in that gap must still see the owner; Codex P1 r6).
+    expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))");
     expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'invoice_id' = ?", ['inv-1']);
     expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'entry_point' = ANY(?)", [['dispatch_completion_deferred', 'autopay_completion_decline_deferred', 'invoice_send_deferred']]);
-    // The invoice-send path's own retry: only the completion-owned queues are consulted.
+    // The invoice-send path's own retry: the completion-owned queues and any
+    // worker-claimed row block it; only its own still-SCHEDULED held leg is
+    // adoptable (consumed under the claim).
     await expect(claimInvoiceForSend('inv-1', { adoptsQueuedInvoiceSend: true })).rejects.toMatchObject({ code: 'queued_pay_link' });
     smsLogQuery = queries().pop();
-    expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'entry_point' = ANY(?)", [['dispatch_completion_deferred', 'autopay_completion_decline_deferred']]);
+    expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("metadata->>'entry_point' = ANY(?)", [['dispatch_completion_deferred', 'autopay_completion_decline_deferred', 'invoice_send_deferred']]);
+    expect(smsLogQuery.whereRaw).toHaveBeenCalledWith("(status = 'sending' OR (status = 'sent' AND metadata->>'finalize_pending' = 'true') OR (status = 'scheduled' AND metadata->>'entry_point' <> ?))", ['invoice_send_deferred']);
     // Delivered or terminally failed → the row is no longer live → claimable again.
     db.__state.queuedCompletionText = null;
     const claim = await claimInvoiceForSend('inv-1');
@@ -124,6 +130,59 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       expect(smsLogReads).toBe(2);
       // The claim was taken (draft → sending) and given back (→ draft): nothing left under it.
       expect(db.__state.status).toBe('draft');
+    } finally {
+      db.mockImplementation(original);
+    }
+  });
+
+  test('adoption consumes the send\'s own still-scheduled held SMS leg under the claim, then re-checks strictly: a row the worker claimed meanwhile keeps the delivery and the claim is given back (Codex P1 r6 #4131)', async () => {
+    const db = require('../models/db');
+    const { claimInvoiceForSend } = require('../services/invoice');
+    db.__state.status = 'draft';
+    db.__state.sent_at = null;
+    db.__state.queuedCompletionText = null;
+    const original = db.getMockImplementation();
+    const cancels = [];
+    let strictReads = 0;
+    let workerOwnsRow = false;
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'sms_log') {
+        q.update = jest.fn((values) => {
+          cancels.push({ values, where: q.where.mock.calls[q.where.mock.calls.length - 1][0], raw: q.whereRaw.mock.calls.map((c) => c[0]) });
+          return { returning: jest.fn(async () => (workerOwnsRow ? [] : [{ id: 'sms-held-leg' }])) };
+        });
+        q.first = jest.fn(async () => {
+          const strict = q.whereRaw.mock.calls.some((c) => c[0] === "(status IN ('scheduled', 'sending') OR (status = 'sent' AND metadata->>'finalize_pending' = 'true'))");
+          if (!strict) return null; // adopter's view: its own scheduled leg is not a blocker
+          strictReads += 1;
+          return workerOwnsRow ? { id: 'sms-held-leg', scheduled_for: new Date('2026-09-11T12:00:00Z') } : null;
+        });
+      }
+      return q;
+    });
+    try {
+      // Happy path: the scheduled leg is cancelled (superseded) and the claim is returned.
+      const claim = await claimInvoiceForSend('inv-1', { adoptsQueuedInvoiceSend: true });
+      expect(claim).toMatchObject({ previousStatus: 'draft', claimed: true });
+      expect(cancels).toHaveLength(1);
+      expect(cancels[0].where).toEqual({ status: 'scheduled' });
+      expect(cancels[0].values.status).toBe('cancelled');
+      expect(cancels[0].raw).toEqual(expect.arrayContaining(["metadata->>'entry_point' = ?", "metadata->>'invoice_id' = ?"]));
+      expect(strictReads).toBe(1);
+      // Race: the worker flipped the row to 'sending' first — nothing to cancel,
+      // the strict re-check sees the live row, the claim is refused AND released.
+      db.__state.status = 'draft';
+      workerOwnsRow = true;
+      await expect(claimInvoiceForSend('inv-1', { adoptsQueuedInvoiceSend: true })).rejects.toMatchObject({ code: 'queued_pay_link' });
+      expect(db.__state.status).toBe('draft');
+      // The completion's claim never consumes anything: no adopt flag → no cancel.
+      cancels.length = 0;
+      workerOwnsRow = false;
+      db.__state.status = 'draft';
+      await claimInvoiceForSend('inv-1');
+      expect(cancels).toHaveLength(0);
+      db.__state.status = 'draft';
     } finally {
       db.mockImplementation(original);
     }
