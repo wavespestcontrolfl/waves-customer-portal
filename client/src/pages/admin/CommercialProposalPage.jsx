@@ -206,6 +206,8 @@ function CommercialProposalEditor() {
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
   const [validThrough, setValidThrough] = useState('');
+  // The SAVED fixed date — the one the server enforces on send and Mark won.
+  const [savedValidThrough, setSavedValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
@@ -230,6 +232,13 @@ function CommercialProposalEditor() {
   const [briefOpen, setBriefOpen] = useState(true);
 
   const locked = lockReason(estimate);
+  // A fixed bid past its SAVED validity date stays editable (so the date can
+  // be revised) but cannot be sent or marked won — the server refuses both
+  // (assertBidSendDate / fixedBidDeadlinePassed), so neither action is
+  // offered until a later date is saved (GH codex P2 r5 on #4309). Eastern
+  // calendar-day comparison, the same day the server's proposalExpiry ends.
+  const fixedDeadlinePassed = !!savedValidThrough
+    && new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) > savedValidThrough;
 
   // Monotonic edit generation: every field edit bumps it, and save() applies
   // the normalized reload ONLY if no edit landed while the save round-trip
@@ -271,6 +280,7 @@ function CommercialProposalEditor() {
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
     setTerms(p.terms || '');
     setValidThrough(p.validThrough || '');
+    setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
@@ -1597,7 +1607,10 @@ function CommercialProposalEditor() {
                 {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Download PDF
               </Button>
 
-              {!locked && (
+              {!locked && fixedDeadlinePassed && (
+                <p className="text-13 text-zinc-600">The bid validity date has passed. Save a later Valid through date before sending or marking this proposal won.</p>
+              )}
+              {!locked && !fixedDeadlinePassed && (
                 <Button variant="secondary" className="w-full" onClick={sendProposal} disabled={sending || saving}>
                   {sending ? <Loader2 size={15} className="animate-spin" /> : <SendIcon size={15} />} Review and send
                 </Button>
@@ -1613,7 +1626,7 @@ function CommercialProposalEditor() {
                 </Button>
               )}
 
-              {savedOnce && !estimate?.archivedAt && canMarkProposalWon(estimate) && (
+              {savedOnce && !estimate?.archivedAt && !fixedDeadlinePassed && canMarkProposalWon(estimate) && (
                 <Button variant="secondary" className="w-full" onClick={markWon} disabled={markingWon}>
                   {markingWon ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Mark won
                 </Button>

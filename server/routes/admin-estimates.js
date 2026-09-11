@@ -4296,6 +4296,10 @@ router.put('/:id/proposal', async (req, res, next) => {
             .where((published) => published.whereNotNull('sent_at').orWhereNotNull('viewed_at'))
             .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'")))
         .where('expires_at', '<', authoredExpiry)
+        // Same atomic belt as extendEstimate's group revive (GH codex P1 r5
+        // on #4309): while the rollout gate is on, a member the engine never
+        // verified is never revived onto the customer's group link.
+        .modify((q) => { if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL); })
         .update({
           expires_at: authoredExpiry,
           status: db.raw("CASE WHEN status = 'expired' THEN (CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END) ELSE status END"),

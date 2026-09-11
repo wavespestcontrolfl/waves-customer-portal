@@ -15823,6 +15823,29 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // later requests fall back to notify-office-only, and the office extends
 // manually via POST /api/admin/estimates/:id/extend on their own judgment.
 // Every path raises an in-app admin notification.
+// The notify-only extension claim: group lock (same lock proposal saves,
+// grouped sends, extensions and renewals take) → fresh row → fixed-hold
+// verdict on the CURRENT group → dedupe claim, all in one transaction.
+// `blocked` is the generic-404 answer; `claimed` 0 without a block is the
+// ordinary 24h dedupe (GH codex P1 r5 on #4309). Exported for tests.
+async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
+  return db.transaction(async (trx) => {
+    const fresh = await trx('estimates').where({ id: estimateId }).first();
+    if (!fresh) return { claimed: 0, blocked: true };
+    if (fresh.estimate_group_id) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(fresh.estimate_group_id)]);
+    }
+    if (await require('../services/estimate-extension').fixedBidBlocksExtension(trx, fresh)) return { claimed: 0, blocked: true };
+    const claimed = await trx('estimates')
+      .where({ id: estimateId })
+      .where(dedupeOpen)
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .update({ extension_requested_at: trx.fn.now() });
+    return { claimed, blocked: false };
+  });
+}
+
 router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('estimateExtensionRequest')) {
@@ -15977,11 +16000,13 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // must not fall through to a 201 that pages the office — the row is off
     // the surface, so the answer is the same generic 404 as an unknown
     // token (no enumeration). A zero row is re-read to tell the two apart.
-    const claimed = await db('estimates')
-      .where({ id: estimate.id })
-      .where(DEDUPE_OPEN)
-      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-      .update({ extension_requested_at: db.fn.now() });
+    // Serialized and re-judged like the auto-grant inside extendEstimate
+    // (GH codex P1 r5 on #4309): a sibling can gain a fixed date between
+    // the preflight above and this claim, and the route contract answers a
+    // fixed-validity group with the generic 404 BEFORE any claim burns the
+    // window or pages the office.
+    const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);
+    if (blocked) return res.status(404).json({ error: 'Estimate not found' });
     if (!claimed) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
       if (!fresh || estimateOffCustomerSurface(fresh)) {
@@ -26118,6 +26143,7 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
+module.exports.claimNotifyOnlyExtensionRequest = claimNotifyOnlyExtensionRequest;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.clampLawnLadderEntry = clampLawnLadderEntry;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;

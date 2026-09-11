@@ -88,6 +88,11 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
 const { gateEnvValue } = require('../config/feature-gates');
+jest.mock('../services/pricing-authority-gate', () => {
+  const actual = jest.requireActual('../services/pricing-authority-gate');
+  return { ...actual, gatedSendAuthorityPredicateApplies: jest.fn(() => false) };
+});
+const pricingAuthorityGate = require('../services/pricing-authority-gate');
 
 let row;
 let mutations;
@@ -267,6 +272,19 @@ describe('commercial bid authoring', () => {
     expect(String(siblingExtension.patch.status?.sql ?? siblingExtension.patch.status)).toMatch(/WHEN status = 'expired' THEN \(CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END\)/);
     expect(String(siblingExtension.patch.disposition?.sql ?? siblingExtension.patch.disposition)).toMatch(/expired_unviewed/);
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+  });
+  test('the push-forward revival carries the pricing-authority predicate while the rollout gate is on (GH codex P1 r5 on #4309)', async () => {
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
+    pricingAuthorityGate.gatedSendAuthorityPredicateApplies.mockReturnValue(true);
+    const whereRawSql = [];
+    db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
+    try {
+      const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+      expect(res.statusCode).toBe(200);
+      expect(whereRawSql).toContain(pricingAuthorityGate.GATED_SEND_AUTHORITY_SQL);
+    } finally {
+      pricingAuthorityGate.gatedSendAuthorityPredicateApplies.mockReturnValue(false);
+    }
   });
   test('shortening a fixed hold pulls members back off the obsolete widened expiry (GH codex P1 r4 on #4309)', async () => {
     const oldExpiry = new Date('2100-01-01T04:59:59.999Z');
