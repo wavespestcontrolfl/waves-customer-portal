@@ -300,6 +300,7 @@ export default function EquipmentMaintenancePage({
   };
 
   // ─── RENDER ─────────────────────────────────────────────────────
+  const fleetLoaded = overview != null || equipment.length > 0 || alerts.length > 0;
   return <div style={embedded ? undefined : {
     maxWidth: 1300,
     margin: "0 auto"
@@ -312,12 +313,14 @@ export default function EquipmentMaintenancePage({
           {toast}
         </Card>}
       {tab === "fleet" && fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
-          Could not load fleet: {fleetError}
+          {fleetLoaded ? "Could not refresh fleet: " : "Could not load fleet: "}
+          {fleetError}
+          {fleetLoaded && ". Showing previously loaded data."}
         </ActionFeedback>}
       {analyticsError && tab === "analytics" && <ActionFeedback error onRetry={loadAnalytics} className="mb-4">
           Could not load analytics: {analyticsError}
         </ActionFeedback>}
-      {tab === "fleet" && !fleetError && <FleetTab {...{
+      {tab === "fleet" && (!fleetError || fleetLoaded) && <FleetTab {...{
       loading,
       overview,
       alerts,
@@ -453,8 +456,7 @@ function FleetTab({
       marginBottom: 16
     }}>
         {" "}
-        <Field label="Category">
-          <Select value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
+        <Select aria-label="Category" value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
           width: "auto",
           minWidth: 140
         }}>
@@ -463,10 +465,8 @@ function FleetTab({
             {categories.map(c => <option key={c} value={c}>
                 {c}
               </option>)}
-          </Select>
-        </Field>{" "}
-        <Field label="Status">
-          <Select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
+          </Select>{" "}
+        <Select aria-label="Status" value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
           width: "auto",
           minWidth: 130
         }}>
@@ -477,10 +477,8 @@ function FleetTab({
             <option value="retired">Retired</option>{" "}
             <option value="sold">Sold</option>{" "}
             <option value="lost">Lost</option>{" "}
-          </Select>
-        </Field>{" "}
-        <Field label="Sort by">
-          <Select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
+          </Select>{" "}
+        <Select aria-label="Sort by" value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
           width: "auto",
           minWidth: 130
         }}>
@@ -488,8 +486,7 @@ function FleetTab({
             <option value="name">Sort: Name</option>{" "}
             <option value="condition">Sort: Condition</option>{" "}
             <option value="cost">Sort: Cost</option>{" "}
-          </Select>
-        </Field>{" "}
+          </Select>{" "}
       </div>
       {/* Equipment Grid */}
       <div style={{
