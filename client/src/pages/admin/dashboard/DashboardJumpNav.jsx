@@ -98,7 +98,7 @@ export default function DashboardJumpNav({
   };
 
   return (
-    <div className="z-20 mb-5 md:sticky md:top-0 md:bg-surface-page/95 md:pb-3">
+    <div data-qa="dashboard-jump-nav" className="z-20 mb-5 md:sticky md:top-0 md:bg-surface-page/95 md:pb-3">
       <AdminCommandHeader
         title={title}
         icon={LayoutDashboard}

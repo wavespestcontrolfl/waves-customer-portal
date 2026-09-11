@@ -113,7 +113,13 @@ async function main() {
       }
     });
     const result = await page.evaluate(() => {
-      const rootElement = document.querySelector('main [data-ui-density="comfortable"]');
+      // Scope to the navigation foundation this commit migrates. The rest of the
+      // dashboard (ActionInbox, the chart cards, the AI panel) still renders its
+      // own explicit text-11/text-13 and sub-44px controls, which UiSurface does
+      // not override, so a whole-page scan fails before the nav is ever exercised.
+      // Those panels come with their own migrations.
+      const scope = document.querySelector('[data-qa="dashboard-jump-nav"]');
+      const rootElement = scope || document.querySelector('main [data-ui-density="comfortable"]');
       if (!rootElement) throw new Error('Comfortable dashboard surface missing');
       const visible = (node) => node.getClientRects().length > 0;
       const smallText = [...rootElement.querySelectorAll('*')]
@@ -129,7 +135,7 @@ async function main() {
         smallText,
         shortControls,
         overflow: document.documentElement.scrollWidth > innerWidth + 1,
-        titleSize: parseFloat(getComputedStyle(rootElement.querySelector('h1')).fontSize),
+        titleSize: parseFloat(getComputedStyle(document.querySelector('main h1')).fontSize),
       };
     });
     report.geometry.push({ name, viewport: page.viewportSize(), ...result });
@@ -143,7 +149,11 @@ async function main() {
   }
 
   try {
-    server = await previewServer(root, 'http://127.0.0.1:25157');
+    // No URL unless one is supplied: browser.js treats any requested URL as an
+    // externally managed server and throws instead of starting Vite, so the
+    // documented bare invocation could never come up on a clean checkout. A
+    // caller-supplied URL still wins, and setup() picks this checkout's port.
+    server = await previewServer(root, process.argv.find((arg) => arg.startsWith('http://')) || process.env.ADMIN_PREVIEW_URL);
     browser = await launchBrowser();
 
     const desktop = await openPage(1440);

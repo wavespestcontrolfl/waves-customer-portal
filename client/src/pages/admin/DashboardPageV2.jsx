@@ -516,8 +516,14 @@ export default function DashboardPageV2() {
         <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body">
           <Card>
             <CardBody>
-              <ActionFeedback error onRetry={() => window.location.reload()}>
-                Too many requests. Wait a few seconds and try again.
+              {/* The sentence keeps main's wording, so the retry affordance stays
+                  inline rather than becoming ActionFeedback's "Try again" button. */}
+              <ActionFeedback error>
+                Too many requests. Wait a few seconds and{" "}
+                <button onClick={() => window.location.reload()} className="underline">
+                  retry
+                </button>
+                .
               </ActionFeedback>
             </CardBody>
           </Card>
@@ -541,8 +547,12 @@ export default function DashboardPageV2() {
       <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body">
         <Card>
           <CardBody>
-            <ActionFeedback error onRetry={() => window.location.reload()}>
-              Failed to load dashboard.
+            <ActionFeedback error>
+              Failed to load dashboard.{" "}
+              <button onClick={() => window.location.reload()} className="underline">
+                Retry
+              </button>
+              .
             </ActionFeedback>
           </CardBody>
         </Card>

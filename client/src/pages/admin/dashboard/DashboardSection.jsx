@@ -1,6 +1,8 @@
-// Labeled anchor target for the jump-nav. The scroll-mt offsets clear the
-// sticky nav bar: two stacked rows below xl (section tabs over the period
-// strip — ~80px at md–lg, taller still with the mobile select), one row at xl+.
+// Labeled anchor target for the jump-nav. The scroll-mt offsets clear the sticky
+// nav bar, which at md–lg stacks the ~116px workspace command header, its gap and
+// the two-row period card — over 240px including the wrapper's bottom padding, so
+// the old md:scroll-mt-52 (208px) dropped headings under the chrome. md–xl clears
+// 288px; xl+ collapses the period strip onto one row and needs less.
 // `about` renders a native-details dropdown under the header explaining what
 // the section is for and how to read it — tap "What is this?" to expand.
 export default function DashboardSection({ id, title, caption, about, children }) {
@@ -8,7 +10,7 @@ export default function DashboardSection({ id, title, caption, about, children }
     <section
       id={id}
       aria-label={title}
-      className="mb-6 scroll-mt-56 md:scroll-mt-52"
+      className="mb-6 scroll-mt-56 md:scroll-mt-72 xl:scroll-mt-56"
     >
       <div className="flex items-baseline justify-between gap-3 pb-1.5 border-b border-hairline border-zinc-200">
         <h2 className="text-18 font-medium leading-[1.35] text-zinc-900">{title}</h2>
