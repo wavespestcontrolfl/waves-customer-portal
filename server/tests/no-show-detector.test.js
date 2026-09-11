@@ -25,6 +25,18 @@ describe('missing tracking stages', () => {
     expect(at('11:30', { scheduled_date: '2026-09-12', window_start: '14:00' })?.stage).toBe(2);
     expect(at('11:30', { status: 'completed' })).toBeNull();
   });
+  test('the 48h horizon gates creation only: ignoreHorizon keeps a still-live, evidence-free visit overdue past it', () => {
+    // 2026-09-12 09:01 ET is 48h + 1min after the promised 09:00 start.
+    const late = (extra = {}, opts = {}) => evaluateNoShow({ visit: { ...visit, ...extra }, promise, now: new Date('2026-09-12T09:01:00-04:00'), ...opts });
+    // Default (listNoShows' candidate feed): nothing new is minted this late.
+    expect(late()).toBeNull();
+    // Reconcile passes: elapsed time alone is not "no longer applicable".
+    expect(late({}, { ignoreHorizon: true })).toMatchObject({ stage: 2, evidence: 'missing_tracking' });
+    // Every other exit still applies with the horizon ignored.
+    expect(late({ arrived_at: '2026-09-10T11:40:00-04:00' }, { ignoreHorizon: true })).toBeNull();
+    expect(late({ status: 'completed' }, { ignoreHorizon: true })).toBeNull();
+    expect(evaluateNoShow({ visit, promise: null, now: new Date('2026-09-12T09:01:00-04:00'), ignoreHorizon: true })).toBeNull();
+  });
   test('a newer unknown communication window cannot be replaced by an older known one', () => {
     const map = latestPromises([promise, { ...promise, start_at: null, communicated_at: '2026-09-10T08:00:00-04:00' }], new Date('2026-09-10T12:00:00-04:00'));
     expect(map.get('visit').start_at).toBeNull();
@@ -421,6 +433,68 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   });
 });
 
+
+describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid is not (audit P1)', () => {
+  // twilio.js inserts the sms_log row AFTER Twilio accepted the message,
+  // inside its own try/catch — a logging failure (or an audit row that
+  // predates the twilio_sid link) leaves a text the customer really got
+  // with no sms_log row. Requiring positive sms_log proof dropped that
+  // promise and let latestPromises fall back to an older window. Mirror of
+  // the email read's em.id IS NULL rule, but only for a real SM/MM sid:
+  // 'owner-silence' and the gate-/template-/internal- sentinels mean NO
+  // text went out and never get an sms_log row either.
+  function passthroughChain(result = []) {
+    const chain = {};
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'where']) chain[m] = () => chain;
+    chain.select = () => Promise.resolve(result);
+    return chain;
+  }
+  function fakeConn() {
+    const calls = {};
+    const conn = (table) => {
+      if (table === 'customer_interactions as ci' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a') {
+        const chain = {};
+        for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
+        chain.where = (...args) => { (calls.whereCalls ||= []).push(args); return chain; };
+        chain.select = () => Promise.resolve([]);
+        return chain;
+      }
+      throw new Error(`fake conn: unexpected table ${table}`);
+    };
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    conn.isTransaction = true;
+    return { conn, calls };
+  }
+
+  test('push OR linked sent/delivered/read OR (unlinked AND real Twilio sid)', async () => {
+    const { conn, calls } = fakeConn();
+    await loadPromiseEvents(conn, ['visit-1']);
+    const deliveredCall = (calls.whereCalls || []).find(([arg]) => typeof arg === 'function');
+    expect(deliveredCall).toBeTruthy();
+
+    const inner = { whereNull: jest.fn(() => inner), whereRaw: jest.fn(() => inner) };
+    const qb = {
+      where: jest.fn(() => qb), orWhereIn: jest.fn(() => qb),
+      orWhere: jest.fn((fn) => { fn.call(inner); return qb; }),
+    };
+    deliveredCall[0].call(qb);
+    expect(qb.where).toHaveBeenCalledWith('a.provider', 'push');
+    expect(qb.orWhereIn).toHaveBeenCalledWith('s.status', ['sent', 'delivered', 'read']);
+    expect(inner.whereNull).toHaveBeenCalledWith('s.id');
+    const [sidSql] = inner.whereRaw.mock.calls[0];
+    expect(sidSql).toContain('a.provider_message_id');
+    // The sid shape gate is the one thing that keeps the sentinels out.
+    const pattern = new RegExp(sidSql.match(/'(\^.*\$)'/)[1], 'i');
+    expect(pattern.test('SM' + 'a'.repeat(32))).toBe(true);
+    expect(pattern.test('MM' + '0123456789abcdef'.repeat(2))).toBe(true);
+    expect(pattern.test('owner-silence')).toBe(false);
+    expect(pattern.test('gate-quiet-hours')).toBe(false);
+    expect(pattern.test('template-disabled')).toBe(false);
+    expect(pattern.test('internal-redirect')).toBe(false);
+    expect(pattern.test('push:delivered')).toBe(false);
+  });
+});
 
 describe('cancellation -> reopen lifecycle (same key throughout, not just reassignment)', () => {
   // Distinguishes this from the A -> B -> A case above: here the tracking

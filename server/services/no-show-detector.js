@@ -37,13 +37,26 @@ const instant = (value) => value == null ? NaN : new Date(value).getTime();
 
 // Pure, also used by the replay. All evidence must exist by the evaluation
 // time; a later arrival cannot erase an earlier useful warning in a replay.
-function evaluateNoShow({ visit, promise, now = new Date(), stage1Minutes = 45 } = {}) {
+//
+// The 48h horizon below gates CREATION, not retention: listNoShows (the
+// candidate feed behind every NEW alert/notice) always calls this with
+// ignoreHorizon left false, so an ancient, presumably-already-handled
+// promise never mints a fresh alert out of nowhere. sweep()'s two
+// reconcile passes (the open dispatch_alerts loop and the tech-notice
+// loop) pass ignoreHorizon: true instead, so a visit that's STILL in
+// LIVE_STATUSES with no arrival/departure evidence and an unchanged
+// promise keeps its already-open alert/notice alive past 48h — without
+// this split, elapsed time alone silently auto-resolved the exact
+// still-unresolved no-show this feature exists to surface (codex P1).
+// Every OTHER exit (status left LIVE_STATUSES, arrival/departure
+// evidence, no promise, a changed promise) still applies unconditionally.
+function evaluateNoShow({ visit, promise, now = new Date(), stage1Minutes = 45, ignoreHorizon = false } = {}) {
   if (!visit || !LIVE_STATUSES.includes(visit.status) || !promise) return null;
   const start = instant(promise.start_at);
   const known = instant(promise.communicated_at);
   const nowMs = instant(now);
   if (!Number.isFinite(start) || !Number.isFinite(known) || known > nowMs || nowMs < start
-    || nowMs > start + 48 * 3600000) return null;
+    || (!ignoreHorizon && nowMs > start + 48 * 3600000)) return null;
   const dayStart = parseETDateTime(`${etDateString(new Date(start))}T00:00`).getTime();
   const observed = (stamp) => Number.isFinite(instant(stamp)) && instant(stamp) >= dayStart && instant(stamp) <= nowMs;
   const arrived = ['arrived_at', 'actual_start_time', 'check_in_time'].some((key) => observed(visit[key]));
@@ -102,7 +115,28 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
           OR a.metadata->>'original_message_type' = ANY(?::text[]))))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
       .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
-      .where(function delivered() { this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read']); })
+      // Live delivery state comes from the sms_log row Twilio's status
+      // callback updates. A LINKED row must currently read sent/delivered/
+      // read (queued/scheduled/sending never reached the phone yet;
+      // undelivered/failed/blocked never will). An UNLINKED audit row
+      // (s.id IS NULL) is neutral, not bad, exactly like the email read's
+      // em.id IS NULL below: twilio.js's sms_log insert runs AFTER the
+      // Twilio API accepted the message and is wrapped in its own
+      // try/catch, so a logging failure — or an audit row older than the
+      // twilio_sid link — leaves a text the customer really received with
+      // no sms_log row at all; requiring positive proof here dropped that
+      // promise and let latestPromises fall back to an older window (audit
+      // P1). Neutral ONLY for a real Twilio SM/MM sid (the same shape
+      // send-customer-message's recordReceiptSmsDelivery trusts): the
+      // success-shaped sentinels ('owner-silence', gate-/template-/
+      // internal-) mean NO text reached the customer and never get an
+      // sms_log row, so they must stay excluded.
+      .where(function delivered() {
+        this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read'])
+          .orWhere(function unlinkedRealSend() {
+            this.whereNull('s.id').whereRaw(`a.provider_message_id ~* '^(SM|MM)[a-f0-9]{32}$'`);
+          });
+      })
       .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at'),
     // appointment-email.js's own send-time customer_interactions row is
     // never updated afterward (it stays status:'sent' forever) — the LIVE
@@ -375,7 +409,21 @@ async function sweep(conn, { now = new Date() } = {}) {
     if (!enabled()) return;
     const visit = await trx('scheduled_services').where({ id: alert.job_id }).forUpdate().first();
     const promise = latestPromises(await loadPromiseEvents(trx, [String(alert.job_id)], { now }), now).get(String(alert.job_id));
-    const live = evaluateNoShow({ visit, promise, now });
+    // ignoreHorizon: true — past the 48h horizon this alert's own visit
+    // would no longer appear in listNoShows' candidate set at all (the
+    // horizon gates CREATION, not retention — see evaluateNoShow), and
+    // this reconcile pass is the only thing left touching it. Without
+    // this, elapsed time alone would read as "no longer applicable" and
+    // auto-resolve a visit that's still overdue with zero evidence
+    // (codex P1).
+    // Deliberately NO tracking_key / recipient comparison here: a tech ->
+    // tech reassignment inside the horizon is the per-card loop's job (it
+    // resolves the old key AND mints the replacement), and past the horizon
+    // nothing can mint a replacement — resolving on a recipient change
+    // there would be the same silent drop, so the existing card stays open
+    // (naming the tech it was raised against) until the visit itself moves
+    // on or a dispatcher resolves it.
+    const live = evaluateNoShow({ visit, promise, now, ignoreHorizon: true });
     if (!live || live.stage !== alert.payload.stage || live.promised_window.start_at !== alert.payload.promised_window?.start_at) {
       // Same automatic-supersession stamp as the per-card loop above (codex
       // P1) — this pass catches a visit that dropped out of `rows`
@@ -399,7 +447,10 @@ async function sweep(conn, { now = new Date() } = {}) {
     const visitId = notice.payload?.visit_id;
     const visit = visitId ? await trx('scheduled_services').where({ id: visitId }).forUpdate().first() : null;
     const promise = visit ? latestPromises(await loadPromiseEvents(trx, [String(visitId)], { now }), now).get(String(visitId)) : null;
-    const live = visit ? evaluateNoShow({ visit, promise, now }) : null;
+    // ignoreHorizon: true for the same reason as the dispatch_alerts pass
+    // above — elapsed time alone must not dismiss a notice for a visit
+    // that is still live with no arrival evidence.
+    const live = visit ? evaluateNoShow({ visit, promise, now, ignoreHorizon: true }) : null;
     const sameRecipient = !!(live && visit.technician_id === notice.technician_id);
     // The tech this notice was written for may have gone
     // field_dispatchable=false since (a deliberate move to office-only —
