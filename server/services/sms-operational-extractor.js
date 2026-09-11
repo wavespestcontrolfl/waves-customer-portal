@@ -9,15 +9,25 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v15';
+const VERSION = 'sms-ops-v18';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
   'neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code',
 ]);
 const SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['obligations', 'facts'],
+  type: 'object', additionalProperties: false, required: ['obligations', 'facts', 'additional_properties'],
   properties: {
+    additional_properties: {
+      type: 'array', maxItems: 8,
+      items: { type: 'object', additionalProperties: false,
+        required: ['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote'],
+        properties: { ...Object.fromEntries(['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote']
+          .map((field) => [field, { type: field === 'address_line1' || field === 'quote' ? 'string' : ['string', 'null'], maxLength: 900 }])),
+          label: { type: ['string', 'null'], maxLength: 100 },
+        },
+      },
+    },
     obligations: {
       type: 'array', maxItems: 12,
       items: {
@@ -105,11 +115,25 @@ function matchesExplicitAccessCode({ quote, field, value }) {
   return fields[match[1].toLowerCase()] === field && match[2].trim() === value;
 }
 
-function stringifySmsEvidence(value) {
-  return JSON.stringify(value, (key, item) => typeof item === 'string' ? scrubPans(item) : item);
+// Row ids and record refs are identifiers this codebase generates, never
+// cardholder data, but roughly one UUID in 500 hides a Luhn-valid 13-19 digit
+// run that the PAN detector rewrites. A rewritten id silently breaks the
+// citation contract in both directions: the prompt offers a ref the model
+// cannot be matched back to, and a faithful `record_ref` echo fails the
+// sensitive-output guard. Exempt a value only when the key names an id AND
+// the value is UUID-shaped, so free text can never claim the exemption.
+const ID_KEY = /(?:^|_)(?:id|ref)$/;
+const OPAQUE_ID = /^(?:[a-z_]+:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function opaqueId(key, item) {
+  return ID_KEY.test(String(key)) && OPAQUE_ID.test(item);
 }
 
-function buildPrompt({ message, history = [], properties = [], captureCommitments = true }) {
+function stringifySmsEvidence(value) {
+  return JSON.stringify(value, (key, item) => typeof item === 'string' && !opaqueId(key, item)
+    ? scrubPans(item) : item);
+}
+
+function buildPrompt({ message, history = [], properties = [], captureCommitments = true, captureAdditionalProperties = false }) {
   // Bridge a card readback split across consecutive messages before each
   // JSON string is scrubbed. A missing/throwing scrubber stops the lane.
   const messages = [...history, message];
@@ -134,6 +158,12 @@ Obligations (capture enabled: ${captureCommitments}; when false return obligatio
 - Do not call a reply fulfillment. "I'll send the estimate" still means an estimate is owed.
 - due_text must quote the timing actually stated in the current message. due_at is an ISO timestamp ONLY for an explicitly stated date AND clock time, resolved from that message's timestamp in America/New_York. For tomorrow/afternoon/end of day without a clock time, keep due_at=null. Never invent a default deadline.
 
+Additional properties (capture enabled: ${captureAdditionalProperties}; when false return additional_properties=[]):
+- For an INBOUND message naming additional service addresses, propose one item per address. This only creates office review; never approve an account relationship, property role, or a primary-residence change.
+- Preserve the customer’s own label (for example "family", "primary", "rental") as label, copied verbatim from the current message only when clearly attached to this address; otherwise null. A label never proves ownership or a shared billing account.
+- quote must be the COMPLETE single line containing that address, verbatim. Every non-null address part must occur verbatim in that line. Leave missing city/state/ZIP null. Never borrow the current customer's address or infer that family members belong to one billing account. The office sees the full message, including every condition and qualifier.
+- A multi-address list is allowed here even when other fact fields require the complete message. If the current message exceeds 600 characters return facts=[] and obligations=[]; still capture address proposals.
+
 Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
@@ -156,7 +186,7 @@ function hasClockRange(body) {
   return false;
 }
 
-function groundExtraction(parsed, { message, properties = [], captureCommitments = true }) {
+function groundExtraction(parsed, { message, properties = [], captureCommitments = true, captureAdditionalProperties = false }) {
   if (!validate(parsed)) throw new Error('sms_operations_invalid_schema');
   if (stringifySmsEvidence(parsed) !== JSON.stringify(parsed)) throw new Error('sms_operations_sensitive_output');
   const body = normalize(message.message_body);
@@ -166,7 +196,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const propertyIds = new Set(properties.map((p) => p.id));
   const grounded = (item) => body.includes(normalize(item.quote))
     && (!item.property_id || propertyIds.has(item.property_id));
-  const obligations = (captureCommitments ? parsed.obligations : []).filter((item) => {
+  const obligations = (captureCommitments && message.message_body.length <= 600 ? parsed.obligations : []).filter((item) => {
     if (!grounded(item) || !kindBelongsToParty(item.party, item.kind)) return false;
     if (item.basis === 'promise' && isQuestionSource(message.message_body)) return false;
     // Mixed/negated instructions need a human reading of scope; a keyword
@@ -206,7 +236,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   // when ..." may qualify an earlier sentence. Retain the complete source
   // instead of maintaining an open-ended list of possible conjunctions.
   const completeSource = message.message_body.trim();
-  const facts = message.direction !== 'inbound' ? [] : parsed.facts.filter((item) => {
+  const facts = message.direction !== 'inbound' || message.message_body.length > 600 ? [] : parsed.facts.filter((item) => {
     if (!grounded(item) || item.quote.trim() !== completeSource || isQuestionSource(completeSource)) return false;
     if (item.field === 'contact_preference') return explicitContactPreference(item.quote) === item.value;
     if (item.field.endsWith('_code')) return matchesExplicitAccessCode(item);
@@ -215,13 +245,28 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const factDropped = parsed.facts.length - facts.length;
   const obligationDropped = captureCommitments
     ? parsed.obligations.length - obligations.length + obligations.filter((item) => item.timing_unverified).length : 0;
-  return { obligations, facts, dropped: factDropped + obligationDropped };
+  const lines = message.message_body.split(/\r?\n/).map((line) => line.trim());
+  const additional = captureAdditionalProperties && message.direction === 'inbound' ? parsed.additional_properties : [];
+  const seen = new Set();
+  const additional_properties = additional.filter((item) => {
+    if (!lines.includes(item.quote.trim()) || !/^\d+[A-Za-z-]*\s+\S/.test(item.address_line1.trim())) return false;
+    if (['address_line1', 'address_line2', 'city', 'state', 'zip'].some((key) => item[key] && !normalize(item.quote).includes(normalize(item[key])))) return false;
+    if (item.label && !normalize(item.quote).includes(normalize(item.label))) return false;
+    const key = require('./customer-properties').addressKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).map((item) => Object.fromEntries(['address_line1', 'address_line2', 'city', 'state', 'zip', 'quote', 'label'].map((key) => [key, item[key] || null])));
+  const dropped = factDropped + obligationDropped + additional.length - additional_properties.length;
+  // Address capture may inspect a longer source, but its other instructions
+  // still need the existing operational-review exception even for empty arrays.
+  return { obligations, facts, additional_properties, dropped: message.message_body.length > 600 ? Math.max(1, dropped) : dropped };
 }
 
 async function extractSmsOperations(context) {
   // Whole-source facts must fit the narrowest schema field. Longer SMS
   // go to the existing exception path, even if a provider would return [].
-  if (context.message.message_body.length > 600) return { obligations: [], facts: [], dropped: 1 };
+  if (context.message.message_body.length > (context.captureAdditionalProperties ? 6000 : 600)) return { obligations: [], facts: [], additional_properties: [], dropped: 1 };
   let prompt;
   try { prompt = buildPrompt(context); } catch (err) {
     if (err.message === 'sms_operations_source_boundary_changed') return { obligations: [], facts: [], dropped: 1 };

@@ -560,6 +560,59 @@ export function applyServerTermiteRentalPricingConfig(config) {
   return TERMITE_RENTAL_QUARTERS;
 }
 
+// Station hardware cost basis (plan 2026-09-03 §A1) — DB-tunable via
+// pricing_config.termite_install AND, on the server, overlaid by the
+// inventory catalog link. GET /admin/pricing-config/termite_install serves
+// the ENGINE'S effective values under `effective` (station cost + its
+// source), so this fallback previews — and stamps — the same hardware cost
+// the server will price. Same live-rates posture as the appliers above;
+// absent/invalid resets the in-code default (kill-value pattern).
+const TERMITE_INSTALL_DEFAULTS = Object.freeze({
+  trelonaStationCost: 24.00, // $384 / 16-station box (owner 2026-09-02)
+  trelonaStationCostSource: 'config',
+  cartridgeCostSource: 'config',
+  advanceStationCost: 13.16,
+  laborMaterial: 5.25,
+  misc: 0.75,
+  multiplier: 1.45,
+  minStations: 8,
+});
+let TERMITE_INSTALL = { ...TERMITE_INSTALL_DEFAULTS };
+const positiveNumber = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+const nonNegativeNumber = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+// One row per knob: the engine-effective key first, then the row aliases the
+// server bridge reads, then the in-code default (table-driven so the applier
+// carries no per-key branching — codex #4313 r5 P2).
+const TERMITE_INSTALL_KNOBS = [
+  { key: 'trelonaStationCost', effective: 'trelona_station_cost', row: ['trelona_bait', 'trelona_station_cost'], parse: positiveNumber },
+  { key: 'advanceStationCost', effective: 'advance_station_cost', row: ['advance_bait', 'advance_station_cost'], parse: positiveNumber },
+  { key: 'laborMaterial', effective: 'labor_material_per_station', row: ['labor_per_station', 'labor_material_per_station'], parse: nonNegativeNumber },
+  { key: 'misc', effective: 'misc_per_station', row: ['misc_per_station'], parse: nonNegativeNumber },
+  { key: 'multiplier', effective: 'install_multiplier', row: ['multiplier', 'install_multiplier'], parse: positiveNumber },
+  { key: 'minStations', effective: 'min_stations', row: ['min_stations', 'minStations'], parse: positiveNumber },
+];
+function firstParsed(parse, source, keys) {
+  for (const k of keys) {
+    const v = source ? parse(source[k]) : null;
+    if (v != null) return v;
+  }
+  return null;
+}
+
+export function applyServerTermiteInstallPricingConfig(config, effective = config?.effective) {
+  const eff = effective && typeof effective === 'object' ? effective : null;
+  const row = config && typeof config === 'object' ? config : null;
+  const next = { ...TERMITE_INSTALL_DEFAULTS };
+  for (const knob of TERMITE_INSTALL_KNOBS) {
+    next[knob.key] = firstParsed(knob.parse, eff, [knob.effective]) ?? firstParsed(knob.parse, row, knob.row) ?? TERMITE_INSTALL_DEFAULTS[knob.key];
+  }
+  // Provenance rides only with an effective value (the row alone is 'config').
+  next.trelonaStationCostSource = eff?.trelona_station_cost_source === 'catalog' && firstParsed(positiveNumber, eff, ['trelona_station_cost']) != null ? 'catalog' : 'config';
+  next.cartridgeCostSource = eff?.cartridge_cost_source === 'catalog' ? 'catalog' : 'config';
+  TERMITE_INSTALL = next;
+  return { ...TERMITE_INSTALL };
+}
+
 // Station-check brackets (owner 2026-07-28) — DB-tunable via
 // pricing_config.termite_monitoring, same live-rates posture as the bond and
 // rental appliers above. monthly = base + step × max(0, ceil(sta/bracket)−2):
@@ -2674,11 +2727,16 @@ export function calculateEstimate(inputs) {
       // station count. Menu is Trelona-only; Advance stays computable for
       // replaying old estimates.
       const tmSystem = termiteBaitSystem || 'trelona';
-      const staAdv = Math.max(8, Math.ceil(perim / 10));
-      const staTre = Math.max(8, Math.ceil(perim / 15));
+      // Install basis from the live server config + catalog link
+      // (applyServerTermiteInstallPricingConfig), never a baked literal —
+      // this preview is a CLIENT_FALLBACK save candidate and must price and
+      // stamp what the server prices (codex #4313 r1 P1).
+      const TI = TERMITE_INSTALL;
+      const staAdv = Math.max(TI.minStations, Math.ceil(perim / 10));
+      const staTre = Math.max(TI.minStations, Math.ceil(perim / 15));
       const sta = tmSystem === 'advance' ? staAdv : staTre;
-      const ai = Math.round((staAdv * (13.16 + 5.25 + 0.75)) * 1.45);
-      const ti = Math.round((staTre * (22.05 + 5.25 + 0.75)) * 1.45);
+      const ai = Math.round((staAdv * (TI.advanceStationCost + TI.laborMaterial + TI.misc)) * TI.multiplier);
+      const ti = Math.round((staTre * (TI.trelonaStationCost + TI.laborMaterial + TI.misc)) * TI.multiplier);
       // Bracketed by the selected system's station count; the retired
       // Basic/Premier tier input no longer changes price (bmo/pmo kept for
       // legacy readers, both stamped with the bracket monthly).
@@ -2700,6 +2758,23 @@ export function calculateEstimate(inputs) {
         measurements: {
           footprintSqFt: { value: fpEff || null, source: termiteFootprintSqFt ? 'manual_override' : 'property_footprint' },
           perimeterLF: { value: perim, source: termitePerimeterLF ? 'manual_override' : 'computed_from_footprint' },
+        },
+        // Quote-time station-cost snapshot — the server's pricingKnobs shape
+        // (plan §A1 replay rule). A CLIENT_FALLBACK save persists this
+        // envelope, and the replay reader treats an UNSTAMPED termite result
+        // as pre-A1 ($22.05); stamping here keeps a new $24 quote at $24.
+        pricingKnobs: {
+          system: tmSystem,
+          stationCost: tmSystem === 'advance' ? TI.advanceStationCost : TI.trelonaStationCost,
+          stationCostSource: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
+          laborMaterial: TI.laborMaterial,
+          misc: TI.misc,
+          installMultiplier: TI.multiplier,
+          minStations: TI.minStations,
+        },
+        materialCostSource: {
+          station: tmSystem === 'advance' ? 'config' : TI.trelonaStationCostSource,
+          cartridge: tmSystem === 'trelona' ? TI.cartridgeCostSource : 'none',
         },
       };
       wgServices.push({

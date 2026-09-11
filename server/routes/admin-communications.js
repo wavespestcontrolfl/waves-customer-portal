@@ -3,13 +3,14 @@ const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -155,16 +156,36 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
   return null;
 }
 
+// The linked customer of a source call, when the number being dialed is one
+// of their known-caller numbers. Null otherwise (unlinked source, deleted
+// customer, or a number the customer is not known by).
+async function customerOfSourceCall(callId, to) {
+  const normalizedTo = normalizePhone(to);
+  if (!normalizedTo) return null;
+  const customer = await db('customers as c')
+    .whereIn('c.id', db('call_log').select('customer_id').where({ id: callId }).whereNotNull('customer_id'))
+    .whereNull('c.deleted_at').first('c.*')
+    .catch((e) => { logger.warn(`[admin-call] source-call customer lookup failed: ${e.message}`); return null; });
+  if (!customer) return null;
+  const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+  return KNOWN_CALLER_PHONE_COLS.some((column) => normalizedTo === normalizePhone(customer[column])) ? customer : null;
+}
+
 async function findSingleCustomerForPhone(phone) {
-  // Compare on the last 10 digits so stored formats ('+19415551234',
-  // '9415551234', '(941) 555-1234') all match the same dialable number —
-  // full-digit equality misses customers stored without the country code.
-  const last10 = normalizePhoneLast10(normalizePhone(phone) || phone);
-  if (!last10) return null;
+  // Full-digit match on every stored format the number could plausibly be
+  // ('+19415551234', '9415551234', '(941) 555-1234' all match the same
+  // NANP line), via the same NANP-vs-international candidate set the
+  // exact-contact search above uses (phoneMatchDigits, utils/phone.js) —
+  // NOT a last-10-digit suffix match, which let an international sender
+  // resolve to an unrelated US customer that merely shared its last ten
+  // digits (codex #4213 P2; the wrong-customer-attach incident this rule
+  // exists to prevent).
+  const candidates = phoneMatchDigits(phone);
+  if (!candidates.length) return null;
 
   const matches = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [candidates])
     .orderBy('updated_at', 'desc')
     .limit(2);
 
@@ -185,7 +206,10 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   for (const row of rows || []) {
     if (row.customer_id || row.first_name) continue;
     const contactPhone = row.contact_phone || row.customer_phone;
-    const key = normalizePhoneLast10(normalizePhone(contactPhone) || contactPhone);
+    // phoneIdentityKey (utils/phone.js) — NOT normalizePhoneLast10 — so an
+    // international contact never buckets under the same key as a US
+    // customer sharing its last ten digits; see findSingleCustomerForPhone.
+    const key = phoneIdentityKey(contactPhone);
     if (key && !phones.has(key)) phones.set(key, contactPhone);
   }
   if (!phones.size) return new Map();
@@ -864,7 +888,7 @@ router.post('/sms', async (req, res, next) => {
     if (statementLinkIds && result?.sent) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
-        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds, { actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
       }
@@ -1035,7 +1059,7 @@ router.post('/sms', async (req, res, next) => {
     // accepted-then-thrown send DID deliver the statement.
     if (statementLinkIds && err?.providerOutcome?.sent === true) {
       try {
-        await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+        await require('../services/composer-customer-links').markStatementsSent(statementLinkIds, { actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
       }
@@ -1172,7 +1196,13 @@ router.post('/call', async (req, res, next) => {
   let attemptedFrom = req.body?.fromNumber || null;
   let attemptedTo = req.body?.to || null;
   try {
-    const { to, fromNumber, customerId, source: rawSource, relatedCallId } = req.body;
+    const { to, fromNumber, customerId, source: rawSource, relatedCallId, relatedCommitmentId } = req.body;
+    if (relatedCommitmentId && !UUID_RE.test(String(relatedCommitmentId))) {
+      return res.status(400).json({ error: 'Invalid callback id' });
+    }
+    if (relatedCallId && !UUID_RE.test(String(relatedCallId))) {
+      return res.status(400).json({ error: 'Invalid related call id' });
+    }
     if (!to) return res.status(400).json({ error: 'to number required' });
     if (fromNumber && !TWILIO_NUMBERS.findByNumber(fromNumber)) {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
@@ -1192,8 +1222,17 @@ router.post('/call', async (req, res, next) => {
     // garbage input fails loudly rather than silently dialing as main).
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
-    const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
-    const metadata = relatedCallId ? { relatedCallId } : null;
+    const source = relatedCommitmentId || rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
+    // A callback attempt placed while the card policy is on is stamped so
+    // rollback keeps its strict customer-leg proof and completion action,
+    // whether the UI linked the commitment (card) or the source call (the
+    // existing Call Log action). Pre-policy attempts keep the legacy proof.
+    const metadata = relatedCommitmentId ? { relatedCommitmentId } : relatedCallId ? { relatedCallId } : null;
+    const cardPolicy = !!metadata && source === 'admin-callback' && require('../services/callback-cards').enabled();
+    if (cardPolicy) metadata.callback_policy = 'card';
+    // The dial target is persisted canonical so the live-call interlock can
+    // match it exactly.
+    const dialTo = normalizePhone(to) || to;
 
     const adminPhone = process.env.ADAM_PHONE || '+19415993489';
     const toLast10 = normalizePhoneLast10(to);
@@ -1203,7 +1242,19 @@ router.post('/call', async (req, res, next) => {
     if (toLast10 && adminPhoneKeys.has(toLast10)) {
       return res.status(400).json({ error: 'to must be a customer phone, not the admin bridge phone' });
     }
-    attemptedTo = adminPhone;
+    let bridgePhone = adminPhone;
+    if (relatedCommitmentId) {
+      // A callback card rings the staff member who took it, whatever their
+      // role: the commitment is assigned and audited under that account, so
+      // the same person must be the one who can press 1.
+      const staff = await db('technicians').where({ id: req.technicianId, employment_status: 'active' }).first('id', 'phone');
+      bridgePhone = require('../services/tech-line').usableCell(staff);
+      if (!bridgePhone) return res.status(409).json({ error: 'Your staff profile needs a cell number before calls can bridge to you' });
+    }
+    if (normalizePhone(to) === normalizePhone(bridgePhone)) {
+      return res.status(400).json({ error: 'to must be a customer phone, not your bridge phone' });
+    }
+    attemptedTo = bridgePhone;
 
     // Prefer the explicit customer picked in the UI. Phone-only lookup is
     // ambiguous when spouses/contacts share a number, so auto-link only when
@@ -1216,12 +1267,19 @@ router.post('/call', async (req, res, next) => {
         .first();
       if (!customer) return res.status(404).json({ error: 'customerId not found' });
       const normalizedTo = normalizePhone(to);
-      const normalizedCustomerPhone = normalizePhone(customer.phone);
-      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+      const contactColumns = relatedCommitmentId ? require('../utils/known-caller-phone').KNOWN_CALLER_PHONE_COLS : ['phone'];
+      if (!normalizedTo || !contactColumns.some((column) => normalizedTo === normalizePhone(customer[column]))) {
         return res.status(400).json({ error: 'to must match the selected customer phone' });
       }
-    } else {
-      customer = await findSingleCustomerForPhone(to).catch((e) => {
+    } else if (!relatedCommitmentId) {
+      // The Call Log callback action omits customerId when it dials one of
+      // the linked customer's OTHER numbers (service contact, secondary):
+      // that customer is the source call's, so the attempt is linked to
+      // them — and takes their customer-level claim — when the dialed
+      // number is one they are known by. Otherwise the phone-only lookup
+      // below decides, as for any click-to-call.
+      if (relatedCallId) customer = await customerOfSourceCall(relatedCallId, to);
+      if (!customer) customer = await findSingleCustomerForPhone(to).catch((e) => {
         logger.warn(`[admin-call] customer lookup failed for ${maskPhone(to)}: ${e.message}`);
         return null;
       });
@@ -1230,16 +1288,81 @@ router.post('/call', async (req, res, next) => {
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
 
-    // Step 1 (services/call-bridge.js — shared with the tech portal's
-    // "Call from my line"): call the admin first; on press-1, dial the
-    // customer with the main line as caller ID.
-    const bridged = await placeBridgeCall({
-      to, bridgePhone: adminPhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+    let bridgeClaimIds = [];
+    // Every callback attempt under the card policy takes the customer claim
+    // and live-call interlock — the card AND the existing Call Log action —
+    // so two surfaces cannot ring one customer twice.
+    if (relatedCommitmentId || cardPolicy) bridgeClaimIds = await db.transaction(async (trx) => {
+      if (relatedCommitmentId && !require('../services/callback-cards').enabled()) throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
+      // The same durable claim the tech-line bridge uses covers the gap
+      // before call_log is inserted, keyed to the NUMBER being called: every
+      // card dials from the shared main line, so a line-wide key would let
+      // one ringing callback block every other customer's card; a
+      // per-commitment or per-customer key would let a linked and an
+      // unlinked attempt ring the same phone twice at once.
+      // …and, when a customer is linked, to that CUSTOMER as well: two of
+      // their known numbers must not ring at once either.
+      const claimIds = [];
+      for (const key of [`callback-card-bridge:${dialTo}`, ...(customer ? [`callback-card-bridge:customer:${customer.id}`] : [])]) {
+        const claim = await trx.raw(`INSERT INTO sms_send_claims (claim_key) VALUES (?)
+          ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+          WHERE sms_send_claims.created_at < NOW() - interval '1 minute' RETURNING id`, [key]);
+        if (!claim.rows.length) throw Object.assign(new Error('A callback was just started. Wait a minute before trying again.'), { status: 409 });
+        claimIds.push(claim.rows[0].id);
+      }
+      // The live-call interlock covers the linked customer AND the dialed
+      // number, so a linked and an unlinked attempt to one phone collide.
+      const active = await require('../services/call-bridge').activeBridgeCall(
+        { source, customerId: customer?.id || null, toPhone: dialTo }, trx);
+      if (active) throw Object.assign(new Error('A callback is already ringing or connected. Wait for it to finish.'), { status: 409 });
+      if (!relatedCommitmentId) return claimIds;
+      const original = await trx('call_log as cl').whereIn('cl.id', trx('call_commitments').select('call_log_id')
+        .where({ id: relatedCommitmentId, kind: 'callback', party: 'waves' })).forUpdate('cl').first('cl.*');
+      const promise = original ? await trx('call_commitments as cc').where({ 'cc.id': relatedCommitmentId })
+        .whereRaw(`NOT ${require('../services/call-commitments').staleAiRowSql('cc')}`).forUpdate('cc').first('cc.*') : null;
+      const target = String(original?.direction || '').startsWith('outbound') ? original.to_phone : original?.from_phone;
+      if (!promise || promise.status !== 'open' || !original || normalizePhone(target) !== normalizePhone(to)
+        || (original.customer_id || null) !== (customer?.id || null)) {
+        throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
+      }
+      if (!req.body.expected_at || new Date(req.body.expected_at).getTime() !== new Date(promise.updated_at).getTime()) {
+        throw Object.assign(new Error('This callback changed. Refresh before calling.'), { status: 409 });
+      }
+      metadata.relatedCallId = promise.call_log_id;
+      // Starting the call is the office vouching for an AI callback: record
+      // the review through the ledger's confirm action so a later extraction
+      // that omits the promise cannot hide work staff already took on.
+      if (promise.human_state == null) {
+        await require('../services/call-commitments').applyHumanUpdate(trx, promise.id, { action: 'confirm', reviewedBy: req.technicianId });
+      }
+      await trx('call_commitments').where({ id: promise.id }).update({ assigned_to: req.technicianId, updated_at: new Date() });
+      await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
+        action: 'callback_call_claimed', resource_type: 'call_commitment', resource_id: promise.id,
+        metadata: { claim_id: claimIds[0] }, critical: true, trx });
+      return claimIds;
     });
+    let bridged;
+    try {
+      if (relatedCommitmentId && !require('../services/callback-cards').enabled()) {
+        throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
+      }
+      bridged = await placeBridgeCall({
+        to: dialTo, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+      });
+    } catch (err) {
+      // An ambiguous create can already be ringing. Its claim and initiated
+      // row survive, just as they do for calls from the technician's line.
+      if (bridgeClaimIds.length && !err.bridgeAmbiguous) await db('sms_send_claims').whereIn('id', bridgeClaimIds).del();
+      throw err;
+    }
+    if (relatedCommitmentId) await require('../services/audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: req.technicianId,
+      action: 'callback_called', resource_type: 'call_commitment', resource_id: relatedCommitmentId,
+      metadata: { call_log_id: bridged.callLogId } });
 
     res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId });
   } catch (err) {
     if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
+    if (err.status === 409) return res.status(409).json({ error: err.message });
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'outbound',
@@ -1323,7 +1446,7 @@ router.get('/log', async (req, res, next) => {
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.contact_phone || m.customer_phone;
       const fallbackCustomer = !m.customer_id && initialContact
-        ? fallbackCustomers.get(normalizePhoneLast10(normalizePhone(initialContact) || initialContact))
+        ? fallbackCustomers.get(phoneIdentityKey(initialContact))
         : null;
       const customerName = m.first_name
         ? `${m.first_name} ${m.last_name || ''}`.trim()
@@ -3024,10 +3147,46 @@ router.get('/blocked-numbers', async (req, res, next) => {
 
 // POST /api/admin/communications/blocked-numbers — add a number
 // Body: { number, blockType?, reason? }
+// The inbox "Mark spam" action posts here for an unknown-sender thread.
+// The number is stored as E.164 because the spam-block middleware matches
+// the Twilio From value exactly; a thread's contactPhone may carry local
+// formatting. A number that resolves to a live customer (main phone or a
+// service-contact slot) is refused, mirroring the call-disposition guard —
+// blocking it would silently drop that customer's texts.
 router.post('/blocked-numbers', async (req, res, next) => {
   try {
-    const { number, blockType, reason } = req.body;
-    if (!number) return res.status(400).json({ error: 'number required' });
+    const { blockType, reason } = req.body;
+    const number = normalizePhone(req.body.number);
+    if (!phoneMatchDigits(req.body.number).length) return res.status(400).json({ error: 'valid number required' });
+
+    const owner = await findKnownCallerCustomer(db, number);
+    if (owner) {
+      return res.status(409).json({
+        error: 'This number belongs to an existing customer and cannot be blocked. Archive or edit the customer record instead.',
+        code: 'CUSTOMER_NUMBER',
+        customer_id: owner.id,
+        customer_name: [owner.first_name, owner.last_name].filter(Boolean).join(' ') || null,
+      });
+    }
+    // An OPEN lead (a quote requester who has not converted) has no
+    // customer row yet, so its thread looks unknown in the inbox; blocking
+    // it would silently drop the prospect's next text and call (codex
+    // #4213 P1).
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    // No catch: a failing safety check must refuse the block, not allow it.
+    const openLead = await db('leads')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .whereNull('deleted_at')
+      .whereIn(db.raw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')"), phoneMatchDigits(number))
+      .first('id', 'first_name', 'last_name');
+    if (openLead) {
+      return res.status(409).json({
+        error: 'This number belongs to an open lead and cannot be blocked. Close or convert the lead first.',
+        code: 'LEAD_NUMBER',
+        lead_id: openLead.id,
+      });
+    }
 
     const existing = await db('blocked_numbers').where({ number }).first();
     if (existing) return res.json({ success: true, alreadyBlocked: true });

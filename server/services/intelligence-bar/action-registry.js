@@ -10,6 +10,7 @@ const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT
 const { threadsEnabled } = require('./threads');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
+const { validScope } = require('./scope-policy');
 
 const MODULES = [
   ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
@@ -68,6 +69,9 @@ for (const [moduleName, exportName, executeName] of MODULES) {
       || (p.kind === 'read') !== (approval === null)
       || !['admin', 'technician_or_admin'].includes(p.role)
       || (p.role === 'technician_or_admin' && (moduleName !== 'tech-tools' || p.kind !== 'read'))
+      // A tool without a reviewed data scope is unreachable: not discoverable,
+      // not executable, and refused by the task-context guards (scope-policy.js).
+      || !validScope(p)
       || typeof mod[executeName] !== 'function' || actions.has(tool.name)) {
       policyErrors.push(tool.name);
       continue;

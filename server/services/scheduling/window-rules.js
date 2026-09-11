@@ -24,6 +24,7 @@
  * removed on PR #3486 once the probe stopped blocking.)
  */
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./occupancy');
+const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 
 // Admin day END is the dispatch grid's bound (TimeGridDay DAY_END_HOUR = 20),
 // not the customer slot-finder's 17:00: operators legitimately book/move
@@ -79,12 +80,15 @@ function assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes 
     }
   } else {
     const dur = Number.parseInt(durationMinutes, 10);
-    endMin = startMin + (Number.isInteger(dur) && dur > 0 ? dur : DEFAULT_DURATION_MINUTES);
+    endMin = startMin + (Number.isInteger(dur) && dur > 0 ? dur : (capacityEnabled() ? 30 : DEFAULT_DURATION_MINUTES));
   }
   if (endMin <= startMin) {
     throw invalidWindow(`Appointment end must be after its start — got ${minutesToHHMM(startMin)}-${minutesToHHMM(endMin)}`);
   }
-  if (endMin > ADMIN_DAY_END_MINUTES) {
+  if (capacityEnabled() && !placementFitsShift(startMin, endMin)) {
+    throw invalidWindow(`Appointment arrival windows and work must fit between ${minutesToHHMM(SHIFT.startMinutes)} and ${minutesToHHMM(SHIFT.endMinutes)}`);
+  }
+  if (!capacityEnabled() && endMin > ADMIN_DAY_END_MINUTES) {
     throw invalidWindow(`Appointment must end by ${minutesToHHMM(ADMIN_DAY_END_MINUTES)} — got an end of ${minutesToHHMM(endMin)}`);
   }
   return { window_start: minutesToHHMM(startMin), window_end: minutesToHHMM(endMin) };
@@ -134,6 +138,7 @@ function slotOverlapWarning(date) {
 async function probeSlotOverlap({
   trx, date, windowStart, windowEnd, excludeServiceIds = [],
   excludeStatuses = ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  arrivalWindow,
 } = {}) {
   if (!trx || !date || !windowStart || !windowEnd) return [];
   const dateStr = String(date).split('T')[0];
@@ -145,6 +150,7 @@ async function probeSlotOverlap({
     windowEnd,
     excludeServiceIds,
     excludeStatuses,
+    arrivalWindow,
   });
   return clash.map((row) => ({
     id: row.id,

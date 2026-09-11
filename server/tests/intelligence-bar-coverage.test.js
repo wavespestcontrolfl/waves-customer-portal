@@ -1,4 +1,4 @@
-const { frontendSourceCensus, checkCoverage } = require('../../scripts/check-ib-coverage');
+const { frontendSourceCensus, checkCoverage, coverageCounts } = require('../../scripts/check-ib-coverage');
 
 test('partial parity requires reviewed tested scopes and concrete remaining gaps', () => {
   const action = { id: 'partial', fingerprint: 'changed', ui: { file: 'example.jsx', line: 1 } };
@@ -78,10 +78,22 @@ test('verified coverage requires actual policy and evidence for the reviewed imp
   }
 });
 
+test('acknowledging an exact request fingerprint does not remove an unsupported capability', () => {
+  const action = census[0];
+  const reviewed = { ...action, status: 'reviewed_unmapped', reviewedFingerprint: action.fingerprint,
+    exception: { review: 'Fixture source review', reason: 'Same request; formatting only, no tool parity' } };
+  expect(checkCoverage([action], { actions: [reviewed] }, {})).toEqual([]);
+  expect(checkCoverage([{ ...action, fingerprint: 'changed' }], { actions: [reviewed] }, {})).toHaveLength(1);
+  expect(checkCoverage([action], { actions: [{ ...reviewed, exception: {} }] }, {})).toHaveLength(1);
+  expect(coverageCounts([
+    { status: 'unmapped' }, reviewed, { status: 'reviewed_exception' }, { status: 'verified' },
+  ])).toEqual({ recorded: 4, unsupported: 2 });
+});
+
 
 test('baseline provenance cannot silently promote unsupported coverage to a reviewed status', () => {
   const action = census[0], proof = new Set([`${action.id}:${action.fingerprint}`]);
-  for (const status of ['verified', 'reviewed_exception', 'invented']) {
+  for (const status of ['verified', 'reviewed_exception', 'reviewed_unmapped', 'invented']) {
     const record = { ...action, baselineFingerprint: action.fingerprint, status };
     expect(checkCoverage([action], { actions: [record] }, {}, proof)).toHaveLength(1);
   }

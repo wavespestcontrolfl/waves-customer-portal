@@ -185,6 +185,12 @@ const STAGES = {
 // 2026-08-06: keep in lockstep when either side changes.
 const TEMPLATES = [
   {
+    id: "day0_ask",
+    name: "Day-0 Ask",
+    sentiment: "happy",
+    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+  },
+  {
     id: "friendly_ask",
     name: "Friendly Ask",
     sentiment: "happy",
@@ -298,6 +304,76 @@ function calcScore(sentiment, daysAgo, revenue, stage, askCount, svcType) {
   return Math.max(0, Math.min(100, score));
 }
 
+// The cadence's stored decision (review_sequences.decision, written by
+// enrollment and every step-runner deferral) rendered the same way the
+// completion panel explains it: reason, planned/next time, owner action.
+const DECISION_LABELS = {
+  smart_window: "Day-0 ask at the smart send window",
+  operator_timing: "Day-0 ask at the time chosen on the completion panel",
+  customer_requested: "Customer asked for the link — next cadence tick",
+  immediate: "First touch sending now",
+  opener_in_flight: "Series final parked until the opener's send settles",
+  follow_up_scheduled: "Follow-up scheduled",
+  send_window: "Held for the 8 AM–8 PM send window",
+  provider_retry: "Provider retry",
+  send_error_retry: "Send error — retrying",
+  plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
+  cap_stats_unavailable: "Re-checking the ask cap",
+};
+const fmtETWhen = (d) => new Date(d).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+function decisionLine(seq, sequencesEnabled) {
+  if (!seq) return null;
+  // A stranded claim (null schedule the worker never re-selects) needs a hand
+  // whether or not the gate is on — say so first (codex #4140 r6 P2).
+  if (seq.stranded) return "Send claim never settled · Owner action: check this cadence";
+  // The worker skips every run while GATE_REVIEW_SEQUENCES is off — the
+  // redemption sweep included — so neither an active row's next tick nor a
+  // parked row's re-check is a plan: both are frozen (codex #4140 r5, r13 P2).
+  // An UNKNOWN gate state is not a plan either (codex #4140 r15 P2): only a
+  // confirmed-on worker earns a "Next" time. Both gates are needed — the
+  // cadence cron registers only under the master GATE_CRON_JOBS.
+  // The only action this page offers is the gates: with them on the worker
+  // resumes an active row at its next tick and the sweep redeems (or, after
+  // 24h, clears) a parked one — so say that, not a Stop this page does not
+  // have (codex #4140 r18 P2).
+  if (sequencesEnabled !== true) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on${seq.parked ? " — the parked final is redeemed by the next sweep" : ""}`;
+  if (seq.sending) return "Sending now · Owner action: none";
+  // Overdue by more than 7 days: the worker retires the row as stale at its
+  // next pickup instead of sending (codex #4140 r24 P2) — no send time exists.
+  if (seq.staleRetire) return "Overdue over 7 days — retired as stale at the next tick, nothing sends · Owner action: re-enroll from a completion if a review ask is still wanted";
+  // A parked series final (deferred until the opener's send settles) is a
+  // durable enrollment the redemption sweep redeems — not "no cadence"
+  // (codex #4140 r12 P2). It needs no branch of its own: its stored
+  // decision is opener_in_flight with no plannedAt, so it renders below as
+  // "Re-check <tick> · Series final parked… · Owner action: none" — the
+  // tick because the sweep runs on the cadence ticks (nextSendTickAt),
+  // not at the raw park time (codex #4140 r13 P2).
+  const d = seq.decision || {};
+  const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
+  // nextRunAt is when the row becomes ELIGIBLE; the worker runs at :14/:44,
+  // so the planned send is the next tick the server computes
+  // (nextSendTickAt) — a 4:30 PM row cannot text before 4:44 (codex #4140 r4).
+  const when = seq.nextSendTickAt || seq.nextRunAt || d.plannedAt || d.nextEvalAt;
+  // An ask step that swaps channel at send time lands on the other channel's
+  // tick — say both when they differ (codex #4140 r14, r16 P2).
+  const fallback = seq.fallbackTickAt ? ` by ${seq.plannedChannel}, or ${fmtETWhen(seq.fallbackTickAt)} if it falls back to ${seq.fallbackChannel}` : "";
+  const whenText = when ? `${fmtETWhen(when)}${fallback}` : null;
+  const owner = d.ownerAction && d.ownerAction !== "none" ? `Owner action: ${d.ownerAction}` : "Owner action: none";
+  // A cadence enrolled before the decision column existed has no decision
+  // until its next runner update; its next_run_at is a planned send.
+  const planned = !!d.plannedAt || !d.reason;
+  return [whenText ? `${planned ? "Next" : "Re-check"} ${whenText}` : null, label, capturedRequestText(seq, d), owner].filter(Boolean).join(" · ");
+}
+// A "Customer asked for the link" captured against a cadence that was already
+// running keeps that cadence's own decision (its schedule is unchanged), so
+// the capture is shown beside it — who and when (codex #4140 r8).
+function capturedRequestText(seq, decision) {
+  const c = seq.customerRequested;
+  if (!c || decision.reason === "customer_requested") return null;
+  const at = c.at ? fmtETWhen(c.at) : null;
+  return ["Customer asked for the link", c.byName ? `captured by ${c.byName}` : null, at].filter(Boolean).join(" ");
+}
+
 function fmtDate(d) {
   if (!d) return "—";
   if (typeof d === "string") return d;
@@ -321,6 +397,10 @@ function hydrate(body, c) {
     // server's own first-name substitution never runs on it, and a full name
     // would tip the one-segment ask templates into a second segment.
     .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
+    // {sender} is deliberately NOT hydrated here (codex #4139 r1): the
+    // candidates feed carries no technician, so the server renders it from
+    // the record ("<tech> with Waves", else "Waves Pest Control") — the same
+    // way it swaps {review_url} for the tokenized link.
     .replace(/\{service_type\}/g, c.lastSvc || "pest control")
     .replace(/\{review_url\}/g, c.reviewUrl)
     .replace(/\{date\}/g, c.lastDate);
@@ -369,7 +449,9 @@ function apiToCustomer(row) {
     email: "",
     lastDate: svcDate ? fmtDate(svcDate) : "—",
     lastSvc: svc,
-    lastTech: "Adam",
+    // No technician in the candidates feed: the server resolves the tech
+    // from the latest completed service when the drawer sends none.
+    lastTech: null,
     sentiment,
     stage,
     score,
@@ -438,7 +520,7 @@ function Tag({ type, children }) {
   return (
     <span
       style={{
-        fontSize: 10,
+        fontSize: 12, // UI audit F0517
         fontWeight: 500,
         padding: "3px 8px",
         borderRadius: 20,
@@ -453,14 +535,18 @@ function Tag({ type, children }) {
 }
 
 function Btn({ variant = "ghost", onClick, disabled, children, style: extra }) {
+  // UI audit F0517: ~28px touch height before; 36px on desktop, 44px below
+  // the 640px mobile breakpoint (live, not a module-load snapshot).
+  const mobile = useIsMobile(640);
   const base = {
     display: "inline-flex",
     alignItems: "center",
     gap: 6,
     padding: "7px 14px",
+    minHeight: mobile ? 44 : 36,
     borderRadius: 8,
     fontFamily: C.sans,
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: 500,
     cursor: disabled ? "not-allowed" : "pointer",
     border: "none",
@@ -522,6 +608,9 @@ export default function ReviewVelocityEngine() {
   // sends from other sessions; it's replaced by /outreach-activity.
   const [activityLog, setActivityLog] = useState([]);
   const [analytics, setAnalytics] = useState(null);
+  // GATE_REVIEW_SEQUENCES && GATE_CRON_JOBS as the candidates response reports
+  // them; null until known.
+  const [sequencesEnabled, setSequencesEnabled] = useState(null);
   const [drawerCust, setDrawerCust] = useState(null);
   const [toast, setToast] = useState("");
   const [batchModal, setBatchModal] = useState(false);
@@ -561,9 +650,17 @@ export default function ReviewVelocityEngine() {
     adminFetch("/admin/reviews/outreach-candidates")
       .then((d) => {
         setCustomers((d.customers || []).map(apiToCustomer));
+        // The gate rides with the rows (codex #4140 r15 P2); an absent value
+        // stays unknown, which decisionLine treats as paused.
+        setSequencesEnabled(typeof d.reviewSequencesEnabled === "boolean" ? d.reviewSequencesEnabled : null);
         setLoading(false);
       })
       .catch((err) => {
+        // A failed reload must not keep an earlier success's gate verdict —
+        // the gate could have flipped while the request failed, and decisionLine
+        // /Start Cadence would keep advertising sends (codex #4140 r23 P1).
+        // Unknown reads as paused.
+        setSequencesEnabled(null);
         setLoadError(err?.message || "Failed to load outreach candidates");
         setLoading(false);
       });
@@ -616,6 +713,11 @@ export default function ReviewVelocityEngine() {
     async (customer, opts = {}) => {
       const svcType = customer.lastSvc;
       try {
+        // `techName` is sent as-is (null when the candidates feed carries no
+        // technician): the route coalesces null to "no tech" and resolves the
+        // sender from the record. Keep this request expression byte-identical
+        // to main — the IB coverage gate fingerprints it, and its operation
+        // has not changed.
         const res = await adminFetch("/admin/reviews/send-request", {
           method: "POST",
           body: JSON.stringify({
@@ -810,7 +912,7 @@ export default function ReviewVelocityEngine() {
                     minWidth: 18,
                     height: 18,
                     borderRadius: 9,
-                    fontSize: 10,
+                    fontSize: 11,
                     fontWeight: 700,
                     padding: "0 5px",
                     marginLeft: 6,
@@ -885,7 +987,7 @@ export default function ReviewVelocityEngine() {
           setPipeSearch={setPipeSearch}
           quickSend={quickSend}
           quickStartSequence={quickStartSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
           setDrawerCust={setDrawerCust}
           setBatchModal={setBatchModal}
           addLog={addLog}
@@ -908,7 +1010,7 @@ export default function ReviewVelocityEngine() {
           showToast={showToast}
           sendReviewRequest={sendReviewRequest}
           startSequence={startSequence}
-          sequencesEnabled={analytics?.reviewSequencesEnabled}
+          sequencesEnabled={sequencesEnabled}
         />
       )}
       {/* Batch Modal */}
@@ -1176,7 +1278,7 @@ function Dashboard({
                   >
                     <div style={{ fontSize: 11, color: C.t3, textTransform: "uppercase" }}>{ch.channel}</div>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>{ch.sent}</div>
-                    <div style={{ fontSize: 10, color: C.t3 }}>
+                    <div style={{ fontSize: 11, color: C.t3 }}>
                       {ch.sent > 0 ? Math.round((ch.reviewed / ch.sent) * 100) : 0}% converted
                     </div>
                   </div>
@@ -1325,7 +1427,7 @@ function Dashboard({
                       >
                         {s.v}
                       </div>{" "}
-                      <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+                      <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                         {s.l}
                       </div>{" "}
                     </div>
@@ -1400,20 +1502,35 @@ function VelocityChart({ velocity }) {
         border: `1px solid ${C.bdr}`,
         borderRadius: 12,
         padding: 16,
+        height: 150,
+        // Up to 13 weekly buckets at phone width: keep a floor width per
+        // column so the 11px M/D labels stay inside their columns and let
+        // the row scroll sideways instead of spilling out of the card.
+        overflowX: "auto",
+        WebkitOverflowScrolling: "touch",
+      }}
+    >
+    <div
+      style={{
         display: "flex",
         alignItems: "flex-end",
         gap: 6,
-        height: 150,
+        height: "100%",
+        minWidth: "max-content",
       }}
     >
       {velocity.map((v, i) => {
-        const h = Math.round((v.reviews / max) * 100);
+        // Bars scale against 70% of the column so the value above and the
+        // date below (11px each plus margins) fit inside the 150px chart
+        // instead of pushing the tallest column into the heading.
+        const h = Math.round((v.reviews / max) * 70);
         const wk = v.week ? new Date(v.week) : null;
         return (
           <div
             key={i}
             style={{
               flex: 1,
+              minWidth: 32,
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -1421,7 +1538,7 @@ function VelocityChart({ velocity }) {
               height: "100%",
             }}
           >
-            <div style={{ fontSize: 10, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.t2, marginBottom: 2 }}>
               {v.reviews}
             </div>
             <div
@@ -1435,12 +1552,13 @@ function VelocityChart({ velocity }) {
                 transition: "height .3s",
               }}
             />
-            <div style={{ fontSize: 9, color: C.t3, marginTop: 4 }}>
+            <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
               {wk ? `${wk.getMonth() + 1}/${wk.getDate()}` : ""}
             </div>
           </div>
         );
       })}
+    </div>
     </div>
   );
 }
@@ -1691,9 +1809,14 @@ function Pipeline({
                   </td>{" "}
                   <td style={tdStyle}>
                     {c.sequence ? (
-                      <Tag type="blu">
-                        Cadence {c.seqStep}/{c.seqTotal}
-                      </Tag>
+                      <>
+                        <Tag type="blu">
+                          Cadence {c.seqStep}/{c.seqTotal}
+                        </Tag>
+                        <div style={{ fontSize: 14, color: C.t3, marginTop: 4 }}>
+                          {decisionLine(c.sequence, sequencesEnabled)}
+                        </div>
+                      </>
                     ) : c.seqStep > 0 ? (
                       <Tag type="acc">
                         Asked {c.askCount}×
@@ -1989,7 +2112,7 @@ function ActivityList({ log, max }) {
             <div style={{ flex: 1, minWidth: 0 }}>
               {" "}
               <div style={{ fontSize: 12, lineHeight: 1.5 }}>{l.msg}</div>{" "}
-              <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+              <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                 {l.time}
               </div>{" "}
             </div>{" "}
@@ -2070,7 +2193,7 @@ function CustomerDrawer({
 
   const startSequence = async () => {
     if (c.sequence) {
-      showToast("Already in an active cadence");
+      showToast(c.sequence.parked ? "A cadence is already parked for this customer" : "Already in an active cadence");
       return;
     }
     setSeqStarting(true);
@@ -2270,7 +2393,7 @@ function CustomerDrawer({
             <Tag type="acc">{gbp?.name || c.gbpId}</Tag>{" "}
             <span
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 color: C.t3,
                 flex: 1,
                 overflow: "hidden",
@@ -2299,14 +2422,14 @@ function CustomerDrawer({
                 >
                   {" "}
                   <span style={{ fontWeight: 500 }}>{j.svcType}</span>{" "}
-                  <span style={{ fontSize: 10, color: C.t3 }}>
+                  <span style={{ fontSize: 11, color: C.t3 }}>
                     {j.date}
                   </span>{" "}
                 </div>
                 {j.notes && (
                   <div style={{ color: C.t3, marginTop: 2 }}>{j.notes}</div>
                 )}
-                <div style={{ fontSize: 10, color: C.t3, marginTop: 2 }}>
+                <div style={{ fontSize: 11, color: C.t3, marginTop: 2 }}>
                   {j.tech} · ${j.revenue}
                 </div>{" "}
               </div>
@@ -2332,7 +2455,7 @@ function CustomerDrawer({
                 }}
               >
                 {" "}
-                <div style={{ fontSize: 10, color: C.t3, marginBottom: 2 }}>
+                <div style={{ fontSize: 11, color: C.t3, marginBottom: 2 }}>
                   {m.date} {m.dir === "out" ? "→ Sent" : "← Received"}
                 </div>
                 {m.text}
@@ -2399,7 +2522,7 @@ function CustomerDrawer({
             />{" "}
             <div
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 color: C.t3,
                 marginTop: 6,
                 lineHeight: 1.5,
@@ -2471,6 +2594,11 @@ function CustomerDrawer({
               </Btn>{" "}
               {c.sequence ? (
                 <Btn disabled>In cadence ({c.seqStep}/{c.seqTotal})</Btn>
+              ) : null}{" "}
+              {c.sequence ? (
+                <div style={{ fontSize: 14, color: C.t3, marginTop: 6, flexBasis: "100%" }}>
+                  {decisionLine(c.sequence, sequencesEnabled)}
+                </div>
               ) : sequencesEnabled ? (
                 <Btn onClick={startSequence} disabled={seqStarting || !c.cadenceable}>
                   {seqStarting ? "Starting…" : "Start Cadence"}

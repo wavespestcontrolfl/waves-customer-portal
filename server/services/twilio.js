@@ -151,7 +151,7 @@ async function notifySmsGuardBlocked({ to, body, reason, messageType }) {
         `Recipient: ${maskPhone(to)}`,
         `Body length: ${body?.length || 0}`,
       ].join("\n"),
-      link: "/admin/sms-templates",
+      link: "/admin/communications#tab=templates",
       originalMessageType: "sms_guard_blocked",
       originalToMasked: maskPhone(to),
     });
@@ -171,6 +171,10 @@ async function redirectInternalAdminSmsToNotification(to, body, options = {}) {
       ...payload,
       originalToMasked: maskPhone(to),
     });
+    if (stats?.suppressed || stats?.policySilenced) {
+      // An intentional preference/policy stop is not a delivery outage.
+      return { success: true, sid: 'internal-admin-notification-suppressed', suppressed: true };
+    }
     if (!internalAlertNotificationDelivered(stats)) {
       logger.warn(
         `[twilio] internal alert notification redirect did not deliver; suppressed owner/admin SMS fallback (messageType=${options.messageType || "n/a"}, to=${maskPhone(to)}, bodyLen=${body?.length || 0})`,
@@ -395,6 +399,7 @@ function deliverArrival(channel, ctx) {
 }
 
 const TwilioService = {
+  isKnownOwnerPhone,
   // =========================================================================
   // PHONE VERIFICATION (Login via OTP)
   // =========================================================================
@@ -792,18 +797,26 @@ const TwilioService = {
         // operatorInitiated flag — admin attribution is operator provenance.
         adminAttributed: Boolean(options.adminUserId),
       });
+      if (typeof options.withSmsHandoff === 'function' && pushRoute !== 'sms_only') {
+        return { success: false, preSendBlocked: true, code: 'UNSUPPORTED_SMS_HANDOFF',
+          error: 'Locked lead handoff requires SMS routing', validator: 'check_sms_handoff_authority' };
+      }
       if (pushRoute === "push_first") {
         const pushed = await PushRouting.attemptPushFirst({
           customerId: options.customerId,
           to,
           body,
           messageType: options.messageType,
+          // The visit this message is about — the push link opens its house.
+          appointmentId: options.appointmentId || null,
           fromNumber,
           // Proof-of-send linkage for the scheduled-SMS recovery sweep —
           // without it a crash window makes the sweep resend the message.
           scheduledSmsLogId: options.scheduledSmsLogId,
           explicitPushOnly: options.explicitPushOnly,
           notificationEventKey: options.notificationEventKey,
+          invoiceId: options.invoiceId,
+          requestNotification: options.requestNotification,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
         });
@@ -814,6 +827,8 @@ const TwilioService = {
           return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
         }
         if (options.explicitPushOnly) {
+          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
+          if (pushed.retryable) return { success: false, appRetryable: true, error: pushed.reason, retryAfterMs: pushed.retryAfterMs };
           if (pushed.pending) return { success: false, appPending: true, error: pushed.reason };
           return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
         }
@@ -830,13 +845,44 @@ const TwilioService = {
       // clearance outranks the bounced send — an insert-time default is
       // post-handoff and can postdate a START that raced the log write,
       // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
-      const handoffAt = new Date();
+      let handoffAt;
       // Re-anchor the 21610 ordering timestamp at the ACTUAL provider
       // handoff (codex #3495): entry-time capture predates template/
       // customer lookups and the push-first attempt, so a START received
       // during that preparation wrongly outranked the rejection.
-      smsAttemptAt = new Date();
-      const message = await c.messages.create(msgPayload);
+      let message;
+      let dispatchStarted = false;
+      const dispatch = async () => {
+        handoffAt = new Date();
+        smsAttemptAt = handoffAt;
+        dispatchStarted = true;
+        message = await c.messages.create(msgPayload);
+      };
+      if (typeof options.withSmsHandoff === 'function') {
+        let verdict;
+        try {
+          verdict = await options.withSmsHandoff(dispatch);
+        } catch (err) {
+          if (!message && dispatchStarted) throw err;
+          if (!dispatchStarted) {
+            verdict = { ok: false, code: 'SMS_HANDOFF_CHECK_FAILED',
+              reason: 'SMS handoff authority check failed', retryable: true };
+          } else {
+            // The read-only guard may fail to commit after Twilio accepts.
+            // Preserve that known acceptance so callers cannot retry the SMS.
+            logger.warn('[sms] Authority guard failed after provider acceptance', { code: err.code });
+          }
+        }
+        if (!message) {
+          return { success: false, preSendBlocked: true,
+            code: verdict?.code || 'SMS_HANDOFF_CHECK_FAILED',
+            error: verdict?.reason || 'SMS handoff authority was not established',
+            ...(verdict?.retryable ? { retryable: true } : {}),
+            validator: 'check_sms_handoff_authority' };
+        }
+      } else {
+        await dispatch();
+      }
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
       );
@@ -848,6 +894,7 @@ const TwilioService = {
           to,
           body,
           messageType: options.messageType,
+          appointmentId: options.appointmentId || null,
           preSendCheck: options.preSendCheck,
         }).catch(() => {});
       }
@@ -855,6 +902,19 @@ const TwilioService = {
       // Log to sms_log (legacy) AND dual-write to unified messages.
       // PR 2 cuts the inbox read path over to messages; sms_log stays as
       // long as anything still queries it (scheduled-SMS queue, BI scripts).
+      // An explicit internal_alert/admin_alert send to a known owner phone
+      // never reaches here (redirectInternalAdminSmsToNotification above
+      // diverts it to a bell/push instead) — so a row landing here with an
+      // owner-phone recipient is always an UNTYPED alert (e.g. the office
+      // satisfaction-request text) that would otherwise pass the compliance
+      // gate's message_type exclusion. Stamp that provenance durably, at
+      // send time, rather than leaving the compliance reader (twilio-webhook
+      // hasOutboundHistory) to re-derive it from the CURRENT owner-phone env
+      // vars: if ADAM_PHONE later changes and this number is reassigned, a
+      // read-time check would stop recognizing it as ever having been an
+      // operator alert and treat the row as ordinary customer-facing
+      // history (codex #4211 P2).
+      const sentToKnownOwnerPhone = isKnownOwnerPhone(to);
       try {
         await db("sms_log").insert({
           customer_id: options.customerId || null,
@@ -884,6 +944,7 @@ const TwilioService = {
           // the carrier verdict).
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
+            ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : {}),
             ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
             ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
@@ -909,6 +970,7 @@ const TwilioService = {
           media: options.media || explicitMedia,
           messageType: options.messageType || "manual",
           deliveryStatus: "sent",
+          ...(sentToKnownOwnerPhone ? { metadata: { to_owner_phone_at_send: true } } : {}),
         })
         .then((recorded) => {
           if (!recorded?.message) return null;
@@ -970,6 +1032,28 @@ const TwilioService = {
    * Send 24-hour service reminder
    * Called by cron job the day before scheduled service
    */
+  // The customer's notification_prefs row as it applies to ONE visit (app
+  // property scope, PR 3): a NON-primary saved property's toggles when
+  // enforced, shadow-logged otherwise. An unreadable property under
+  // enforcement THROWS — the callers map that to a retry — but not silently:
+  // en-route / arrived have no scheduler retry lane for an ungrouped visit,
+  // so the office is belled first (in-session review on f9945dc89).
+  async _visitPrefsFor(customerId, scheduledServiceId, source) {
+    const row = await db("notification_prefs").where({ customer_id: customerId }).first();
+    try {
+      return await require('./property-notification-prefs').prefsForVisit(row, customerId, scheduledServiceId, source);
+    } catch (err) {
+      try {
+        await require('./notification-service').notifyAdmin('appointment', 'Appointment text not sent',
+          `The ${source.replace(/_/g, ' ')} text for visit ${scheduledServiceId} could not be sent: the property's notification settings were unreadable. Please contact the customer.`,
+          { dedupeKey: `property-prefs-unreadable:${scheduledServiceId}:${source}`, metadata: { scheduledServiceId, customerId, source } });
+      } catch (bellErr) {
+        logger.error(`[twilio] unreadable-property bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+      }
+      throw err;
+    }
+  },
+
   async sendServiceReminder(customerId, scheduledServiceId) {
     const customer = await db("customers").where({ id: customerId }).first();
     const service = await db("scheduled_services")
@@ -984,10 +1068,10 @@ const TwilioService = {
 
     if (!customer || !service) return;
 
-    // Check if customer has this notification enabled
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // Check if customer has this notification enabled — for a NON-primary
+    // saved property, that property's own toggle (app property scope, PR 3;
+    // enforced under GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise).
+    const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'reminder_24h_legacy');
     if (!prefs?.service_reminder_24h || !prefs?.sms_enabled) return;
 
     const time = service.window_start
@@ -1047,11 +1131,13 @@ const TwilioService = {
    * Phase 1 callers always pass a token (minted by migration backfill);
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null } = {}) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null, scheduledServiceId = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // The visit's NON-primary saved property owns the en-route toggle (app
+    // property scope, PR 3; enforced under GATE_APP_PROPERTY_TEXTS, shadow-
+    // logged otherwise). A failed property read under enforcement throws —
+    // the caller retries rather than texting on the customer row's answer.
+    const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'en_route');
     if (!customer || !prefs?.tech_en_route) return;
 
     // Honor the customer's delivery-channel choice (portal Settings dropdown,
@@ -1162,6 +1248,12 @@ const TwilioService = {
             audience: "customer",
             purpose: "tech_en_route",
             customerId,
+            // The visit this notice is about: rides provider → push routing →
+            // push sink, where the deep link is qualified with the visit's
+            // saved property (GitHub codex #4207 r11 P1) — without it an
+            // App-delivered en-route push for a secondary house opened the
+            // profile's primary and hid the active tracker.
+            ...(scheduledServiceId ? { appointmentId: scheduledServiceId } : {}),
             identityTrustLevel:
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"
@@ -1179,13 +1271,24 @@ const TwilioService = {
     const sendEnRouteEmail = async () => {
       try {
         const AppointmentEmail = require("./appointment-email");
-        return await AppointmentEmail.sendTechEnRouteEmail({
+        const res = await AppointmentEmail.sendTechEnRouteEmail({
           customerId,
+          scheduledServiceId,
           techName: customerTechName,
           etaMinutes,
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
+        // A HELD email (preferences unreadable at the provider handoff) has
+        // no retry lane on this path — bell the office so an email-only
+        // service contact is not silently skipped (GitHub codex #4299 r4 P1).
+        if (res?.held) {
+          await require('./notification-service').notifyAdmin('appointment', 'En-route email not sent',
+            `The en-route email for visit ${scheduledServiceId || customerId} could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            { dedupeKey: `en-route-email-held:${scheduledServiceId || customerId}`, metadata: { scheduledServiceId, customerId } })
+            .catch((bellErr) => logger.error(`[twilio] en-route email hold bell failed for ${customerId}: ${bellErr.message}`));
+        }
+        return res;
       } catch (e) {
         logger.warn(`[twilio] en-route email send failed for customer ${customerId}: ${e.message}`);
         return { ok: false, error: e.message };
@@ -1193,7 +1296,9 @@ const TwilioService = {
     };
     const alertUnreachable = async () => {
       try {
-        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route" });
+        // Visit-aware (app property scope, PR 3): reachability is judged on
+        // the recipients THIS visit's saved property notifies (GitHub codex r5 P1).
+        await AppointmentReminders.alertNoReachableChannel({ customerId, kind: "en_route", scheduledServiceId });
       } catch (e) {
         logger.warn(`[twilio] en-route no-channel alert failed for customer ${customerId}: ${e.message}`);
       }
@@ -1253,9 +1358,8 @@ const TwilioService = {
    */
   async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
-    const prefs = await db("notification_prefs")
-      .where({ customer_id: customerId })
-      .first();
+    // Same per-property toggle as en-route (app property scope, PR 3).
+    const prefs = await this._visitPrefsFor(customerId, scheduledServiceId, 'arrived');
     // Deterministic local suppression (opt-out / SMS disabled / missing customer):
     // the arrival is "handled", not a retryable failure. The caller (markOnProperty)
     // keeps its idempotency guard stamped on this signal so no later same-job
@@ -1317,6 +1421,7 @@ const TwilioService = {
             audience: "customer",
             purpose: "tech_arrived",
             customerId,
+            ...(scheduledServiceId ? { appointmentId: scheduledServiceId } : {}),
             identityTrustLevel:
               isServiceContactRole(contact.role)
                 ? "service_contact_authorized"

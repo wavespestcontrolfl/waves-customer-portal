@@ -419,7 +419,11 @@ async function queryCustomers(input, readCustomerIds = []) {
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
       db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1) as health_score"),
-    );
+    )
+    // Soft-deleted rows never surface here: get_customer_detail and the
+    // update path already refuse them, so listing one sends the operator
+    // (and the model) chasing a record no other tool will touch.
+    .whereNull('customers.deleted_at');
 
   const supportedFilters = new Set(Object.keys(TOOLS.find(t => t.name === 'query_customers').input_schema.properties.filters.properties));
   const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));
@@ -489,7 +493,7 @@ async function queryCustomers(input, readCustomerIds = []) {
 
   const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
   const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
-  const total = await db('customers').count('* as count').first();
+  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
 
   return {
     customers: customers.map(c => ({
@@ -912,7 +916,7 @@ async function findDuplicates(input) {
   if (match_on === 'phone') {
     const dupes = await db('customers')
       .select('phone', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
-      .whereNotNull('phone').where('phone', '!=', '')
+      .whereNull('deleted_at').whereNotNull('phone').where('phone', '!=', '')
       .groupBy('phone').having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
     return { match_on: 'phone', duplicates: dupes };
@@ -921,7 +925,7 @@ async function findDuplicates(input) {
   if (match_on === 'email') {
     const dupes = await db('customers')
       .select('email', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
-      .whereNotNull('email').where('email', '!=', '')
+      .whereNull('deleted_at').whereNotNull('email').where('email', '!=', '')
       .groupBy('email').having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
     return { match_on: 'email', duplicates: dupes };
@@ -935,7 +939,7 @@ async function findDuplicates(input) {
         db.raw('COUNT(*) as count'),
         db.raw("string_agg(id::text, ', ') as ids"),
       )
-      .whereNotNull('address_line1').where('address_line1', '!=', '')
+      .whereNull('deleted_at').whereNotNull('address_line1').where('address_line1', '!=', '')
       .groupByRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))), address_line1")
       .having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
@@ -1207,12 +1211,10 @@ async function updateCustomer(customerId, updates, expectedVersion) {
       // customer-dedupe.js and routes/admin-customers.js — extend ALL in
       // the same commit): pg_advisory_xact_lock(hashtextextended(
       //   'customer-email:' || lower(trim(<email>)), 0)).
+      // Every assigned address (primary and service-contact slots) takes the
+      // key — utils/customer-comms-lock.js lockAssignedCustomerEmails.
+      await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
       if (clean.email) {
-        const emailLc = String(clean.email).trim().toLowerCase();
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-          [`customer-email:${emailLc}`],
-        );
         // Serialization ONLY — deliberately NO claimant refusal (r23):
         // customers.email is intentionally non-unique (20260417000010 —
         // spouses/shared household addresses are supported), so an
@@ -1566,12 +1568,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
           throw err;
         }
         const lockedMerged = { ...lockedBefore, ...clean };
+        await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
         if (emailSubmitted && clean.email) {
-          const emailLc = String(clean.email).trim().toLowerCase();
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-            [`customer-email:${emailLc}`],
-          );
           // Serialization ONLY — no claimant refusal (r23): shared
           // household addresses are supported (20260417000010); see
           // updateCustomer.

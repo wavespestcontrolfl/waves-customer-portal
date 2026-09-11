@@ -19,6 +19,17 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => jest.fn());
+// Pin ET "now" (12:00 ET, Aug 31 2026) so the same-day picked-hour floor
+// test is deterministic; every other test passes explicit past dates.
+jest.mock('../utils/datetime-et', () => {
+  const actual = jest.requireActual('../utils/datetime-et');
+  const PINNED_NOW = new Date('2026-08-31T16:00:00Z');
+  return {
+    ...actual,
+    etParts: (date) => actual.etParts(date || PINNED_NOW),
+    etDateString: (date) => actual.etDateString(date || PINNED_NOW),
+  };
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
@@ -35,6 +46,12 @@ jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
   findAvailableSlots: jest.fn(),
 }));
+// The arrival-mode picked-hour verdict asks the shared route checker
+// directly; the gate helper stays real so the env flag still decides.
+jest.mock('../services/scheduling/arrival-route', () => ({
+  ...jest.requireActual('../services/scheduling/arrival-route'),
+  checkArrivalPlacement: jest.fn(),
+}));
 // Only the snapshot loader is stubbed — conflictsForTarget stays REAL so
 // the guard's overlap semantics are the production ones.
 jest.mock('../services/rain-out', () => ({
@@ -45,6 +62,7 @@ jest.mock('../services/rain-out', () => ({
 const express = require('express');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy } = require('../services/rain-out');
+const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
 let server;
@@ -105,7 +123,7 @@ test('hint with the gate off answers gated:true and never touches the engine', a
 test('hint with the gate on runs a single-day search with the new params passed through', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   const res = await post({
-    ...BASE, hint: true, excludeServiceIds: ['svc-1'], slotStepMinutes: 60, topN: 3,
+    ...BASE, hint: true, serviceType: 'Lawn Care', excludeServiceIds: ['svc-1'], slotStepMinutes: 60, topN: 3,
   });
   expect(res.status).toBe(200);
   const body = await res.json();
@@ -117,9 +135,11 @@ test('hint with the gate on runs a single-day search with the new params passed 
   expect(opts.dateTo).toBe('2026-09-01');
   expect(opts.excludeServiceIds).toEqual(['svc-1']);
   expect(opts.slotStepMinutes).toBe(60);
-  // Hint mode over-fetches (3×) so the occupancy guard can drop hours
-  // without leaving the chips row short; the response is sliced back.
-  expect(opts.topN).toBe(9);
+  expect(opts.serviceType).toBe('Lawn Care');
+  // Hint mode takes the engine's ENTIRE list (the occupancy guard can veto
+  // whole gaps, and no fixed cap is safe on a busy multi-tech range); the
+  // response is sliced back to topN.
+  expect(opts.topN).toBe(Number.POSITIVE_INFINITY);
 });
 
 test('garbage excludeServiceIds / slotStepMinutes 400 before the engine runs', async () => {
@@ -302,4 +322,385 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
   const opts = findAvailableSlots.mock.calls[0][0];
   if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1' });
   else expect(opts).not.toHaveProperty('arrivalWindow');
+});
+
+// ── Picked-hour scoring ──────────────────────────────────────────────
+// A hint request may carry the hour already in the picker; the answer says
+// what THAT hour costs (drive into the stop + what the insertion adds) by
+// finding the route gap whose bounds contain it.
+
+const gapSlot = (over = {}) => ({
+  rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00',
+  detour_minutes: 57, drive_in_minutes: 37, drive_out_minutes: 31, latest_start_min: 9 * 60,
+  insertion: { after: 'HQ (start of day)', after_name: null, after_stop_id: null, before: 'Stop B (11:00)', before_stop_id: 's-b' },
+  technician: { id: 't1', name: 'A' },
+  ...over,
+});
+
+test('pickedStart inside a gap answers that gap\'s drive-in leg, origin and detour — and asks the engine for every gap', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      gapSlot(),
+      gapSlot({ rank: 2, start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60, detour_minutes: 4, drive_in_minutes: 12,
+        insertion: { after: 'Stop C (13:00)', after_name: 'Stop C', after_stop_id: 's-c', before: 'HQ (end of day)', before_stop_id: null } }),
+    ],
+    evaluated: 2,
+  });
+  const res = await post({ ...BASE, hint: true, slotStepMinutes: 60, topN: 3, pickedStart: '14:00' });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.picked).toEqual({
+    start: '14:00', fits: true, detour_minutes: 4, drive_in_minutes: 12,
+    from_home_base: false, from_name: 'Stop C', technician: { id: 't1', name: 'A' },
+  });
+  // The picked hour can sit in the worst gap of the day, so the engine's
+  // whole list is requested (the chips row is still sliced to topN).
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
+  expect(body.slots).toHaveLength(2);
+});
+
+test('pickedEnd past start + duration scores the whole window against the gap ceiling (edit form)', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Gap 09:00..latest start 13:00 for a 60-min search → last clear end 14:00.
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ latest_start_min: 13 * 60 })], evaluated: 1 });
+  const fits = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '11:00', pickedEnd: '14:00' })).json();
+  expect(fits.picked).toMatchObject({ start: '11:00', fits: true });
+  const miss = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '11:00', pickedEnd: '15:00' })).json();
+  expect(miss.picked).toEqual({ start: '11:00', fits: false });
+  // An end before start + duration never shrinks the window.
+  const short = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '13:00', pickedEnd: '13:30' })).json();
+  expect(short.picked).toMatchObject({ start: '13:00', fits: true });
+  expect((await post({ ...BASE, hint: true, pickedStart: '11:00', pickedEnd: 'noon' })).status).toBe(400);
+});
+
+test('a slot with an unknown leg answers detour_minutes null — hint chips, the picked verdict, and the ungated list alike', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockImplementation(async () => ({
+    slots: [gapSlot({ drive_in_minutes: null, detour_minutes: 0, latest_start_min: 12 * 60 })],
+    evaluated: 1,
+  }));
+  const hint = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '10:00' })).json();
+  expect(hint.slots[0].detour_minutes).toBeNull();
+  expect(hint.picked).toMatchObject({ fits: true, detour_minutes: null, drive_in_minutes: null });
+  const plain = await (await post({ ...BASE })).json();
+  expect(plain.slots[0].detour_minutes).toBeNull();
+});
+
+test('pickedStart in the first gap reports the home base as the origin', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00' })).json();
+  expect(body.picked).toMatchObject({ fits: true, drive_in_minutes: 37, from_home_base: true, from_name: null, detour_minutes: 57 });
+});
+
+test('pickedStart outside every gap does not fit', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '16:00' })).json();
+  expect(body.picked).toEqual({ start: '16:00', fits: false });
+});
+
+test('a picked hour the tech-blind occupancy snapshot flags does not fit either', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ latest_start_min: 14 * 60 })], evaluated: 1 });
+  loadOccupancy.mockResolvedValue({ ...emptyOccupancy(), rows: [occupiedRow()] }); // 09:00–10:00, technician null
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00' })).json();
+  expect(body.picked).toEqual({ start: '09:00', fits: false });
+  // The chips row still slides past the occupied hour as before.
+  expect(body.slots[0].start_time).toBe('10:00');
+});
+
+test('garbage pickedStart 400s before the engine runs; no pickedStart means no picked key', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const bad = await post({ ...BASE, hint: true, pickedStart: '9am' });
+  expect(bad.status).toBe(400);
+  expect(findAvailableSlots).not.toHaveBeenCalled();
+  const body = await (await post({ ...BASE, hint: true })).json();
+  expect(body.picked).toBeUndefined();
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
+});
+
+test('a topN:1 range hint survives three fully occupied gaps and answers the fourth (pre-push P1)', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Three single-hour gaps on 09-01, all sitting on tech-null rows; one
+  // free gap the next day. With a 3× over-fetch the free gap was never
+  // fetched and the range hint vanished.
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      gapSlot({ rank: 1, start_time: '09:00', end_time: '10:00', latest_start_min: 9 * 60, detour_minutes: 1 }),
+      gapSlot({ rank: 2, start_time: '11:00', end_time: '12:00', latest_start_min: 11 * 60, detour_minutes: 2 }),
+      gapSlot({ rank: 3, start_time: '13:00', end_time: '14:00', latest_start_min: 13 * 60, detour_minutes: 3 }),
+      gapSlot({ rank: 4, date: '2026-09-02', start_time: '10:00', end_time: '11:00', latest_start_min: 10 * 60, detour_minutes: 4 }),
+    ],
+    evaluated: 4,
+  });
+  loadOccupancy.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-09-01'
+    ? { ...emptyOccupancy(), rows: [9, 11, 13].map((h) => occupiedRow({ id: `u-${h}`, startMin: h * 60, endMin: (h + 1) * 60 })) }
+    : emptyOccupancy()));
+  const body = await (await post({ ...BASE, dateTo: '2026-09-04', hint: true, slotStepMinutes: 60, topN: 1 })).json();
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
+  expect(body.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-02', '10:00']]);
+});
+
+test('sameDayFloorMin is applied while choosing: a topN:1 range answer walks today\'s gap up to the floor instead of losing it', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Today (pinned 08-31) has one wide gap opening at 10:00; tomorrow a
+  // dearer 09:00. A running-late floor of 14:00 must yield today 14:00.
+  // Fresh object per call: the route reassigns result.slots, so one shared
+  // mock object would leak the first answer into the second request.
+  findAvailableSlots.mockImplementation(async () => ({
+    slots: [
+      gapSlot({ rank: 1, date: '2026-08-31', start_time: '10:00', end_time: '11:00', latest_start_min: 15 * 60, detour_minutes: 1 }),
+      gapSlot({ rank: 2, date: '2026-09-01', start_time: '09:00', end_time: '10:00', latest_start_min: 9 * 60, detour_minutes: 2 }),
+    ],
+    evaluated: 2,
+  }));
+  const body = await (await post({ ...BASE, dateFrom: '2026-08-31', dateTo: '2026-09-03', hint: true, slotStepMinutes: 60, topN: 1, sameDayFloorMin: 14 * 60 })).json();
+  expect(body.slots.map((s) => [s.date, s.start_time, s.end_time])).toEqual([['2026-08-31', '14:00', '15:00']]);
+  // A floor past the gap's last start drops today entirely and the next day answers.
+  const late = await (await post({ ...BASE, dateFrom: '2026-08-31', dateTo: '2026-09-03', hint: true, slotStepMinutes: 60, topN: 1, sameDayFloorMin: 16 * 60 })).json();
+  expect(late.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-01', '09:00']]);
+  // Other days are never floored; garbage 400s.
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
+  expect((await post({ ...BASE, hint: true, sameDayFloorMin: '2pm' })).status).toBe(400);
+});
+
+test('a picked hour outside the engine\'s day bounds is not scored (no picked key) rather than called a conflict', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  // 07:00 is before the 08:00 day open; 16:30 + 60 min runs past the
+  // 17:00 close. Neither is ever enumerated, so neither is a verdict.
+  for (const hour of ['07:00', '16:30']) {
+    const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: hour })).json();
+    expect(body.picked).toBeUndefined();
+  }
+  // Just inside the bounds and outside every gap: a real "doesn't fit".
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '16:00' })).json();
+  expect(body.picked).toEqual({ start: '16:00', fits: false });
+});
+
+test('an off-hour picked start is not scored (no picked key): the save validator refuses :15/:30 starts, so no verdict may endorse one', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  // 09:15 sits inside the 09:00 gap's bounds — a gap match alone would call
+  // it a fit — but window-rules rejects every non-HH:00 start at save. The
+  // chips still answer, so the hint keeps its other lines while the
+  // operator is mid-edit.
+  const off = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:15' })).json();
+  expect(off.picked).toBeUndefined();
+  expect(off.slots).toHaveLength(1);
+  const onHour = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00' })).json();
+  expect(onHour.picked).toMatchObject({ start: '09:00', fits: true });
+});
+
+test('a same-day picked hour before the engine\'s now+30 floor is not scored (no picked key), later hours are', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // ET now is pinned at 12:00 → the engine floors today at 12:30, so a
+  // 12:00 pick is absent from its list for reasons that say nothing
+  // about the route; a 13:00 pick sits in the returned gap.
+  const TODAY = { ...BASE, dateFrom: '2026-08-31', dateTo: '2026-08-31' };
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ date: '2026-08-31', start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60 })], evaluated: 1 });
+  const early = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, pickedStart: '12:00' })).json();
+  expect(early.picked).toBeUndefined();
+  const later = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, pickedStart: '13:00' })).json();
+  expect(later.picked).toMatchObject({ start: '13:00', fits: true });
+});
+
+test('an inverted picked window (end at or before start) is not scored: the save rejects it, so no verdict may normalize it into a fit', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  const inverted = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '08:00' })).json();
+  expect(inverted.picked).toBeUndefined();
+  const zero = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '09:00' })).json();
+  expect(zero.picked).toBeUndefined();
+  expect(zero.slots).toHaveLength(1);
+});
+
+test('a same-day picked hour below the caller\'s sameDayFloorMin is not scored (Quick Move running-late marks it invalid), an hour at the floor is', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // ET now is pinned at 12:00 (engine floor 12:30). Quick Move sends a
+  // stricter floor — the visit's current window ends at 14:00 — so 13:00
+  // sits inside the returned gap yet is invalid for the sheet; the verdict
+  // must not call it a fit. 14:00 clears the floor and scores normally.
+  const TODAY = { ...BASE, dateFrom: '2026-08-31', dateTo: '2026-08-31' };
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ date: '2026-08-31', start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60 })], evaluated: 1 });
+  const below = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, sameDayFloorMin: 14 * 60, pickedStart: '13:00' })).json();
+  expect(below.picked).toBeUndefined();
+  const atFloor = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, sameDayFloorMin: 14 * 60, pickedStart: '14:00' })).json();
+  expect(atFloor.picked).toMatchObject({ start: '14:00', fits: true });
+});
+
+test('arrival-window mode scores the picked hour with the shared route checker: feasible, unverified (no verdict), verified miss', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  const db = require('../models/db');
+  db.raw = jest.fn((sql) => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          lat: 27.55, lng: -82.4,
+          address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+          visit_customer_id: 'fixture-customer', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  // The recommendation list is empty in all three cases — it proves nothing.
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  const req = { ...BASE, serviceId: 'fixture-service', technicianId: 't1', hint: true, arrivalWindows: true, slotStepMinutes: 60, pickedStart: '09:00' };
+  try {
+    checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 9, estimatedArrival: '09:44' });
+    let body = await (await post(req)).json();
+    expect(body.picked).toEqual({ start: '09:00', fits: true, detour_minutes: 9, drive_in_minutes: null, from_home_base: null, from_name: null, technician: null });
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'fixture-service', date: '2026-09-01', technicianId: 't1', windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60,
+    }));
+    checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'route_unverified' });
+    body = await (await post(req)).json();
+    expect(body.picked).toBeUndefined();
+    checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'arrival_window' });
+    body = await (await post(req)).json();
+    expect(body.picked).toEqual({ start: '09:00', fits: false });
+    // Unassigned (no technicianId): the checker would score the SAVED
+    // tech's route while the chips rank every tech — no verdict at all.
+    checkArrivalPlacement.mockClear();
+    body = await (await post({ ...req, technicianId: undefined })).json();
+    expect(body.picked).toBeUndefined();
+    expect(checkArrivalPlacement).not.toHaveBeenCalled();
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+// The edit form's pending Service address: the save stamps it, so the hint
+// must score there — and the arrival context must simulate the visit being
+// saved (that stamp, the form's duration, the picked window), the way the
+// save probe hands the checker `changes: updates` (Codex #4120 r7 P2).
+function mockVisitAndProperty(db, property) {
+  db.raw = jest.fn((sql) => sql);
+  db.mockImplementation((table) => (table === 'customer_properties'
+    ? { where: () => ({ first: async () => property }) }
+    : {
+      where: () => ({
+        leftJoin: () => ({
+          first: async () => ({
+            lat: 27.55, lng: -82.4,
+            address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+            visit_customer_id: 'fixture-customer', visit_profile_label: null,
+          }),
+        }),
+      }),
+    }));
+}
+const PROPERTY_ID = '11111111-2222-4333-8444-555555555555';
+const rentalProperty = {
+  id: PROPERTY_ID, address_line1: '9 Rental Way', address_line2: '', city: 'Parrish', state: 'FL', zip: '34219',
+  latitude: 27.11, longitude: -82.22,
+};
+
+test('a pending propertyId scores at THAT property, not the visit\'s stored stamp (gap mode)', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  mockVisitAndProperty(require('../models/db'), rentalProperty);
+  const res = await post({ hint: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(200);
+  expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ lat: 27.11, lng: -82.22 });
+  const body = await res.json();
+  expect(body.target).toMatchObject({ source: 'pending_property', address: '9 Rental Way, Parrish, FL, 34219' });
+});
+
+test('a pending property without a pin geocodes ITS address, never the stored pin', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const { geocodeAddress } = require('../services/geocoder');
+  mockVisitAndProperty(require('../models/db'), { ...rentalProperty, latitude: null, longitude: null });
+  geocodeAddress.mockResolvedValue({ lat: 27.5, lng: -82.4 });
+  const res = await post({ hint: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(200);
+  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219', { cacheOnly: false });
+  expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ lat: 27.5, lng: -82.4 });
+  expect((await res.json()).target.source).toBe('address_geocoded_now');
+});
+
+test('arrival mode hands the engine and the picked-hour checker the pending edit as `changes`: duration, the property stamp, and (picked only) the window', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  mockVisitAndProperty(require('../models/db'), rentalProperty);
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 4 });
+  try {
+    const res = await post({
+      hint: true, arrivalWindows: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, technicianId: 't1',
+      durationMinutes: 90, durationEdit: true, dateFrom: '2026-09-01', dateTo: '2026-09-01', slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '12:00',
+    });
+    expect(res.status).toBe(200);
+    const stamp = { property_id: PROPERTY_ID, address_line1: '9 Rental Way', city: 'Parrish', state: 'FL', zip: '34219', lat: 27.11, lng: -82.22 };
+    expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({
+      lat: 27.11, lng: -82.22,
+      arrivalWindow: { serviceId: 'fixture-service', changes: { estimated_duration_minutes: 90, ...stamp } },
+    });
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
+      windowStart: '09:00', windowEnd: '12:00', durationMinutes: 90,
+      changes: { estimated_duration_minutes: 90, ...stamp, window_start: '09:00', window_end: '12:00' },
+    }));
+    expect((await res.json()).picked).toMatchObject({ start: '09:00', fits: true });
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+test('arrival mode without a pending property still passes the form\'s duration and the picked window through `changes`', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  mockVisitAndProperty(require('../models/db'), null);
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 4 });
+  try {
+    await post({ ...BASE, hint: true, arrivalWindows: true, serviceId: 'fixture-service', technicianId: 't1', slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '11:00', durationEdit: true });
+    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: { estimated_duration_minutes: 60 } });
+    expect(checkArrivalPlacement.mock.calls[0][0].changes).toEqual({ estimated_duration_minutes: 60, window_start: '09:00', window_end: '11:00' });
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+// A move (manual reschedule, drag-drop confirm) sends the stored window span
+// as `durationMinutes` while its save keeps the stored estimate: a 19:00–20:00
+// hint for a 120-minute visit must simulate 120 minutes, like the save's route
+// check, not the 60-minute span (pre-push hook P1 on the r7 fix).
+test('a move without `durationEdit` leaves the stored work estimate alone: `changes` carries the stamp and the picked window, never the requested span', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  mockVisitAndProperty(require('../models/db'), null);
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  checkArrivalPlacement.mockResolvedValue({ feasible: false, detourMinutes: null });
+  try {
+    const res = await post({ ...BASE, hint: true, arrivalWindows: true, serviceId: 'fixture-service', technicianId: 't1', slotStepMinutes: 60, durationMinutes: 60, pickedStart: '19:00', pickedEnd: '20:00' });
+    expect(res.status).toBe(200);
+    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: {} });
+    expect(checkArrivalPlacement.mock.calls[0][0].changes).toEqual({ window_start: '19:00', window_end: '20:00' });
+    // The checker still receives the span as `durationMinutes` (it takes the larger of that and the stored estimate).
+    expect(checkArrivalPlacement.mock.calls[0][0]).toMatchObject({ durationMinutes: 60 });
+    expect((await res.json()).picked).toMatchObject({ start: '19:00', fits: false });
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+test('propertyId is refused outside hint mode / without a serviceId, and an unknown property 422s before the engine runs', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  expect((await post({ ...BASE, propertyId: PROPERTY_ID })).status).toBe(400);
+  expect((await post({ ...BASE, hint: true, propertyId: PROPERTY_ID })).status).toBe(400);
+  mockVisitAndProperty(require('../models/db'), null);
+  const res = await post({ hint: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(422);
+  expect(findAvailableSlots).not.toHaveBeenCalled();
 });

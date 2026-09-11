@@ -31,19 +31,6 @@ const ALL_PIPELINE_STAGES = [
   'negotiating', 'won', 'active_customer', 'at_risk', 'churned', 'past_customer', 'lost', 'dormant',
 ];
 
-// customers.created_via — PROVENANCE of a machine-minted row, stamped by the
-// creating path itself. Row SHAPE cannot carry this: several lead-creation
-// paths write an address-less, ZIP-less, active new_lead row (the Twilio
-// tracking webhook AND a form submitted without an address), so anything that
-// must tell them apart has to read a stamp, not infer one. Consumers treat a
-// NULL as "unknown provenance" and stay conservative.
-const CREATED_VIA = {
-  // routes/twilio-webhook.js domain/van tracking branch: the placeholder row
-  // minted for an unknown number that just texted/called a tracking number,
-  // before anyone knows who they are.
-  TWILIO_TRACKING_SHELL: 'twilio_tracking_shell',
-};
-
 const { etDateString } = require('../utils/datetime-et');
 
 // A live customer right now = in a customer stage AND active AND not soft-deleted.
@@ -130,8 +117,14 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
 // write happened. No internal try/catch: inside a transaction a swallowed SQL
 // error would leave the txn aborted and doom the commit — callers own
 // containment.
-async function promoteCustomerOnBooking(database, customerId) {
+// `serviceType` — the booked service. A Waves Assessment is NOT a win (owner
+// ruling 2026-09-08, services/assessment-booking.js): the owner is going out
+// to look and quote, nothing has sold, so the row keeps its lead stage and
+// no member_since is stamped. Callers that know what was booked pass it;
+// the deal converts later on quote acceptance / a paid booking as usual.
+async function promoteCustomerOnBooking(database, customerId, { serviceType = null } = {}) {
   if (!customerId) return false;
+  if (require('./assessment-booking').isAssessmentServiceType(serviceType)) return false;
   const customer = await database('customers')
     .where({ id: customerId })
     .first('id', 'pipeline_stage', 'member_since', 'active', 'churned_at');
@@ -158,6 +151,6 @@ async function promoteCustomerOnBooking(database, customerId) {
 }
 
 module.exports = {
-  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, CREATED_VIA, whereLiveCustomer,
+  CUSTOMER_STAGES, FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, whereLiveCustomer,
   CONVERSION_DATE_SQL, stageLifecycleStamps, promoteCustomerOnBooking,
 };

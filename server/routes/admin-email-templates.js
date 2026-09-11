@@ -1,4 +1,5 @@
 const express = require('express');
+const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
@@ -665,33 +666,41 @@ router.post('/suppressions', async (req, res, next) => {
       created_by: req.technicianId || null,
     };
 
-    const existingQuery = db('email_suppressions')
-      .whereRaw('LOWER(email) = ?', [email])
-      .where({ status: 'active', suppression_type: suppressionType });
-    if (groupKey) existingQuery.where({ group_key: groupKey });
-    else existingQuery.whereNull('group_key');
-    const existing = await existingQuery.first();
+    // Written under the shared per-address lock so a bearer-link email
+    // handoff holding it finishes (or has not yet authorized) before this
+    // suppression is visible.
+    const outcome = await db.transaction(async (trx) => {
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, email);
+      const existingQuery = trx('email_suppressions')
+        .whereRaw('LOWER(email) = ?', [email])
+        .where({ status: 'active', suppression_type: suppressionType });
+      if (groupKey) existingQuery.where({ group_key: groupKey });
+      else existingQuery.whereNull('group_key');
+      const existing = await existingQuery.first();
 
-    if (existing) {
-      const [updated] = await db('email_suppressions').where({ id: existing.id }).update({
-        source: cleanString(req.body.source, existing.source || 'admin_manual'),
-        metadata: JSON.stringify({ ...parseJsonObject(existing.metadata), ...metadata }),
-        updated_at: new Date(),
+      if (existing) {
+        const [updated] = await trx('email_suppressions').where({ id: existing.id }).update({
+          source: cleanString(req.body.source, existing.source || 'admin_manual'),
+          metadata: JSON.stringify({ ...parseJsonObject(existing.metadata), ...metadata }),
+          updated_at: new Date(),
+        }).returning('*');
+        return { suppression: updated, existing: true };
+      }
+
+      const [suppression] = await trx('email_suppressions').insert({
+        email,
+        group_key: groupKey,
+        suppression_type: suppressionType,
+        status: 'active',
+        source: cleanString(req.body.source, 'admin_manual'),
+        consent_source: cleanString(req.body.consentSource ?? req.body.consent_source, '') || null,
+        consent_timestamp: req.body.consentTimestamp || req.body.consent_timestamp || null,
+        metadata: JSON.stringify(metadata),
       }).returning('*');
-      return res.json({ suppression: updated, existing: true });
-    }
-
-    const [suppression] = await db('email_suppressions').insert({
-      email,
-      group_key: groupKey,
-      suppression_type: suppressionType,
-      status: 'active',
-      source: cleanString(req.body.source, 'admin_manual'),
-      consent_source: cleanString(req.body.consentSource ?? req.body.consent_source, '') || null,
-      consent_timestamp: req.body.consentTimestamp || req.body.consent_timestamp || null,
-      metadata: JSON.stringify(metadata),
-    }).returning('*');
-    res.status(201).json({ suppression, existing: false });
+      return { suppression, existing: false };
+    });
+    if (outcome.existing) return res.json(outcome);
+    res.status(201).json(outcome);
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
     next(err);
@@ -1184,13 +1193,58 @@ router.put('/versions/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Read the booking audience without enqueueing, claiming, or sending. Content
+// fixtures remain independent of this optional check against a persisted visit.
+async function onboardingAudiencePreview(templateKey, scheduledServiceId) {
+  if (!['app_intro', 'welcome.new_recurring'].includes(templateKey)) return null;
+  const service = await db('scheduled_services').where({ id: scheduledServiceId }).first();
+  const customer = service && await db('customers').where({ id: service.customer_id }).first();
+  if (!service || !customer) {
+    const error = new Error('Appointment not found'); error.status = 404; throw error;
+  }
+  if (templateKey === 'app_intro') {
+    const intro = require('../services/recurring-app-intro-email');
+    const eligibility = await intro.appIntroEligibility(service);
+    return {
+      scheduledServiceId, templateKey,
+      applies: true,
+      // The parent template change already shares the corrected first-visit
+      // reader. This comparison isolates the recurring/member gate expansion.
+      before: eligibility.eligible && service.is_recurring === true && ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(customer.waveguard_tier),
+      after: eligibility.eligible,
+      gateEnabled: intro.isEnabled(),
+      reason: eligibility.reason,
+      note: 'Current first-visit rules apply to both audiences. Recipient validation, suppression and the once-per-customer send ledger still apply at delivery.',
+    };
+  }
+  const welcome = require('../services/new-recurring-welcome-sms');
+  const eligibility = await welcome.oneTimeWelcomeEligibility(service, customer);
+  return {
+    scheduledServiceId, templateKey,
+    applies: service.is_recurring === false,
+    before: false,
+    after: eligibility.eligible,
+    gateEnabled: welcome.oneTimeWelcomeEmailEnabled(),
+    reason: eligibility.reason,
+    note: 'Only the one-time email addition is evaluated here. Existing recurring and SMS eligibility is unchanged. Email preferences, suppression and queue/send guards still apply.',
+  };
+}
+
 // POST /api/admin/email-templates/versions/:id/preview
 router.post('/versions/:id/preview', async (req, res) => {
   try {
+    const scheduledServiceId = req.body.scheduledServiceId;
+    if (scheduledServiceId && Joi.string().uuid().validate(scheduledServiceId).error) {
+      return res.status(400).json({ error: 'Appointment ID must be a valid UUID' });
+    }
     const payload = req.body.payload || {};
     const rendered = await EmailTemplates.renderVersion(req.params.id, payload, {
       unsubscribeUrl: sendgrid.unsubscribeUrl('preview-demo-token'),
     });
+    if (scheduledServiceId) {
+      const version = await EmailTemplates.loadVersion(req.params.id);
+      rendered.audiencePreview = await onboardingAudiencePreview(version.template.template_key, scheduledServiceId);
+    }
     res.json(rendered);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });

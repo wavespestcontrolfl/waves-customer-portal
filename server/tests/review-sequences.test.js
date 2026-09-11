@@ -19,6 +19,8 @@ jest.mock('../services/review-ask-drafter', () => ({
   draftEmailIntro: (...a) => mockDraftEmailIntro(...a),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The per-customer send lock needs a real pool; its own suite covers it.
+jest.mock('../utils/cron-lock', () => ({ runExclusive: async (_key, fn) => fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: async (url) => url }));
@@ -100,11 +102,12 @@ function makeMock(initial = {}, opts = {}) {
       count() { return { first: async () => ({ count: String(filtered(this).length), c: String(filtered(this).length) }) }; },
       insert(row) {
         if (!state.rows[this.table]) state.rows[this.table] = [];
+        if (opts.onInsert) { const veto = opts.onInsert(this.table, row, state); if (veto) return { returning: async () => { throw veto; } }; }
         const inserted = { id: row.id || `${this.table}-${state.rows[this.table].length + 1}`, ...row };
         state.rows[this.table].push(inserted);
         return { returning: async () => [inserted] };
       },
-      async update(patch) { if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
+      async update(patch) { if (opts.onUpdate) opts.onUpdate(this.table, patch, state); if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
       async del() { const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
       then(res, rej) { return Promise.resolve(filtered(this)).then(res, rej); },
     };
@@ -145,7 +148,7 @@ describe('review sequences — cadence engine', () => {
     // The touch is recorded in review_requests with channel + template + sequence linkage,
     // and marked followup_sent so the legacy Day-3 auto-followup skips it.
     const touch = mock.__state.rows.review_requests[0];
-    expect(touch).toMatchObject({ channel: 'sms', template_key: 'friendly_ask', sequence_step: 0, followup_sent: true, status: 'sent' });
+    expect(touch).toMatchObject({ channel: 'sms', template_key: 'day0_ask', sequence_step: 0, followup_sent: true, status: 'sent' });
     expect(touch.sequence_id).toBe(result.sequence.id);
   });
 
@@ -214,6 +217,41 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('capped');
+  });
+
+  test('stopReviewSequence reaches a parked (deferred) series final, leaves a redeeming lease alone (codex #4140 r18 P2)', async () => {
+    const mock = makeMock({
+      review_sequences: [
+        { id: 'seqParked', customer_id: 'p1', status: 'deferred', next_run_at: new Date(Date.now() + 30 * 60000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqLease', customer_id: 'p2', status: 'redeeming', next_run_at: null, plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqActive', customer_id: 'p3', status: 'active', next_run_at: new Date(), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    expect(await ReviewService.stopReviewSequence('seqParked')).toEqual({ stopped: true });
+    expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'manual', next_run_at: null });
+    expect(await ReviewService.stopReviewSequence('seqLease')).toEqual({ stopped: false });
+    expect(mock.__state.rows.review_sequences[1].status).toBe('redeeming');
+    expect(await ReviewService.stopReviewSequence('seqActive')).toEqual({ stopped: true });
+    // A stopped parked row no longer reads as an enrollment on the Reviews page.
+    expect(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3'])).toEqual(expect.objectContaining({ p2: expect.anything() }));
+    expect(Object.keys(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3']))).toEqual(['p2']);
+  });
+
+  test('getActiveSequencesForCustomers promises no tick for an active row the runner will retire as stale (codex #4140 r24 P2)', async () => {
+    const mock = makeMock({
+      review_sequences: [
+        { id: 'seqStale', customer_id: 's1', status: 'active', next_run_at: new Date(Date.now() - 8 * 86400000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqLate', customer_id: 's2', status: 'active', next_run_at: new Date(Date.now() - 60 * 60000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const map = await ReviewService.getActiveSequencesForCustomers(['s1', 's2']);
+    expect(map.s1).toMatchObject({ staleRetire: true, nextSendTickAt: null });
+    expect(map.s2.staleRetire).toBe(false);
+    expect(map.s2.nextSendTickAt).toBeTruthy();
   });
 
   test('a cadence stops on a non-promoter draft score tap (no submit)', async () => {
@@ -661,6 +699,438 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     // smart window's worst case is "next morning 10 AM" + Sat→Sun overrides).
     expect(seq.next_run_at.getTime()).toBeGreaterThan(Date.now() - 1000);
     expect(seq.next_run_at.getTime()).toBeLessThan(Date.now() + 48 * 3600000);
+  });
+
+  describe('decision record (owner directive 2026-09-07: panel and Reviews page explain the same decision)', () => {
+    const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+
+    test('a smart-window enrollment records the planned Day-0 send with owner action none', async () => {
+      mockGates.reviewSequences = true;
+      const mock = makeMock({ customers: [{ id: 'dc-1', first_name: 'Ana', last_name: 'M', phone: '+19410000132', nearest_location_id: 'sarasota' }] });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.enrollPostService({ customerId: 'dc-1', serviceType: 'Quarterly Pest Control', completedAt: new Date() });
+
+      expect(result.started).toBe(true);
+      const seq = mock.__state.rows.review_sequences[0];
+      const d = parse(seq.decision);
+      expect(d).toMatchObject({ reason: 'smart_window', ownerAction: 'none' });
+      expect(new Date(d.plannedAt).getTime()).toBe(seq.next_run_at.getTime());
+      expect(seq.customer_requested == null).toBe(true);
+    });
+
+    test('"Customer asked for the link" is recorded (who/when/source) and the ask waits for the next tick — not an instant send', async () => {
+      mockGates.reviewSequences = true;
+      const mock = makeMock({ customers: [{ id: 'dc-2', first_name: 'Dana', last_name: 'Q', phone: '+19410000133', nearest_location_id: 'bradenton' }] });
+      db.mockImplementation(mock);
+      const requested = { by: 'tech-1', byName: 'Adam', at: new Date().toISOString(), source: 'completion_panel' };
+
+      const result = await ReviewService.enrollPostService({ customerId: 'dc-2', serviceType: 'pest control', completedAt: new Date(), delayMinutes: 0, customerRequested: requested });
+
+      expect(result.started).toBe(true);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(parse(seq.customer_requested)).toEqual(requested);
+      expect(parse(seq.decision)).toMatchObject({ reason: 'customer_requested', ownerAction: 'none' });
+      expect(seq.next_run_at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+    });
+
+    test('an operator-picked time records operator_timing', async () => {
+      mockGates.reviewSequences = true;
+      const mock = makeMock({ customers: [{ id: 'dc-3', first_name: 'Lee', last_name: 'K', phone: '+19410000134', nearest_location_id: 'parrish' }] });
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollPostService({ customerId: 'dc-3', completedAt: new Date(), delayMinutes: 600 });
+
+      expect(parse(mock.__state.rows.review_sequences[0].decision)).toMatchObject({ reason: 'operator_timing' });
+    });
+
+    test('a send-window hold records the planned send; a sent touch records the scheduled follow-up', async () => {
+      mockGates.reviewSequences = true;
+      const nextAllowedAt = new Date(Date.now() + 9 * 3600000);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, nextAllowedAt: nextAllowedAt.toISOString(), code: 'QUIET_HOURS_HOLD' });
+      const mock = makeMock({
+        customers: [{ id: 'dc-4', first_name: 'Mae', last_name: 'R', phone: '+19410000135', nearest_location_id: 'venice' }],
+        review_sequences: [{
+          id: 'seq-dc4', customer_id: 'dc-4', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.processReviewSequences();
+      const held = mock.__state.rows.review_sequences[0];
+      expect(parse(held.decision)).toMatchObject({ reason: 'send_window', plannedAt: nextAllowedAt.toISOString(), ownerAction: 'none' });
+      expect(held.next_run_at.getTime()).toBe(nextAllowedAt.getTime());
+
+      held.next_run_at = new Date(Date.now() - 1000);
+      await ReviewService.processReviewSequences();
+      const sent = mock.__state.rows.review_sequences[0];
+      expect(sent.current_step).toBe(1);
+      const d = parse(sent.decision);
+      expect(d.reason).toBe('follow_up_scheduled');
+      expect(new Date(d.plannedAt).getTime()).toBe(sent.next_run_at.getTime());
+    });
+
+    test('a provider blip with a synthesized retry time is a re-check, not a send-window hold (codex #4140 r1)', async () => {
+      mockGates.reviewSequences = true;
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, retryable: true, nextAllowedAt: new Date(Date.now() + 5 * 60000).toISOString(), code: 'PROVIDER_FAILURE' });
+      const mock = makeMock({
+        customers: [{ id: 'dc-6', first_name: 'Mae', last_name: 'R', phone: '+19410000136', nearest_location_id: 'venice' }],
+        review_sequences: [{
+          id: 'seq-dc6', customer_id: 'dc-6', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.processReviewSequences();
+      const d = parse(mock.__state.rows.review_sequences[0].decision);
+      expect(d.reason).not.toBe('send_window');
+      expect(d.plannedAt).toBeNull();
+      expect(d.nextEvalAt).toBeTruthy();
+    });
+
+    test('a stale send claim reads as stranded, a fresh one as sending (codex #4140 r1)', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-dc7', customer_id: 'dc-7', status: 'active', current_step: 0, plan: JSON.stringify([{ day: 0 }]), next_run_at: null, updated_at: new Date(Date.now() - 20 * 60000) },
+          { id: 'seq-dc8', customer_id: 'dc-8', status: 'active', current_step: 0, plan: JSON.stringify([{ day: 0 }]), next_run_at: null, updated_at: new Date() },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['dc-7', 'dc-8']);
+      expect(map['dc-7']).toMatchObject({ sending: false, stranded: true });
+      expect(map['dc-8']).toMatchObject({ sending: true, stranded: false });
+    });
+
+    test('"Customer asked for the link" survives a parked series final and its redemption (codex #4140 r1)', async () => {
+      mockGates.reviewSequences = true;
+      const d = (ago) => new Date(Date.now() - ago * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'pk2', first_name: 'Ann', last_name: 'Q', phone: '+19410000168', nearest_location_id: 'bradenton' }],
+        service_records: [{ id: 'sr-pk2', customer_id: 'pk2', scheduled_service_id: 'pk2-2' }],
+        scheduled_services: [
+          { id: 'pk2-1', customer_id: 'pk2', service_id: 'svc-wt', status: 'completed', scheduled_date: d(2), service_key: 'wildlife_trapping' },
+          { id: 'pk2-2', customer_id: 'pk2', service_id: 'svc-wt', status: 'completed', scheduled_date: d(0), service_key: 'wildlife_trapping', follow_up_interval_days: 1 },
+        ],
+        review_sequences: [{ id: 'seq-stuck2', customer_id: 'pk2', scheduled_service_id: 'pk2-1', status: 'active', current_step: 0, next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]) }],
+      });
+      db.mockImplementation(mock);
+      const prev = ReviewService._SUPERSEDE_RETRY_DELAY_MS;
+      ReviewService._SUPERSEDE_RETRY_DELAY_MS = 1;
+      const requested = { by: 'tech-1', byName: 'Adam', at: new Date().toISOString(), source: 'completion_panel' };
+      let res;
+      try {
+        res = await ReviewService.enrollPostService({ customerId: 'pk2', serviceRecordId: 'sr-pk2', completedAt: new Date(), delayMinutes: 0, customerRequested: requested });
+      } finally {
+        ReviewService._SUPERSEDE_RETRY_DELAY_MS = prev;
+      }
+      expect(res.reason).toBe('deferred_inflight');
+      const parked = mock.__state.rows.review_sequences.find((r) => r.status === 'deferred');
+      expect(parse(parked.customer_requested)).toMatchObject({ by: 'tech-1', source: 'completion_panel' });
+      expect(parse(parked.decision)).toMatchObject({ reason: 'opener_in_flight', enrollmentReason: 'customer_requested' });
+
+      mock.__state.rows.review_sequences.find((r) => r.id === 'seq-stuck2').status = 'completed';
+      parked.next_run_at = new Date(Date.now() - 1000);
+      const out = await ReviewService.processReviewSequences();
+      expect(out.redeemed).toBe(1);
+      const active = mock.__state.rows.review_sequences.find((r) => r.status === 'active');
+      expect(parse(active.customer_requested)).toMatchObject({ by: 'tech-1', source: 'completion_panel' });
+      // The redeemed Day-0 was already due, so the runner may have sent it in
+      // the same sweep and moved the decision on — never to operator_timing.
+      expect(['customer_requested', 'follow_up_scheduled']).toContain(parse(active.decision).reason);
+    });
+
+    test('getActiveSequencesForCustomers exposes the parsed decision and the request capture', async () => {
+      const mock = makeMock({
+        review_sequences: [{ id: 'seq-dc5', customer_id: 'dc-5', status: 'active', current_step: 1, plan: JSON.stringify([{ day: 0 }, { day: 4 }]), next_run_at: new Date(), decision: JSON.stringify({ reason: 'follow_up_scheduled', ownerAction: 'none' }), customer_requested: JSON.stringify({ by: 'tech-1', source: 'completion_panel' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['dc-5']);
+      expect(map['dc-5']).toMatchObject({ currentStep: 1, totalSteps: 2, sending: false, decision: { reason: 'follow_up_scheduled' }, customerRequested: { source: 'completion_panel' } });
+    });
+  });
+
+  test('"Customer asked for the link" against an ACTIVE cadence is recorded on that cadence, its schedule untouched (codex #4140 r4 P2)', async () => {
+    mockGates.reviewSequences = true;
+    const nextRun = new Date(Date.now() + 3 * 3600000);
+    const mock = makeMock({
+      customers: [{ id: 'aa-1', first_name: 'Lee', last_name: 'K', phone: '+19410000144', nearest_location_id: 'venice' }],
+      review_sequences: [{ id: 'seq-aa1', customer_id: 'aa-1', status: 'active', current_step: 1, touches_sent: 1, plan: JSON.stringify([{ day: 0 }, { day: 4 }]), started_at: new Date(), next_run_at: nextRun, updated_at: new Date(Date.now() - 3600000), decision: JSON.stringify({ reason: 'follow_up_scheduled', ownerAction: 'none' }) }],
+    });
+    db.mockImplementation(mock);
+    const requested = { by: 'tech-1', byName: 'Adam', at: new Date().toISOString(), source: 'completion_panel' };
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'aa-1', serviceType: 'pest control', techName: 'Adam', customerRequested: requested, decision: { reason: 'customer_requested' } });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+    const active = mock.__state.rows.review_sequences[0];
+    const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    expect(parse(active.customer_requested)).toEqual(requested);
+    // Schedule and decision belong to the running cadence; the runner's claim
+    // stamp (updated_at) is not refreshed by a request capture.
+    expect(active.next_run_at).toBe(nextRun);
+    expect(parse(active.decision)).toMatchObject({ reason: 'follow_up_scheduled' });
+    expect(active.updated_at.getTime()).toBeLessThan(Date.now() - 3000000);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a request capture survives the enrollment race — a unique-index loss records it on the WINNING cadence (codex #4140 r9 P2)', async () => {
+    mockGates.reviewSequences = true;
+    const requested = { by: 'tech-2', byName: 'Bea', at: new Date().toISOString(), source: 'completion_panel' };
+    // No active row at the up-front lookup; another enrollment wins the
+    // unique index between that lookup and this insert.
+    const mock = makeMock({
+      customers: [{ id: 'rc-1', first_name: 'Ray', last_name: 'C', phone: '+19410000146', nearest_location_id: 'venice' }],
+    }, {
+      onInsert: (table, row, state) => {
+        if (table !== 'review_sequences' || row.customer_id !== 'rc-1') return null;
+        state.rows.review_sequences.push({ id: 'seq-winner', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0, plan: '[{"day":0}]', started_at: new Date(), next_run_at: new Date(Date.now() + 3600000) });
+        return Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'rc-1', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, decision: { reason: 'customer_requested' } });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: true });
+    const winner = mock.__state.rows.review_sequences.find((r) => r.id === 'seq-winner');
+    expect(JSON.parse(winner.customer_requested)).toEqual(requested);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('the first request capture survives a later completion (concurrent writer: %s)', async (concurrent) => {
+    const first = { by: 'first-tech', at: '2030-01-01T16:00:00Z', source: 'completion_panel' };
+    const later = { by: 'later-tech', at: '2030-01-02T16:00:00Z', source: 'completion_panel' };
+    const mock = makeMock({
+      customers: [{ id: 'capture-once' }],
+      review_sequences: [{ id: 'capture-seq', customer_id: 'capture-once', status: 'active',
+        customer_requested: concurrent ? null : JSON.stringify(first) }],
+    }, {
+      onUpdate: (table, patch, state) => {
+        if (concurrent && table === 'review_sequences' && patch.customer_requested) {
+          state.rows.review_sequences[0].customer_requested = JSON.stringify(first);
+        }
+      },
+    });
+    db.mockImplementation(mock);
+    const result = await ReviewService.startReviewSequence({ customerId: 'capture-once', customerRequested: later });
+    expect(result).toMatchObject({ reason: 'already_active', requestRecorded: true });
+    expect(JSON.parse(mock.__state.rows.review_sequences[0].customer_requested)).toEqual(first);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('request capture retries enrollment when the active cadence settles before the update', async () => {
+    const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    const firstTouchAt = new Date(Date.now() + 3600000);
+    const mock = makeMock({
+      customers: [{ id: 'capture-race' }],
+      review_sequences: [{ id: 'settled', customer_id: 'capture-race', status: 'active' }],
+    }, {
+      onUpdate: (table, patch, state) => {
+        if (table === 'review_sequences' && patch.customer_requested) state.rows.review_sequences[0].status = 'completed';
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'capture-race', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, firstTouchAt });
+
+    expect(result).toMatchObject({ started: true, scheduledFor: firstTouchAt });
+    expect(JSON.parse(result.sequence.customer_requested)).toEqual(requested);
+    expect(mock.__state.rows.review_sequences[0].customer_requested).toBeUndefined();
+    expect(mock.__state.rows.review_sequences.filter(row => row.status === 'active')).toHaveLength(1);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([false, true])('a vanished unique-index winner retries with the delivery cap rechecked (delivered: %s)', async (delivered) => {
+    const requested = { by: 'tech-1', at: new Date().toISOString(), source: 'completion_panel' };
+    let collided = false;
+    const mock = makeMock({ customers: [{ id: 'vanished-winner' }] }, {
+      onInsert: (table, row, state) => {
+        if (table !== 'review_sequences' || collided) return null;
+        collided = true;
+        if (delivered) state.rows.review_requests.push({ id: 'winner-ask', customer_id: row.customer_id, status: 'sent', sent_at: new Date(), template_key: 'day0_ask' });
+        return Object.assign(new Error('concurrent enrollment settled'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'vanished-winner', serviceType: 'pest control', techName: 'Bea', customerRequested: requested, firstTouchAt: new Date(Date.now() + 3600000) });
+
+    if (delivered) {
+      expect(result).toMatchObject({ started: false, reason: 'cooldown' });
+      expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    } else {
+      expect(result.started).toBe(true);
+      expect(JSON.parse(result.sequence.customer_requested)).toEqual(requested);
+    }
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('persistent enrollment contention fails visibly after a bounded capture retry', async () => {
+    let attempts = 0;
+    const mock = makeMock({ customers: [{ id: 'capture-contention' }] }, {
+      onInsert: (table) => {
+        if (table !== 'review_sequences') return null;
+        attempts += 1;
+        return Object.assign(new Error('concurrent enrollment settled'), { code: '23505' });
+      },
+    });
+    db.mockImplementation(mock);
+
+    await expect(ReviewService.startReviewSequence({ customerId: 'capture-contention', serviceType: 'pest control', techName: 'Bea', customerRequested: { source: 'completion_panel' } }))
+      .rejects.toThrow('Active review cadence changed during request capture');
+    expect(attempts).toBe(2);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an already_active result without a request leaves the cadence untouched and reports requestRecorded:false', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'aa-2', first_name: 'Mo', last_name: 'B', phone: '+19410000145', nearest_location_id: 'venice' }],
+      review_sequences: [{ id: 'seq-aa2', customer_id: 'aa-2', status: 'active', current_step: 0, touches_sent: 0, plan: '[]', started_at: new Date(), next_run_at: new Date() }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'aa-2', serviceType: 'pest control', techName: 'Adam' });
+
+    expect(result).toMatchObject({ started: false, reason: 'already_active', requestRecorded: false });
+    expect(mock.__state.rows.review_sequences[0].customer_requested == null).toBe(true);
+  });
+
+  describe('the planned send is the worker tick, not the eligibility instant (codex #4140 r4 P2)', () => {
+    const { nextCadenceTickAt, REVIEW_CADENCE_TICK_MINUTES } = ReviewService.__private;
+
+    test('the scheduler cron and the tick table name the same minutes', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+      expect(scheduler).toContain(`cron.schedule('${REVIEW_CADENCE_TICK_MINUTES.join(',')} * * * *'`);
+    });
+
+    test('the legacy scheduler cron (processScheduled, */15) and the legacy tick table name the same minutes (codex #4140 r18 P2)', () => {
+      const fs = require('fs');
+      const path = require('path');
+      const { LEGACY_REVIEW_TICK_MINUTES } = ReviewService.__private;
+      const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+      const legacy = scheduler.slice(scheduler.indexOf("cron.schedule('*/15 * * * *'"), scheduler.indexOf('ReviewService.processScheduled()'));
+      expect(legacy).toContain("cron.schedule('*/15 * * * *'");
+      expect(LEGACY_REVIEW_TICK_MINUTES).toEqual([0, 15, 30, 45]);
+      // The preview route hands the panel both tick tables.
+      const route = fs.readFileSync(path.join(__dirname, '../routes/admin-reviews.js'), 'utf8');
+      expect(route).toContain('legacyTickMinutesOfHour: ReviewService.__private.LEGACY_REVIEW_TICK_MINUTES');
+    });
+
+    test.each([
+      ['4:30:00 → 4:44', '2026-05-26T20:30:00.000Z', '2026-05-26T20:44:00.000Z'],
+      ['4:45:00 → 5:14', '2026-05-26T20:45:00.000Z', '2026-05-26T21:14:00.000Z'],
+      ['4:14:00 exactly → 4:14 (the tick fires on it)', '2026-05-26T20:14:00.000Z', '2026-05-26T20:14:00.000Z'],
+      ['4:14:30 → 4:44 (the :14 tick already ran)', '2026-05-26T20:14:30.000Z', '2026-05-26T20:44:00.000Z'],
+      ['11:50 PM → 12:14 AM next day', '2026-05-26T23:50:00.000Z', '2026-05-27T00:14:00.000Z'],
+    ])('%s', (_label, from, expected) => {
+      expect(nextCadenceTickAt(new Date(from)).toISOString()).toBe(expected);
+    });
+
+    test('getActiveSequencesForCustomers exposes nextSendTickAt for the Reviews page, null while the runner holds the claim', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-t1', customer_id: 't-1', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: new Date('2026-05-26T20:30:00Z') },
+          { id: 'seq-t2', customer_id: 't-2', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: null, updated_at: new Date() },
+        ],
+      });
+      db.mockImplementation(mock);
+      // Pinned before the row's schedule: the tick is computed from the row.
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T20:00:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['t-1', 't-2']);
+        expect(map['t-1'].nextSendTickAt.toISOString()).toBe('2026-05-26T20:44:00.000Z');
+        expect(map['t-2']).toMatchObject({ nextSendTickAt: null, sending: true });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    test('an SMS step whose tick falls outside the 8 AM–8 PM window shows the first tick after it reopens; an email ask step is not windowed (codex #4140 r11 P2)', async () => {
+      mockGates.smsSendWindow = true;
+      // 7:50 PM ET on 2026-05-26 (EDT, UTC-4) = 23:50Z; the 8:14 PM tick is outside the window.
+      const eveningRow = new Date('2026-05-26T23:50:00Z');
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-w1', customer_id: 'w-1', status: 'active', current_step: 0, plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]', next_run_at: eveningRow },
+          { id: 'seq-w2', customer_id: 'w-2', status: 'active', current_step: 0, plan: '[{"day":0,"channel":"email","templateKey":"day0_ask"}]', next_run_at: eveningRow },
+        ],
+      });
+      db.mockImplementation(mock);
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T23:00:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['w-1', 'w-2']);
+        // Next morning 8:00 AM EDT = 12:00Z; first tick after it is 8:14.
+        expect(map['w-1'].nextSendTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
+        // Either ask step can swap channel at send time (codex #4140 r14, r16 P2):
+        // the SMS step's email fallback escapes the window; the email step's SMS fallback meets it.
+        expect(map['w-1']).toMatchObject({ fallbackChannel: 'email', plannedChannel: 'text' });
+        expect(map['w-1'].fallbackTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
+        expect(map['w-2'].nextSendTickAt.toISOString()).toBe('2026-05-27T00:14:00.000Z');
+        expect(map['w-2']).toMatchObject({ fallbackChannel: 'text', plannedChannel: 'email' });
+        expect(map['w-2'].fallbackTickAt.toISOString()).toBe('2026-05-27T12:14:00.000Z');
+      } finally {
+        nowSpy.mockRestore();
+        mockGates.smsSendWindow = false;
+      }
+    });
+
+    test.each(['deferred', 'redeeming'])('a %s final rechecks at night without an SMS-window hold', async status => {
+      mockGates.smsSendWindow = true;
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-27T01:00:00Z').getTime());
+      const mock = makeMock({ review_sequences: [{ id: 'parked-night', customer_id: 'night-customer', status,
+        current_step: 0, plan: '[{"day":0,"channel":"sms","templateKey":"day0_ask"}]',
+        next_run_at: new Date('2026-05-27T01:05:00Z') }] });
+      db.mockImplementation(mock);
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['night-customer']);
+        expect(map['night-customer'].nextSendTickAt.toISOString()).toBe('2026-05-27T01:14:00.000Z');
+        expect(map['night-customer']).toMatchObject({ parked: true, fallbackTickAt: null, fallbackChannel: null, plannedChannel: null });
+      } finally { nowSpy.mockRestore(); mockGates.smsSendWindow = false; }
+    });
+
+    test('a parked series final is a cadence in the candidate map (parked, next re-check), and an active row wins over it (codex #4140 r12 P2)', async () => {
+      const parkAt = new Date(Date.now() + 20 * 60000);
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-pk1', customer_id: 'pk-1', status: 'deferred', stop_reason: 'opener_in_flight', current_step: 0, plan: '[{"day":0},{"day":4}]', next_run_at: parkAt, decision: JSON.stringify({ reason: 'opener_in_flight', enrollmentReason: 'customer_requested' }) },
+          { id: 'seq-pk2a', customer_id: 'pk-2', status: 'active', current_step: 1, plan: '[{"day":0},{"day":4}]', next_run_at: new Date(Date.now() + 3600000) },
+          { id: 'seq-pk2d', customer_id: 'pk-2', status: 'redeeming', current_step: 0, plan: '[{"day":0}]', next_run_at: parkAt },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['pk-1', 'pk-2']);
+      expect(map['pk-1']).toMatchObject({ id: 'seq-pk1', parked: true, sending: false, stranded: false, totalSteps: 2, decision: { reason: 'opener_in_flight' } });
+      expect(new Date(map['pk-1'].nextRunAt).getTime()).toBe(parkAt.getTime());
+      expect(map['pk-2']).toMatchObject({ id: 'seq-pk2a', parked: false, currentStep: 1 });
+    });
+
+    test('an overdue row (missed tick, gate re-enabled between ticks) shows the next tick from now, never one already past (codex #4140 r8)', async () => {
+      const mock = makeMock({
+        review_sequences: [
+          { id: 'seq-t3', customer_id: 't-3', status: 'active', current_step: 0, plan: '[{"day":0}]', next_run_at: new Date('2026-05-26T20:30:00Z') },
+        ],
+      });
+      db.mockImplementation(mock);
+      const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-05-26T22:50:00Z').getTime());
+      try {
+        const map = await ReviewService.getActiveSequencesForCustomers(['t-3']);
+        expect(map['t-3'].nextSendTickAt.toISOString()).toBe('2026-05-26T23:14:00.000Z');
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
   });
 
   test('enrollPostService is idempotent per customer — an active cadence blocks a second enrollment', async () => {
@@ -2395,23 +2865,39 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('superseded');
   });
 
-  test('a personalized draft becomes the touch body (persisted as custom_body, link substituted)', async () => {
+  // A sequence sitting at its Day-4 reminder (step 1), Day-0 already sent 4
+  // days ago — the drafter's remaining home after the Day-0 touch became
+  // controlled composition (owner decision 2026-09-07).
+  function reminderStepFixture(id, customer, extra = {}) {
+    return {
+      customers: [customer],
+      review_sequences: [{
+        id, customer_id: customer.id, status: 'active', current_step: 1, touches_sent: 1, service_type: 'pest control', tech_name: 'Adam',
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [
+        { id: `${id}-day0`, sequence_id: id, sequence_step: 0, customer_id: customer.id, channel: 'sms', template_key: 'day0_ask', status: 'sent', sms_sent_at: new Date(Date.now() - 4 * 86400000), created_at: new Date(Date.now() - 4 * 86400000) },
+        ...(extra.review_requests || []),
+      ],
+    };
+  }
+
+  test('a personalized draft becomes the Day-4 reminder body (persisted as custom_body, link substituted)', async () => {
     const draft = 'Hi Stan, Adam here — hope the ants are staying gone after Tuesday. If we earned it: {review_url}. Anything off, just reply here.';
     mockDraftAskBody.mockResolvedValue(draft);
-    const mock = makeMock({
-      customers: [{ id: 'pd-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000040', nearest_location_id: 'bradenton' }],
-    });
+    const mock = makeMock(reminderStepFixture('seq-pd1', { id: 'pd-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000040', nearest_location_id: 'bradenton' }));
     db.mockImplementation(mock);
 
-    const result = await ReviewService.startReviewSequence({ customerId: 'pd-1', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+    const out = await ReviewService.processReviewSequences();
 
-    expect(result.started).toBe(true);
-    expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'pest control', techName: 'Adam', recipientFirstName: 'Stan' }));
-    const touch = mock.__state.rows.review_requests[0];
+    expect(out.sent).toBe(1);
+    expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'pest control', techName: 'Adam', recipientFirstName: 'Stan', sequenceStep: 1 }));
+    const touch = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1);
     expect(touch.custom_body).toBe(draft);
     // Personalized provenance: the outreach funnel groups by template_key, so
     // a drafted touch must not be credited to the control template.
-    expect(touch.template_key).toBe('friendly_ask_personalized');
+    expect(touch.template_key).toBe('soft_reminder_personalized');
     // The sent SMS is the draft with {review_url} resolved to the tokenized link.
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).toContain('hope the ants are staying gone after Tuesday');
@@ -2419,21 +2905,208 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(sentBody).not.toContain('{review_url}');
   });
 
-  test('a rejected/failed draft falls back to the standard template (ask still sends)', async () => {
+  test('a rejected/failed draft falls back to the standard template (reminder still sends)', async () => {
     mockDraftAskBody.mockResolvedValue(null);
-    const mock = makeMock({
-      customers: [{ id: 'pd-2', first_name: 'Ada', last_name: 'V', phone: '+19410000041', nearest_location_id: 'venice' }],
-    });
+    const mock = makeMock(reminderStepFixture('seq-pd2', { id: 'pd-2', first_name: 'Ada', last_name: 'V', phone: '+19410000041', nearest_location_id: 'venice' }));
     db.mockImplementation(mock);
 
-    const result = await ReviewService.startReviewSequence({ customerId: 'pd-2', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+    const out = await ReviewService.processReviewSequences();
 
-    expect(result.started).toBe(true);
-    const touch = mock.__state.rows.review_requests[0];
+    expect(out.sent).toBe(1);
+    const touch = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1);
     expect(touch.custom_body == null).toBe(true);
-    expect(touch.template_key).toBe('friendly_ask');
+    expect(touch.template_key).toBe('soft_reminder');
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
-    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template copy
+    expect(sentBody).toContain('quick nudge from Waves'); // soft_reminder template copy
+  });
+
+  describe('controlled Day-0 composition (owner decision 2026-09-07)', () => {
+    const { countSegments } = require('../services/messaging/segment-counter');
+    const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+    const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+
+    test('the Day-0 SMS is composed from verified fields — never the drafter, no "today", one segment as sent', async () => {
+      mockDraftAskBody.mockResolvedValue('SHOULD NOT BE USED {review_url}');
+      const mock = makeMock({
+        customers: [{ id: 'd0-1', first_name: 'Christopher2', last_name: 'K', phone: '+19410000090', nearest_location_id: 'bradenton' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-1', serviceType: 'Quarterly Pest Control', techName: 'Christopher Adams', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(touch.custom_body == null).toBe(true);
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).toBe(`Hi Christopher2! Christopher with Waves. If we earned it, a Google review means a lot: https://portal.test/rate/${touch.token} Reply if anything's off.`);
+      expect(sentBody).not.toMatch(/\btoday\b|\btonight\b|\bthis morning\b/i);
+      // As sent: scheme stripped at the Twilio boundary, GSM-normalized.
+      const seg = countSegments(normalizeGsmPunctuation(stripSmsUrlScheme(sentBody.replace(`https://portal.test/rate/${touch.token}`, 'https://portal.wavespestcontrol.com/l/abcde'))));
+      expect(seg).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
+    });
+
+    test('no technician on the record → the company signs, never "Your tech with Waves"', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-2', first_name: 'Mae', last_name: 'R', phone: '+19410000091', nearest_location_id: 'venice' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-2', serviceType: 'pest control', startedBy: 'admin-1' });
+
+      expect(result.started).toBe(true);
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).toContain('Hi Mae! Waves Pest Control. If we earned it');
+      expect(sentBody).not.toContain('Your tech');
+    });
+
+    test('a plan persisted before the change (friendly_ask at step 0) gets the controlled body too', async () => {
+      mockDraftAskBody.mockResolvedValue('SHOULD NOT BE USED {review_url}');
+      const mock = makeMock({
+        customers: [{ id: 'd0-3', first_name: 'Robin', last_name: 'T', phone: '+19410000092', nearest_location_id: 'bradenton' }],
+        review_sequences: [{
+          id: 'seq-d03', customer_id: 'd0-3', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockDraftAskBody).not.toHaveBeenCalled();
+      const touch = mock.__state.rows.review_requests[0];
+      expect(touch.template_key).toBe('day0_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Robin! Adam with Waves.');
+    });
+
+    test('a Day-0 draft persisted by an earlier deferred attempt is NOT reused — the controlled body sends', async () => {
+      // Prod case 2026-08-25: drafted "Thanks for having us out today" at 8 PM,
+      // held by quiet hours, sent verbatim at 8 AM the next day.
+      const staleDraft = 'Thanks for having us out today, Robin! Mind leaving a review? {review_url}';
+      const mock = makeMock({
+        customers: [{ id: 'd0-4', first_name: 'Robin', last_name: 'T', phone: '+19410000093', nearest_location_id: 'bradenton' }],
+        review_sequences: [{
+          id: 'seq-d04', customer_id: 'd0-4', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 12 * 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+        review_requests: [{ id: 'rr-d04', sequence_id: 'seq-d04', sequence_step: 0, customer_id: 'd0-4', channel: 'sms', template_key: 'friendly_ask_personalized', custom_body: staleDraft, status: 'deferred', created_at: new Date(Date.now() - 12 * 3600000) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-d04');
+      expect(retry.custom_body == null).toBe(true);
+      expect(retry.template_key).toBe('day0_ask');
+      const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+      expect(sentBody).not.toContain('today');
+      expect(sentBody).toContain('Hi Robin! Adam with Waves.');
+    });
+
+    test('the multi-treatment first-visit ask keeps its own template', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-5', first_name: 'Ken', last_name: 'T', phone: '+19410000094', nearest_location_id: 'venice' }],
+        review_sequences: [{
+          id: 'seq-d05', customer_id: 'd0-5', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'first_treatment_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mock.__state.rows.review_requests[0].template_key).toBe('first_treatment_ask');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain("First treatment's done");
+    });
+
+    test('a quiet-hours retry through sendSMS signs the Day-0 ask the same way: first name with Waves, else the company (codex #4139 r1)', async () => {
+      const mock = makeMock({
+        customers: [
+          { id: 'd0-6', first_name: 'Lee', last_name: 'P', phone: '+19410000095', nearest_location_id: 'venice' },
+          { id: 'd0-7', first_name: 'Kim', last_name: 'P', phone: '+19410000096', nearest_location_id: 'venice' },
+        ],
+        review_requests: [
+          { id: 'rr-d06', customer_id: 'd0-6', channel: 'sms', status: 'pending', template_key: 'day0_ask', tech_name: 'Christopher Longname', token: 'tok-d06', location_id: 'venice' },
+          { id: 'rr-d07', customer_id: 'd0-7', channel: 'sms', status: 'pending', template_key: 'day0_ask', tech_name: null, token: 'tok-d07', location_id: 'venice' },
+        ],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.sendSMS('rr-d06');
+      await ReviewService.sendSMS('rr-d07');
+
+      const bodies = mockSendCustomerMessage.mock.calls.map((c) => c[0].body);
+      expect(bodies[0]).toContain('Hi Lee! Christopher with Waves.');
+      expect(bodies[0]).not.toContain('Longname');
+      expect(bodies[1]).toContain('Hi Kim! Waves Pest Control.');
+      expect(bodies[1]).not.toContain('Our team');
+    });
+
+    test('a record-scoped enrollment signs with the linked visit\'s technician, never a newer visit\'s (codex #4139 r2)', async () => {
+      const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'd0-9', first_name: 'Ivy', last_name: 'P', phone: '+19410000098', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d09', customer_id: 'd0-9', scheduled_service_id: 'ss-d09-old' }],
+        // tech_name rides the visit rows (the mock's leftJoin is a no-op).
+        scheduled_services: [
+          { id: 'ss-d09-old', customer_id: 'd0-9', status: 'completed', scheduled_date: d(30), service_type: 'pest control', technician_id: 'tech-a', tech_name: 'Older Tech' },
+          { id: 'ss-d09-new', customer_id: 'd0-9', status: 'completed', scheduled_date: d(1), service_type: 'pest control', technician_id: 'tech-b', tech_name: 'Newer Tech' },
+        ],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.startReviewSequence({ customerId: 'd0-9', serviceRecordId: 'sr-d09', startedBy: 'invoice' });
+
+      expect(result.started).toBe(true);
+      expect(mock.__state.rows.review_sequences[0].tech_name).toBe('Older Tech');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ivy! Older with Waves.');
+    });
+
+    test('a cadence touch signs with the record\'s technician even when the sequence cached another name (codex #4139 r3)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'd0-10', first_name: 'Uma', last_name: 'P', phone: '+19410000099', nearest_location_id: 'venice' }],
+        service_records: [{ id: 'sr-d10', customer_id: 'd0-10', technician_id: 'tech-a', service_type: 'pest control', service_date: '2026-09-01' }],
+        technicians: [{ id: 'tech-a', name: 'Older Tech' }, { id: 'tech-b', name: 'Newer Tech' }],
+        review_sequences: [{
+          id: 'seq-d10', customer_id: 'd0-10', status: 'active', current_step: 0, touches_sent: 0,
+          // Enrolled before the deployment: the cache holds a newer visit's tech.
+          tech_name: 'Newer Tech', service_record_id: 'sr-d10',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Uma! Older with Waves.');
+    });
+
+    test('a drawer send with no techName resolves the technician from the latest completed visit (codex #4139 r1)', async () => {
+      const d = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+      const mock = makeMock({
+        customers: [{ id: 'd0-8', first_name: 'Ora', last_name: 'P', phone: '+19410000097', nearest_location_id: 'venice' }],
+        // The mock's leftJoin is a no-op, so the technician's name rides the
+        // visit row under the joined alias.
+        scheduled_services: [{ id: 'ss-d08', customer_id: 'd0-8', status: 'completed', scheduled_date: d(1), service_type: 'pest control', technician_id: 'tech-9', tech_name: 'Christopher Longname' }],
+        technicians: [{ id: 'tech-9', name: 'Christopher Longname' }],
+      });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.sendGatedAsk({ customerId: 'd0-8', channel: 'sms', templateId: 'day0_ask', triggeredBy: 'admin' });
+
+      expect(result.outcome).toBe('sent');
+      expect(mockSendCustomerMessage.mock.calls[0][0].body).toContain('Hi Ora! Christopher with Waves.');
+    });
   });
 
   test('a one-off send (no sequence) NEVER drafts — the operator template is exactly what sends', async () => {
@@ -2457,25 +3130,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.template_key).toBe('friendly_ask');
   });
 
-  test('a retried cadence step reuses the previously persisted draft instead of re-drafting', async () => {
+  test('a retried reminder step reuses the previously persisted draft instead of re-drafting', async () => {
     const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
-    const mock = makeMock({
-      customers: [{ id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }],
-      review_sequences: [{
-        id: 'seq-rt', customer_id: 'rt-1', status: 'active', current_step: 0, touches_sent: 0,
-        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
-        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
-      }],
+    const mock = makeMock(reminderStepFixture('seq-rt', { id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }, {
       // A prior attempt already drafted + persisted for this step (send deferred).
-      review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 0, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
-    });
+      review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 1, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    }));
     db.mockImplementation(mock);
 
     const out = await ReviewService.processReviewSequences();
 
     expect(out.sent).toBe(1);
     expect(mockDraftAskBody).not.toHaveBeenCalled();
-    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rt');
+    const retry = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1 && r.id !== 'rr-rt');
     expect(retry.custom_body).toBe(priorDraft);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).toContain('hope the ants stayed gone');
@@ -2483,28 +3150,24 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
   test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
     const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
-    const mock = makeMock({
+    const mock = makeMock(reminderStepFixture('seq-rc', {
       // SMS now routes to a service contact whose phone differs from the
       // account holder's — the account-holder draft must NOT follow them.
-      customers: [{ id: 'rc-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', service_contact_phone: '+19419999999', nearest_location_id: 'bradenton' }],
-      review_sequences: [{
-        id: 'seq-rc', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0,
-        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
-        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
-      }],
-      review_requests: [{ id: 'rr-rc', sequence_id: 'seq-rc', sequence_step: 0, customer_id: 'rc-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
-    });
+      id: 'rc-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', service_contact_phone: '+19419999999', nearest_location_id: 'bradenton',
+    }, {
+      review_requests: [{ id: 'rr-rc', sequence_id: 'seq-rc', sequence_step: 1, customer_id: 'rc-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    }));
     db.mockImplementation(mock);
 
     const out = await ReviewService.processReviewSequences();
 
     expect(out.sent).toBe(1);
     expect(mockDraftAskBody).not.toHaveBeenCalled();
-    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rc');
+    const retry = mock.__state.rows.review_requests.find((r) => r.sequence_step === 1 && r.id !== 'rr-rc');
     expect(retry.custom_body == null).toBe(true);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).not.toContain('hope the ants stayed gone');
-    expect(sentBody).toContain('quick Google review would mean the world'); // friendly_ask template
+    expect(sentBody).toContain('quick nudge from Waves'); // soft_reminder template
   });
 
   test('a scheduled-but-never-sent review-looking SMS does not trigger the manual-ask standdown', async () => {

@@ -112,7 +112,7 @@ const sBtn = (bg, color) => ({
   cursor: "pointer",
 });
 const sBadge = (bg, color) => ({
-  fontSize: 10,
+  fontSize: 11,
   padding: "2px 8px",
   borderRadius: 4,
   background: bg,
@@ -130,7 +130,7 @@ const sInput = {
   boxSizing: "border-box",
 };
 const thS = {
-  fontSize: 10,
+  fontSize: 11,
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 1,
@@ -444,7 +444,7 @@ export default function InventoryPage() {
               </div>{" "}
               <div
                 style={{
-                  fontSize: 9,
+                  fontSize: 11,
                   color: D.muted,
                   textTransform: "uppercase",
                   letterSpacing: 1,
@@ -637,7 +637,7 @@ function LawnFactsTab({ showToast }) {
         ].map(([label, value]) => (
           <div key={label}>
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: D.heading }}>{value}</div>
-            <div style={{ fontSize: 10, color: D.muted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
           </div>
         ))}
       </div>
@@ -1161,7 +1161,7 @@ function PriceSyncTab({ showToast }) {
             </div>
             <div
               style={{
-                fontSize: 9,
+                fontSize: 11,
                 color: D.muted,
                 textTransform: "uppercase",
                 letterSpacing: 1,
@@ -1342,7 +1342,7 @@ function PriceSyncTab({ showToast }) {
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
               <label>
-                <div style={{ fontSize: 10, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Vendor cap</div>
+                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Vendor cap</div>
                 <input
                   type="number"
                   min="1"
@@ -1685,7 +1685,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
           ].map((item) => (
             <div key={item.label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 12px", minWidth: 120 }}>
               <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: item.color }}>{item.value}</div>
-              <div style={{ color: D.muted, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>{item.label}</div>
+              <div style={{ color: D.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>{item.label}</div>
             </div>
           ))}
         </div>
@@ -1962,7 +1962,7 @@ function UnitReviewTab({ showToast }) {
 // ══════════════════════════════════════════════════════════════
 // PRODUCTS TAB — with inline editing
 // ══════════════════════════════════════════════════════════════
-function ProductsTab({
+export function ProductsTab({
   refreshId, initialSearch = "", initialProductId = null,
   showToast,
   filter = "all",
@@ -1987,6 +1987,7 @@ function ProductsTab({
   const [search, setSearch] = useState(initialSearch);
   const [catFilter, setCatFilter] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [expanded, setExpanded] = useState(initialProductId);
   const loadSequence = useRef(0);
   const [editing, setEditing] = useState(null);
@@ -2016,21 +2017,30 @@ function ProductsTab({
           ? "&needsPricing=false"
           : "";
     const stockParam = filter === "low_stock" ? "&stock=low" : "";
-    const [pData, vData] = await Promise.all([
-      adminFetch(
-        `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
-      ),
-      // Vendors are owner-only under the role lockdown — a technician's
-      // Products load must not hang on that 403 (codex P1). Empty vendor
-      // list just hides per-vendor pricing affordances they can't use.
-      adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
-    ]);
-    if (sequence !== loadSequence.current) return;
-    setProducts(pData.products || []);
-    setCategories(pData.categories || []);
-    setTotalProducts(pData.total || 0);
-    setVendors(vData.vendors || []);
-    setLoading(false);
+    try {
+      const [pData, vData] = await Promise.all([
+        adminFetch(
+          `/admin/inventory?search=${encodeURIComponent(search)}&category=${encodeURIComponent(catFilter)}&limit=${PER_PAGE}&page=${page}${needsPricingParam}${stockParam}`,
+        ),
+        // Vendors are owner-only under the role lockdown — a technician's
+        // Products load must not hang on that 403 (codex P1). Empty vendor
+        // list just hides per-vendor pricing affordances they can't use.
+        adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
+      ]);
+      if (sequence !== loadSequence.current) return;
+      setProducts(pData.products || []);
+      setCategories(pData.categories || []);
+      setTotalProducts(pData.total || 0);
+      setVendors(vData.vendors || []);
+      setLoadError(null);
+    } catch (e) {
+      if (sequence !== loadSequence.current) return;
+      // The products request had no catch, so a non-2xx left
+      // "Loading products..." up forever (UI audit F0474).
+      setLoadError(e?.message || "Request failed");
+    } finally {
+      if (sequence === loadSequence.current) setLoading(false);
+    }
   }, [search, catFilter, page, filter]);
 
   useEffect(() => {
@@ -2089,6 +2099,25 @@ function ProductsTab({
     }
   };
 
+  if (loadError)
+    return (
+      <div role="alert" style={{ color: D.red, padding: 40, textAlign: "center" }}>
+        Failed to load products: {loadError}{" "}
+        <button
+          type="button"
+          style={{ ...sBtn(D.teal, D.white), marginLeft: 8 }}
+          onClick={() => {
+            // Clear the error first so the loading branch renders during the
+            // retry; leaving it up allowed repeated clicks and overlapping loads.
+            setLoadError(null);
+            setLoading(true);
+            load();
+          }}
+        >
+          Retry
+        </button>
+      </div>
+    );
   if (loading)
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
@@ -2598,7 +2627,7 @@ function ProductsTab({
                           <button
                             onClick={() => saveEdit(p.id)}
                             style={{
-                              fontSize: 10,
+                              fontSize: 11,
                               padding: "3px 8px",
                               borderRadius: 4,
                               border: "none",
@@ -2613,7 +2642,7 @@ function ProductsTab({
                           <button
                             onClick={() => setEditing(null)}
                             style={{
-                              fontSize: 10,
+                              fontSize: 11,
                               padding: "3px 6px",
                               borderRadius: 4,
                               border: `1px solid ${D.border}`,
@@ -2661,7 +2690,7 @@ function ProductsTab({
                                   setDeleting(null);
                                 }}
                                 style={{
-                                  fontSize: 10,
+                                  fontSize: 11,
                                   padding: "2px 6px",
                                   borderRadius: 4,
                                   border: "none",
@@ -2675,7 +2704,7 @@ function ProductsTab({
                               <button
                                 onClick={() => setDeleting(null)}
                                 style={{
-                                  fontSize: 10,
+                                  fontSize: 11,
                                   padding: "2px 6px",
                                   borderRadius: 4,
                                   border: `1px solid ${D.border}`,
@@ -3461,7 +3490,7 @@ function ExpandedProduct({
                   </span>
                 )}
                 {vp.confidenceScore != null && (
-                  <span style={{ color: D.muted, fontSize: 10 }}>
+                  <span style={{ color: D.muted, fontSize: 11 }}>
                     {Math.round(vp.confidenceScore * 100)}% conf
                   </span>
                 )}
@@ -3479,7 +3508,7 @@ function ExpandedProduct({
                   </a>
                 )}
                 {vp.lastChecked && (
-                  <span style={{ color: D.muted, fontSize: 10 }}>
+                  <span style={{ color: D.muted, fontSize: 11 }}>
                     {new Date(vp.lastChecked).toLocaleDateString()}
                   </span>
                 )}
@@ -3487,7 +3516,7 @@ function ExpandedProduct({
                   onClick={() => queueRefresh(vp)}
                   style={{
                     marginLeft: "auto",
-                    fontSize: 10,
+                    fontSize: 11,
                     padding: "3px 8px",
                     borderRadius: 4,
                     border: `1px solid ${D.border}`,
@@ -3508,7 +3537,7 @@ function ExpandedProduct({
         <div>
           <label
             style={{
-              fontSize: 10,
+              fontSize: 11,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -3533,7 +3562,7 @@ function ExpandedProduct({
         <div>
           <label
             style={{
-              fontSize: 10,
+              fontSize: 11,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -3553,7 +3582,7 @@ function ExpandedProduct({
         <div>
           <label
             style={{
-              fontSize: 10,
+              fontSize: 11,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -3925,51 +3954,51 @@ function RegistryTab({ showToast }) {
                 <div style={{ display: "grid", gap: 10 }}>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Visibility</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Visibility</label>
                       <select value={form.customerVisibility} onChange={(e) => setForm((f) => ({ ...f, customerVisibility: e.target.value }))} style={sInput}>
                         {VISIBILITY_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
                     </div>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Status</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Status</label>
                       <select value={form.contentStatus} onChange={(e) => setForm((f) => ({ ...f, contentStatus: e.target.value }))} style={sInput}>
                         {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                       </select>
                     </div>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Common Name</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Common Name</label>
                       <input value={form.commonName} onChange={(e) => setForm((f) => ({ ...f, commonName: e.target.value }))} placeholder="Plain-language name" style={sInput} />
                     </div>
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Target Pests (comma-separated)</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Target Pests (comma-separated)</label>
                       <input value={form.targetPests} onChange={(e) => setForm((f) => ({ ...f, targetPests: e.target.value }))} placeholder="ants, roaches, spiders" style={sInput} />
                     </div>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Application Zones (comma-separated)</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Application Zones (comma-separated)</label>
                       <input value={form.applicationZones} onChange={(e) => setForm((f) => ({ ...f, applicationZones: e.target.value }))} placeholder="exterior perimeter, interior cracks" style={sInput} />
                     </div>
                   </div>
 
                   <div>
-                    <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Public Summary (why we use it — 1-2 sentences)</label>
+                    <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Public Summary (why we use it — 1-2 sentences)</label>
                     <textarea value={form.publicSummary} onChange={(e) => setForm((f) => ({ ...f, publicSummary: e.target.value }))} rows={2} placeholder="Non-repellent transfer insecticide that eliminates entire colonies..." style={{ ...sInput, resize: "vertical" }} />
                   </div>
 
                   <div>
-                    <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Portal Summary (shown in service history)</label>
+                    <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Portal Summary (shown in service history)</label>
                     <textarea value={form.portalSummary} onChange={(e) => setForm((f) => ({ ...f, portalSummary: e.target.value }))} rows={2} placeholder="Applied to your exterior perimeter to create a transfer zone..." style={{ ...sInput, resize: "vertical" }} />
                   </div>
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Customer Safety Summary</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Customer Safety Summary</label>
                       <textarea value={form.customerSafetySummary} onChange={(e) => setForm((f) => ({ ...f, customerSafetySummary: e.target.value }))} rows={2} placeholder="Applied according to label directions..." style={{ ...sInput, resize: "vertical" }} />
                     </div>
                     <div>
-                      <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Pet/Kid Guidance</label>
+                      <label style={{ fontSize: 11, color: D.muted, display: "block", marginBottom: 2 }}>Pet/Kid Guidance</label>
                       <textarea value={form.petKidGuidanceText} onChange={(e) => setForm((f) => ({ ...f, petKidGuidanceText: e.target.value }))} rows={2} placeholder="Safe once dry — technician confirms timing" style={{ ...sInput, resize: "vertical" }} />
                     </div>
                   </div>
@@ -4150,7 +4179,7 @@ function VendorEditForm({ vendor, onSave, onCancel }) {
         <div key={f.key} style={{ marginBottom: 6 }}>
           <label
             style={{
-              fontSize: 10,
+              fontSize: 11,
               color: D.muted,
               display: "block",
               marginBottom: 2,
@@ -4797,7 +4826,7 @@ function ProtocolsTab({
                       </div>
                       <div
                         style={{
-                          fontSize: 9,
+                          fontSize: 11,
                           color: D.muted,
                           textTransform: "uppercase",
                         }}
@@ -4817,7 +4846,7 @@ function ProtocolsTab({
                       </div>
                       <div
                         style={{
-                          fontSize: 9,
+                          fontSize: 11,
                           color: D.muted,
                           textTransform: "uppercase",
                         }}
@@ -4837,7 +4866,7 @@ function ProtocolsTab({
                       </div>
                       <div
                         style={{
-                          fontSize: 9,
+                          fontSize: 11,
                           color: D.muted,
                           textTransform: "uppercase",
                         }}
@@ -4860,7 +4889,7 @@ function ProtocolsTab({
                       style={{
                         ...sBtn("transparent", D.teal),
                         border: `1px solid ${D.border}`,
-                        fontSize: 10,
+                        fontSize: 11,
                         padding: "5px 8px",
                       }}
                     >
@@ -4871,7 +4900,7 @@ function ProtocolsTab({
                         onClick={() => openAddForLine(line.serviceLine)}
                         style={{
                           ...sBtn(D.teal, D.white),
-                          fontSize: 10,
+                          fontSize: 11,
                           padding: "5px 8px",
                         }}
                       >
@@ -4884,7 +4913,7 @@ function ProtocolsTab({
                         style={{
                           ...sBtn(`${D.amber}22`, D.amber),
                           border: `1px solid ${D.amber}44`,
-                          fontSize: 10,
+                          fontSize: 11,
                           padding: "5px 8px",
                         }}
                       >
@@ -4903,7 +4932,7 @@ function ProtocolsTab({
                           line.templateCount === 0 ? D.red : D.muted,
                         ),
                         border: `1px solid ${line.templateCount === 0 ? `${D.red}33` : D.border}`,
-                        fontSize: 10,
+                        fontSize: 11,
                         padding: "5px 8px",
                       }}
                     >
@@ -5209,7 +5238,7 @@ function ProtocolsTab({
                           <button
                             onClick={() => saveEdit(p.id)}
                             style={{
-                              fontSize: 10,
+                              fontSize: 11,
                               padding: "3px 6px",
                               borderRadius: 4,
                               border: "none",
@@ -5223,7 +5252,7 @@ function ProtocolsTab({
                           <button
                             onClick={() => setEditingRow(null)}
                             style={{
-                              fontSize: 10,
+                              fontSize: 11,
                               padding: "3px 6px",
                               borderRadius: 4,
                               border: `1px solid ${D.border}`,
@@ -5311,7 +5340,7 @@ function ProtocolsTab({
                           <button
                             onClick={() => startEdit(p)}
                             style={{
-                              fontSize: 10,
+                              fontSize: 11,
                               padding: "2px 6px",
                               borderRadius: 4,
                               border: `1px solid ${D.border}`,
@@ -5325,7 +5354,7 @@ function ProtocolsTab({
                           <button
                             onClick={() => deleteRow(p.id)}
                             style={{
-                              fontSize: 10,
+                              fontSize: 11,
                               padding: "2px 6px",
                               borderRadius: 4,
                               border: "none",
@@ -5392,7 +5421,7 @@ function AddProtocolRow({
       <div>
         <label
           style={{
-            fontSize: 10,
+            fontSize: 11,
             color: D.muted,
             display: "block",
             marginBottom: 2,
@@ -5418,7 +5447,7 @@ function AddProtocolRow({
       <div>
         <label
           style={{
-            fontSize: 10,
+            fontSize: 11,
             color: D.muted,
             display: "block",
             marginBottom: 2,
@@ -5439,7 +5468,7 @@ function AddProtocolRow({
       <div>
         <label
           style={{
-            fontSize: 10,
+            fontSize: 11,
             color: D.muted,
             display: "block",
             marginBottom: 2,
@@ -5464,7 +5493,7 @@ function AddProtocolRow({
       <div>
         <label
           style={{
-            fontSize: 10,
+            fontSize: 11,
             color: D.muted,
             display: "block",
             marginBottom: 2,
@@ -5492,12 +5521,12 @@ function AddProtocolRow({
           }
           style={{ accentColor: D.teal }}
         />
-        <label style={{ fontSize: 10, color: D.muted }}>Primary</label>
+        <label style={{ fontSize: 11, color: D.muted }}>Primary</label>
       </div>{" "}
       <div>
         <label
           style={{
-            fontSize: 10,
+            fontSize: 11,
             color: D.muted,
             display: "block",
             marginBottom: 2,

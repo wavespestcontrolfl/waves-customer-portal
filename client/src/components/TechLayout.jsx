@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
+import { TrendingUp } from 'lucide-react';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
+import TechFieldShell from './tech/TechFieldShell';
 import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
+import usePayGrowthAvailable from '../hooks/usePayGrowthAvailable';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -27,6 +30,7 @@ const NAV_ITEMS = [
   { path: '/tech/estimate', icon: '📋', label: 'Estimate', adminOnly: true },
   { path: '/tech/protocols', icon: '📖', label: 'Protocols' },
   { path: '/tech/documents', icon: '📄', label: 'Documents', controlledDocuments: true },
+  { path: '/tech/pay-growth', icon: <TrendingUp aria-hidden="true" />, label: 'Growth', payGrowth: true },
 ];
 
 export default function TechLayout() {
@@ -38,6 +42,7 @@ export default function TechLayout() {
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
   const controlledDocumentsAvailable = useStaffDocumentsAvailable(authStatus === 'ready');
+  const payGrowthAvailable = usePayGrowthAvailable(authStatus === 'ready');
 
   useEffect(() => {
     const token = getAdminAuthToken();
@@ -200,8 +205,8 @@ export default function TechLayout() {
           <button
             type="button"
             onClick={() => {
-              const next = location.pathname.startsWith('/tech')
-                ? location.pathname
+              const next = /^\/tech(?:\/|$)/i.test(location.pathname)
+                ? `${location.pathname}${location.search}`
                 : '/tech';
               navigate(`/admin/login?next=${encodeURIComponent(next)}`);
             }}
@@ -225,12 +230,14 @@ export default function TechLayout() {
     );
   }
 
+  const pathname = location.pathname.toLowerCase().replace(/\/+$/, '') || '/tech';
   const isActive = (item) => {
-    if (item.exact) return location.pathname === item.path;
-    return location.pathname.startsWith(item.path);
+    if (item.exact) return pathname === item.path;
+    return pathname.startsWith(item.path);
   };
 
   return (
+    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable} payGrowthAvailable={payGrowthAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -267,14 +274,14 @@ export default function TechLayout() {
             color: DARK.text,
           }}>Field Tools</span>
         </div>
-        <span style={{ fontSize: 13, color: DARK.muted }}>{techName}</span>
+        <span style={{ fontSize: 14, color: DARK.muted }}>{techName}</span>
       </header>
 
       {/* Main content area. Bottom padding clears the fixed nav (8px pad +
           44px links) plus the home-indicator safe area on notched iPhones. */}
       <main style={{ flex: 1, padding: '16px', paddingBottom: 'calc(80px + env(safe-area-inset-bottom, 0px))', overflowY: 'auto' }}>
         <AddToHomeScreenHint />
-        {location.pathname === '/tech/documents' && !controlledDocumentsAvailable
+        {pathname === '/tech/documents' && !controlledDocumentsAvailable
           ? <p style={{ fontSize: 14, color: DARK.text }}>Staff documents are unavailable.</p>
           : <Outlet />}
       </main>
@@ -293,7 +300,7 @@ export default function TechLayout() {
         padding: '8px 0 env(safe-area-inset-bottom, 8px)',
         zIndex: 50,
       }}>
-        {NAV_ITEMS.filter((item) => (!item.adminOnly || techRole === 'admin') && (!item.controlledDocuments || controlledDocumentsAvailable)).map((item) => {
+        {NAV_ITEMS.filter((item) => (!item.adminOnly || techRole === 'admin') && (!item.controlledDocuments || controlledDocumentsAvailable) && (!item.payGrowth || payGrowthAvailable)).map((item) => {
           const active = isActive(item);
           return (
             <Link
@@ -307,9 +314,9 @@ export default function TechLayout() {
                 gap: 2,
                 textDecoration: 'none',
                 padding: '4px 12px',
-                // 44px effective touch target (field use = gloved thumbs).
-                minHeight: 44,
-                minWidth: 44,
+                // 48px effective touch target (field use = gloved thumbs).
+                minHeight: 48,
+                minWidth: 48,
                 borderRadius: 8,
                 color: active ? DARK.teal : DARK.muted,
                 transition: 'color 0.2s',
@@ -325,5 +332,6 @@ export default function TechLayout() {
         })}
       </nav>
     </div>
+    </TechFieldShell>
   );
 }

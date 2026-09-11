@@ -1,9 +1,12 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
+import PayGrowth from "../../components/payGrowth/PayGrowth";
+import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -149,6 +152,7 @@ const STAFF_SECTIONS = [
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
+  { key: "pay-growth", label: "Pay & Growth", Icon: BarChart3 },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -166,7 +170,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents"],
+    tabs: ["team", "documents", "pay-growth"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -174,10 +178,27 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
   STAFF_SECTIONS.map((s) => [s.key, s]),
 );
 
+// Resolve the LEAF the page will actually render for a ?tab= deep link.
+// Gate-off or non-admin deep links to pay-growth fall back to the group's
+// default tab entirely (content + beacon + active-tab highlight), same as any
+// other invalid/role-gated deep link. While an admin's availability request
+// is still pending (null) the tab is unresolved: rendering Team meanwhile
+// would flash the wrong view and could flush a false Team usage beacon.
+export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
+  if (rawTab !== "pay-growth") return rawTab;
+  if (role !== "admin" || payGrowthAvailable === false) return "team";
+  return payGrowthAvailable === true ? "pay-growth" : null;
+}
+
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
+  const payGrowthAvailable = usePayGrowthAvailable();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
+  // null = pay-growth requested by an admin while availability is still
+  // unknown: no leaf renders and no beacon fires until it resolves.
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole());
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -185,8 +206,9 @@ export default function TimeTrackingPage() {
     setSearchParams(next);
   };
   const activeGroup =
-    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab ?? rawTab)) ||
     TIMETRACKING_TAB_GROUPS[0];
+  useRenderedTabBeacon("/admin/timetracking", tab, [searchParams]);
   const [toast, setToast] = useState("");
   const showToast = (m) => {
     setToast(m);
@@ -221,7 +243,7 @@ export default function TimeTrackingPage() {
             marginBottom: 16,
           }}
         >
-          {activeGroup.tabs.map((key) => {
+          {activeGroup.tabs.filter((key) => key !== "pay-growth" || payGrowthGateOpen).map((key) => {
             const leaf = STAFF_LEAF_BY_KEY[key];
             const active = tab === key;
             const LeafIcon = leaf.Icon;
@@ -272,6 +294,8 @@ export default function TimeTrackingPage() {
           <DocumentsTab showToast={showToast} />
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
+      {tab === "pay-growth" && <PayGrowth manage />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>Checking pay and growth availability…</p>}
       <div
         style={{
           position: "fixed",

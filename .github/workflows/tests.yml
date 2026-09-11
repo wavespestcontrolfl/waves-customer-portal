@@ -80,11 +80,38 @@ jobs:
         env:
           RECEIPT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/receipt-sms-delivery-postgres.test.js
+      - name: Request App receipt transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/request-app-receipts-postgres.test.js
       - name: Grouped closeout transaction tests
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js
+      - name: Invoice-issued closeout resolver transaction tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/invoice-issued-closeout-postgres.test.js
+      - name: Historical invoice repair transaction tests
+        working-directory: server
+        env:
+          REPAIR_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/link-unlinked-visit-invoices-postgres.test.js tests/execute-visit-invoice-plan-postgres.test.js
+      - name: Visit summary identity transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
+        run: npx jest --ci --silent --runInBand tests/visit-summary-identity-postgres.test.js
+      - name: Visit summary authorization and recovery transaction tests
+        working-directory: server
+        env:
+          VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
+        run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2
@@ -94,6 +121,11 @@ jobs:
         # above still runs every server test; this step adds the coverage gate.
         working-directory: server
         run: npm run test:customer-coverage
+      - name: Customer App preference and delivery transaction tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/customer-app-notifications-postgres.test.js
       - name: DB-gated suites (serial, against the migrated database)
         working-directory: server
         env:
@@ -107,11 +139,22 @@ jobs:
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
             | xargs npx jest --ci --silent --runInBand
+      - name: Completion pricing and invoice replay transaction tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+          COMPLETION_PRICING_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/completion-pricing.postgres.test.js
       - name: Combined reservation and conversion transaction tests
         working-directory: server
         env:
           COMBINED_VISIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js
+      - name: Catalog allowance transaction tests
+        working-directory: server
+        env:
+          SCHEDULING_CAPACITY_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js tests/scheduling-capacity-holds-postgres.test.js tests/scheduling-capacity-accept-postgres.test.js tests/scheduling-capacity-allocation-postgres.test.js
       - name: Shared reservation arrival transaction tests
         working-directory: server
         env:
@@ -185,10 +228,13 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:qa-workflow
       - name: Portal, payment, report and completion previews
         run: npm run qa:previews
+      - name: Email workspace synthetic scenarios
+        if: ${{ !cancelled() }}
+        run: node scripts/qa/admin-email-workspace.cjs
       - name: Estimate interaction and PDF previews
         if: ${{ !cancelled() }}
         env:
@@ -200,7 +246,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: browser-qa-${{ github.sha }}
-          path: .tmp/qa/
+          path: |
+            .tmp/qa/
+            .tmp/email-workspace/
+          # Both paths live under a dot-directory, which upload-artifact@v4
+          # skips unless hidden files are opted in.
+          include-hidden-files: true
           retention-days: 7
 
   application-qa:
@@ -246,7 +297,7 @@ jobs:
         run: npm run qa:cleanup
       - name: Verify retained journey results survived cleanup
         run: |
-          node -e "const r = require('./.tmp/qa/e2e/report.json'); require('node:assert/strict').equal(r.steps.filter(s => s.passed).length, 6)"
+          node -e "const r = require('./.tmp/qa/e2e/report.json'); require('node:assert/strict').equal(r.steps.filter(s => s.passed).length, 13)"
       - name: Application QA evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -300,8 +351,11 @@ jobs:
         run: |
           xcodebuild -version
           pod --version
+          xcodeproj --version
       - name: Generate and sync the pinned iOS app
         run: bash scripts/mobile/bootstrap-ios.sh
+      - name: Verify iOS push signing setup and release checks
+        run: python3 scripts/mobile/test_ios_push.py
       - name: Compile iOS simulator app without signing
         working-directory: client/ios/App
         run: >-

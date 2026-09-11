@@ -13,7 +13,13 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
-const OCCUPANCY_TYPES = ['owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'];
+// 'family_occupied' (owner ruling 2026-09-08): a home the customer owns or
+// pays for that a FAMILY MEMBER lives in — neither owner-occupied nor a
+// rental. Office-set only for now: the call extractor's occupancy enum
+// (schemas/call-extraction.*.json, intake-normalize CALL_OCCUPANCY_TYPES)
+// does not emit it, so a call never writes it and normalizeCallOccupancy
+// keeps treating it as unstated.
+const OCCUPANCY_TYPES = ['owner_occupied', 'family_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'];
 
 /**
  * Occupancy a lazily-backfilled PRIMARY should carry when nothing better is
@@ -175,14 +181,51 @@ async function ensurePrimaryProperty(customerOrId, opts = {}) {
       return ensurePrimaryCore(customerOrId, opts, trx);
     });
   }
-  return ensurePrimaryCore(customerOrId, opts, conn && conn.isTransaction ? conn : db);
+  // A caller-owned transaction may already hold child-row locks (an
+  // invoice or prepay term under the admin invoice route, codex #4115 r5
+  // P2), so it must never WAIT for the customers row — a merge takes
+  // customer first, then those children, and the two would deadlock.
+  if (conn && conn.isTransaction) return ensurePrimaryCore(customerOrId, { ...opts, lockWait: false }, conn);
+  // Unfenced callers get one transaction of their own so the liveness
+  // check and the insert below run under the customers row lock (codex
+  // #4115 r3 P2): an unlocked read could see a merge loser before its
+  // deleted_at commits, wait behind executeMerge's FOR UPDATE, and then
+  // insert a primary for a customer that was archived meanwhile. This
+  // transaction holds nothing else, so waiting for the row is safe.
+  return db.transaction((trx) => ensurePrimaryCore(customerOrId, opts, trx));
 }
 
-async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, conn = db) {
-  const customer = typeof customerOrId === 'string'
-    ? await conn('customers').where({ id: customerOrId }).first()
-    : customerOrId;
-  if (!customer || !customer.id) return { created: false, propertyId: null };
+/**
+ * The customers row the primary backfill decides liveness on. LOCK ORDER:
+ * customers row FIRST (same row lock customer-dedupe's executeMerge takes,
+ * and the same first lock the claim fence and the wizard activation already
+ * hold on their connection — a re-lock on one's own transaction is free).
+ * lockWait=false (a caller-owned transaction that may hold child-row locks)
+ * uses SKIP LOCKED: a row another transaction holds — a merge in flight —
+ * reads as absent, instead of waiting in the reverse lock order. A
+ * non-transaction conn (unit fakes) keeps the plain read.
+ */
+async function readCustomerForBackfill(customerOrId, custId, conn, lockWait) {
+  if (conn.isTransaction) {
+    const q = conn('customers').where({ id: custId }).forUpdate();
+    return (lockWait ? q : q.skipLocked()).first();
+  }
+  return typeof customerOrId === 'string' ? conn('customers').where({ id: custId }).first() : customerOrId;
+}
+
+async function ensurePrimaryCore(customerOrId, { occupancyType, source, lockWait = true } = {}, conn = db) {
+  const custId = typeof customerOrId === 'string' ? customerOrId : customerOrId?.id;
+  if (!custId) return { created: false, propertyId: null };
+  // The liveness re-check reads the LOCKED row, never the caller's snapshot:
+  // a caller-supplied customer object still wins for the address fields
+  // (estimate-clarify-asks passes an amended address_line2 on purpose), but
+  // deleted_at is decided by the row as it is once the lock is granted.
+  const live = await readCustomerForBackfill(customerOrId, custId, conn, lockWait);
+  // An archived customer never grows a primary: a merge loser keeps its
+  // address after its property rows move to the winner, and a row created
+  // here would collide on a merge undo (same guard as the ops backfill).
+  if (!live || !live.id || live.deleted_at) return { created: false, propertyId: null };
+  const customer = typeof customerOrId === 'string' ? live : { ...live, ...customerOrId, deleted_at: live.deleted_at };
 
   const existing = await conn('customer_properties').where({ customer_id: customer.id, is_primary: true }).first();
   if (existing) return { created: false, propertyId: existing.id };
@@ -418,7 +461,9 @@ async function completePrimaryFromCall(customerId, call = {}, { claimFence = nul
       return completePrimaryCore(customerId, call, trx);
     });
   }
-  return completePrimaryCore(customerId, call, conn && conn.isTransaction ? conn : db);
+  // Office review already owns the customer lock; its completion and property
+  // insert must commit together on that same transaction connection.
+  return completePrimaryCore(customerId, call, conn || db);
 }
 
 async function completePrimaryCore(customerId, call, conn) {
@@ -540,6 +585,85 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
 }
 
 /**
+ * Daily backstop for the lazily-created PRIMARY row. The primary is
+ * created on first READ (properties tab, call pipeline, estimate linkage),
+ * and none of the customer-insert paths (website quote, web-form / GBP
+ * lead, Twilio, proposal win, …) create one — prod 2026-09-07: 144 live,
+ * addressed customers had no property row, and every booking anchored for
+ * them fell to NULL. This sweep fills the gap within the day so no later
+ * consumer has to assume the row exists (once #4115 lands the booking
+ * anchor backfills its own at booking time and this catches customers
+ * nothing read; until then it is the only backstop). Per customer, one transaction:
+ * customers row FOR UPDATE, re-check (still live, still addressed, still
+ * no row — a concurrent read may have backfilled it), then the same core
+ * every lazy read uses. Newest first (a fresh lead is the one about to be
+ * booked). Best-effort per row: a
+ * failure is counted and logged by code only (a knex error message embeds
+ * the SQL bindings, i.e. the address) and the sweep moves on.
+ */
+async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 } = {}) {
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  // Batches until nothing is eligible (or maxRows, a runaway guard): a
+  // daily run must drain the whole backlog, not the newest 100. A created
+  // row leaves the candidate set by itself; a failed or skipped-but-still-
+  // row-less id is excluded from later batches so it cannot be re-selected
+  // forever within one run.
+  const seen = new Set();
+  let cappedOut = false;
+  while (results.checked < maxRows) {
+    const rows = await db('customers as c')
+      .whereNull('c.deleted_at')
+      .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
+      .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
+      .modify((q) => { if (seen.size) q.whereNotIn('c.id', Array.from(seen)); })
+      .orderBy('c.created_at', 'desc')
+      .limit(Math.min(batchSize, maxRows - results.checked))
+      .select('c.id');
+    if (!rows.length) break;
+    for (const row of rows) {
+      seen.add(row.id);
+      results.checked += 1;
+      try {
+        const r = await db.transaction(async (trx) => {
+          const customer = await trx('customers').where({ id: row.id }).forUpdate().first();
+          if (!customer || customer.deleted_at || !String(customer.address_line1 || '').trim()) return { created: false };
+          const any = await trx('customer_properties').where({ customer_id: row.id }).first('id');
+          if (any) return { created: false };
+          return ensurePrimaryCore(customer, { source: 'backfill' }, trx);
+        });
+        if (r.created) results.created += 1; else results.skipped += 1;
+      } catch (err) {
+        results.failed += 1;
+        logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
+      }
+    }
+    // Stopped on the guard, not on an empty candidate set: whatever is left
+    // waits for the next run, and the doc's "within a day" does not hold for
+    // it. A clean resolve alone would read as fully drained.
+    if (results.checked >= maxRows) cappedOut = true;
+  }
+  if (results.checked > 0) {
+    logger.info(
+      `[customer-properties] primary backstop sweep: checked=${results.checked}, ` +
+      `created=${results.created}, skipped=${results.skipped}, failed=${results.failed}`,
+    );
+  }
+  if (cappedOut) {
+    logger.warn(`[customer-properties] primary backstop stopped at the maxRows guard (${maxRows}); a backlog may remain for the next run`);
+  }
+  // Every row was attempted; now surface the failures to job_health (the
+  // scheduler runs this under runExclusive, which records success on a
+  // resolved promise) — counts only, never an address or SQL text.
+  if (results.failed > 0) {
+    throw Object.assign(
+      new Error(`primary backstop sweep: ${results.failed} of ${results.checked} row(s) failed`),
+      { results },
+    );
+  }
+  return results;
+}
+
+/**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
  * visit-group stamp needs a property anchor, and the estimate-linkage
@@ -558,9 +682,35 @@ async function soleActivePropertyId(customerId, conn = db) {
     .where({ customer_id: customerId, active: true })
     .limit(2)
     .select('id');
+  const inSavepoint = (fn) => (conn.isTransaction ? conn.transaction((sp) => fn(sp)) : fn(conn));
   try {
-    const rows = conn.isTransaction ? await conn.transaction((sp) => read(sp)) : await read(conn);
-    return rows.length === 1 ? rows[0].id : null;
+    const rows = await inSavepoint(read);
+    if (rows.length === 1) return rows[0].id;
+    if (rows.length) return null;
+    // No property row at all: the primary is created LAZILY (the migration
+    // backfilled existing customers; a customer created since — website
+    // quote, web-form / GBP lead, Twilio, proposal win — gets one on the
+    // first read that backfills). Prod 2026-09-07: 144 addressed customers
+    // had no row, and every lead-page / public booking for them anchored
+    // to NULL, so the visit-group stamp refused. This anchor is such a
+    // read: backfill the primary from the customers mirror (same core the
+    // properties tab and the estimate linkage use), then it IS the sole
+    // property. An inactive-only primary is left alone (created=false) —
+    // a deliberate deactivation stays office-placed. Runs in the same
+    // savepoint discipline as the read so a failed statement cannot
+    // poison the caller's transaction.
+    // The core takes the customers row lock, so it always runs on a
+    // transaction: a savepoint under the caller's (which may already hold
+    // child-row locks — never wait there, codex #4115 r5), or one of its
+    // own (nothing else held — waiting is safe).
+    const ensured = await conn.transaction((c) => ensurePrimaryCore(customerId, { lockWait: !conn.isTransaction }, c));
+    if (ensured.created) return ensured.propertyId;
+    // Not created: a concurrent anchor may have just committed the primary
+    // (found by the core's existence check, or the 23505 race) — re-read so
+    // the committed state decides; an inactive-only primary or no address
+    // still reads as no active row → null.
+    const after = await inSavepoint(read);
+    return after.length === 1 ? after[0].id : null;
   } catch {
     return null;
   }
@@ -898,6 +1048,7 @@ module.exports = {
   addManualProperty,
   editManualProperty,
   changePrimaryProperty,
+  sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,

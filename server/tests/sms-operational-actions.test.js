@@ -10,7 +10,7 @@ jest.mock('../utils/pan-scrub', () => {
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
-const { groundExtraction, extractSmsOperations, buildPrompt } = require('../services/sms-operational-extractor');
+const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence } = require('../services/sms-operational-extractor');
 const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -28,7 +28,7 @@ const obligation = (quote, extra = {}) => ({
 });
 const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'The controller is on the side of the house',
   quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
-const extracted = (obligations = [], facts = []) => ({ obligations, facts });
+const extracted = (obligations = [], facts = []) => ({ obligations, facts, additional_properties: [] });
 
 describe('SMS operational evidence and ownership', () => {
   test('keeps an inbound request before staff promises anything', () => {
@@ -228,7 +228,7 @@ describe('SMS operational evidence and ownership', () => {
   ])('unpunctuated and Unicode questions require review: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'pet_details', quote, value: quote })]), {
       message: source(quote), properties,
-    })).toEqual({ obligations: [], facts: [], dropped: 1 });
+    })).toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
   });
 
   test.each([
@@ -244,7 +244,7 @@ describe('SMS operational evidence and ownership', () => {
   ])('indirect questions cannot become durable access instructions: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'access_notes', quote, value: quote })]), {
       message: source(quote), properties,
-    })).toEqual({ obligations: [], facts: [], dropped: 1 });
+    })).toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
   });
 
   test.each([
@@ -254,7 +254,7 @@ describe('SMS operational evidence and ownership', () => {
   ])('explicit instructions and reported facts remain grounded: %s', (quote) => {
     const item = fact({ field: 'access_notes', quote, value: quote });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
-      .toEqual({ obligations: [], facts: [item], dropped: 0 });
+      .toEqual({ obligations: [], facts: [item], additional_properties: [], dropped: 0 });
   });
 
   test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
@@ -262,7 +262,7 @@ describe('SMS operational evidence and ownership', () => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
-      .toEqual({ obligations: [], facts: [], dropped: 1 });
+      .toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
     expect(factVerdict(item, { properties, senderIsPrimary: true })).toBe('code_uncertain');
   });
 
@@ -559,7 +559,7 @@ describe('SMS operational evidence and ownership', () => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
-      .toEqual({ obligations: [], facts: [], dropped: 1 });
+      .toEqual({ obligations: [], facts: [], additional_properties: [], dropped: 1 });
     expect(factVerdict(item, { properties, senderIsPrimary: true })).toBe('code_uncertain');
   });
 
@@ -788,6 +788,24 @@ describe('fulfillment proof', () => {
     expect(dispatchWithFallback.mock.calls[0][1].text).not.toContain('CVV is 123');
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'sms:1', quote: text }, evidence, { kind: 'other' }))
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
+  });
+
+  test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    // Roughly one UUID in 500 hides a Luhn-valid 13-19 digit run. This one
+    // does, so the scrubber would rewrite the id it is asked to cite.
+    const id = '35037702-7555-4718-8aa9-183d7088f227';
+    expect(require('../utils/pan-scrub').scrubPans(id)).not.toBe(id);
+    const witness = { ...record, id, ref: `estimate:${id}` };
+    const evidence = { records: [witness], failures: [] };
+    await verifySmsFulfillment(commitment, evidence);
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain(`estimate:${id}`);
+    expect(groundFulfillment({ ...verdict, record_ref: witness.ref }, evidence, commitment))
+      .toMatchObject({ verdict: 'fulfilled', record_id: id });
+    // The exemption is keyed on an id-shaped key AND an id-shaped value, so a
+    // card number in free text is still scrubbed wherever it appears.
+    const carded = { ...witness, text: 'Card 4242 4242 4242 4242', id: 'Card 4242 4242 4242 4242' };
+    expect(stringifySmsEvidence(carded)).not.toContain('4242 4242 4242 4242');
   });
 
   test('fulfillment holds split SMS readbacks before exposing any body copy to the provider', async () => {

@@ -1159,6 +1159,11 @@ function mapCustomerListRow(c) {
     healthScore: c.health_score != null ? parseInt(c.health_score) : null,
     healthGrade: c.health_grade || null,
     cardsOnFile: parseInt(c.cards_on_file || 0),
+    // Active saved properties. Callers that don't select property_count
+    // (quick-add echoes, detail mappers) read 0 — never a guess of 1: a row
+    // may legitimately have no customer_properties row yet (pre-06-29
+    // customers whose sole-property anchor has not been written).
+    propertyCount: parseInt(c.property_count || 0),
   };
 }
 
@@ -2345,6 +2350,13 @@ router.get('/', async (req, res, next) => {
       db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
       db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
+      // ACTIVE saved properties (customer_properties) — the same rows the New
+      // Appointment service-address picker offers. The search dropdowns
+      // render a "N properties" chip from it so the office sees a
+      // multi-property customer BEFORE picking them, instead of discovering
+      // the second house only after the primary was booked (owner report
+      // 2026-09-08). Retired rows (active=false) are not counted.
+      db.raw("(SELECT COUNT(*) FROM customer_properties WHERE customer_properties.customer_id = customers.id AND customer_properties.active = TRUE) as property_count"),
       // Net of all paid payments minus refunds — the same definition the
       // customer-detail endpoint computes. customers.lifetime_revenue has NO
       // production writer (only demo seeds ever set it), so reading the
@@ -3963,12 +3975,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // customer-dedupe.js and intelligence-bar/tools.js — extend ALL
           // in the same commit): pg_advisory_xact_lock(hashtextextended(
           //   'customer-email:' || lower(trim(<email>)), 0)).
+          // Every assigned address (the primary and the service-contact
+          // slots) takes the key: the bounce recovery's ownership check reads
+          // all of them (utils/customer-comms-lock.js lockAssignedCustomerEmails).
+          await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, updates);
           if (updates.email) {
-            const emailLc = String(updates.email).trim().toLowerCase();
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-              [`customer-email:${emailLc}`],
-            );
             // Serialization ONLY — deliberately NO claimant refusal (r23):
             // customers.email is intentionally non-unique (migration
             // 20260417000010 dropped the constraint so spouses and shared
@@ -4249,19 +4260,22 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     }
     dbUpdates.updated_at = new Date();
 
-    if (existing) {
-      await db('notification_prefs')
+    // Row → address key, like every customer address writer: a billing
+    // address assigned here contends with a bearer-link handoff that read
+    // it as unowned, so the handoff commits first or re-judges ownership.
+    await db.transaction(async (trx) => {
+      if (!existing) {
+        // Create through the canonical helper (marketing flags NULL), then
+        // apply exactly the admin-named fields — a bare insert would take the
+        // legacy true defaults and mint marketing consent as a side effect.
+        await createDefaultCustomerRows(trx, req.params.id);
+      }
+      await trx('notification_prefs').where({ customer_id: req.params.id }).forUpdate().first('customer_id');
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
+      await trx('notification_prefs')
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
-    } else {
-      // Create through the canonical helper (marketing flags NULL), then
-      // apply exactly the admin-named fields — a bare insert would take the
-      // legacy true defaults and mint marketing consent as a side effect.
-      await createDefaultCustomerRows(db, req.params.id);
-      await db('notification_prefs')
-        .where({ customer_id: req.params.id })
-        .update(dbUpdates);
-    }
+    });
 
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })

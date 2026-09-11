@@ -34,7 +34,7 @@ const mockProps = {
     return mockManualWrite(customerId, fields, { ...options, propertyId });
   }),
   listProperties: jest.fn(async () => [{ id: 'p1', is_primary: true }, { id: 'p-new', is_primary: false }]),
-  OCCUPANCY_TYPES: ['owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'],
+  OCCUPANCY_TYPES: ['owner_occupied', 'family_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'],
 };
 jest.mock('../services/customer-properties', () => mockProps);
 

@@ -39,6 +39,7 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
+const { occupiedRows } = require('./visit-capacity');
 
 const DEFAULT_DURATION_MINUTES = 60;
 
@@ -190,14 +191,20 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     the same rung-1 lock BEFORE extending the hold's expiry — a hold
 //     whose window a committed visit has since taken is superseded
 //     (released, delete-only) and the reserve throws instead of refreshing.
-//   services/slot-reservation.js commitReservation  1
+//     Capacity holds also take selected-technician and unassigned day fences
+//     in canonical order before any row lock. This fences dispatch membership
+//     changes from another technician to unassigned through certification.
+//   services/slot-reservation.js commitReservation  1 -> 3 (capacity)
 //     Keys rung 1 off an UNLOCKED read of the hold row's date; its
 //     FOR UPDATE follows the lock, and a date moved in between fails into
 //     RESERVATION_EXPIRED (the row-lock rule above). Inside the estimate-
 //     accept txn the SAME key was already pre-locked at txn start and
 //     passed as preLockedDate — a pre-read/preLockedDate mismatch fails
 //     into RESERVATION_EXPIRED before any lock, and the matching-key
-//     acquisition is a reentrant no-op.
+//     acquisition is a reentrant no-op. Capacity commits pre-acquire both
+//     selected-technician and unassigned day fences before row locks; callers
+//     pass the technician alongside preLockedDate, and both identities are
+//     rechecked before further acquisition or route-order writes.
 //     + probe with includeHolds:false excluding its own hold row — runs even
 //     when no accept-time duration resolved (the narrow tech-scoped check is
 //     skipped then, but graduation still commits real occupancy).
@@ -227,15 +234,19 @@ const DEFAULT_DURATION_MINUTES = 60;
 //   services/rain-out.js — computes the batch and delegates EVERY write to
 //     rebooker.rescheduleVisit, so its moves take rungs 1+3 there.
 //   services/call-recording-processor.js booking txn — the ONE writer whose
-//     COMMIT is exempt by owner rule (book + flag, never block), so its
-//     in-txn conflict read stays advisory and lock-free. Deliberately so:
-//     taking rung 1 means WAITING on whoever holds the date, and this
-//     booking must never fail or stall on a lock. (Historically the
-//     exemption also dodged a real inversion — the estimate-accept txn used
-//     to row-lock these same leads/customers/estimates tables before
-//     reaching rung 1 inside commitReservation; that residual is closed by
-//     the accept txn's rung-1 pre-lock above, but the owner rule stands on
-//     its own.) Reliable DETECTION is restored post-commit: a
+//     COMMIT is exempt by owner rule (book + flag, never block). Since the
+//     2026-09-11 capacity activation ruling it TRIES rungs 1 + 3 through
+//     fenceBookingDay (bounded non-blocking polling, ~1.5s cap) before its
+//     conflict read and each INSERT; a granted fence makes the phone row
+//     visible to a concurrent capacity certification (arrival-route.js
+//     verifyArrivalCapacity's FOR UPDATE cannot see a phantom INSERT under
+//     READ COMMITTED, and its route certification holds rung 1 through
+//     commit — so a phone writer holding rung 1 has either committed before
+//     that read or waits until after that commit). A missed fence falls back
+//     to today's unfenced insert: the booking never fails or stalls on a
+//     lock. try-locks never wait, so the phone txn can never be a deadlock
+//     participant even though it row-locks leads/customers/estimates after
+//     the fence. Reliable DETECTION stays post-commit: a
 //     dedicated short rung-1 transaction (date locks — one per distinct
 //     date, sorted ascending — + one findConflictingVisits read PER ROW the
 //     call created, the primary and its follow-up child each against its
@@ -276,6 +287,86 @@ async function tryAcquireOccupancyLock(trx, dateStr) {
   return row?.locked === true;
 }
 
+// Bounded, NON-BLOCKING fence for the phone-booking writer (owner ruling
+// 2026-09-11, option 1): try rung 1 (`occupancy:<date>`) then rung 3
+// (`<techId|unassigned>:<date>`, tech-day-lock.js) with pg_try_advisory_xact_lock,
+// re-trying every `pollMs` until `waitMs` elapses. A capacity certification
+// holds these for milliseconds, so the caller effectively never waits; when
+// the cap expires the caller books exactly as before (unfenced + post-commit
+// conflict flag). Never throws for a lock miss — only for a query failure the
+// caller already treats as best-effort. Any key granted stays held through
+// the transaction (xact advisory locks cannot be released early); `acquired`
+// is true only when EVERY key was granted, so a partial grant reports as a
+// missed fence. Sleeps happen in Node, not in Postgres (no pg_sleep on the
+// connection), and the last sleep is clamped to the remaining budget so the
+// cap is a HARD cap on wall time (codex #4368 r1 P2): the final try lands at
+// the deadline, never past it. A query error (statement timeout, connection
+// reset) propagates — callers run this inside a savepoint so PostgreSQL's
+// aborted-transaction state never reaches the booking itself.
+const CALL_BOOKING_FENCE_WAIT_MS = 1500;
+const CALL_BOOKING_FENCE_POLL_MS = 50;
+
+function bookingFenceWaitMs() {
+  const raw = Number(process.env.CALL_BOOKING_FENCE_WAIT_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : CALL_BOOKING_FENCE_WAIT_MS;
+}
+
+// Every result carries the deadline it ran against so a caller can pass it
+// back for a re-fence (see fenceDeadline).
+async function fenceBookingDay(trx, options = {}) {
+  const { date, techId = null, pollMs = CALL_BOOKING_FENCE_POLL_MS,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = () => Date.now() } = options;
+  const deadline = fenceDeadline(options, now);
+  const dateStr = String(date || '').split('T')[0];
+  const keys = [];
+  const miss = (reason) => ({ acquired: false, keys, reason, deadline });
+  if (!dateStr) return miss('no_date');
+  const { lockTechDays } = require('./tech-day-lock');
+  let haveOccupancy = false;
+  for (;;) {
+    // Canonical order: rung 1 before rung 3, exactly like every blocking
+    // writer. A granted rung is kept (xact-scoped) and not re-requested.
+    // The clock is re-read after EVERY awaited attempt (codex #4368 r4 P2):
+    // a slow round trip can return past the deadline, and neither the next
+    // rung nor a late grant may then count — the cap bounds the decision,
+    // not just the sleeps. (A granted rung stays held; it still serializes,
+    // it is just not reported as a fence the booking waited for.) Strictly
+    // past: an attempt landing exactly on the deadline still counts, so an
+    // exhausted budget (the unassigned re-fence) gets one try per rung.
+    if (!haveOccupancy) {
+      haveOccupancy = await tryAcquireOccupancyLock(trx, dateStr);
+      if (haveOccupancy) keys.push(occupancyLockKey(dateStr));
+      if (now() > deadline) return miss(haveOccupancy ? 'deadline_exceeded' : 'date_busy');
+    }
+    if (haveOccupancy) {
+      const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
+      if (techKeys) {
+        keys.push(...techKeys);
+        return now() > deadline ? miss('deadline_exceeded') : { acquired: true, keys, deadline };
+      }
+    }
+    if (!await pausedWithinBudget({ deadline, now, sleep, pollMs })) return miss(haveOccupancy ? 'tech_day_busy' : 'date_busy');
+  }
+}
+
+// An absolute `deadline` (same clock as `now`) wins over `waitMs`, so a
+// re-fence runs inside the budget its first attempt was given rather than
+// starting a fresh one (codex r2 P2).
+function fenceDeadline({ deadline = null, waitMs = bookingFenceWaitMs() }, now) {
+  return Number.isFinite(deadline) ? deadline : now() + Math.max(0, waitMs);
+}
+
+// One poll pause, clamped to the remaining budget (codex r1 P2) and re-checked
+// after waking (codex r3 P2): a delayed event loop can oversleep the clamped
+// timer, and a rung released after the cap must not be tried. Returns false
+// when the budget is spent, before or after the pause.
+async function pausedWithinBudget({ deadline, now, sleep, pollMs }) {
+  const remaining = deadline - now();
+  if (remaining <= 0) return false;
+  await sleep(Math.max(1, Math.min(pollMs, remaining)));
+  return now() < deadline;
+}
+
 // Acquire the date-wide occupancy lock for MANY dates in one transaction
 // (series reschedules probe/write several target dates). Dedups + sorts so two
 // concurrent multi-date movers always grab a shared pair in the SAME order and
@@ -298,6 +389,7 @@ const CONFLICT_COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date',
   'window_start', 'window_end', 'status', 'service_type',
   'estimated_duration_minutes', 'reservation_expires_at', 'source_estimate_id',
+  'reservation_service_mix',
   // Seeded-placeholder identity (recurring child, still pending, never
   // customer-confirmed) — the rebooker's beyond-horizon series check reads
   // these to tell a disposable seeded row from a real booking.
@@ -395,7 +487,7 @@ async function findConflictingVisits({
     // no end) — same predicate as slot-reservation/rebooker/createSelfBooking.
     // window_start-NULL placeholder rows evaluate NULL here and stay inert.
     .whereRaw(
-      "window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time",
+      "((window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time) OR reservation_service_mix->>'version' = '2')",
       [windowEnd, DEFAULT_DURATION_MINUTES, windowStart],
     );
   if (excludeIds.length) query.whereNotIn('id', excludeIds);
@@ -414,7 +506,13 @@ async function findConflictingVisits({
     });
   }
   const rows = await query.select(CONFLICT_COLUMNS).orderBy('window_start', 'asc');
-  return Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(rows)) return [];
+  // SQL already filters ordinary visits. Combined members need the full
+  // allocation span, while callers still receive the original database rows.
+  const occupied = occupiedRows(rows);
+  return rows.filter((row, index) => row.reservation_service_mix?.version !== 2
+    || (occupied[index].startMin != null && windowsOverlap(timeToMinutes(windowStart), timeToMinutes(windowEnd),
+      occupied[index].startMin, occupied[index].endMin)));
 }
 
 /**
@@ -460,7 +558,7 @@ async function findConflictingVisitsWithTravel({
   if (!Array.isArray(rows)) return [];
 
   const stops = [];
-  for (const row of rows) {
+  for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
     if (startMin == null) continue;
     const explicitEnd = timeToMinutes(row.window_end);
@@ -469,7 +567,7 @@ async function findConflictingVisitsWithTravel({
       : DEFAULT_DURATION_MINUTES;
     stops.push({
       startMin,
-      endMin: explicitEnd != null ? explicitEnd : startMin + durationMin,
+      endMin: row.endMin ?? (explicitEnd != null ? explicitEnd : startMin + durationMin),
       lat: row.lat,
       lng: row.lng,
       // A live hold never shadows a committed neighbour (travel-gap.js).
@@ -477,9 +575,9 @@ async function findConflictingVisitsWithTravel({
       row,
     });
   }
-  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row, reason]));
+  const reasonByRow = new Map(travelGapConflicts(candidate, stops).map(({ stop, reason }) => [stop.row.id, reason]));
   // Query order (window_start asc), not conflict order.
-  return rows.filter((row) => reasonByRow.has(row)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row) }));
+  return rows.filter((row) => reasonByRow.has(row.id)).map((row) => ({ ...row, conflict_reason: reasonByRow.get(row.id) }));
 }
 
 /**
@@ -533,7 +631,7 @@ async function listOccupiedWindows({
   if (!Array.isArray(rows)) return [];
 
   const out = [];
-  for (const row of rows) {
+  for (const row of occupiedRows(rows)) {
     const startMin = timeToMinutes(row.window_start);
     if (startMin == null) continue;
     const endMin = timeToMinutes(row.window_end);
@@ -544,7 +642,7 @@ async function listOccupiedWindows({
       ...row,
       date: normalizeDate(row.scheduled_date),
       startMin,
-      endMin: endMin != null ? endMin : startMin + durationMin,
+      endMin: row.endMin ?? (endMin != null ? endMin : startMin + durationMin),
     });
   }
   return out;
@@ -578,6 +676,8 @@ module.exports = {
   acquireOccupancyLock,
   acquireOccupancyLocks,
   tryAcquireOccupancyLock,
+  fenceBookingDay,
+  CALL_BOOKING_FENCE_WAIT_MS,
   DEFAULT_DURATION_MINUTES,
   DEFAULT_EXCLUDE_STATUSES,
   _internals: { timeToMinutes, normalizeDate, occupancyLockKey },

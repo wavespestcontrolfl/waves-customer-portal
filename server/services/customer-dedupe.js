@@ -22,6 +22,7 @@
  * full original row is preserved in customer_merge_journal.
  */
 const db = require('../models/db');
+const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
@@ -445,7 +446,9 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 // repointing would import components the winner's scalar knows nothing
 // about (and same-family rows would abort the merge on the unique
 // constraint). The loser's rows are explicitly deleted instead.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates']);
+// Field credit allocations retain the account that supplied the accepted
+// value. Their append-only guard must not abort an unrelated account merge.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
@@ -484,7 +487,7 @@ const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
 // Everything else: empty winner fields fill from the loser, then the loser's
 // row is removed. Anything not copied survives in the journal snapshot.
 const SINGLETON_BOOLEAN_SEMANTICS = { notification_prefs: 'and', property_preferences: 'or' };
-const CHANNEL_RESTRICTIVENESS = { email: 2, sms: 1, both: 0 };
+const CHANNEL_RESTRICTIVENESS = { email: 3, push: 2, sms: 1, both: 0 };
 // Column defaults that mean "never filled in", not a real choice — a winner
 // holding one of these must still take the loser's actual value (pet details,
 // preferred day) before the loser's row is deleted.
@@ -521,6 +524,9 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
   const updates = {};
   for (const [col, loserVal] of Object.entries(loserRow)) {
     if (['id', column, 'created_at', 'updated_at'].includes(col)) continue;
+    // Choice provenance follows its channel below; it is not SMS consent
+    // and must not pass through the generic boolean AND rule.
+    if (table === 'notification_prefs' && col === 'request_channel_explicit') continue;
     const winnerVal = winnerRow[col];
     if (typeof loserVal === 'boolean' && typeof winnerVal === 'boolean') {
       if (booleanMode === 'and' && winnerVal && !loserVal) updates[col] = false;
@@ -529,13 +535,29 @@ async function mergeSingletonPrefRow(trx, table, column, winnerId, loserId) {
       table === 'notification_prefs' && col.endsWith('_channel')
       && CHANNEL_RESTRICTIVENESS[winnerVal] !== undefined && CHANNEL_RESTRICTIVENESS[loserVal] !== undefined
     ) {
-      if (CHANNEL_RESTRICTIVENESS[loserVal] > CHANNEL_RESTRICTIVENESS[winnerVal]) updates[col] = loserVal;
+      // A known untouched request Email default must not erase an App
+      // choice. Explicit and historically unknown Email still win.
+      const winnerRank = col === 'request_channel' && winnerVal === 'email' && loserVal === 'push'
+        && winnerRow.request_channel_explicit === false ? -1 : CHANNEL_RESTRICTIVENESS[winnerVal];
+      const loserRank = col === 'request_channel' && loserVal === 'email' && winnerVal === 'push'
+        && loserRow.request_channel_explicit === false ? -1 : CHANNEL_RESTRICTIVENESS[loserVal];
+      if (loserRank > winnerRank) updates[col] = loserVal;
     } else if (isDefaultish(winnerVal) && !isDefaultish(loserVal)) {
       updates[col] = forUpdate(loserVal);
     }
   }
+  if (table === 'notification_prefs' && Object.hasOwn(winnerRow, 'request_channel_explicit')) {
+    const channel = updates.request_channel || winnerRow.request_channel;
+    const matching = [winnerRow, loserRow].filter((row) => row.request_channel === channel);
+    const explicit = matching.some((row) => row.request_channel_explicit === true) ? true
+      : matching.some((row) => row.request_channel_explicit !== false) ? null : false;
+    if (winnerRow.request_channel_explicit !== explicit) updates.request_channel_explicit = explicit;
+  }
   if (Object.keys(updates).length) {
-    await trx(table).where(column, winnerId).update({ ...updates, updated_at: trx.fn.now() });
+    const requestOnly = table === 'notification_prefs'
+      && Object.keys(updates).every((col) => ['request_channel', 'request_channel_explicit'].includes(col));
+    await trx(table).where(column, winnerId).update({ ...updates,
+      ...(!requestOnly ? { updated_at: trx.fn.now() } : {}) });
   }
   await trx(table).where(column, loserId).del();
   return `merged ${Object.keys(updates).length} fields into winner row, dropped loser row`;
@@ -609,6 +631,9 @@ async function repointCustomerProperties(trx, table, column, winnerId, loserId) 
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId, ...demote });
+        // Per-property appointment toggles follow the property to its new
+        // owner (app property scope, PR 3).
+        if (table === 'customer_properties') await require('./property-notification-prefs').repointPropertyPrefs(id, winnerId, sp);
       });
       moved += 1;
     } catch (e) {
@@ -909,6 +934,23 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       await trx.raw(
         'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
         ['property-preferences', custId],
+      );
+    }
+    // The invoice-issued-closeout gate lock, BEFORE the customer row lock
+    // (GitHub r7 P2 #4127): that closeout takes the invoice row lock FIRST
+    // and the customer row lock LAST (required there to match the
+    // void/reversal paths' invoice → customer order), while this merge
+    // takes the customer row lock FIRST and its FK sweep below repoints
+    // that same invoice's customer_id — two different row-lock orders on
+    // the same two rows, an ABBA hazard no single order can fix. The
+    // closeout takes this identical lock (same namespace, the visit's
+    // customer id) before it touches the invoice row, so whichever
+    // transaction gets here first runs to completion before the other
+    // takes any row lock.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['invoice-issued-closeout', custId],
       );
     }
     // Combined-session locks BEFORE any customer row locks, UNCONDITIONALLY
@@ -2631,6 +2673,17 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // the journal → comms → customers order cannot cycle. The later
     // email/name-guard acquisitions of this same key are reentrant no-ops.
     await lockCustomerComms(trx, winnerId);
+    // The invoice-issued-closeout gate lock, sorted, BEFORE the customer
+    // rows (GitHub r7 P2 #4127) — the same reason as executeMerge: this undo
+    // locks the customers first and later the journaled invoices FOR
+    // UPDATE, while the closeout locks invoice → customer; the shared gate
+    // serializes the two before either takes a row lock.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['invoice-issued-closeout', custId],
+      );
+    }
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);
@@ -3584,6 +3637,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // automate — REFUSE (409; the throw rolls the transaction back to
       // zero writes). Rebook or reassign the appointment first, then
       // revert. (Untouched-merges contract.)
+      // The lawn actuals ledger freezes each visit's property (#4113) with a
+      // SET NULL FK the transfer decision below would otherwise bypass: a
+      // ledger row still pointing at this property counts like a referencing
+      // visit, so the property transfers instead of being deleted and the
+      // frozen reference survives (Codex #4113 P2).
+      // Fail closed: a probe that errors is NOT proof the ledger holds no
+      // reference. The error propagates and the undo aborts (the throw rolls
+      // the transaction back to zero writes) rather than deleting a property
+      // whose SET NULL FK would erase a frozen ledger reference (Codex #4113).
+      const ledgerRows = lockedProperty
+        ? await ledgerReferenceRead(trx, (k) => k('lawn_protocol_service_completions')
+          .where({ property_id: recorded.linked_property_id }).select('id').limit(1))
+        : [];
+      const ledgerReference = Array.isArray(ledgerRows) ? ledgerRows.some((row) => row?.id) : Boolean(ledgerRows?.id);
       const strandedVisits = referencingVisits.filter((v) => v.customer_id !== loserId);
       if (strandedVisits.length) {
         refuse(`${strandedVisits.length} appointment(s) referencing the linked property would not belong to the restored customer after the undo — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
@@ -3593,7 +3660,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (!lockedProperty) {
         // Row already gone or re-owned — nothing to act on (and nothing was
         // locked); report it like any moved-on state.
-      } else if (referencingVisits.length) {
+      } else if (referencingVisits.length || ledgerReference) {
         transferred = await transferToLoser();
         if (transferred) {
           repointedBack['customer_properties.linked_property_transferred'] = transferred;
@@ -4147,7 +4214,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // proportion to the risk, and a brand-new signup claiming exactly the
       // restored address in that window is vanishingly rare and self-heals
       // (the undo simply refuses on the next attempt).
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
       // Serialization ONLY — no claimant refusal (r29, same product ruling
       // as the operator writers): customers.email is deliberately
       // non-unique (20260417000010 — spouses and shared household/business

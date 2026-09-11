@@ -13,6 +13,7 @@
 // jest.mock factory may reference them (jest hoists the factory above them).
 let mockCustomers = [];
 let mockTermRows = [];
+let mockScheduledNotices = [];
 
 jest.mock('../models/db', () => {
   function thenableFor(resultFn) {
@@ -27,6 +28,7 @@ jest.mock('../models/db', () => {
     return b;
   }
   const db = jest.fn((table) => {
+    if (table === 'sms_log') return { insert: async (row) => { mockScheduledNotices.push(row); } };
     if (table === 'customers') return thenableFor(() => mockCustomers);
     if (String(table).startsWith('annual_prepay_terms')) return thenableFor(() => mockTermRows);
     return thenableFor(() => []);
@@ -64,6 +66,7 @@ const baseCustomer = {
 beforeEach(() => {
   mockCustomers = [];
   mockTermRows = [];
+  mockScheduledNotices = [];
   jest.clearAllMocks();
   StripeService.charge.mockReset();
   StripeService.chargeOneTime.mockReset();
@@ -71,6 +74,26 @@ beforeEach(() => {
 });
 
 describe('processMonthlyBilling — billing_mode guard', () => {
+  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-MM', billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), {
+      paymentRecord: { id: 'attempt-1', amount: 55.3 },
+    }));
+    const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    sender.mockResolvedValueOnce({ sent: false, deferred: true, code, nextAllowedAt: '2026-09-09T12:00:00Z' });
+    await BillingCron.processMonthlyBilling();
+    expect(mockScheduledNotices).toHaveLength(1);
+    expect(mockScheduledNotices[0]).toMatchObject({ customer_id: 'cust-MM', status: 'scheduled' });
+    const meta = JSON.parse(mockScheduledNotices[0].metadata);
+    expect(meta).toMatchObject({ payment_id: 'attempt-1', retry_count: 0,
+      entry_point: 'billing_failure_deferred', notificationEventKey: 'payment-problem:attempt:attempt-1:autopay_charge_failed',
+    });
+    expect(sender).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ notificationEventKey: meta.notificationEventKey }),
+    }));
+    expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
+  });
+
   test('per_application customer is skipped and never reaches the charge path', async () => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-PA', billing_mode: 'per_application' }];
 
@@ -174,5 +197,18 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     await BillingCron.processMonthlyBilling();
 
     expect(chargeMonthly).toHaveBeenCalledWith('cust-EM');
+  });
+});
+
+
+describe('monthly payment settlement reporting', () => {
+  test.each(['processing', 'paid'])('%s preserves returned amount and sends receipts only after settlement', async status => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-state', billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-state', status, amount: '102.90' });
+    const result = await BillingCron.processMonthlyBilling();
+    expect(result).toMatchObject({ charged: status === 'paid' ? 1 : 0, processing: status === 'processing' ? 1 : 0 });
+    expect(logAutopay).toHaveBeenCalledWith('cust-state', status === 'paid' ? 'charge_success' : 'charge_processing', expect.objectContaining({ amountCents: 10290, paymentId: 'pay-state' }));
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
   });
 });

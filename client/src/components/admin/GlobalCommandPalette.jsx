@@ -31,6 +31,8 @@ import { retainTaskReceipt } from "../../utils/ibTaskReceipts";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
+import useAdminNavigation from "../../hooks/useAdminNavigation";
+import AdminPageFinder from "./AdminPageFinder";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const RECENTS_KEY = "admin_ib_recents";
@@ -245,7 +247,7 @@ function renderMarkdown(text) {
           key={key++}
           style={{ display: "flex", gap: 8, paddingLeft: 4, marginBottom: 3 }}
         >
-          <span style={{ color: D.teal, fontSize: 10, marginTop: 5 }}>●</span>
+          <span style={{ color: D.teal, fontSize: 11, marginTop: 5 }}>●</span>
           <span>{renderInline(line.replace(/^[-•*]\s/, ""))}</span>
         </div>,
       );
@@ -300,7 +302,10 @@ function renderInline(text) {
 }
 
 // ─── MAIN COMPONENT ─────────────────────────────────────────────
-function GlobalCommandPalette({ user }, ref) {
+function GlobalCommandPalette({ user, onNavigate }, ref) {
+  const canFindPages = Boolean(useAdminNavigation());
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => { if (!canFindPages) setNavigationOpen(false); }, [canFindPages]);
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
@@ -350,6 +355,7 @@ function GlobalCommandPalette({ user }, ref) {
   const [dragY, setDragY] = useState(0);
   const dragStartRef = useRef(null);
   const inputRef = useRef(null);
+  const openerRef = useRef(null);
   const fileInputRef = useRef(null);
   const attachmentConversionRef = useRef(0);
   const attachmentsLoadingRef = useRef(false);
@@ -365,27 +371,43 @@ function GlobalCommandPalette({ user }, ref) {
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
 
+  const rememberOpener = () => {
+    // Mode switches retain the trigger from before either dialog opened.
+    if (!open && !navigationOpen) openerRef.current = document.activeElement;
+  };
+
   useImperativeHandle(
     ref,
     () => ({
-      open: () => setOpen(true),
-      close: () => setOpen(false),
-      toggle: () => setOpen((v) => !v),
+      open: () => { rememberOpener(); setNavigationOpen(false); setOpen(true); },
+      openNavigation: () => { if (canFindPages) { rememberOpener(); setOpen(false); setNavigationOpen(true); } },
+      close: () => { setNavigationOpen(false); setOpen(false); },
+      toggle: () => { rememberOpener(); setNavigationOpen(false); setOpen((v) => !v); },
     }),
-    [],
+    [canFindPages, open, navigationOpen],
   );
 
   // ⌘K / Ctrl+K listener
   useEffect(() => {
     const handler = (e) => {
+      if (e.defaultPrevented) return;
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setOpen((prev) => !prev);
+        rememberOpener();
+        if (canFindPages) {
+          setOpen(false);
+          setNavigationOpen((prev) => !prev);
+        } else setOpen((prev) => !prev);
       }
+      // useModalFocus owns Escape for real key events (it stops the shared
+      // modal stack from handing it to an underlying record drawer); this
+      // branch covers a keydown dispatched straight at window, which never
+      // reaches the document-level capture listener.
+      if (e.key === "Escape" && open) setOpen(false);
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [open, canFindPages, navigationOpen]);
 
   // Focus input when opening + refresh recents
   useEffect(() => {
@@ -432,9 +454,11 @@ function GlobalCommandPalette({ user }, ref) {
     // the thread itself is discarded.
     if (!threadsAvailableRef.current) setResponse(null);
     // Legacy threaded approvals have no task recovery. Keep their bound cards
-    // until resolved; task-backed cards can be reopened from Saved requests.
+    // until resolved. A task-backed card belongs to the task it came from
+    // (activeTask is cleared just above) and is dropped here regardless of
+    // whether the task-list probe has answered yet; the saved task keeps it.
     if (!threadsAvailableRef.current) setPendingActions([]);
-    else if (tasksAvailableRef.current) setPendingActions(previous => previous.filter(action => !action.taskId));
+    else setPendingActions(previous => previous.filter(action => !action.taskId));
     setToolActivity([]);
     if (!threadsAvailableRef.current) {
       // Unlike New chat/submit (deliberate detach — no re-resume), a
@@ -782,6 +806,8 @@ function GlobalCommandPalette({ user }, ref) {
     dragStartRef.current = null;
   };
 
+  if (navigationOpen && canFindPages) return <AdminPageFinder onClose={() => setNavigationOpen(false)} onNavigate={onNavigate}
+    onAsk={() => { openerRef.current?.focus({ preventScroll: true }); onNavigate?.(); setNavigationOpen(false); setOpen(true); }} />;
   if (!open) return null;
 
   if (isMobile) {
@@ -968,7 +994,7 @@ function GlobalCommandPalette({ user }, ref) {
                     borderRadius: 4,
                     background: D.bg,
                     border: `1px solid ${D.border}`,
-                    fontSize: 10,
+                    fontSize: 11,
                     color: D.muted,
                     fontFamily: "JetBrains Mono, monospace",
                   }}
@@ -1015,7 +1041,7 @@ function GlobalCommandPalette({ user }, ref) {
           <div style={{ flex: 1, overflow: "auto", padding: "10px 18px 14px" }}>
             <div
               style={{
-                fontSize: 10,
+                fontSize: 11,
                 fontWeight: 500,
                 color: D.muted,
                 letterSpacing: "0.06em",
@@ -1171,7 +1197,8 @@ function GlobalCommandPalette({ user }, ref) {
           }}
         >
           {" "}
-          <span style={{ fontSize: 10, color: D.border }}>
+          <span style={{ fontSize: 11, color: D.muted }}>
+            {/* UI audit F0086: was 10px in the border colour — invisible */}
             Intelligence Bar — context: {contextLabel}
           </span>{" "}
           {(threadsAvailable || tasksAvailable) && (
@@ -1183,7 +1210,7 @@ function GlobalCommandPalette({ user }, ref) {
                 border: `1px solid ${showThreads ? accentColor + "55" : D.border}`,
                 borderRadius: 6,
                 color: showThreads ? accentColor : D.muted,
-                fontSize: 10,
+                fontSize: 11,
                 fontWeight: 500,
                 cursor: "pointer",
               }}
@@ -1193,8 +1220,8 @@ function GlobalCommandPalette({ user }, ref) {
           )}
           <span
             style={{
-              fontSize: 10,
-              color: D.border,
+              fontSize: 11,
+              color: D.muted,
               fontFamily: "JetBrains Mono, monospace",
             }}
           >
@@ -1773,7 +1800,7 @@ function Section({ label, children }) {
       {" "}
       <div
         style={{
-          fontSize: 10,
+          fontSize: 11,
           fontWeight: 500,
           color: "#71717A",
           letterSpacing: "0.06em",

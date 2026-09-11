@@ -53,6 +53,9 @@ mocked provider response is not evidence of end-to-end capability.
 - `action-registry.js` validates explicit role/side-effect/approval policy for the
   existing 209 definitions and dynamically loads authorized cross-module tools.
   Unknown classifications and injected top-level actor/approval fields fail closed.
+  Every entry also declares a data `scope` (see
+  `intelligence-bar-read-scope-catalog.md`); a missing or invalid scope keeps the
+  tool out of the registry and `task-context.js` refuses it as `scope_unclassified`.
 - `outcomes.js` recognizes blocked/failed/unknown/partial/provider-accepted results.
   Confirmation and recovered cards use stored outcomes; accepted SMS audit failures
   retain provider acceptance without implying delivery or permitting a repeat send.
@@ -103,8 +106,11 @@ These exceptions do not grant coverage to any customer, estimate, inventory,
 financial, communications, or other domain operation.
 
 `npm run check:ib-coverage` compares AST request fingerprints with the reviewed
-manifest. New or changed calls need a concrete tool + outcome evidence or an
-explicit exception for that exact fingerprint. The original `a2bb0bc49` census
+manifest. New or changed calls need a concrete tool + outcome evidence, a genuine
+capability exception, or a `reviewed_unmapped` acknowledgment for that exact
+request fingerprint. The acknowledgment uses the same review-metadata checks but
+remains in the unsupported/unverified count; formatting or UI retry work does
+not remove a domain capability from the backlog. The original `a2bb0bc49` census
 remains recorded. The task branch was updated to `e4de41345` before Phase 2;
 25 additional upstream sites and ten upstream fingerprint changes are separately
 marked with that source commit. Deleted upstream sites remain recorded, and no

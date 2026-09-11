@@ -162,7 +162,7 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
     const partialReviewed = [verifiedScopes.length, remainingScopes.length,
       partialText.every(value => typeof value === 'string' && value.trim().length > 0)].every(Boolean);
     const implemented = tested && (previous.status === 'verified' || (previous.status === 'partially_verified' && partialReviewed));
-    const exception = previous.status === 'reviewed_exception'
+    const exception = ['reviewed_exception', 'reviewed_unmapped'].includes(previous.status)
       && ['review', 'reason'].every(key => typeof previous.exception?.[key] === 'string' && previous.exception[key].trim());
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
     if (previous.status !== 'unmapped' || previous.baselineFingerprint !== action.fingerprint || !baselineProof.has(`${action.id}:${action.fingerprint}`)) {
@@ -240,10 +240,17 @@ function main() {
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
   const policy = JSON.parse(fs.readFileSync(path.join(ROOT, 'server/services/intelligence-bar/action-policy.json'), 'utf8'));
   const errors = checkCoverage(current, manifest, policy, verifiedBaselineProof(current, manifest));
-  const unsupported = manifest.actions.filter(a => !['verified', 'reviewed_exception'].includes(a.status)).length;
-  console.log(`IB coverage: ${manifest.actions.length} recorded UI sites; ${unsupported} unsupported/unverified. ${errors.length} new/changed unmapped sites.`);
+  const { recorded, unsupported } = coverageCounts(manifest.actions);
+  console.log(`IB coverage: ${recorded} recorded UI sites; ${unsupported} unsupported/unverified. ${errors.length} new/changed unmapped sites.`);
   errors.forEach(error => console.error(error));
   process.exitCode = errors.length ? 1 : 0;
+}
+
+function coverageCounts(actions) {
+  return {
+    recorded: actions.length,
+    unsupported: actions.filter(a => !['verified', 'reviewed_exception'].includes(a.status)).length,
+  };
 }
 
 function compactManifest(manifest) {
@@ -254,4 +261,4 @@ function compactManifest(manifest) {
 }
 
 if (require.main === module) main();
-module.exports = { frontendCensus, frontendSourceCensus, backendCensus, checkCoverage, verifiedBaselineProof, normalizedEndpoint, compactManifest };
+module.exports = { frontendCensus, frontendSourceCensus, backendCensus, checkCoverage, coverageCounts, verifiedBaselineProof, normalizedEndpoint, compactManifest };

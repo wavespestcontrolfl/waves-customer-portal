@@ -429,3 +429,25 @@ compared whole against Alice Link and refused.
 Validation: 165 target cases pass (141 unit and 24 rollback-only isolated
 PostgreSQL cases). No model, provider, production query, migration, merge or
 gate change occurred.
+
+#4120 (three-line best-time hint) records the first `reviewed_exception` row.
+The `useBestTimes` hint request moved into a `search` wrapper, so the census
+sees a new site (`16c8f8f115eaeffba01b983c`) rather than a changed one, and a
+pre-merge branch cannot prove a baseline. The row is excepted, not covered:
+admin date pickers fire this POST automatically to decorate the picked hour
+and the best hours, a read-only ranking over the same find-time engine the
+`find_available_slots` read tool already exposes, gated by
+`GATE_BEST_TIME_HINTS`, with no write or approval. The superseded
+`useBestTimes` row stays as history; the denominator is 1,745 recorded sites,
+1,744 unsupported/unverified. No domain action gains coverage.
+
+PR #4086 (lawn completion defaults, client half) re-identified the
+`CompletionPanel` planner request: the endpoint is now computed — the GET with
+`?completionDefaults=1` for the prefill projection, or `POST
+/admin/treatment-plans/:serviceId/build` when the technician edits the visit
+area — so the census records it as one unresolved dynamic-endpoint site. It is
+acknowledged as `reviewed_unmapped` for that exact fingerprint: both routes are
+the read-only WaveGuard planner (technician current-visit scope, no completion
+records, no inventory deduction, no exception approval), and the superseded
+literal `GET /admin/treatment-plans/:param` row leaves the denominator, which
+stays at 1,757 recorded / 1,735 unsupported sites. Nothing gains coverage.

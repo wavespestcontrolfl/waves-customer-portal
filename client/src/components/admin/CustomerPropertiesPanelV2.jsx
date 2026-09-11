@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
-import { Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
+import { Input, inputStyles, useUiDensity, Select, Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -57,6 +57,7 @@ export default function CustomerPropertiesPanelV2({
   // header/map don't keep rendering the stale (empty) profile address.
   onChanged = null,
 }) {
+  const density = useUiDensity();
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
@@ -239,13 +240,13 @@ export default function CustomerPropertiesPanelV2({
     ? { label: "Default", title: "Default service address", description: "This contact is a property manager — the primary row is the default service address on the profile, not a residence." }
     : { label: "Primary", title: "Address on the profile", description: "The primary row is the address on the profile; every other row is an additional serviced property." };
   const inputCls =
-    "w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
+    "w-full h-9 px-2.5 text-ui-body text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
 
   return (
     <Card className="mb-5" data-testid="customer-properties-panel">
       <CardBody className="p-4">
         <div className="flex items-center justify-between gap-2 mb-2">
-          <div className="u-label text-ink-secondary">
+          <div className="ui-label text-ink-secondary">
             Service addresses{properties.length > 0 ? ` (${properties.length})` : ""}
           </div>
           {canEdit && !adding && (
@@ -254,13 +255,13 @@ export default function CustomerPropertiesPanelV2({
             </Button>
           )}
         </div>
-        <div className="text-12 text-ink-secondary mb-3">
+        <div className="text-ui-label text-ink-secondary mb-3">
           {primaryCopy.description}
         </div>
 
-        {loading && <div className="text-12 text-ink-secondary">Loading…</div>}
+        {loading && <div className="text-ui-label text-ink-secondary">Loading…</div>}
         {loadErr && (
-          <div className="px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{loadErr}</div>
+          <div className="px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{loadErr}</div>
         )}
 
         {!loading && !loadErr && (
@@ -272,10 +273,10 @@ export default function CustomerPropertiesPanelV2({
                 data-testid="customer-property-row"
               >
                 <div className="flex-1 min-w-0">
-                  <div className="text-13 text-zinc-900 break-words">
+                  <div className="text-ui-body text-zinc-900 break-words">
                     {p.is_primary && (
                       <span
-                        className="text-10 uppercase tracking-label text-ink-tertiary mr-1.5"
+                        className="text-ui-caption ui-label text-ink-tertiary mr-1.5"
                         title={primaryCopy.title}
                       >
                         {primaryCopy.label}
@@ -284,7 +285,7 @@ export default function CustomerPropertiesPanelV2({
                     {formatPropertyAddress(p)}
                   </div>
                   {labelEdit?.id === p.id ? (
-                    <input
+                    <Input
                       aria-label={`Label for ${p.address_line1}`}
                       autoFocus
                       value={labelEdit.value}
@@ -306,26 +307,26 @@ export default function CustomerPropertiesPanelV2({
                           setLabelEdit(null);
                         }
                       }}
-                      className="mt-1 w-full max-w-xs h-8 px-2 text-12 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                      className="mt-1 w-full max-w-xs h-8 px-2 text-ui-label text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
                     />
                   ) : canEdit ? (
-                    <button
+                    <button data-ui-text-action
                       type="button"
                       aria-label={`Edit label for ${p.address_line1}`}
                       disabled={writeBusy}
                       onClick={() => setLabelEdit({ id: p.id, value: p.label || "" })}
-                      className="block p-0 border-0 bg-transparent text-12 text-ink-secondary hover:text-zinc-900 hover:underline u-focus-ring text-left disabled:opacity-50"
+                      className="block p-0 border-0 bg-transparent text-ui-label text-ink-secondary hover:text-zinc-900 hover:underline u-focus-ring text-left disabled:opacity-50"
                     >
                       {p.label || "Add label"}
                     </button>
                   ) : (
                     p.label && (
-                      <div className="text-12 text-ink-secondary">{p.label}</div>
+                      <div className="text-ui-label text-ink-secondary">{p.label}</div>
                     )
                   )}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <select
+                  <Select
                     aria-label={`Relationship for ${p.address_line1}`}
                     value={p.relationship || ""}
                     disabled={!canEdit || writeBusy}
@@ -337,8 +338,8 @@ export default function CustomerPropertiesPanelV2({
                         {o.label}
                       </option>
                     ))}
-                  </select>
-                  <select
+                  </Select>
+                  <Select
                     aria-label={`Occupancy for ${p.address_line1}`}
                     value={p.occupancy_type || "unknown"}
                     disabled={!canEdit || writeBusy}
@@ -350,7 +351,7 @@ export default function CustomerPropertiesPanelV2({
                         {o.label}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
                 {canEdit && canChangePrimary && !p.is_primary && (
                   <div className="max-w-64">
@@ -363,18 +364,18 @@ export default function CustomerPropertiesPanelV2({
               </div>
             ))}
             {properties.length === 0 && (
-              <div className="text-12 text-ink-secondary py-2">{primaryAddress?.line1 ? `Primary address: ${[primaryAddress.line1, primaryAddress.line2, primaryAddress.city, primaryAddress.state, primaryAddress.zip].filter(Boolean).join(", ")}. No additional service addresses recorded.` : "No service address on file."}</div>
+              <div className="text-ui-label text-ink-secondary py-2">{primaryAddress?.line1 ? `Primary address: ${[primaryAddress.line1, primaryAddress.line2, primaryAddress.city, primaryAddress.state, primaryAddress.zip].filter(Boolean).join(", ")}. No additional service addresses recorded.` : "No service address on file."}</div>
             )}
           </div>
         )}
         {rowErr && (
-          <div className="mt-2 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">{rowErr}</div>
+          <div className="mt-2 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">{rowErr}</div>
         )}
 
         {adding && (
           <form onSubmit={submitAdd} className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div className="sm:col-span-2">
-              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-line1">
+              <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-line1">
                 Street address
               </label>
               <AddressAutocomplete
@@ -383,7 +384,7 @@ export default function CustomerPropertiesPanelV2({
                 geocodeOnBlur={false}
                 placeholder="Start typing an address…"
                 id="cp-line1"
-                className={`${inputCls} text-16`}
+                className={inputStyles({ density, className: `${inputCls} text-16` })}
                 maxLength={LIMITS.address_line1}
                 value={form.address_line1}
                 onChange={(value) => setForm((f) => ({ ...f, address_line1: value }))}
@@ -408,10 +409,10 @@ export default function CustomerPropertiesPanelV2({
               />
             </div>
             <div className="sm:col-span-2">
-              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-line2">
+              <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-line2">
                 Unit / line 2
               </label>
-              <input
+              <Input
                 id="cp-line2"
                 className={inputCls}
                 maxLength={LIMITS.address_line2}
@@ -420,10 +421,10 @@ export default function CustomerPropertiesPanelV2({
               />
             </div>
             <div>
-              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-city">
+              <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-city">
                 City
               </label>
-              <input
+              <Input
                 id="cp-city"
                 className={inputCls}
                 maxLength={LIMITS.city}
@@ -433,10 +434,10 @@ export default function CustomerPropertiesPanelV2({
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-state">
+                <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-state">
                   State
                 </label>
-                <input
+                <Input
                   id="cp-state"
                   className={inputCls}
                   value={form.state}
@@ -451,10 +452,10 @@ export default function CustomerPropertiesPanelV2({
                 />
               </div>
               <div>
-                <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-zip">
+                <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-zip">
                   ZIP
                 </label>
-                <input
+                <Input
                   id="cp-zip"
                   className={inputCls}
                   maxLength={LIMITS.zip}
@@ -464,10 +465,10 @@ export default function CustomerPropertiesPanelV2({
               </div>
             </div>
             <div>
-              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-rel">
+              <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-rel">
                 Relationship
               </label>
-              <select
+              <Select
                 id="cp-rel"
                 className={`${inputCls} text-14`}
                 value={form.relationship}
@@ -478,13 +479,13 @@ export default function CustomerPropertiesPanelV2({
                     {o.label}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div>
-              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-occ">
+              <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-occ">
                 Occupancy
               </label>
-              <select
+              <Select
                 id="cp-occ"
                 className={`${inputCls} text-14`}
                 value={form.occupancy_type}
@@ -495,13 +496,13 @@ export default function CustomerPropertiesPanelV2({
                     {o.label}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div>
-              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-label">
+              <label className="ui-label text-ink-secondary block mb-1" htmlFor="cp-label">
                 Label (optional)
               </label>
-              <input
+              <Input
                 id="cp-label"
                 className={inputCls}
                 maxLength={PROPERTY_LABEL_MAX}
@@ -510,7 +511,7 @@ export default function CustomerPropertiesPanelV2({
               />
             </div>
             {saveErr && (
-              <div className="sm:col-span-2 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-12">
+              <div className="sm:col-span-2 px-2 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
                 {saveErr}
               </div>
             )}

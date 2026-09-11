@@ -30,6 +30,7 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
   // under the appointment purpose the immediate dispatch send enforced.
@@ -734,6 +735,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:20 AM ET — primary-property backstop. The same customer-create
+  // paths never create the lazily-backfilled primary customer_properties
+  // row, so a booking for a fresh lead anchored to NULL (prod 2026-09-07:
+  // 144 rows missing). Daily is enough (owner 2026-09-07) once #4115
+  // lands: from then on the booking anchor backfills a missing primary at
+  // booking time and this only has to catch customers nothing read in
+  // between. Until #4115 merges this sweep is the only backstop, so #4115
+  // merges first. Own job_health name so the watchdog reports it apart
+  // from the geocode sweep.
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepMissingPrimaryProperties } = require('./customer-properties');
+      await runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties());
+    } catch (err) {
+      logger.error(`[customer-properties] primary backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
@@ -1429,6 +1449,25 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2463,6 +2502,19 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Stripe webhook events purge failed: ${err.message}`);
     }
+    // Same 90-day sweep for property_text_decisions (the ruling-R5 shadow
+    // log for appointment texts by saved property): the review window is a
+    // week; 90 days keeps the flip's evidence around.
+    try {
+      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const db = require('../models/db');
+      if (await db.schema.hasTable('property_text_decisions')) {
+        const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
+        if (purged > 0) logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
+      }
+    } catch (err) {
+      logger.error(`property_text_decisions purge failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -2691,6 +2743,40 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Call extraction replay eval failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // WEEKLY MONDAY 3:50AM ET — Voice relay conversation eval. Replays the
+  // synthetic-caller scenario fixture (server/fixtures/voice-relay-eval/)
+  // through the LIVE Sandy conversation loop and the pinned judge, in a CHILD
+  // PROCESS: each scenario sets the relay's gate env vars (context, booking,
+  // transfer, recovery) for its own run, and those must never touch the
+  // process that is answering real calls. The harness never closes a session
+  // (no call_log write, no capture floor) and refuses DB access while a
+  // scenario runs; the child emits one regression bell plus the existing
+  // ops digest/email on repeated failure. Judge telemetry uses its normal
+  // replay-labelled ledger lane. runExclusive: live model calls; don't double-spend on
+  // deploy-overlap ticks. Kill switch: GATE_VOICE_RELAY_EVAL=false.
+  // =========================================================================
+  cron.schedule('50 3 * * 1', async () => {
+    if (!isEnabled('voiceRelayEval')) return;
+    logger.info('Running: voice relay conversation eval');
+    try {
+      await runExclusive('voice-relay-eval', async () => {
+        const { runVoiceRelayEvalProcess, summaryLine } = require('./eval/voice-relay-replay');
+        const result = await runVoiceRelayEvalProcess();
+        logger.info(`Voice relay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
+      });
+    } catch (err) {
+      // The child could not send its own alert (crash / timeout / no JSON):
+      // page through the same inconclusive path, never a log line alone.
+      logger.error(`Voice relay eval failed: ${err.message}`);
+      try {
+        await require('./eval/voice-relay-replay').notifyEvalCrash(err);
+      } catch (notifyErr) {
+        logger.error(`Voice relay eval crash notification failed: ${notifyErr.message}`);
+      }
     }
   }, { timezone: 'America/New_York' });
 
@@ -3183,6 +3269,10 @@ function initScheduledJobs() {
         const StatementFollowups = require('./payer-statement-followups');
         const result = await StatementFollowups.runPending();
         logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
+        // Settled-statement child closeouts that failed or never ran have no
+        // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
+        const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
+        if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
@@ -3652,6 +3742,10 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            withSmsHandoff: require('./messaging/deferred-replay-registry')
+              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
+                customer_id: msg.customer_id || claimMeta.customer_id || null,
+                to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
@@ -3672,6 +3766,10 @@ function initScheduledJobs() {
               ? claimMeta.stamp_receipt_invoice_id
               : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
+            // The visit a deferred appointment notice is about: the consent
+            // validator resolves the per-property toggles from it (app
+            // property scope, PR 3) exactly like the immediate send did.
+            ...(claimMeta.scheduled_service_id ? { appointmentId: claimMeta.scheduled_service_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
             // re-queues here minutes later — still an answer to the
@@ -3704,6 +3802,10 @@ function initScheduledJobs() {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
+                service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
+                request_status_version: claimMeta.request_status_version,
+                request_updated_at: claimMeta.request_updated_at } : {}),
               useCustomerChannel: claimMeta.useCustomerChannel === true,
               bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
@@ -3853,8 +3955,12 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
+          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+            // MOVE_HOLD: the replay now names its visit (appointmentId, app
+            // property scope PR 3), so a grouped-move hold stamped on that
+            // visit — or its fail-closed read — answers the send exactly like
+            // the immediate path: a deferral, never a terminal block.
             // Transient provider failure (Twilio 429/5xx/timeout) or a DB
             // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
             // no retry metadata but is retry-advised by contract): re-queue
@@ -3863,14 +3969,21 @@ function initScheduledJobs() {
             // (RED audit R3). Bounded by SCHEDULED_SMS_MAX_ATTEMPTS via the
             // claim-time attempt counter. The message will still send, so
             // parked decisions stay parked — we do NOT reopen them here.
-            const retryAt = smsResult.nextAllowedAt
+            // Native-provider retries share this three-attempt rail. Grow
+            // the provider's minimum delay after each failed replay and add
+            // jitter; held lookups and other channels retain their timing.
+            const nativeRetryMs = smsResult.code === 'APP_PROVIDER_RETRY'
+              ? Math.max(60000, Number(smsResult.retryAfterMs) || 60000)
+                * (2 ** (Number(claimMeta.scheduled_sms_attempts) || 1)) * (1 + Math.random() * 0.2)
+              : null;
+            const retryAt = nativeRetryMs ? new Date(completedAt.getTime() + nativeRetryMs) : smsResult.nextAllowedAt
               ? new Date(smsResult.nextAllowedAt)
               : new Date(Date.now() + 15 * 60 * 1000);
             await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
@@ -3919,7 +4032,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();
@@ -4055,6 +4175,16 @@ function initScheduledJobs() {
   // =========================================================================
   // EVERY 5 MIN — Retry queued service report v1 email deliveries
   // =========================================================================
+  // Saved visit packets outlive their creation gate. Resume through the
+  // canonical member and effect claims after a process restart.
+  cron.schedule('2-57/5 * * * *', async () => {
+    try {
+      await runExclusive('visit-closeout-resume', () => require('./visit-completion-packets').resumePendingVisitCompletions());
+    } catch (err) {
+      logger.error(`[visit-closeout] resume sweep failed (${err.name || 'Error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('*/5 * * * *', async () => {
     try {
       const { processDueServiceReportDeliveries } = require('./service-report/delivery-queue');
@@ -4283,17 +4413,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // EVERY 2 MINUTES — Call-alert durable retry (owner ruling
   // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
   // post-call timer is in-memory and the sweep window is 24h, so a Gmail
   // hang must never be able to starve it (hook P1).
   // =========================================================================
   cron.schedule('*/2 * * * *', async () => {
-    try {
-      await require('./missed-call-bell').sweepMissedCalls();
-    } catch (err) {
-      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
-    }
+    const results = await Promise.allSettled([
+      Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
+      Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
+    ]);
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller'][index]} sweep failed: ${result.reason.message}`);
+    });
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -6027,7 +6159,7 @@ function initScheduledJobs() {
       await runExclusive('billing-monthly', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processMonthlyBilling();
-        logger.info(`Monthly billing done: ${result.charged} charged, ${result.failed} failed, ${result.skipped} skipped`);
+        logger.info(`Monthly billing done: ${result.charged} charged, ${result.processing} processing, ${result.failed} failed, ${result.skipped} skipped`);
       });
     } catch (err) {
       logger.error(`Monthly billing failed: ${err.message}`);
@@ -6039,7 +6171,7 @@ function initScheduledJobs() {
       await runExclusive('billing-retries', async () => {
         const BillingCron = require('./billing-cron');
         const result = await BillingCron.processPaymentRetries();
-        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded`);
+        if (result.retried > 0) logger.info(`Payment retries: ${result.retried} retried, ${result.succeeded} succeeded, ${result.processing} processing`);
       });
     } catch (err) {
       logger.error(`Payment retry failed: ${err.message}`);

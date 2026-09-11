@@ -7,8 +7,8 @@
  * client held them and the server ignored them, always sending a single
  * canonical message (audit finding O2).
  *
- * Placeholders ({first}, {tech}, {service_type}, {review_url}, ...) are
- * substituted by renderOutreachBody. {review_url} always resolves to a
+ * Placeholders ({first}, {tech}, {sender}, {service_type}, {review_url}, ...)
+ * are substituted by renderOutreachBody. {review_url} always resolves to a
  * tokenized portal link (never a bare Google URL): behind
  * GATE_REVIEW_DIRECT_LINK it is the tracked /api/rate/<token>/go redirect
  * straight to the Google review form; gate off, the legacy /rate/<token>
@@ -28,6 +28,22 @@
  */
 
 const OUTREACH_TEMPLATES = [
+  {
+    // The cadence's Day-0 ask (owner decision 2026-09-07, a narrow revision of
+    // the 2026-07-30 personalized-drafting spec for THIS touch only): composed
+    // from verified fields — the recipient's first name, the technician on the
+    // completed service ({sender} = "<tech> with Waves", or "Waves Pest
+    // Control" when no tech resolves), the tokenized link, and the uniform
+    // reply invite everyone gets. Day-agnostic on purpose: the smart send
+    // window and quiet hours can carry the ask past midnight, and a "today"
+    // written at 8 PM read wrong at 8 AM. No service label — with the reply
+    // invite, no label variant fits one segment. sendOutreachTouch routes
+    // every cadence step-0 SMS ask here (never the LLM drafter).
+    id: 'day0_ask',
+    name: 'Day-0 Ask',
+    sentiment: 'happy',
+    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+  },
   {
     id: 'friendly_ask',
     name: 'Friendly Ask',
@@ -179,13 +195,26 @@ const CAP_TOUCH_SQL = `(template_key IS NULL OR template_key NOT IN (${CAP_EXEMP
  * shifted to the next Monday morning by the sequence scheduler
  * (review-request.js).
  */
+const DAY0_ASK_TEMPLATE_KEY = 'day0_ask';
+// Step-0 SMS asks the controlled Day-0 body replaces: a key-less step and
+// every link-bearing ask template — the new key, the pre-2026-09-07 plan key
+// still persisted on in-flight sequences (plans are stored per row), and any
+// other ask an admin's custom plan names at step 0 (codex #4139 r2: those
+// would otherwise reach the LLM drafter). Only the multi-treatment
+// first-visit ask keeps its own copy; no-link check-ins are not asks.
+function isDay0ControlledAsk({ sequenceStep, channel, templateId }) {
+  return sequenceStep === 0
+    && (channel || 'sms') === 'sms'
+    && (templateId == null || (templateId !== 'first_treatment_ask' && isAskTemplate(templateId)));
+}
+
 const DEFAULT_SEQUENCE_PLAN = [
-  { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
+  { day: 0, channel: 'sms', templateKey: DAY0_ASK_TEMPLATE_KEY },
   { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
   { day: 6, channel: 'email', templateKey: 'final_nudge' },
 ];
 const RECURRING_SEQUENCE_PLAN = [
-  { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
+  { day: 0, channel: 'sms', templateKey: DAY0_ASK_TEMPLATE_KEY },
 ];
 const MULTI_TREATMENT_FIRST_PLAN = [
   { day: 0, channel: 'sms', templateKey: 'first_treatment_ask' },
@@ -202,7 +231,7 @@ function getOutreachTemplate(id) {
  * issue/check-in templates that deliberately carry no link.
  *
  * @param {string} body        raw template body (with {placeholders})
- * @param {object} vars        { first, name, tech, service_type, review_url, date }
+ * @param {object} vars        { first, name, tech, sender, service_type, review_url, date }
  * @param {object} [opts]      { requireLink:boolean } force-append the link
  */
 function renderOutreachBody(body, vars = {}, opts = {}) {
@@ -211,6 +240,9 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     name: vars.name || vars.first || 'there',
     // 9 chars: keeps every {tech} template inside one segment at its worst case
     tech: vars.tech || 'Your tech',
+    // Sender identity from the record: the technician's first name when one
+    // resolves, else the company — never a hardcoded person.
+    sender: vars.sender || (vars.tech ? `${vars.tech} with Waves` : 'Waves Pest Control'),
     service_type: vars.service_type || 'service',
     review_url: vars.review_url || '',
     date: vars.date || '',
@@ -219,6 +251,7 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
     .replace(/\{first\}/g, v.first)
     .replace(/\{name\}/g, v.name)
     .replace(/\{tech\}/g, v.tech)
+    .replace(/\{sender\}/g, v.sender)
     .replace(/\{service_type\}/g, v.service_type)
     .replace(/\{review_url\}/g, v.review_url)
     .replace(/\{date\}/g, v.date);
@@ -235,6 +268,8 @@ function renderOutreachBody(body, vars = {}, opts = {}) {
 module.exports = {
   OUTREACH_TEMPLATES,
   TEMPLATES_BY_ID,
+  DAY0_ASK_TEMPLATE_KEY,
+  isDay0ControlledAsk,
   DEFAULT_SEQUENCE_PLAN,
   RECURRING_SEQUENCE_PLAN,
   MULTI_TREATMENT_FIRST_PLAN,

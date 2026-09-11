@@ -645,11 +645,28 @@ function parseRawAddress(raw) {
       remainder = cleanString(remainder.slice(0, trailingZip.index));
     }
     const stateMatch = findTrailingState(remainder);
-    if (stateMatch.state) {
+    const beforeState = cleanString(removeState(remainder, stateMatch));
+    const stateToken = stateMatch.raw.toLowerCase();
+    // "123 Main St NE" and "123 Main Ct" end in street tokens, not
+    // Nebraska/Connecticut. A real locality before the state ("Lincoln
+    // NE") or a comma-separated state tail still supplies geography.
+    // Owner ruling 2026-09-11 (Florida-only business): in comma-free input
+    // a trailing token that is both a street token and a state code ("Ct",
+    // "Ne", "Se", "Wa", ...) is ALWAYS the street reading — Court,
+    // Northeast — whenever no city was found before it. "123 Royal Palm Ct",
+    // "123 Route 12 Groton Ct" and "1234 Gulf of Mexico Dr NE" are Florida
+    // streets. Another state is only read when the geography is explicit:
+    // a comma-separated tail ("..., Groton, CT") or a state after a
+    // recognized city ("123 Main Street Lincoln NE"). Out-of-area callers
+    // are caught downstream by Google validation of the whole address, not
+    // by guessing a state from a suffix-shaped word.
+    const bareStreetEnding = /^\d/.test(beforeState) && !splitStreetAndCity(beforeState).city
+      && (DIRECTIONALS.has(stateToken) || STREET_SPLIT_SUFFIXES.has(stateToken));
+    if (stateMatch.state && !bareStreetEnding) {
       state = stateMatch.state;
-      remainder = cleanString(removeState(remainder, stateMatch));
+      remainder = beforeState;
     }
-    const split = splitStreetAndCity(remainder);
+    const split = bareStreetEnding ? { line1: remainder, city: '' } : splitStreetAndCity(remainder);
     line1 = split.line1;
     city = split.city;
   }

@@ -1,3 +1,5 @@
+import { clearNativeBadge } from '../native/nativeBadge';
+
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 const REFRESH_LOCK_NAME = 'waves-customer-refresh';
 const REFRESH_LEASE_KEY = 'waves_refresh_lease';
@@ -15,6 +17,11 @@ export function tokenSessionIdentity(token) {
     return {
       customerId: String(payload.customerId),
       sessionId: payload.sessionId == null ? null : String(payload.sessionId),
+      // Selected saved property (GATE_APP_PROPERTY_SCOPE). A same-profile
+      // property switch keeps customerId AND sessionId, so the retry guard
+      // must compare this too or a stale select-property could retry under
+      // the new selection's credential.
+      propertyId: payload.propertyId == null ? null : String(payload.propertyId),
     };
   } catch {
     return null;
@@ -29,6 +36,18 @@ export function sameRequestSession(left, right) {
     // family, so null -> family is safe when the customer is unchanged. Once
     // an access token has a family, keep matching it strictly so a concurrent
     // logout/login or property-session replacement can never inherit a retry.
+    && (left.sessionId === null || left.sessionId === right.sessionId)
+    // Strict on the property claim: none → some IS a scope change.
+    && (left.propertyId ?? null) === (right.propertyId ?? null));
+}
+
+// The native unread badge is keyed by the CUSTOMER (server counts by
+// req.customerId), so a same-profile saved-property switch must not zero it
+// (codex #4207 GitHub r1 P2): the request-supersession identity above is
+// property-strict on purpose; this one is not.
+export function sameBadgeAccount(left, right) {
+  return Boolean(left && right
+    && left.customerId === right.customerId
     && (left.sessionId === null || left.sessionId === right.sessionId));
 }
 
@@ -63,6 +82,7 @@ export class ApiClient {
   }
 
   setTokens(token, refreshToken) {
+    if (!sameBadgeAccount(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = token;
     this.refreshToken = refreshToken;
@@ -77,6 +97,7 @@ export class ApiClient {
   }
 
   clearTokens() {
+    void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = null;
     this.refreshToken = null;
@@ -87,6 +108,7 @@ export class ApiClient {
   }
 
   adoptTokens(token, refreshToken) {
+    if (this.token && !sameBadgeAccount(tokenSessionIdentity(this.token), tokenSessionIdentity(token))) void clearNativeBadge();
     this.tokenGeneration += 1;
     this.token = token || null;
     this.refreshToken = refreshToken || null;
@@ -383,17 +405,21 @@ export class ApiClient {
     });
   }
 
-  getAuthProperties() {
-    return this.request('/auth/properties');
+  // `scope: 'saved'` asks for the saved-property list (GATE_APP_PROPERTY_SCOPE);
+  // while the gate is off the server answers the profile list regardless.
+  getAuthProperties({ scope } = {}) {
+    return this.request(scope ? `/auth/properties?scope=${encodeURIComponent(scope)}` : '/auth/properties');
   }
 
-  selectAuthProperty(customerId) {
+  // propertyId (a saved property on the target profile) rides only when given,
+  // so profile-only switches keep today's exact body.
+  selectAuthProperty(customerId, propertyId = null) {
     return this.request('/auth/select-property', {
       method: 'POST',
       // Rebuild on a 401 retry: attemptRefresh rotates the credential before
       // retrying, so replaying a pre-serialized old token would revoke the
       // whole family under the server's reuse detection.
-      bodyFactory: () => JSON.stringify({ customerId, refreshToken: this.refreshToken }),
+      bodyFactory: () => JSON.stringify({ customerId, ...(propertyId ? { propertyId } : {}), refreshToken: this.refreshToken }),
     });
   }
 
@@ -416,17 +442,25 @@ export class ApiClient {
   }
 
   // ---- Schedule ----
-  getSchedule(days = 90) {
-    return this.request(`/schedule?days=${days}`);
+  // allProperties: the customer's WHOLE schedule regardless of the selected
+  // saved property — plan-coverage evidence only (WaveGuard is per customer).
+  getSchedule(days = 90, { allProperties = false } = {}) {
+    return this.request(`/schedule?days=${days}${allProperties ? '&allProperties=1' : ''}`);
   }
 
-  getNextService() {
-    return this.request('/schedule/next');
+  getNextService({ allProperties = false } = {}) {
+    return this.request(allProperties ? '/schedule/next?allProperties=1' : '/schedule/next');
   }
 
   // Every property on the account with its next visit (multi-property Visits tab).
   getAccountUpcoming() {
     return this.request('/schedule/account-next');
+  }
+
+  // Saved-property twin of getAccountUpcoming (GATE_APP_PROPERTY_SCOPE): one
+  // row per unified entry, keyed like GET /auth/properties?scope=saved.
+  getSavedPropertiesNext() {
+    return this.request('/schedule/properties-next');
   }
 
   confirmAppointment(id) {
@@ -554,8 +588,8 @@ export class ApiClient {
     });
   }
 
-  getRequests() {
-    return this.request('/requests');
+  getRequests(requestId) {
+    return this.request(requestId ? `/requests?requestId=${encodeURIComponent(requestId)}` : '/requests');
   }
 
   // Cancel-flow v2 (GATE_CANCEL_FLOW_V2). Preview is read-only despite the

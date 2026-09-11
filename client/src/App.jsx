@@ -246,6 +246,7 @@ import AdminForgotPasswordPage from './pages/AdminForgotPasswordPage';
 import AdminResetPasswordPage from './pages/AdminResetPasswordPage';
 import AdminLayout from './components/AdminLayoutV2';
 import TechLayout from './components/TechLayout';
+import TechNavigationLock from './components/tech/TechNavigationLock';
 import InstallPrompt from './components/InstallPrompt';
 import BiometricGate from './components/BiometricGate';
 import PublicFunnelTracking from './components/analytics/PublicFunnelTracking';
@@ -370,6 +371,7 @@ const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPag
 const AdminAgentEstimatePage = lazyWithRetry(() => import('./pages/admin/AgentEstimatePage'));
 const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
+const PayGrowth = lazyWithRetry(() => import('./components/payGrowth/PayGrowth'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
@@ -434,27 +436,143 @@ function RoutesErrorBoundary({ children }) {
   return <PageErrorBoundary key={location.pathname} customerGlass={customerGlass}>{children}</PageErrorBoundary>;
 }
 
+// A profile-only link (every push minted before the composers carry the
+// property) means that profile's PRIMARY — the house unstamped visits belong
+// to — so a non-primary selection on the same profile still switches back
+// rather than keeping an arbitrary house whose scoped reads would hide the
+// notified visit. While the primary entry is not known yet (list still
+// loading, or failed) the link stays pending — mounting the portal would open
+// the notification under the wrong house (codex #4207 r2); the guard's
+// propertiesError check fails it closed.
+function profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntry, selectedId }) {
+  if (!propertyScopedDestination || !sameProfile || !selectedId) return { fallbackPropertyId: null, primaryUnknown: false };
+  if (!primaryEntry) return { fallbackPropertyId: null, primaryUnknown: true };
+  const primaryId = String(primaryEntry.propertyId);
+  return { fallbackPropertyId: selectedId !== primaryId ? primaryId : null, primaryUnknown: false };
+}
+
+// Tabs whose reads are customer-wide: a push to them requires only the right
+// profile — neither the profile's primary (uncapped codex r1r P1) nor the
+// house a completion or receipt push names (uncapped codex r1v P1): a retired
+// house must not turn a report or an invoice into "Property unavailable" when
+// the tab itself opens. Home, Visits and My Property follow the selection.
+const CUSTOMER_WIDE_TABS = ['billing', 'refer', 'documents', 'plan', 'learn'];
+
+// Where a notification deep link wants the portal to be, judged against the
+// session's current selection and property list. Pure: everything the route
+// guard decides is derived here so the guard itself stays a small effect.
+//
+// Saved-property destination (GATE_APP_PROPERTY_SCOPE): a push that knows
+// the visit's house names it too (`notificationPropertyId`). The full
+// selection is compared — same profile but a different saved property still
+// switches. A profile-only link keeps today's rule: switch only when the
+// PROFILE differs (see profileOnlyTarget).
+export function resolveNotificationTarget({ search, customer, properties, selectedProperty }) {
+  const params = new URLSearchParams(search);
+  const targetProperty = params.get('notificationProperty');
+  // The hint means something only against a SAVED-property list. A
+  // PROFILE-shaped list (gate off, or rolled back after the push was
+  // minted) has no houses to match, so the hint degrades to a profile-only
+  // link — today's routing — instead of "Property unavailable" (uncapped
+  // codex r1t P1). An EMPTY list (still loading, or failed) keeps the hint:
+  // the pending / fail-closed paths of the guard own that case.
+  // Saved entries carry a propertyId (null for a row-less profile) and a key;
+  // profile entries carry neither.
+  const listIsProfileShaped = properties.length > 0
+    && !properties.some((property) => property.key || Object.prototype.hasOwnProperty.call(property, 'propertyId'));
+  const propertyScopedDestination = !CUSTOMER_WIDE_TABS.includes(params.get('tab') || 'dashboard');
+  const targetPropertyId = listIsProfileShaped || !propertyScopedDestination ? null : params.get('notificationPropertyId');
+  const profileDiffers = !!targetProperty && String(customer?.id) !== targetProperty;
+  const sameProfile = !!targetProperty && !profileDiffers;
+  const currentProfileEntries = properties.filter((property) => String(property.customerId || property.id) === String(customer?.id));
+  const primaryEntry = currentProfileEntries.find((property) => property.isPrimaryProperty) || null;
+  const selectedId = selectedProperty?.propertyId ? String(selectedProperty.propertyId) : '';
+  // A saved property named by the link wins over the profile-only rule.
+  const profileOnly = targetPropertyId
+    ? { fallbackPropertyId: null, primaryUnknown: false }
+    : profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntry, selectedId });
+  const resolvedTargetPropertyId = targetPropertyId || profileOnly.fallbackPropertyId;
+  const savedDiffers = sameProfile && !!resolvedTargetPropertyId && selectedId !== resolvedTargetPropertyId;
+  return {
+    targetProperty,
+    resolvedTargetPropertyId,
+    propertyScopedDestination,
+    currentProfileEntries,
+    primaryUnknown: profileOnly.primaryUnknown,
+    pending: profileDiffers || savedDiffers || profileOnly.primaryUnknown,
+  };
+}
+
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty } = useAuth();
+  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, refreshProperties, selectedProperty = null } = useAuth();
   const location = useLocation();
-  const targetProperty = new URLSearchParams(location.search).get('notificationProperty');
-  const targetPending = !!targetProperty && isAuthenticated && String(customer?.id) !== targetProperty;
+  const { targetProperty, resolvedTargetPropertyId, propertyScopedDestination, currentProfileEntries, primaryUnknown, pending } = resolveNotificationTarget({
+    search: location.search, customer, properties, selectedProperty,
+  });
+  const targetPending = isAuthenticated && pending;
   const switchingTarget = useRef(null);
   const [targetError, setTargetError] = useState(null);
+  // A target the in-memory list does not carry is re-read ONCE before it is
+  // refused: a house added after this tab last loaded `properties` (a warm
+  // app session, an in-app bell tap) is valid on the server but absent here
+  // (GitHub codex r10 P2). `refreshedFor` records the destination whose
+  // re-read finished, so the second pass decides on the fresh list; a
+  // failed re-read sets propertiesError and fails closed above.
+  const refreshingFor = useRef(null);
+  const [refreshedFor, setRefreshedFor] = useState(null);
   useEffect(() => {
-    if (!targetPending || loading || switchingTarget.current === targetProperty) return;
+    const destination = `${targetProperty}:${resolvedTargetPropertyId || ''}`;
+    // Destination satisfied (or gone): release the in-flight guard so a
+    // later return to the same notification URL — Billing, a manual switch
+    // to another house, Back — switches again instead of loading forever
+    // (uncapped codex r2d P1).
+    if (!targetPending) { switchingTarget.current = null; return; }
+    if (loading || switchingTarget.current === destination) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
-    if (!properties.some((property) => String(property.id) === targetProperty)) {
+    const refreshUnseen = () => {
+      if (refreshedFor === destination) return false;
+      if (refreshingFor.current === destination) return true;
+      refreshingFor.current = destination;
+      Promise.resolve(typeof refreshProperties === 'function' ? refreshProperties() : false)
+        .catch(() => false)
+        .finally(() => { refreshingFor.current = null; setRefreshedFor(destination); });
+      return true;
+    };
+    if (primaryUnknown) {
+      // Entries for this profile are listed but none is its primary (the
+      // office retired it): nothing safe to open — fail closed.
+      if (currentProfileEntries.length > 0) setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return; // otherwise keep waiting for the list
+    }
+    // Saved-property entries carry composite ids (GATE_APP_PROPERTY_SCOPE);
+    // a notification names the PROFILE, so match on the entry's customer.
+    // The saved-property list omits an active profile whose houses were ALL
+    // retired. A CUSTOMER-WIDE destination (Billing, Documents…) on such a
+    // sibling profile is still reachable — /auth/select-property verifies
+    // ownership and refuses a foreign profile — so only PROPERTY-scoped
+    // destinations require the profile to list a house (uncapped codex r1x
+    // P1); a customer-wide one proceeds to the ownership-checked switch.
+    if (propertyScopedDestination && !properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
+      if (refreshUnseen()) return;
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }
-    switchingTarget.current = targetProperty;
+    // A named saved property must be one of that profile's listed entries.
+    const savedEntry = resolvedTargetPropertyId
+      ? properties.find((property) => String(property.customerId || property.id) === targetProperty && String(property.propertyId) === resolvedTargetPropertyId)
+      : null;
+    if (resolvedTargetPropertyId && !savedEntry) {
+      if (refreshUnseen()) return;
+      setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return;
+    }
+    switchingTarget.current = destination;
     // select-property verifies ownership again on the server. The portal
     // stays unmounted until the authenticated customer matches the target.
-    void switchProperty(targetProperty).then((switched) => {
+    void switchProperty(savedEntry ? { customerId: savedEntry.customerId, propertyId: savedEntry.propertyId } : targetProperty).then((switched) => {
       if (!switched) setTargetError('This property could not be opened. Try again.');
     }).catch(() => setTargetError('This property could not be opened. Try again.'));
-  }, [targetPending, targetProperty, loading, properties, propertiesError, switchProperty]);
+  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, propertyScopedDestination, currentProfileEntries.length, loading, properties, propertiesError, switchProperty, refreshProperties, refreshedFor]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
   useGlassSurface(loading || targetPending);
@@ -520,6 +638,7 @@ function ProtectedRoute({ children }) {
 export default function App() {
   const app = (
     <AuthProvider>
+      <TechNavigationLock>
       <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <PublicFunnelTracking />
         <AdminSafariShell />
@@ -573,17 +692,20 @@ export default function App() {
           <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
           <Route path="/tech" element={isNativeApp() ? <Navigate to="/" replace /> : <TechLayout />}>
             <Route index element={<Suspense fallback={<RouteFallback label="Loading..." />}><TechHomePage /></Suspense>} />
+            <Route path="tools" element={<Suspense fallback={<RouteFallback label="Loading tools…" />}><TechHomePage section="tools" /></Suspense>} />
+            <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><TechHomePage section="more" /></Suspense>} />
             {/* Field estimates use the canonical server-priced builder. The retired
                 tech-only calculator duplicated prices client-side and its SMS call
                 posted the wrong request shape, so it could show “sent” after a 400. */}
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
             <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
+            <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>
           <Route path="/admin" element={isNativeApp() ? <Navigate to="/" replace /> : <PageErrorBoundary><AdminLayout /></PageErrorBoundary>}>
-            <Route index element={<Navigate to="dashboard" />} />
+            <Route index element={<Navigate to="dashboard" replace />} />
             <Route path="dashboard" element={<Suspense fallback={<RouteFallback label="Loading dashboard..." />}><AdminDashboardPage /></Suspense>} />
             <Route path="customers" element={<Suspense fallback={<RouteFallback label="Loading customers..." />}><AdminCustomersPage /></Suspense>} />
             <Route path="customers/new" element={<Suspense fallback={<RouteFallback label="Loading customer form..." />}><AdminCustomersPage /></Suspense>} />
@@ -696,6 +818,8 @@ export default function App() {
             <Route path="more" element={<Suspense fallback={<RouteFallback label="Loading…" />}><AdminMorePage /></Suspense>} />
             <Route path="_design-system" element={<Suspense fallback={<RouteFallback label="Loading design system..." />}><DesignSystemPage /></Suspense>} />
             <Route path="_design-system/flags" element={<Suspense fallback={<RouteFallback label="Loading flags..." />}><DesignSystemFlagsPage /></Suspense>} />
+            {/* Unknown staff URLs stay in the admin shell instead of falling through to the customer login. */}
+            <Route path="*" element={<Navigate to="/admin/dashboard" replace />} />
           </Route>
           <Route
             path="/*"
@@ -712,6 +836,7 @@ export default function App() {
         <CustomerDialogHost />
         </BiometricGate>
       </BrowserRouter>
+      </TechNavigationLock>
     </AuthProvider>
   );
   return app;

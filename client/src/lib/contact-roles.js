@@ -33,6 +33,7 @@ export function contactRoleTitle(role) {
 export const OCCUPANCY_OPTIONS = [
   { value: "unknown", label: "Unknown" },
   { value: "owner_occupied", label: "Owner-occupied" },
+  { value: "family_occupied", label: "Family-occupied" },
   { value: "rental_investment", label: "Rental / investment" },
   { value: "seasonal", label: "Seasonal" },
   { value: "vacant", label: "Vacant" },

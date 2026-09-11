@@ -72,6 +72,7 @@ import {
   Loader2,
   Mail,
   MessageSquare,
+  Ban,
   Mic,
   MicOff,
   PhoneCall,
@@ -98,6 +99,9 @@ import {
   Badge,
   Button,
   Card,
+  Field,
+  Input,
+  Textarea,
   Select,
   cn,
 } from "../../components/ui";
@@ -261,7 +265,12 @@ const SMS_LOG_PAGE_SIZE = 500;
 // ── V2 helpers ────────────────────────────────────────────────
 
 function smsThreadKey(phone) {
-  return String(phone || "").replace(/\D/g, "").slice(-10) || "unknown";
+  const value = String(phone || "").trim();
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return "unknown";
+  return /^1\d{10}$/.test(digits) || (!value.startsWith("+") && digits.length === 10)
+    ? digits.slice(-10)
+    : `+${digits}`;
 }
 
 // Canonical presence check for tracked customer bearer links: operators edit
@@ -534,10 +543,18 @@ function ConversationViewV2({
   onReply,
   onBack,
   onOpenProfile,
+  onMarkSpam,
 }) {
   const contactPhone = thread.contactPhone;
   const contactName = thread.customerName || contactPhone;
   const canOpenProfile = !!(thread.customerName && thread.customerId);
+  // Only a thread with no customer behind it can be spam. customerId is
+  // the authoritative link (a linked customer can lack a display name);
+  // a customer's or open lead's number is refused server-side anyway. The
+  // action is about a SENDER, so a thread the office started by texting an
+  // unlinked number (outbound only, nothing ever received) does not offer it.
+  const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
+  const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -568,6 +585,18 @@ function ConversationViewV2({
           </div>{" "}
         </div>{" "}
         <div className="flex items-center gap-2 md:gap-3 shrink-0">
+          {canMarkSpam ? (
+            <Button
+              size="sm"
+              variant="secondary"
+              className="flex-1 md:flex-none"
+              title="Block this number and mark the thread read"
+              onClick={() => onMarkSpam(thread)}
+            >
+              <Ban size={13} strokeWidth={1.75} className="mr-1.5" aria-hidden />
+              Mark spam
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="secondary"
@@ -841,6 +870,16 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const [smsView, setSmsView] = useState("threads");
   const [activeThread, setActiveThread] = useState(null);
   const [smsSearch, setSmsSearch] = useState("");
+  // Blocked senders (blocked_numbers). /log does not exclude them, so a
+  // just-blocked thread would otherwise be rebuilt on reload and keep
+  // counting in All / Unknown / Unanswered (codex #4213). A NANP block is
+  // keyed like threads (last 10 digits); any other country code keeps its
+  // full digits so a foreign block can never hide a NANP thread sharing
+  // its suffix (the server enforces the same split).
+  const [blocked, setBlocked] = useState(() => new Set());
+  const blockedFromNumbers = (numbers) => {
+    return new Set(numbers.map(smsThreadKey).filter((key) => key !== "unknown"));
+  };
   // PR 4 — status filter chips, reply-from lock.
   const [statusFilter, setStatusFilter] = useState("all");
   const [threadLock, setThreadLock] = useState(null);
@@ -887,7 +926,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     return Promise.all([
       adminFetch(logUrl).catch(() => ({ messages: [] })),
       adminFetch("/admin/communications/stats").catch(() => null),
-    ]).then(([logData, statsData]) => {
+      adminFetch("/admin/communications/blocked-numbers").catch(() => null),
+    ]).then(([logData, statsData, blockedData]) => {
       if (
         requestSeq !== smsLoadSeqRef.current ||
         normalizedSearch !== smsSearchRef.current
@@ -901,6 +941,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       setSmsPage(logData.page || page);
       setSmsHasMore(!!logData.hasMore);
       setStats(statsData);
+      if (blockedData && Array.isArray(blockedData.numbers)) {
+        setBlocked(blockedFromNumbers(blockedData.numbers.map((b) => b.number)));
+      }
       setLoading(false);
     });
   }, [customer?.id]);
@@ -915,7 +958,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   }, [active, smsSearch, loadData]);
 
   const markMessagesRead = useCallback(
-    async (thread) => {
+    async (thread, { throwOnError = false } = {}) => {
       const threadMessages = Array.isArray(thread?.messages)
         ? thread.messages
         : Array.isArray(thread?.messagesList)
@@ -965,8 +1008,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           }),
         });
         notifyUnreadChanged();
-      } catch {
+      } catch (e) {
         loadData(smsSearch.trim());
+        // Callers that must observe a partial mark-spam/read failure (codex
+        // #4213 P2) opt in here; every other caller keeps today's
+        // fire-and-forget resync-and-swallow behavior.
+        if (throwOnError) throw e;
       }
     },
     [loadData, smsSearch],
@@ -1992,7 +2039,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       : "";
     const recentNewestMessages = customer
       ? customerMessages.filter((message) => message.channel === "sms"
-          && phoneKey(message.contactPhone) === requestRecipientKey
+          && smsThreadKey(message.contactPhone) === requestRecipientKey
           && phoneKey(message.ourEndpointId) === requestFromNumberKey).slice(0, 8)
       : activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
         ? activeThread.messages
@@ -2096,8 +2143,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     threadList.sort(
       (a, b) => new Date(b.lastTimestamp) - new Date(a.lastTimestamp),
     );
-    return threadList;
-  }, [messages]);
+    return blocked.size
+      ? threadList.filter((t) => !blocked.has(smsThreadKey(t.contactPhone)))
+      : threadList;
+  }, [messages, blocked]);
 
   useEffect(() => {
     if (!activeThread) return;
@@ -2187,6 +2236,43 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     });
     return { all: threads.length, unread, unanswered, unknown };
   }, [threads]);
+
+  // Mark spam: block the sender (future texts are dropped before they are
+  // logged), mark this thread read (it stops counting toward the badge and
+  // the nightly unanswered-texts digest), and return to the list. Only
+  // offered on threads with no customer behind them; the server refuses a
+  // customer's number (CUSTOMER_NUMBER) regardless.
+  const handleMarkSpam = async (thread) => {
+    const number = thread?.contactPhone;
+    if (!number) return;
+    if (!window.confirm(`Block ${number} as spam? Future texts AND calls from this number are rejected before they reach anyone, and this thread is marked read.`)) return;
+    try {
+      await adminFetch(`/admin/communications/blocked-numbers`, {
+        method: "POST",
+        body: JSON.stringify({ number, reason: "Marked spam from the SMS inbox" }),
+      });
+    } catch (e) {
+      alert(`Could not mark spam: ${e.message}`);
+      return;
+    }
+    // The block itself succeeded — leave and drop the thread from the
+    // operational lists regardless of what the read call below does.
+    setBlocked((prev) => {
+      const add = blockedFromNumbers([number]);
+      return new Set([...prev, ...add]);
+    });
+    setSmsView("threads");
+    setActiveThread(null);
+    loadData(smsSearch);
+    try {
+      // throwOnError: a swallowed read failure would leave the confirmation
+      // claiming "marked read" while the messages stay unread and reappear
+      // in the badge the moment the number is unblocked (codex #4213 P2).
+      await markMessagesRead(thread, { throwOnError: true });
+    } catch (e) {
+      alert(`${number} is blocked, but marking the thread read failed: ${e.message}. Its messages may still show as unread if this number is ever unblocked.`);
+    }
+  };
 
   const handleThreadReply = (contactPhone, ourNumber, customerId = null) => {
     setToNumber(contactPhone);
@@ -2335,7 +2421,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             className="flex items-center gap-2 min-h-[44px] md:min-h-0 px-1 md:px-0 u-focus-ring"
           >
             {" "}
-            <span className="text-13 md:text-11 text-ink-secondary">
+            <span className="text-ui-body md:text-ui-caption text-ink-secondary">
               AI Auto-Reply
             </span>{" "}
             <span
@@ -2362,29 +2448,27 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <div className="flex items-center gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-900 rounded-sm mb-3">
             {" "}
             <Badge tone="strong">Locked</Badge>{" "}
-            <span className="text-12 text-zinc-900 flex-1">
+            <span className="text-ui-label text-zinc-900 flex-1">
               Replying from <strong>{threadLock.label}</strong>{" "}to continue
               thread with {threadLock.contactPhone}
             </span>{" "}
             <Button
               variant="ghost"
               onClick={() => setThreadLock(null)}
-              className="text-13 md:text-11 min-h-[44px] md:min-h-0 inline-flex items-center px-2 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
+              className="text-ui-body md:text-ui-caption min-h-[44px] md:min-h-0 inline-flex items-center px-2 text-ink-secondary underline hover:text-zinc-900 u-focus-ring"
             >
               Override
             </Button>{" "}
           </div>
         )}
-        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
-          From{threadLock && " (locked to thread)"}
-        </label>{" "}
+        <Field label={<>From{threadLock && " (locked to thread)"}</>} className="mb-3">
         <Select
           aria-label="Send from"
           value={fromNumber}
           onChange={(e) => setFromNumber(e.target.value)}
           disabled={!!threadLock}
           className={cn(
-            "w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 mb-3 min-h-[44px] md:min-h-0",
+            "w-full bg-white border-hairline rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0",
             "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
             threadLock
               ? "border-zinc-900 opacity-60 cursor-not-allowed"
@@ -2407,12 +2491,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             && !ALL_NUMBERS.some((g) => g.numbers.some((n) => n.number === fromNumber)) && (
             <option value={fromNumber}>{threadLock.label}</option>
           )}
-        </Select>{" "}
+        </Select>
+        </Field>
         {!customer && <>
-        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
-          To
-        </label>{" "}
-        <input
+        <Field label="To">
+        <Input
           type="text"
           placeholder="Search by name or enter phone number…"
           value={toSearch || toNumber}
@@ -2450,11 +2533,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             }
           }}
           className={cn(
-            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0",
+            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0",
             "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
             toResults.length ? "mb-0" : "mb-3",
           )}
         />
+        </Field>
         {toResults.length > 0 && (
           <div className="bg-white border-hairline border-zinc-300 border-t-0 rounded-b-sm max-h-[180px] overflow-y-auto mb-3">
             {toResults.map((c) => (
@@ -2467,7 +2551,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                   setToSearch(`${name} — ${c.phone || ""}`);
                   setToResults([]);
                 }}
-                className="px-3 py-2 cursor-pointer border-b border-hairline border-zinc-200 text-13 text-zinc-900 hover:bg-zinc-50"
+                className="px-3 py-2 cursor-pointer border-b border-hairline border-zinc-200 text-ui-body text-zinc-900 hover:bg-zinc-50"
               >
                 {" "}
                 <span className="font-medium">
@@ -2489,13 +2573,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             return (
               <div className="mb-3 px-3 py-2.5 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
                 {" "}
-                <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
+                <div className="text-ui-body md:text-ui-caption font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-tertiary mb-1">
                   Last message from customer
                 </div>{" "}
-                <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+                <div className="text-16 md:text-ui-body text-zinc-900 leading-normal whitespace-pre-wrap">
                   {lastInbound.body}
                 </div>{" "}
-                <div className="text-12 md:text-11 text-ink-tertiary mt-1">
+                <div className="text-ui-label md:text-ui-caption text-ink-tertiary mt-1">
                   {formatTimestamp(lastInbound.createdAt)}
                 </div>{" "}
               </div>
@@ -2509,11 +2593,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <Bot size={15} strokeWidth={2} />
               </span>
               <div className="flex-1 min-w-0">
-                <div className="text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
+                <div className="text-ui-body md:text-ui-caption font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary">
                   Agent review draft
                 </div>
                 {agentDraft?.workflow && (
-                  <div className="text-12 md:text-11 text-ink-tertiary truncate">
+                  <div className="text-ui-label md:text-ui-caption text-ink-tertiary truncate">
                     {agentDraft.workflow.replace(/_/g, " ")}
                     {agentDraft.scenarioLabel
                       ? ` · ${agentDraft.scenarioLabel.replace(/_/g, " ")}`
@@ -2535,14 +2619,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               )}
             </div>
             {agentDraftLoading ? (
-              <div className="text-13 text-ink-secondary">Checking pending review…</div>
+              <div className="text-ui-body text-ink-secondary">Checking pending review…</div>
             ) : (
-              <div className="text-15 md:text-13 text-zinc-900 leading-normal whitespace-pre-wrap">
+              <div className="text-16 md:text-ui-body text-zinc-900 leading-normal whitespace-pre-wrap">
                 {agentDraft.suggestedMessage}
               </div>
             )}
             {agentDraft?.lintFailures?.length > 0 && (
-              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11">
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-ui-label md:text-ui-caption">
                 <div className="font-medium text-zinc-900">
                   Failed comms-lint — review before sending
                 </div>
@@ -2554,17 +2638,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               </div>
             )}
             {agentDraft?.inboundMessage && (
-              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-12 md:text-11 text-ink-tertiary line-clamp-2">
+              <div className="mt-2 pt-2 border-t border-hairline border-zinc-200 text-ui-label md:text-ui-caption text-ink-tertiary line-clamp-2">
                 Trigger: {agentDraft.inboundMessage}
               </div>
             )}
           </div>
         )}
-        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
-          Message
-        </label>{" "}
         <div>
-          <textarea
+          <Field label="Message">
+          <Textarea
             aria-label="Text message"
             name="smsMessage"
             placeholder={listening ? "Listening…" : "Type your message…"}
@@ -2572,11 +2654,12 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             onChange={(e) => setMsgBody(e.target.value)}
             readOnly={rewritingSms}
             rows={3}
-            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
+            className="w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 resize-y focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900"
           />
+          </Field>
           <div className="mt-2 flex items-center gap-2">
-            <button
-              type="button"
+            <Button
+              variant="secondary"
               onClick={handleRewriteSms}
               disabled={
                 rewritingSms ||
@@ -2587,31 +2670,24 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               }
               aria-label="Rewrite message in Waves tone"
               title="Rewrite in Waves tone"
-              className={cn(
-                "sms-writing-tool inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
-                "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
-                "disabled:opacity-50 disabled:cursor-not-allowed",
-              )}
+              className="sms-writing-tool ui-icon-action"
             >
               {rewritingSms ? (
                 <Loader2 size={16} strokeWidth={2.2} className="animate-spin" />
               ) : (
                 <Sparkles size={16} strokeWidth={2.2} />
               )}
-            </button>
+            </Button>
             {dictationSupported && (
-              <button
-                type="button"
+              <Button
+                variant={listening ? "danger" : "secondary"}
                 onClick={toggleDictation}
                 disabled={rewritingSms}
                 aria-label={listening ? "Stop dictation" : "Start voice dictation"}
                 title={listening ? "Stop dictation" : "Start voice dictation"}
                 className={cn(
-                  "sms-writing-tool inline-flex items-center justify-center h-11 w-11 rounded-sm u-focus-ring",
-                  listening
-                    ? "bg-alert-fg text-white animate-pulse"
-                    : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200",
-                  "disabled:opacity-50 disabled:cursor-not-allowed",
+                  "sms-writing-tool ui-icon-action",
+                  listening && "animate-pulse",
                 )}
               >
                 {listening ? (
@@ -2619,7 +2695,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 ) : (
                   <Mic size={16} strokeWidth={2.2} />
                 )}
-              </button>
+              </Button>
             )}
           </div>
         </div>
@@ -2652,7 +2728,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             ))}
           </div>
         )}
-        <div className="flex items-center justify-between text-13 md:text-11 font-mono text-ink-tertiary u-nums mt-1 mb-3">
+        <div className="flex items-center justify-between text-ui-body md:text-ui-caption font-mono text-ink-tertiary u-nums mt-1 mb-3">
           {" "}
           <span>
             {attachments.length > 0
@@ -2686,17 +2762,14 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             e.target.value = "";
           }}
         />{" "}
-        <label className="block text-13 md:text-11 font-medium md:font-normal md:uppercase tracking-normal md:tracking-label text-zinc-900 md:text-ink-secondary mb-1">
-          Send
-        </label>{" "}
+        <Field label="Send" className={sendTiming === "custom" ? "mb-2" : "mb-3"}>
         <Select
           aria-label="Send timing"
           value={sendTiming}
           onChange={(e) => setSendTiming(e.target.value)}
           className={cn(
-            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0",
+            "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0",
             "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
-            sendTiming === "custom" ? "mb-2" : "mb-3",
           )}
         >
           {" "}
@@ -2704,14 +2777,15 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
           <option value="custom">Custom time…</option>{" "}
         </Select>
+        </Field>
         {sendTiming === "custom" && (
-          <input
+          <Input
             type="datetime-local"
             aria-label="Scheduled send time (Eastern)"
             value={sendCustomAt}
             onChange={(e) => setSendCustomAt(e.target.value)}
             className={cn(
-              "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-13 text-zinc-900 min-h-[44px] md:min-h-0 mb-3",
+              "w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0 mb-3",
               "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
             )}
           />
@@ -2720,13 +2794,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
           {/* Plus — attachment menu */}
           <div className="relative">
             {" "}
-            <button
-              type="button"
+            <Button
+              variant="secondary"
               onClick={() => setShowAttachSheet((v) => !v)}
               disabled={uploading}
               aria-label="Add attachment"
               title="Add image"
-              className="sms-writing-tool flex items-center justify-center h-11 w-11 rounded-full bg-zinc-100 text-zinc-900 hover:bg-zinc-200 u-focus-ring disabled:opacity-50"
+              className="sms-writing-tool ui-icon-action"
             >
               {" "}
               <svg
@@ -2743,7 +2817,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                 <line x1="12" y1="5" x2="12" y2="19" />{" "}
                 <line x1="5" y1="12" x2="19" y2="12" />{" "}
               </svg>{" "}
-            </button>
+            </Button>
             {showAttachSheet && (
               <div
                 className="absolute bottom-full left-0 mb-2 z-10 bg-white border-hairline border-zinc-300 rounded-sm shadow-lg overflow-hidden"
@@ -2756,7 +2830,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     setShowAttachSheet(false);
                     cameraInputRef.current?.click();
                   }}
-                  className="block w-full min-h-11 text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 u-focus-ring"
+                  className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 u-focus-ring"
                 >
                   Take photo
                 </button>{" "}
@@ -2766,7 +2840,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                     setShowAttachSheet(false);
                     fileInputRef.current?.click();
                   }}
-                  className="block w-full min-h-11 text-left px-3 py-2.5 text-13 text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
+                  className="block w-full min-h-11 text-left px-3 py-2.5 text-ui-body text-zinc-900 hover:bg-zinc-100 border-t border-hairline border-zinc-200 u-focus-ring"
                 >
                   Photo library
                 </button>{" "}
@@ -2819,7 +2893,10 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               website, app stores, and socials. */}
           <Button
             variant="secondary"
-            onClick={openLinkSheet}
+            onClick={(event) => {
+              event.currentTarget.focus({ preventScroll: true });
+              openLinkSheet();
+            }}
             disabled={
               insertingResched ||
               insertingReservice ||
@@ -2858,7 +2935,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         {sendResult && (
           <div
             className={cn(
-              "mt-2.5 text-12",
+              "mt-2.5 text-ui-label",
               sendResult.ok ? "text-zinc-900" : "text-alert-fg",
             )}
           >
@@ -2931,6 +3008,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               setActiveThread(null);
             }}
             onOpenProfile={(id) => setSelected360Id(id)}
+            onMarkSpam={handleMarkSpam}
           />{" "}
           {renderLoadMore("Load older SMS history")}
         </Card>
@@ -3058,7 +3136,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
                       </div>{" "}
                       <div
                         className={cn(
-                          "text-15 md:text-12 truncate leading-snug",
+                          "text-16 md:text-12 truncate leading-snug",
                           hasUnseen ? "text-zinc-900" : "text-ink-secondary",
                         )}
                       >

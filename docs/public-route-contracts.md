@@ -72,7 +72,10 @@ a `payer_statements` row (never a homeowner record), charges the PAYER's Stripe
 customer only, exposes only the consolidated statement + serviced addresses
 already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
-`/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
+`/api/receipt/:token` (inspection-credit terms come only from this invoice's
+persisted offers; a combined visit includes its billed packet members, matched
+by packet and customer identity. Unrelated visits and payer-billed invoices
+never expose homeowner credit terms), `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
 `/api/public/estimates/:token/find-slots`,
 `/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
@@ -81,10 +84,67 @@ Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
+With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
+use whole-route feasibility, technician eligibility, existing arrival promises,
+blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
+through 16:00 ET are offered; estimate ASAP and booking open-day expansion
+cannot create additional starts. The estimate cache separates capacity mode
+from legacy mode. Assigned technicians have independent route capacity;
+unassigned work remains a fixed blocker. Public responses expose no full route,
+provider legs or exact route coordinates. Scheduling traffic lookups share a
+40-request/800-element allowance per application process per 15 minutes across
+HTTP requests and fall back to the conservative model when exhausted; response
+data remains request-local. Gate-off availability is unchanged.
+Catalog-sized estimate offers resolve the primary appointment allowance from
+`services.scheduling_duration_policy`; independent recurring companions do not
+enlarge that appointment, while one-time paid add-ons contribute shared work.
+Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
+`GATE_SEPARATE_COMBO_VISITS`. Version-2 combined allowances follow service
+identity; version-1 members keep their 60-minute contract. Public offer/cache
+responses omit catalog identifiers, route internals and allocation stamps.
+Reservation and acceptance re-resolve catalog policies. Transactional catalog
+reads hold matched rows with FOR SHARE until the outer transaction ends, so
+catalog edits cannot overtake a validated allowance. Existing version-2 holds
+reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
+Reservation creation prepares bounded route traffic outside the transaction,
+then takes the date occupancy lock and the selected-technician/unassigned day
+fences together in canonical order before row locks. It rechecks the signed
+offer, live route fingerprint, catalog allowance, eligibility and closure state
+before persisting the hold, certified route order and audit. Relevant route rows
+remain locked through persistence; a busy completion yields recoverable
+`SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
+a concurrent move to unassigned is fenced. Completed stops retain their prefix.
+Capacity offers preserve the enabled south-zone day funnel and omit speculative
+ASAP expansion. Public acceptance and one-tap prepare route traffic before opening their write
+transaction, then acquire the date, selected-technician and unassigned fences
+before their first row lock. Commit verifies the prepared date/technician,
+current catalog allowance, live route, eligibility and closures; changed state
+returns recoverable `SLOT_UNAVAILABLE` without acceptance writes. One-tap
+preparation failures retain its existing pick-a-time recovery. Version-1 holds
+keep their legacy path, while version-2 holds retain certification and allowance
+checks after gate shutdown. Without combined allocation, excluded recurring
+companions and their follow-ups remain unassigned and without a promised window;
+they cannot inherit the certified primary trip. Version-2 primary-only holds
+preserve that separation even with `GATE_SEPARATE_COMBO_VISITS` off or capacity
+shut down. Version-2 parent allowances take precedence during follow-up seeding.
+Combined conversion stamps each member before seeding and preserves adjacent
+allocation order at the certified anchor, using a nonblocking day fence for
+callers already holding rows. A busy reorder aborts allocation for recovery.
+Capacity stays off until the other booking/dispatch writers and parent traffic
+prerequisites integrate.
+Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
+try the shared day fence — rung 1 date occupancy plus the tech-day or
+unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
+default 1500 ms) before each insert. A granted fence makes the phone row visible
+to a concurrent route certification or lands it after that certification commits.
+A missed fence books exactly as before (unfenced, post-commit conflict check
+flags overlaps, the card records which insert missed its fence); the booking
+never fails, waits past the cap, or blocks on a lock. This stage still does
+not authorize enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
-`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
-per physical service program. Termite rental and bond billing riders fold into
+`GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
+per physical service program; capacity-enabled selections use version-2 catalog allowances. Termite rental and bond billing riders fold into
 bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
@@ -93,8 +153,8 @@ remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
 and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
 the selection, technician and full occupancy under existing locks, then converts
-the hold into separate sequential 60-minute service windows with independent
-cadences. Missing or unmatched members abort the transaction. A stamped hold
+the hold into independent programs: version-1 members use sequential 60-minute
+windows, and version-2 members use their catalog allowance at one arrival anchor. Missing or unmatched members abort the transaction. A stamped hold
 retains its capacity policy when the creation gate turns off. Shared-arrival
 reminder consumers use the persisted allocation, including with grouping off
 or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
@@ -143,16 +203,81 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
-operational extension runs after acknowledgment under
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+`GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
+unknown-sender SMS. Other values, including `true`, leave this stage off.
+Known primary/secondary/service-contact numbers, reactions, empty bodies,
+standalone carrier commands, and the AI assistant line bypass the classifier.
+Natural-language consent requests never wait on the model; only deterministic
+pitch evidence, such as a vendor footer, may be recorded for those messages.
+The unified inbox message is durably saved before screening. A failed unified
+save or relationship lookup bypasses screening and preserves ordinary handling;
+model failures record a failed non-solicitation verdict. The 3.5-second model
+budget uses the shared dispatcher.
+Shadow verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`)
+are stored under `metadata.spam_verdict` on unified messages and ordinary or
+natural-language opt-out `sms_log` rows. Verdict attachment merges metadata on
+the saved unified row. Read state, opt-out suppression,
+TwiML replies, notifications, estimator routing, and provider request/auth
+contracts retain their existing behavior. No enforcement is available in
+this stage. The SMS operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+unknown domain/van-tracking SMS stays unlinked in the inbox and does not
+create customer/account rows or guess a customer name from message prose.
+Substantive messages ring a per-message `new_lead` bell/push linking to the
+inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
-including replies that return early. Failure to persist that source returns
+including replies that return early. STOP/HELP/START handling (opt-out
+suppression + the `<Message>` confirmation TwiML) applies only to a sender
+Waves has messaged: a matched customer, the AI assistant line, a
+provider-accepted outbound `sms_log`/unified `messages` row (excluding
+operator alerts — by current phone AND by a durable `to_owner_phone_at_send`
+send-time stamp, so a later ADAM_PHONE change can't un-exclude a historical
+alert — the AI assistant's own auto-replies, and push-only touchpoints;
+unified fallback requires a Twilio message SID and phone identities preserve
+country codes), or an active
+`messaging_suppression` row; any other sender's text is ordinary inbound
+(empty TwiML, no reply, no suppression). The eligibility lookup fails open. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
+`/api/webhooks/twilio/outbound-amd` +
+`/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
+callbacks under the existing Twilio-signature-validated mount. The shared
+press-1 `/outbound-connect` bridge adds `<Number machineDetection="Enable">`
+with `GATE_OUTBOUND_VOICEMAIL_SMS=true`, excluding technician caller-ID lines.
+The `<Dial action>` is also added only for an actual callback attempt: the
+persisted bridge row links a callback commitment or was placed under the card
+policy (`metadata.callback_policy = card`, stamped on the existing Call Log
+callback action too), read whatever the gate says, so ordinary admin bridges
+keep the pre-lane shape and a card bridge keeps its evidence after rollback
+before staff press 1. Both lanes use this one completion
+route. Signed terminal child-leg results with a valid duration and SID record
+the first `metadata.customer_leg` on an outbound row matching the call-log UUID,
+parent CallSid and a validated callback link (the card's commitment link, or
+the existing call-log callback's source-call link). If its parent SID backfill
+failed, the signed completion atomically adopts the missing SID on that
+server-linked outbound row. An existing different SID cannot be replaced.
+Retries cannot replace that
+evidence; a failed write returns 503 for provider retry. In-flight results
+remain accepted after gate rollback. This records evidence without closing a
+commitment; fulfillment requires a valid non-voicemail extraction as well. Query context is `callLogId`, `customerNumber`,
+and `callerIdNumber`, generated by the bridge and covered by the signature.
+AMD accepts the child `CallSid`, `AnsweredBy`, and `MachineDetectionDuration`.
+It records the verdict and responds 200; only a `machine_*` verdict can
+send a voicemail follow-up text. The send fails closed on the gate, quiet
+hours (8am–8pm ET), staff/owned recipient numbers, technician caller-ID
+lines, a current/recent visit, non-service inbound callers, and a per-phone
+24-hour `sms_send_claims` claim; template, consent and suppression checks
+also apply through the existing SMS pipeline. The dialed customer number
+comes from the signed query, never the bridge row's admin `to_phone`.
+Only a real provider send stamps success and permits a REST hangup of the
+child leg. A blocked or failed send leaves the call connected. Dial-complete
+announces that a text was sent only when the success stamp exists, then
+hangs up; otherwise it silently hangs up. Gate off leaves the originating
+TwiML unchanged and prevents text/hangup actions on an in-flight AMD callback),
 `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
 `/api/webhooks/twilio/collections-relay-complete` +
 `/api/webhooks/twilio/collections-transfer-complete` +
@@ -287,8 +412,42 @@ ach_status lookup failure). The accept-time verify re-resolves the same
 tender policy and refuses a captured bank method (402
 RECURRING_CARD_REQUIRED → the client re-mints card-only) once the gate is
 off or the customer's ACH state is unhealthy, so a previously minted
-bank-capable intent cannot outlive the kill switch. The one-time
-card-hold-intent route above stays card-only regardless).
+bank-capable intent cannot outlive the kill switch. Optional body
+`replaceSetupIntentId` ("use a different payment method" after a capture
+already succeeded): the named intent must be THIS estimate's own
+`estimate_recurring_card` capture (foreign or unknown id → 400; a Stripe
+read failure → 503). The replacement is minted
+FIRST (idempotency key salted by the retired id — unbounded, no
+generation consumed), then the succeeded intent is stamped
+`metadata.retired='true'` + `replaced_by=<new id>` in Stripe; a mint
+failure leaves the saved method untouched (503). From then on the
+accept-time verify refuses the retired id (402 RECURRING_CARD_REQUIRED)
+and the deterministic mint follows `replaced_by` to the live capture, so
+a refresh lands on the replacement. Replacement and acceptance serialize
+on the estimate ROW LOCK: the replacement runs in a transaction that
+locks the row (`FOR UPDATE`, read-only — no `updated_at` move, so the
+accept's freshness CAS is untouched) and the accept re-reads its verified
+intent live under the same lock before committing, so a retirement that
+landed after the pre-transaction verify aborts the accept (402 → re-mint)
+and a replacement that finds the estimate already accepted retires
+nothing (409 "Estimate already accepted") — every replacement outcome
+takes that lock, including a stale retry with an already-retired or
+unfinished intent, and the locked read re-judges the full accept-active
+gate (declined / expired / archived / off-surface → 409 "Estimate is no
+longer active"), so no fresh capture is minted (and no checkout step
+recorded) for an estimate that turned terminal after the route's read.
+The `setup_intent.succeeded` webhook backstop re-reads an UNSTAMPED
+(legacy / flag-off) capture live from Stripe before enrolling and never
+enrolls a retired one. A chain head is judged by what it captured, like the accept
+gate: a saved card stays valid after GATE_ACCEPT_ACH_CAPTURE closes, a
+captured bank under a card-only policy is skipped like a dead replay
+(unfinished heads must match the tender family exactly) so the
+generation walk mints a compatible card-only intent. Every minted/replayed intent is
+re-read live before it is judged (an idempotent replay returns the
+original create body). A succeeded replay's response carries
+`capturedMethodType`, and the capture UIs render it as a saved-method
+panel with a continue/replace choice instead of a Payment Element. The
+one-time card-hold-intent route above stays card-only regardless).
 `/api/estimates/:token/service-details/:serviceKey/pdf` (read-only
 per-service details-packet PDF for the estimate view's "full details"
 buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
@@ -758,6 +917,9 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+Authored commercial proposals expose reviewed four-decimal quantities and unit
+rates, explicit unit labels and cent-rounded line amounts through the existing
+normalized proposal and document output. These additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
@@ -1106,6 +1268,16 @@ mosquito-, tree-shrub-only and one-time customers get no lane), the
 per-lane open-callback dedupe (an existing open re-service answers with
 that visit's /reschedule link instead of a second booking), and open
 slots from the /book availability engine around the token row's address.
+GET accepts optional `lane=pest|lawn`; find-slots accepts the same optional
+`lane` body field. Both validate it against currently bookable lanes and
+use that lane's duration and technician capability. A single bookable lane
+is implicit. With route capacity enabled, multiple bookable lanes require
+selection: GET returns eligibility with null availability until selected,
+and find-slots returns 400. The page refreshes times and clears the previous
+slot when the selected lane changes. With capacity off, requests omitting
+lane retain the shared longest-duration browse behavior. A recognized selected
+lane that becomes unavailable refreshes eligibility with null availability,
+allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, lunch reserve, day caps — the anti-forgery model
@@ -1346,7 +1518,7 @@ own late claim can fall back to voicemail without changing another ring; a predi
 to a newer reconnect returns a bare response instead of stale fallback TwiML.
 Any change to the claim, the owner fence, the reconnect fence, the sandbox
 branch or what the whisper may speak is security-critical).
-`/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`) (GET + POST;
+`/api/public/secure-card/:token` (+ `/:token/complete`, `/:token/select-plan`, `/:token/replace-intent`) (GET + POST;
 "secure your appointment" card-on-file capture page for the
 appointment-card-request funnel — ALSO serves the standalone "set up
 Auto Pay" link (`appointment_card_requests.kind='customer'`, dark behind
@@ -1394,9 +1566,61 @@ pay link; terminal invoices release the anchor). A recurring
 plan-bearing request REFUSES `/complete` until a durable
 `per_application` selection exists, and the completion claim is
 plan-value-guarded so a selection switch cannot cross a capture
-mid-flight. Treat the token, the verification
-gates, the selection/mint transaction, and the claim mechanics as
-security-critical.
+mid-flight. `/:token/replace-intent` (POST `{ setupIntentId }`, both row
+kinds; "use a different payment method" after a capture already
+SUCCEEDED, 2026-09-08 — same design as the estimate accept's
+`replaceSetupIntentId`): the deterministic mint replays a succeeded
+SetupIntent on every reopen and Stripe will not cancel it, so the GET
+renders a succeeded replay as a saved-method panel (`capturedMethodType`
+set from the live payment method; `paymentMethodTypes` alongside) with
+"Use a different payment method". The named intent must be THIS
+request's own capture (purpose + request id; foreign or unknown id →
+400). The replacement is minted FIRST (key salted by the retired id —
+no generation consumed; the standalone lane mints under the CURRENT
+tender policy), then the succeeded intent is stamped
+`metadata.retired='true'` + `replaced_by=<new id>` in Stripe, then the
+row is re-pointed; a mint or stamp failure leaves the saved method
+untouched (503). Everything runs under the request ROW LOCK (`FOR
+UPDATE`), which is how it serializes with completion: the completion
+claim (pending → completing) waits behind it and the tail re-reads the
+intent LIVE under its claim — a retired capture is refused there (claim
+reverted, nothing saved or enrolled; an unreadable one stays
+retryable), on the page POST AND on the `setup_intent.succeeded` webhook
+backstop (which trusts its event payload — the intent as it succeeded).
+A non-pending / expired row under the lock retires nothing (409
+`request_closed`), and neither does a link the GET would render closed —
+the visit lane re-runs the completion predicate (visit live, not past,
+priced > 0, no third-party payer) and the plan gate (a plan-bearing
+recurring request needs a durable `per_application` selection — the plan
+mode is derived before the lock through the THROWING derivation (an
+unknown mode is 503, never "not recurring"), the selection read from the
+locked row; 409 `plan_required`, the client re-renders the choice) and the standalone lane the GET's
+closure checks (archived customer, payer-billed, unsupported billing
+lane, Auto Pay paused, Auto Pay already active — which retires the row as
+the GET does),
+all under the lock BEFORE any Stripe state changes (409
+`no_longer_needed`; a lookup failure — the Auto-Pay-active probe runs
+fail-closed on the locked handle — is 503, never a retirement on an
+unknown answer). The client refetches on either 409. The GET's row
+repoint is a compare-and-set on the pointer that load observed: a
+replacement committing mid-load cannot be overwritten with the retired
+id — the load follows the row to the replacement instead, adopts the
+intent when a concurrent first load stored the same one, or renders
+`unavailable` if the row moved on; the standalone lane's generation
+mint uses the same observed-pointer CAS and follows a replacement
+pointer on a miss. Every nested read under the
+replacement lock (visit, payer, tender, customer, Auto Pay probe, and
+the Stripe-customer link-up inside the mint) rides the transaction
+handle — one pool connection per request. An unfinished or already-
+retired id has nothing to retire and returns the ordinary mint under the
+same lock. Every minted/replayed intent is re-read LIVE before it is
+judged (an idempotent replay returns the ORIGINAL create body, never a
+later success or retirement stamp); a retired replay follows
+`replaced_by` to the live head, refusing a chain that leaves the
+request's own capture family, and a broken/canceled chain walks the
+generation salt as before. Treat the token, the verification
+gates, the selection/mint transaction, the replacement lock, and the
+claim mechanics as security-critical.
 **Appointment-card enforcement rails (2026-08-01, both dark, fail-closed
 `feature-gates.js` money gates):** the /secure page RENDER stamps the
 disclosed terms onto the pending request row (`no_show_fee_amount` /

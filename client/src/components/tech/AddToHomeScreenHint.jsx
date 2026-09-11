@@ -137,6 +137,8 @@ export default function AddToHomeScreenHint() {
           border: 'none',
           color: DARK.muted,
           fontSize: 20,
+          minHeight: 48,
+          minWidth: 48,
           lineHeight: 1,
           cursor: 'pointer',
           padding: 4,

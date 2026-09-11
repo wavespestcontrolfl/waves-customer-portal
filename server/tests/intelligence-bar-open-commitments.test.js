@@ -2,7 +2,7 @@
 // Owed tab uses, customer resolved by name, overdue subset, Eastern times.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/call-commitments', () => {
   const actual = jest.requireActual('../services/call-commitments');
   return { ...actual, listOpenCommitments: jest.fn() };
@@ -19,7 +19,11 @@ const row = (id, extra = {}) => ({
   customer_first_name: 'Test', customer_last_name: 'Customer', fulfillment: null, ...extra,
 });
 
-beforeEach(() => { jest.clearAllMocks(); });
+beforeEach(() => {
+  jest.clearAllMocks();
+  require('../config/feature-gates').gateEnvValue.mockReturnValue(false);
+  require('../config/feature-gates').isEnabled.mockReturnValue(true);
+});
 
 test('registered as a READ tool (no write gate) with a typed customer_id', () => {
   const tool = COMMS_TOOLS.find((t) => t.name === 'get_open_commitments');
@@ -66,4 +70,25 @@ test('resolves a customer by name; an unknown name answers with a note, never an
   const none = await executeCommsTool('get_open_commitments', { customer_name: 'Nobody' });
   expect(none.commitments).toEqual([]);
   expect(listOpenCommitments).toHaveBeenCalledTimes(1);
+});
+
+test.each([[false, false], [true, false], [false, true], [true, true]])(
+  'callback gates %s/%s report the same deadline policy and explanation', async (cardsEnabled, commitmentsEnabled) => {
+  require('../config/feature-gates').gateEnvValue.mockImplementation((key) => key === 'GATE_CALLBACK_CARD' && cardsEnabled);
+  require('../config/feature-gates').isEnabled.mockImplementation((key) => key !== 'callCommitments' || commitmentsEnabled);
+  listOpenCommitments.mockResolvedValue([row('callback', { kind: 'callback', callback_due_at: '2099-09-01T17:00:00Z' })]);
+  const out = await executeCommsTool('get_open_commitments', {});
+  const enabled = cardsEnabled && commitmentsEnabled;
+  expect(out.implicit_due_rules.callback).toBe(enabled ? 'four staffed hours after the call, using office hours and blackout dates' : "the end of the call's day (Eastern)");
+  expect(out.commitments[0].effective_due_at).toBe(enabled ? '2099-09-01 1:00 PM ET' : '2026-09-02 12:00 AM ET');
+  expect(out.commitments[0].snoozed_until).toBeNull();
+});
+
+test('a snoozed callback card reports the snooze end as the deadline the queue judges', async () => {
+  require('../config/feature-gates').gateEnvValue.mockImplementation((key) => key === 'GATE_CALLBACK_CARD');
+  listOpenCommitments.mockResolvedValue([row('callback', { kind: 'callback', callback_due_at: '2026-09-01T17:00:00Z', snoozed_until: '2099-09-01T19:30:00Z' })]);
+  const out = await executeCommsTool('get_open_commitments', {});
+  expect(out.commitments[0].effective_due_at).toBe('2099-09-01 3:30 PM ET');
+  expect(out.commitments[0].snoozed_until).toBe('2099-09-01 3:30 PM ET');
+  expect(out.overdue).toBe(0);
 });
