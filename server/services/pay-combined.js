@@ -586,9 +586,14 @@ async function listUnconfirmedCombinedSessionsForCustomer(database, customerId, 
   if (!customerId) return [];
   const rows = await stampedCombinedSessionRows(database, customerId);
   const StripeService = require('./stripe');
-  const sessions = [];
-  for (const r of rows) {
-    const piId = String(r.stripe_payment_intent_id);
+  // ONE read per distinct intent, fanned out to its invoice rows — the same
+  // shape planStampedSessionRelease uses (codex #4348 r12 P2). A combined PI
+  // is stamped onto every invoice in its allocation, so the per-row loop
+  // both cost nine Stripe reads for one intent and could observe DIFFERENT
+  // statuses across them, stamping conflicting outcomes onto rows of the
+  // same session — and that disagreement would then be fingerprinted.
+  const outcomeByIntent = new Map();
+  for (const piId of new Set(rows.map((r) => String(r.stripe_payment_intent_id)))) {
     let pi;
     try {
       pi = await StripeService.retrievePaymentIntent(piId);
@@ -597,8 +602,12 @@ async function listUnconfirmedCombinedSessionsForCustomer(database, customerId, 
     }
     const outcome = stampedSessionOutcome(pi, { invalidatedSingleInvoice });
     if (!outcome) throw new Error(`Could not verify payment session ${piId} for the merge preview (payment service unavailable) — try again`);
-    sessions.push({ invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: piId, outcome });
+    outcomeByIntent.set(piId, outcome);
   }
+  const sessions = rows.map((r) => {
+    const piId = String(r.stripe_payment_intent_id);
+    return { invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: piId, outcome: outcomeByIntent.get(piId) };
+  });
   // Sorted by PaymentIntent id, then by the unique invoice id: the same PI
   // appears once per stamped invoice, so the second key is what makes the
   // order — and therefore the merge's effects fingerprint — deterministic.

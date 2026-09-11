@@ -184,3 +184,24 @@ test('planning cancels nothing and retrieves each distinct intent ONCE, however 
   expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_a');
   expect(applied).toEqual({ released: 1, inFlight: 1 });
 });
+
+
+test('the preview retrieves each intent once and gives every invoice row of one intent the SAME outcome (Codex r12 P2)', async () => {
+  let call = 0;
+  // Second read of the same intent reports a different status: the preview
+  // must not see it, because it retrieves once.
+  StripeService.retrievePaymentIntent.mockImplementation(async (id) => {
+    call += 1;
+    if (id !== 'pi_a') return PI[id] || null;
+    return call === 1 ? PI.pi_a : { id: 'pi_a', status: 'processing', metadata: { combined_allocation: '{"x":1}' } };
+  });
+  const rows = [
+    { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' },
+    { id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_a' },
+    { id: 'inv-3', invoice_number: 'INV-3', stripe_payment_intent_id: 'pi_a' },
+  ];
+  const sessions = await listUnconfirmedCombinedSessionsForCustomer(database({ L: rows }), 'L');
+  expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(1);
+  expect(sessions).toHaveLength(3);
+  expect([...new Set(sessions.map((s) => s.outcome))]).toEqual(['cancel']);
+});
