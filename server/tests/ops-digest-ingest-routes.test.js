@@ -191,13 +191,19 @@ describe('bell write', () => {
     expect(json).toEqual({ ok: false, reason: 'bell_write_failed' });
   });
 
-  test('metadata cannot override the seam fields', async () => {
+  test('metadata cannot override the seam fields or pre-resolve the finding', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n2', deduped: false });
-    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI' } });
+    await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', keep: 1 } });
     const opts = mockNotifyAdmin.mock.calls[0][3];
-    expect(opts.metadata.source).toBe('ops-crons');
-    expect(opts.metadata.opsKey).toBe('e22-schedule-integrity:overlaps-2026-09-11');
-    expect(opts.metadata.kind).toBe('FIX');
+    expect(opts.metadata).toEqual({
+      keep: 1,
+      opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
+      subject: 'FIX: schedule integrity — 3 overlapping visits',
+      kind: 'FIX',
+      source: 'ops-crons',
+    });
+    expect(opts.metadata.resolved).toBeUndefined();
+    expect(validateDigest({ ...good(), metadata: { resolved: true } }).value.metadata).toEqual({});
   });
 });
 

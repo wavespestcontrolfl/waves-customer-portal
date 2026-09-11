@@ -112,11 +112,19 @@ function validateLink(raw) {
   return { value: link };
 }
 
+// Keys the seam owns. A caller must not pre-resolve a finding (it would
+// render as cleared), re-key it, or spoof its source; the route sets these
+// after the caller's fields and the fall-off path is the only writer of
+// the resolved* stamps.
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy'];
+
 function validateMetadata(raw) {
   if (raw === undefined || raw === null) return { value: {} };
   if (!isPlainObject(raw)) return { error: 'metadata must be an object' };
   if (Buffer.byteLength(JSON.stringify(raw)) > MAX_METADATA_BYTES) return { error: `metadata exceeds ${MAX_METADATA_BYTES} bytes` };
-  return { value: raw };
+  const value = { ...raw };
+  for (const k of RESERVED_METADATA_KEYS) delete value[k];
+  return { value };
 }
 
 router.post('/', darkUnlessConfigured, ingestLimiter, ingestAuth, async (req, res) => {
@@ -170,4 +178,4 @@ router.post('/resolve', darkUnlessConfigured, ingestLimiter, ingestAuth, async (
 });
 
 module.exports = router;
-module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, KINDS };
+module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, KINDS, RESERVED_METADATA_KEYS };
