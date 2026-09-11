@@ -476,6 +476,31 @@ async function reconcileAttempt(conn, row, now) {
   return true;
 }
 
+// A reconciled row (the customer already used this exact link to move
+// themselves) must never be re-planned, re-parked, or have its exception
+// card touched again from ANY path — not the context re-evaluation in
+// runOne, and not the ordinary receipt reconciliation either.
+// reconcileAttempt's own branches (delivery_failed, delivery_receipt_unavailable,
+// and settleDelivery's scope-changed escape hatch) all call parkReview, which
+// would recreate the very card markLinkUsed just closed — the sibling of the
+// contextFor re-plan bug, at the receipt path instead (codex #4293 P1 r5).
+// The receipt is still worth settling for accurate bookkeeping — a late
+// carrier confirmation should still land as delivered/failed — but nothing
+// about it may reopen office work, so this never calls parkReview and never
+// touches triage_items or call_log.
+async function settleReconciledReceipt(conn, row) {
+  if (!row.provider_message_id) return;
+  const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id }).first('status');
+  if (!sms) return;
+  if (['delivered', 'read'].includes(sms.status)) {
+    await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+      .update({ status: 'delivered', last_error: null, updated_at: new Date() });
+  } else if (['failed', 'undelivered'].includes(sms.status)) {
+    await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+      .update({ status: 'failed', last_error: sms.status, updated_at: new Date() });
+  }
+}
+
 // The promise is no longer sendable: a closed promise cancels the row, shadow
 // mode records the reason without touching the customer, and live mode hands
 // the promise to the office.
@@ -585,20 +610,23 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   // Another sweep may have completed this item since it was listed.
   row = await conn('outbox_messages').where({ id: row.id }).first();
   if (!row || ['delivered', 'cancelled'].includes(row.status)) return;
-  // Reconcile accepted/ambiguous attempts before planning any new send.
-  if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
   // The customer already used this exact link to move themselves.
   // markLinkUsed stamps this and clears the row's exception card, but
   // deliberately leaves status alone — a missing carrier receipt is still
-  // not proof of delivery. Re-entering contextFor here re-evaluates the
-  // ORIGINAL promise against the visit's NOW-MOVED date, finds it
-  // discussed_visit_unavailable, and reparks — resurrecting the very card
-  // markLinkUsed just closed, and permanently: unreconciledPromiseRows never
-  // revisits a row once link_used_reconciled_at is set, so nothing would
-  // ever close it again (codex #4293 P1 r4). Any delivery-receipt
-  // reconciliation this row still needs already ran in the check above;
-  // there is nothing left to plan or re-park.
-  if (row.payload?.link_used_reconciled_at) return;
+  // not proof of delivery. NO further path below may re-plan, re-park, or
+  // reopen this promise's exception card: not the context re-evaluation
+  // (contextFor would find the visit's NOW-MOVED date no longer matches the
+  // original promise and park it discussed_visit_unavailable), and not the
+  // ordinary receipt reconciliation either (its own delivery_failed /
+  // delivery_receipt_unavailable / scope-changed branches all call
+  // parkReview too). Either would resurrect the very card just closed, and
+  // permanently: unreconciledPromiseRows never revisits a row once this
+  // stamp is set, so nothing would ever close it again (codex #4293 P1
+  // r4/r5). settleReconciledReceipt still records a late carrier outcome for
+  // accurate bookkeeping, but never touches triage_items or call_log.
+  if (row.payload?.link_used_reconciled_at) return settleReconciledReceipt(conn, row);
+  // Reconcile accepted/ambiguous attempts before planning any new send.
+  if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
   const context = await contextFor(conn, row.commitment_id, now);
   if (context.reason) return applyContextSkip(conn, row, context.reason, now);
   const { call, visit } = context;

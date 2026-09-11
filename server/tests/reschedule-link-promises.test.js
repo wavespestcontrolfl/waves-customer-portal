@@ -233,7 +233,7 @@ test('an agent who takes the promise back later in the call stops the send', () 
 // for every outbox row when `selfServe` is truthy, empty when it is not —
 // keeps every existing fixture behaving exactly as before; pass it
 // explicitly to pull the two apart.
-function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null } = {}) {
+function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null } = {}) {
   const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const build = (table) => {
@@ -273,6 +273,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
         }
         if (name === 'reschedule_log') { seen.logFilters.push({ eq: { ...state.eq }, ranges: [...state.ranges] }); return selfServe; }
         if (name === 'triage_items') return openCards()[0] || null;
+        if (name === 'sms_log') return smsLog;
         return null;
       },
       insert: async (data) => { seen.inserts.push({ table: name, data }); return [1]; },
@@ -429,6 +430,27 @@ test('a reconciled row is never re-planned or re-parked by the send sweep, and i
   const otherUpdates = seen.updates.filter((u) => !(u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch));
   expect(otherUpdates).toEqual([]);
   expect(seen.inserts).toEqual([]);
+});
+
+test('a reconciled row with a pending receipt still settles it, without re-parking or touching its card', async () => {
+  // reconcileAttempt's own branches (delivery_failed / delivery_receipt_unavailable
+  // / settleDelivery's scope-changed escape hatch) all call parkReview, which
+  // would recreate the very card markLinkUsed just closed just as surely as
+  // the contextFor path does — the receipt-path sibling of the r4 bug (codex
+  // #4293 P1 r5). The row was awaiting a carrier receipt when the customer
+  // self-served; this sweep is the one where that receipt finally arrives.
+  const reconciled = promiseRow('reconciled', 'first', { status: 'review', provider_message_id: 'sid1',
+    payload: { link_used_reconciled_at: '2030-01-08T00:00:00.000Z' } });
+  const { seen, result } = await sweepWith({ outbox: [reconciled], selfServeVisitIds: [], smsLog: { status: 'delivered' } });
+  expect(result.processed).toBe(1);
+  // The late carrier confirmation still lands as accurate bookkeeping...
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'reconciled' },
+    patch: expect.objectContaining({ status: 'delivered' }) }));
+  // ...but nothing about settling it reopens office work: no triage insert,
+  // no triage or call_log update — parkReview and settleDelivery's own
+  // transactional writes never ran for this row.
+  expect(seen.inserts).toEqual([]);
+  expect(seen.updates.some((u) => u.table === 'triage_items' || u.table === 'call_log')).toBe(false);
 });
 
 test('one call-level card speaks for every promise parked against the call', async () => {
