@@ -91,6 +91,17 @@ describe('stop-line-off-remaining-transactional swap table', () => {
     }
   });
 
+  test('the audited body for the recurring-placement text is exactly what 20260906000040 seeds', () => {
+    // A fresh environment runs the seed first and this sweep second, so a
+    // copy change over there must be reflected here or the fresh-install body
+    // silently diverges from prod's (the mechanical strip would still catch
+    // the STOP line, but the reviewed rewrite would stop applying).
+    const seed = require('../models/migrations/20260906000040_recurring_dispatch_sms');
+    const [, audited, set] = SWAPS.find(([k]) => k === 'appointment_recurring_placement_confirmed');
+    expect(seed.TEMPLATE.body).toBe(audited);
+    expect(dropStop(seed.TEMPLATE.body)).toBe(set);
+  });
+
   test('rewrites preserve the exact variable set of the audited body', () => {
     for (const [key, expect_, set] of SWAPS) {
       expect({ key, vars: tokens(set) }).toEqual({ key, vars: tokens(expect_) });

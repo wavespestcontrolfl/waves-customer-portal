@@ -15,8 +15,9 @@
  *     auto_new_recurring is queued ~60 min later by
  *     services/new-recurring-welcome-sms.js. auto_new_appointment needs an
  *     admin to enrol the customer (services/email-automations.js:58), and
- *     auto_prep_guide_link / auto_sprinkler_timer have no send site in the
- *     codebase at all — staff send them by hand to someone already booked.
+ *     auto_prep_guide_link / auto_sprinkler_timer go out from
+ *     services/prep-guide-sender.js to a customer who already has the visit
+ *     (or, for the sprinkler how-to, an existing lawn customer).
  *   - "review requests are marketing solicitations" — they carry no offer.
  *     They go to a customer whose visit we just completed
  *     (services/review-request.js), asking for a Google review. Nothing is
@@ -27,9 +28,10 @@
  * link.js:415), renewal_reminder (cron at 30/15/7 days before a termite bond
  * lapses — services/workflows/renewal-reminder.js; same shape as
  * annual_prepay_renewal_reminder, which 20260810000060 already stripped), and
- * appointment_recurring_placement_confirmed (an admin-created row with no
- * send site anywhere in the repo, sent by hand to an existing recurring
- * customer).
+ * appointment_recurring_placement_confirmed (seeded by
+ * 20260906000040_recurring_dispatch_sms, sent from routes/admin-dispatch.js
+ * when a recurring placement is confirmed — an existing recurring customer
+ * being told the date of their next visit).
  *
  * upsell_add_service and upsell_tier_upgrade are an EXPLICIT owner ruling
  * against this file's own recommendation (2026-09-11): both pitch a paid

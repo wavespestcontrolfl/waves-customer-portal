@@ -35,15 +35,18 @@ actually need.
 
 | Template | Why |
 | --- | --- |
-| `recipient_optin_request` | The CTIA opt-in copy itself. |
+| `recipient_optin_request` | The CTIA opt-in copy itself. Note it is the one template that does not use the standard sentence — it reads "Reply YES to confirm, STOP to opt out, HELP for help." A search for the literal `Reply STOP to opt out` will not find it. |
 | `missed_call`, `lead_auto_reply_biz`, `voicemail_quote_link`, `dropped_call_address_request`, `booking_abandonment_recovery` | Lead first contact — not a customer yet. |
 | `estimate_sent`, `estimate_extended`, `estimate_followup_deposit`, `quote_wizard_booking_invite` | Estimate delivery / program entry; the recipient is often still a prospect. |
 | `referral_invite` | A stranger the referrer named. |
 | `referral_nudge` | A $25-off pitch — marketing content. |
 | Hardcoded lawn-program-overview body in `server/routes/admin-service-outlines.js` | Sent against an estimate; audience can be `lead`. |
 
-`server/services/document-contract-delivery.js` already prints the line only
-when `smsPurpose` is a marketing purpose — that branch is correct as written.
+Two code paths already apply the rule conditionally and are correct as
+written: `server/services/document-contract-delivery.js` prints the line only
+when `smsPurpose` is a marketing purpose, and
+`server/services/outbound-voicemail-sms.js` sets its `optout_clause` only when
+there is no `customerId` — i.e. only for a stranger.
 
 ## Deliberate exceptions
 
