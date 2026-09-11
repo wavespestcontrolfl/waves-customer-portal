@@ -283,6 +283,45 @@ describe("KnowledgePage embedded navigation", () => {
     expect(screen.getByRole("heading", { level: 3, name: "Bait stations" })).toHaveFocus();
   });
 
+  it("keeps info-string fences closed and nests third-level headings under their section", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    // ```json reuses the active delimiter and run length but carries an info
+    // string, so it opens nothing and must not close the sample.
+    const content = [
+      "# Rodent Guarantee",
+      "```",
+      "```json",
+      "# not a heading, still inside the sample",
+      "```",
+      "## Core Rules",
+      "### 1. Retreatment is free",
+      "Body",
+    ].join("\n");
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/knowledge/article/fixture")
+        ? response({ article: { title: "Fixture article", content, tags: [] } })
+        : response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] })
+    ));
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    renderWiki("/admin/knowledge?wikiTab=articles");
+    fireEvent.click(await screen.findByText("Fixture article"));
+
+    const toc = await screen.findByRole("navigation", { name: "Article contents" });
+    const entries = within(toc).getAllByRole("button").map((button) => button.textContent);
+    expect(entries).toEqual(["Rodent Guarantee", "Core Rules", "1. Retreatment is free"]);
+    // The `#` line inside the info-string fence stays in the code sample.
+    expect(screen.getByText(/# not a heading, still inside the sample/)).toBeInTheDocument();
+    // Three stored ATX levels map to three distinct elements.
+    expect(screen.getByRole("heading", { level: 2, name: "Rodent Guarantee" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 3, name: "Core Rules" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 4, name: "1. Retreatment is free" })).toBeInTheDocument();
+    // ...and the TOC indents the child deeper than its parent.
+    const child = within(toc).getByRole("button", { name: "1. Retreatment is free" }).closest("li");
+    const parent = within(toc).getByRole("button", { name: "Core Rules" }).closest("li");
+    expect(parent.className).toContain("pl-4");
+    expect(child.className).toContain("pl-8");
+  });
+
   it("renders only string tags so malformed tag elements cannot crash the reader", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url) => (

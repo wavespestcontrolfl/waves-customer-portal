@@ -40,7 +40,12 @@ function LoadingState({ children }) {
 // pre-wrapped text (no Markdown renderer on this route) but lifts ATX
 // headings into real heading elements so the §5.7 in-page TOC has targets.
 const HEADING_LINE = /^(#{1,3})\s+(.+?)\s*#*\s*$/;
-const FENCE_LINE = /^\s*(`{3,}|~{3,})/;
+const FENCE_LINE = /^\s*(`{3,}|~{3,})(.*)$/;
+
+// The stored ATX level drives both the rendered element and the TOC depth, so a
+// `###` subsection reads as a child of its `##` section rather than a peer.
+const HEADING_CLASS = { 1: "text-18 mt-6 first:mt-0", 2: "text-16 mt-4 first:mt-0", 3: "text-16 mt-3 first:mt-0" };
+const TOC_INDENT = { 1: "", 2: "pl-4", 3: "pl-8" };
 
 function slugify(text, index) {
   const base = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -55,16 +60,22 @@ export function splitArticleSections(content) {
     text = [];
   };
   // CommonMark: a fence closes only on the same delimiter, at least as long as
-  // the opener. A ``` line inside a ```` fence, or a ~~~ line inside a ``` one,
-  // is fence content -- closing on it would promote the code sample's `#` lines.
+  // the opener, and a CLOSING fence carries nothing but trailing whitespace.
+  // A ``` line inside a ```` fence, a ~~~ line inside a ``` one, and an info
+  // string such as ```json are all fence content -- closing on any of them
+  // would promote the code sample's `#` lines into the TOC.
   let fence = null;
   String(content || "").split(/\r?\n/).forEach((line) => {
     // A `# comment` inside a ``` / ~~~ fence is code, not a heading.
     const marker = FENCE_LINE.exec(line);
     if (marker) {
-      const [, delimiter] = marker;
+      const [, delimiter, rest] = marker;
       if (!fence) fence = { char: delimiter[0], length: delimiter.length };
-      else if (delimiter[0] === fence.char && delimiter.length >= fence.length) fence = null;
+      else if (
+        delimiter[0] === fence.char
+        && delimiter.length >= fence.length
+        && rest.trim() === ""
+      ) fence = null;
     }
     const match = fence ? null : HEADING_LINE.exec(line);
     if (!match) {
@@ -86,7 +97,7 @@ function ArticleTableOfContents({ headings, onJump }) {
       <p className="text-ui-caption font-medium uppercase tracking-label text-ink-secondary">Contents</p>
       <ul className="mt-2 space-y-1">
         {headings.map((heading) => (
-          <li key={heading.id} className={heading.level > 1 ? "pl-4" : ""}>
+          <li key={heading.id} className={TOC_INDENT[heading.level] || TOC_INDENT[3]}>
             <button
               type="button"
               onClick={() => onJump(heading.id)}
@@ -104,14 +115,14 @@ function ArticleTableOfContents({ headings, onJump }) {
 function ArticleBody({ sections }) {
   return sections.map((section, index) => {
     if (section.kind === "heading") {
-      const Tag = section.level === 1 ? "h2" : "h3";
+      const Tag = section.level === 1 ? "h2" : section.level === 2 ? "h3" : "h4";
       return (
         <Tag
           key={section.id}
           id={section.id}
           tabIndex={-1}
           className={`scroll-mt-4 break-words font-medium text-zinc-900 ${
-            section.level === 1 ? "text-18 mt-6 first:mt-0" : "text-16 mt-4 first:mt-0"
+            HEADING_CLASS[section.level] || HEADING_CLASS[3]
           }`}
         >
           {section.title}
