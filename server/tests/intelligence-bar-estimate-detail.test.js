@@ -113,6 +113,8 @@ test('tool definition points at the page projection, takes either selector, and 
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page_unavailable/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/committed_totals/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/withheld = quote_required/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/declined estimate with no price-lock stamp has no committed figure/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/unselected_alternative/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page\.propertyGroup/);
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.estimate_id.format).toBe('uuid');
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.customer_id.format).toBe('uuid');
@@ -198,6 +200,51 @@ test('sibling estimates report only the one-time figure the switcher displays, n
   expect(JSON.stringify(shaped.page.propertyGroup)).not.toMatch(/"token"/);
 });
 
+test('a RANGED cadence loses its exact figures at whatever depth it sits — the page shows a confirmed-on-site band, never the number', async () => {
+  mockCompose.mockResolvedValue({
+    ...JSON.parse(JSON.stringify(PAGE_PAYLOAD)),
+    pricing: {
+      frequencies: [
+        { key: 'quarterly', label: 'Quarterly', monthly: 920, annual: 11040, perTreatment: 2760, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 },
+        { key: 'monthly', label: 'Monthly', monthly: 1000, annual: 12000 },
+      ],
+      services: [{
+        key: 'commercial_pest',
+        frequencies: [{
+          key: 'quarterly', monthly: 920, annual: 11040, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 0.5,
+          perServiceTreatments: [{ service: 'commercial_pest', perTreatment: 2760, displayPrice: 2760 }],
+        }],
+      }],
+      combinedRecurring: { monthlySubtotal: 920, annualSubtotal: 11040, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 },
+    },
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  const ranged = shaped.page.pricing.frequencies[0];
+  expect(ranged).toMatchObject({ key: 'quarterly', label: 'Quarterly', ranged: 'low_confidence_confirmed_on_site', lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 });
+  expect(ranged.monthly).toBeUndefined();
+  expect(ranged.annual).toBeUndefined();
+  expect(ranged.perTreatment).toBeUndefined();
+  // the un-stamped sibling cadence keeps its exact price
+  expect(shaped.page.pricing.frequencies[1]).toMatchObject({ monthly: 1000, annual: 12000 });
+  // nested inside a service ladder, and on the combined card
+  const nested = shaped.page.pricing.services[0].frequencies[0];
+  expect(nested.ranged).toBe('low_confidence_confirmed_on_site');
+  expect(nested.perServiceTreatments).toBeUndefined();
+  expect(shaped.page.pricing.combinedRecurring).toMatchObject({ ranged: 'low_confidence_confirmed_on_site' });
+  expect(shaped.page.pricing.combinedRecurring.monthlySubtotal).toBeUndefined();
+  expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/920|11040|2760/);
+});
+
+test('a quote-required cadence needs no range stripping — PriceCard zeroes the band for it and the bundle gate already applies', async () => {
+  mockCompose.mockResolvedValue({
+    ...JSON.parse(JSON.stringify(PAGE_PAYLOAD)),
+    pricing: { frequencies: [{ key: 'quarterly', monthly: 920, quoteRequired: true, lowConfidenceRangePct: 0.2 }] },
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.pricing.frequencies[0]).toMatchObject({ quoteRequired: true, monthly: 920 });
+  expect(shaped.page.pricing.frequencies[0].ranged).toBeUndefined();
+});
+
 // ── Membership: strict here, never for the page ─────────────────────
 test('the reconciler runs BEFORE the composer, on the same row object, and opts INTO strict membership', async () => {
   mockReconcile.mockImplementation(async (estimate) => {
@@ -242,7 +289,9 @@ test('an accepted row is never reconciled: a later lapse must not reprice a comm
   const shaped = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z' }));
   expect(mockReconcile).not.toHaveBeenCalled();
   expect(shaped.price_locked).toBe(true);
-  expect(shaped.committed_totals).toEqual({ monthly: 47, annual: 564, one_time: 125, locked_at: '2026-09-06T12:00:00Z' });
+  // No stored mode (legacy accept): the lanes cannot be split, so every column
+  // is reported with the mode explicitly null.
+  expect(shaped.committed_totals).toEqual({ monthly: 47, annual: 564, one_time: 125, accepted_service_mode: null, locked_at: '2026-09-06T12:00:00Z' });
   // The page still reports what it would price today; the two are separate answers.
   expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
 });
@@ -256,6 +305,21 @@ test('a price_locked_at stamp freezes it the same way, whatever the status', asy
 // The skip and committed_totals use the reconciler's OWN frozen test, so a
 // declined-but-unstamped row — one the real reconciler would reprice — is
 // reconciled here too and reports no committed figure.
+// A mixed estimate keeps BOTH lanes' stored columns after acceptance, so the
+// lane the customer declined must not read as part of the committed deal.
+test('committed_totals reports the accepted lane and names the other as the unselected alternative', async () => {
+  const recurring = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z', accepted_service_mode: 'recurring' }));
+  expect(recurring.committed_totals).toEqual({
+    monthly: 47, annual: 564, accepted_service_mode: 'recurring',
+    locked_at: '2026-09-06T12:00:00Z', unselected_alternative: { one_time: 125 },
+  });
+  const oneTime = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z', accepted_service_mode: 'one_time' }));
+  expect(oneTime.committed_totals).toEqual({
+    one_time: 125, accepted_service_mode: 'one_time',
+    locked_at: '2026-09-06T12:00:00Z', unselected_alternative: { monthly: 47, annual: 564 },
+  });
+});
+
 test('a DECLINED unstamped row is reconciled like any other and commits nothing', async () => {
   const row = estimateRow({ status: 'declined', declined_at: '2026-09-07T10:00:00Z' });
   const shaped = await shapeEstimate(row);

@@ -135,6 +135,41 @@ function siblingEntry(sibling) {
   };
 }
 
+// The exact price fields a RANGED node carries but the page never shows.
+// `stampLowConfidenceRangeOnServices` / `withCombinedLowConfidenceRange`
+// (estimate-public.js:22487, 22518) only ADD `lowConfidenceRangePct` +
+// `lowConfidenceFraction` to a cadence — its exact `monthly`, `annual`,
+// `perTreatment` and per-service treatment rows stay on the payload, and
+// PriceCard converts the price to a "$X-$Y/mo, confirmed on site" band and
+// drops the per-visit rows entirely while ranging (PriceCard.jsx:289-313).
+// So the same rule as quote-required, at whatever depth the stamp appears:
+// keyed off the server's OWN marker, one generic pass, no mirror of the
+// client's band arithmetic. The stamp itself rides along, so the bar can say
+// the price is a confirmed-on-site range and point at the page for the band.
+const RANGED_EXACT_FIELDS = ['monthly', 'annual', 'perTreatment', 'perServiceTreatments', 'monthlySubtotal', 'annualSubtotal'];
+
+function sanitizeRangedNode(node) {
+  const out = { ...node };
+  for (const field of RANGED_EXACT_FIELDS) delete out[field];
+  out.ranged = 'low_confidence_confirmed_on_site';
+  out.ranged_note = 'the page renders this as a "confirmed on site" range around a price it never shows exactly; open the estimate link for the band';
+  return out;
+}
+
+// Depth-agnostic on purpose: a ranged cadence can sit on a top-level
+// frequency, inside services[].frequencies[], or on the combined recurring
+// card, and a future placement would otherwise leak again.
+function sanitizeRanges(value) {
+  if (Array.isArray(value)) return value.map(sanitizeRanges);
+  if (!value || typeof value !== 'object') return value;
+  const walked = {};
+  for (const [k, v] of Object.entries(value)) walked[k] = sanitizeRanges(v);
+  // quoteRequired cadences are already priceless on the page — PriceCard
+  // zeroes the pct for them — so they need no stripping here.
+  if (Number(walked.lowConfidenceRangePct) > 0 && walked.quoteRequired !== true) return sanitizeRangedNode(walked);
+  return walked;
+}
+
 function stripPayload(payload) {
   const out = {};
   for (const [key, value] of Object.entries(payload || {})) {
@@ -151,6 +186,7 @@ function stripPayload(payload) {
     out[key] = value;
   }
   if (Array.isArray(out.propertyGroup)) out.propertyGroup = out.propertyGroup.map(siblingEntry);
+  if (out.pricing) out.pricing = sanitizeRanges(out.pricing);
   // The page renders NO pricing for a quote-required bundle — the client
   // exits to the terminal card first — so neither does this tool. The
   // composer's own verdict decides it; the reason rides along because that
@@ -306,6 +342,31 @@ function blockedRecord(row) {
   };
 }
 
+// The committed figure, split by the lane the customer actually accepted.
+// A mixed estimate keeps BOTH lanes' columns after acceptance —
+// onetime_total still holds the one-time alternative on a recurring accept,
+// monthly_total/annual_total still hold the recurring alternative on a
+// one-time accept — so publishing all three as "what was committed" let the
+// bar report an option the customer declined as part of the deal (codex
+// round 7 P2). accepted_service_mode says which lane won; the loser rides
+// along under `unselected_alternative`, named for what it is. A legacy
+// accept with no stored mode (or a price_locked_at stamp with no accept at
+// all) cannot be split, so it reports every column with the mode set to
+// null — the honest "unknown".
+function committedTotals(row) {
+  const mode = row.accepted_service_mode || null;
+  const recurring = { monthly: money(row.monthly_total), annual: money(row.annual_total) };
+  const oneTime = { one_time: money(row.onetime_total) };
+  const locked_at = row.price_locked_at || row.accepted_at || row.declined_at || null;
+  if (mode === 'recurring') {
+    return { ...recurring, accepted_service_mode: mode, locked_at, unselected_alternative: oneTime };
+  }
+  if (mode === 'one_time') {
+    return { ...oneTime, accepted_service_mode: mode, locked_at, unselected_alternative: recurring };
+  }
+  return { ...recurring, ...oneTime, accepted_service_mode: mode, locked_at };
+}
+
 async function shapeEstimate(row, deposits = []) {
   const reconciliation_error = await reconcileMembership(row);
   // Parsed AFTER the reconcile, never before (pre-push audit P1): the
@@ -344,12 +405,7 @@ async function shapeEstimate(row, deposits = []) {
     price_locked: !!priceLocked,
     ...(priceLocked
       ? {
-        committed_totals: {
-          monthly: money(row.monthly_total),
-          annual: money(row.annual_total),
-          one_time: money(row.onetime_total),
-          locked_at: row.price_locked_at || row.accepted_at || row.declined_at || null,
-        },
+        committed_totals: committedTotals(row),
       }
       : {}),
     ...projection,
@@ -405,7 +461,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a low-confidence commercial price arrives as its range, and a quote-required bundle arrives as \`page.pricing.withheld = quote_required\` with the reason and no amounts at all, because that page shows the customer no figure — so quote whatever \`page\` says and nothing more. A grouped multi-property estimate lists its siblings under \`page.propertyGroup\` with only the one-time figure their switcher displays; each sibling's own page has to be read for its plan pricing. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An accepted or declined estimate also reports committed_totals: what was actually committed, which is not the same as what the page would price today.
+  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a quote-required bundle arrives as \`page.pricing.withheld = quote_required\` with the reason and no amounts at all, because that page shows the customer no figure — so quote whatever \`page\` says and nothing more. A grouped multi-property estimate lists its siblings under \`page.propertyGroup\` with only the one-time figure their switcher displays; each sibling's own page has to be read for its plan pricing. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An ACCEPTED estimate, or one with an explicit price-lock stamp, also reports committed_totals: what was actually committed, which is not the same as what the page would price today — split by accepted_service_mode, with the lane the customer did not take under unselected_alternative. A declined estimate with no price-lock stamp has no committed figure at all (nothing was committed) and reports none. A cadence the page ranges rather than prices ("confirmed on site") arrives with its exact figures removed and ranged set instead — open the estimate link for the band.
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).`,
   input_schema: {
     type: 'object',

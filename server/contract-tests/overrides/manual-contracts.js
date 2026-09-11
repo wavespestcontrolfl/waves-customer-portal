@@ -113,10 +113,11 @@ module.exports = {
         'is_callback', 'service_id', 'source_estimate_id',
       ],
       services: ['id', 'service_key', 'name'],
-      // resolveProposalBillingContext, reached only for an authored
-      // proposal: the customer row it prices against and the prepay term
-      // minted from this estimate.
-      customers: ['id'],
+      // The customer row the composer reads on two paths: every linked
+      // estimate through estimateRendersMonthlyBilling → billing-cadence
+      // (pipeline_stage, monthly_rate, billing_mode — codex round 7 P2),
+      // and an authored proposal through resolveProposalBillingContext.
+      customers: ['id', 'pipeline_stage', 'monthly_rate', 'billing_mode'],
       annual_prepay_terms: ['source_estimate_id'],
     },
     reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',
