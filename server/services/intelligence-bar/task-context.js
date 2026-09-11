@@ -529,6 +529,13 @@ const customerSpecific = context => Boolean(context.targets?.length || context.n
 // closeout readers take service_id and the gap reader tests candidate_service_id
 // (it loads that appointment's customer preferences, plan holds and location).
 const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
+// Writers whose customer records ride under role-named ids: both halves of a
+// merge are customer records, read as the customer collection (readReferences
+// loads and version-stamps every one). The task must own ONE half directly;
+// the other is admitted only as an eligible duplicate-queue candidate under
+// that exact pairing (see the CUSTOMER_PAIR_SELECTORS use in validateRecordTarget).
+const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'] };
+const customerPairIds = (params, toolName) => (CUSTOMER_PAIR_SELECTORS[toolName] || []).map(key => params[key]).filter(Boolean);
 
 // Address-bound readers (lookup_property, and find_available_slots inside a
 // customer-scoped task) take a model-supplied address. It must be one of the
@@ -632,6 +639,8 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
   if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
+  const pair = customerPairIds(params, toolName);
+  if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
   const { records } = resolved;
@@ -661,6 +670,26 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   if (toolName === 'send_email_reply' && !permitted.size) {
     for (const record of records) {
       if (record.kind === 'email_id' && context.explicitEmails?.includes(normalizeEmail(record.from_address))) permitted.add(record.customer_id);
+    }
+  }
+  // Pair authority: the task establishes at most ONE customer target, so a
+  // merge naming a duplicate pair otherwise always fails missingTarget below
+  // — the operator's task could equally be on the stub page (the loser) or
+  // the real customer's page (the winner). Admit the OTHER half only when it
+  // is a live, eligible duplicate-queue candidate under this EXACT
+  // winner/loser pairing — the canonical check customer-dedupe.js owns
+  // (never re-derived here). Neither permitted, or the pair ineligible: the
+  // missingTarget refusal below stands unchanged.
+  const pairSelectors = CUSTOMER_PAIR_SELECTORS[toolName];
+  if (pairSelectors) {
+    // Canonical lowercase (codex #4348 r5 P2): task targets and record ids
+    // are stored lowercase; an uppercase-but-valid UUID pair must reach the
+    // eligibility check, not fall through to missingTarget.
+    const [winnerId, loserId] = pairSelectors.map(key => (params[key] ? String(params[key]).trim().toLowerCase() : params[key]));
+    if (winnerId && loserId && permitted.has(winnerId) !== permitted.has(loserId)) {
+      const { duplicatePairEligibility } = require('../customer-dedupe');
+      const eligibility = await duplicatePairEligibility(winnerId, loserId);
+      if (eligibility.eligible) permitted.add(permitted.has(winnerId) ? loserId : winnerId);
     }
   }
   const missingTarget = customerIds(records).some(id => !permitted.has(id));
@@ -844,4 +873,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, pageIds, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

@@ -49,6 +49,14 @@ test('the dedicated agent estimate workflow preloads its permitted draft tool', 
   expect(registry.initialTools('estimates', { ...scope, context: 'estimates' }).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(false);
 });
 
+test('vendor price comparison preserves the documented product ID or name alternatives', () => {
+  const scope = { role: 'admin', context: 'inventory' };
+  expect(registry.validateInput('compare_vendor_pricing', { product_id: '10000000-0000-4000-8000-000000000001' }, scope)).toBeNull();
+  expect(registry.validateInput('compare_vendor_pricing', { product_name: 'Synthetic product' }, scope)).toBeNull();
+  expect(registry.validateInput('compare_vendor_pricing', {}, scope)).toMatchObject({ code: 'invalid_input' });
+  expect(registry.validateInput('compare_vendor_pricing', { product_id: 'invalid' }, scope)).toMatchObject({ code: 'invalid_input' });
+});
+
 test('technicians cannot discover admin tools or forge a tool scope', async () => {
   const scope = { role: 'technician', context: 'estimates' };
   expect(registry.discover({ query: 'customer inventory' }, scope).result.code).toBe('permission_denied');
@@ -97,6 +105,24 @@ test('restricted owner actions remain in their existing workflow and do not beco
   }));
 });
 
+
+test('merge_customers is allowed on the platform path only while GATE_IB_MERGE_CUSTOMERS is on (Codex r14 P1)', async () => {
+  const action = registry.actions.get('merge_customers');
+  expect(action).toBeTruthy();
+  const scope = { role: 'admin', context: 'customers' };
+  const original = process.env.GATE_IB_MERGE_CUSTOMERS;
+  try {
+    delete process.env.GATE_IB_MERGE_CUSTOMERS;
+    expect(registry.allowed(action, scope)).toBe(false);
+    expect(registry.initialTools('customers', scope).map(t => t.name)).not.toContain('merge_customers');
+    expect(await registry.execute('merge_customers', { winner_customer_id: '10000000-0000-4000-8000-000000000001', loser_customer_id: '10000000-0000-4000-8000-000000000002' }, { ...scope, actionContext: { confirmed: true } }))
+      .toMatchObject({ code: 'permission_denied' });
+    process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+    expect(registry.allowed(action, scope)).toBe(true);
+  } finally {
+    if (original === undefined) delete process.env.GATE_IB_MERGE_CUSTOMERS; else process.env.GATE_IB_MERGE_CUSTOMERS = original;
+  }
+});
 
 test('dedicated estimate cabinet excludes every unrelated write and admin discovery', async () => {
   const scope = { role: 'admin', context: 'agent_estimate' };
@@ -239,15 +265,19 @@ const SCOPE_SNAPSHOT = {
   record: [
     // reads: a customer or record selector confines the rows to one customer
     'check_customer_status', 'compute_estimate', 'draft_review_reply', 'draft_sms', 'draft_sms_reply', 'find_available_slots', 'find_schedule_gaps',
-    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_open_commitments', 'get_service_history',
+    'get_call_log', 'get_closeout_status', 'get_conversation_thread', 'get_customer_detail', 'get_customer_estimate_context', 'get_open_commitments',
+    'get_service_history',
     'get_stop_details', 'query_revenue', 'search_messages',
     // writes: specific customer records proven by validateRecordTarget
     // block_sender carries no record id; validateSenderBlock binds it to the task customer's own address.
-    'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan', 'create_agent_estimate_draft',
-    'create_appointment', 'create_customer', 'create_pending_estimate', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
-    'send_email_reply', 'send_sms', 'set_estimate_presentation', 'submit_review_reply', 'switch_appointment_property',
-    'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer', 'update_lead_status',
-    'update_property_access',
+    // merge_customers' winner/loser ids are mapped to the customer collection by validateRecordTarget
+    // (CUSTOMER_PAIR_SELECTORS), so both halves must belong to the task's customers.
+    'add_customer_property', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
+    'create_agent_estimate_draft',
+    'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day', 'reply_via_sms', 'reschedule_appointment',
+    'save_customer_estimate', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'set_primary_property', 'submit_review_reply',
+    'switch_appointment_property', 'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer',
+    'update_customer_property', 'update_lead_status', 'update_property_access',
   ],
 };
 

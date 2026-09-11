@@ -1,4 +1,12 @@
 {
+  "add_customer_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "adjust_stock": {
     "module": "procurement-tools.js",
     "domain": "procurement",
@@ -1287,6 +1295,14 @@
     "approval": null,
     "scope": "scoped"
   },
+  "merge_customers": {
+    "module": "customer-lifecycle-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "move_stops_to_day": {
     "module": "schedule-tools.js",
     "domain": "schedule",
@@ -1583,6 +1599,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "set_primary_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "sitemap_validation": {
     "module": "seo-tools.js",
     "domain": "seo",
@@ -1647,6 +1671,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "update_customer_property": {
+    "module": "property-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "update_lead_status": {
     "module": "leads-tools.js",
     "domain": "leads",
@@ -1670,5 +1702,21 @@
     "role": "admin",
     "approval": "ui_confirm",
     "scope": "none"
+  },
+  "get_customer_estimate_context": {
+    "module": "customer-estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "record"
+  },
+  "save_customer_estimate": {
+    "module": "customer-estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
   }
 }
