@@ -929,6 +929,12 @@ async function queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend = false } 
 // re-queues a fresh row (the existing-queue check sees none). Only rows
 // still 'scheduled' are consumable — one the worker has flipped to
 // 'sending' stays its own, and the strict re-check after this refuses.
+// Returns the consumed rows (id + their original scheduled_for) — Codex
+// r12 follow-on P1 #4131: this cancellation runs BEFORE the replacement
+// delivery is even attempted (so the worker can never double-send while
+// it's in flight), so if that delivery then fails, the caller needs these
+// ids back to UNDO the cancellation and restore the original obligation
+// (restoreConsumedQueuedSend) rather than silently losing it.
 async function consumeQueuedInvoiceSend(invoiceId) {
   const rows = await db("sms_log")
     .where({ status: "scheduled" })
@@ -939,8 +945,34 @@ async function consumeQueuedInvoiceSend(invoiceId) {
       updated_at: new Date(),
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('cancelled_reason', 'superseded_by_live_send', 'cancelled_at', ?::text)", [new Date().toISOString()]),
     })
-    .returning("id");
-  return Array.isArray(rows) ? rows.length : 0;
+    .returning(["id", "scheduled_for"]);
+  return Array.isArray(rows) ? rows : [];
+}
+
+// Undoes consumeQueuedInvoiceSend's cancellation when the replacement
+// delivery it was consumed FOR ultimately fails and nothing else picked up
+// the obligation (Codex r12 follow-on P1 #4131) — same row (matched by
+// id), same scheduled_for (never touched by the cancel), guarded to only
+// restore a row still exactly in the state this call itself put it in
+// (never a row something else has since claimed or that a fresh
+// replacement already supersedes).
+async function restoreConsumedQueuedSend(consumedRows) {
+  if (!consumedRows?.length) return;
+  const ids = consumedRows.map((row) => row.id).filter(Boolean);
+  if (!ids.length) return;
+  try {
+    await db("sms_log")
+      .whereIn("id", ids)
+      .where({ status: "cancelled" })
+      .whereRaw("metadata->>'cancelled_reason' = 'superseded_by_live_send'")
+      .update({
+        status: "scheduled",
+        updated_at: new Date(),
+        metadata: db.raw("(metadata - 'cancelled_reason') - 'cancelled_at'"),
+      });
+  } catch (err) {
+    logger.error(`[invoice] queued pay-link SMS restore FAILED for ${ids.join(", ")} — the customer's original scheduled send did not resume: ${err.message}`);
+  }
 }
 
 // Nothing due on an invoice linked to a scheduled visit (the estimate
@@ -1122,16 +1154,24 @@ async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, adoptsQu
     await restoreClaimAndThrow(invoiceId, previousStatus, lookupErr);
   }
   if (queuedUnderClaim) await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(queuedUnderClaim));
-  if (!adoptsQueuedInvoiceSend) return;
+  if (!adoptsQueuedInvoiceSend) return [];
   let stillQueued;
+  let consumedRows = [];
   try {
-    const consumed = await consumeQueuedInvoiceSend(invoiceId);
-    if (consumed) logger.info(`[invoice] Queued pay-link SMS for invoice ${invoiceId} consumed by a live send (${consumed} row${consumed === 1 ? "" : "s"} cancelled)`);
+    consumedRows = await consumeQueuedInvoiceSend(invoiceId);
+    if (consumedRows.length) logger.info(`[invoice] Queued pay-link SMS for invoice ${invoiceId} consumed by a live send (${consumedRows.length} row${consumedRows.length === 1 ? "" : "s"} cancelled)`);
     stillQueued = await queuedPayLinkText(invoiceId);
   } catch (adoptErr) {
     await restoreClaimAndThrow(invoiceId, previousStatus, adoptErr);
   }
-  if (stillQueued) await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(stillQueued));
+  if (stillQueued) {
+    // Give back what we just took, ALL of it (Codex r12 follow-on P1
+    // #4131): the row(s) we cancelled above are part of the claim being
+    // handed back here too, not just the invoice status.
+    await restoreConsumedQueuedSend(consumedRows);
+    await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(stillQueued));
+  }
+  return consumedRows;
 }
 
 async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliveryOnly = false, adoptsQueuedInvoiceSend = false, operatorInitiated = false } = {}) {
@@ -1142,7 +1182,7 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
       throw invoiceNotSendableError(current);
     }
-    return { invoice: current, previousStatus: current.status, claimed: false };
+    return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows: [] };
   }
 
   if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
@@ -1183,9 +1223,9 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     throw invoiceNotSendableError(latest);
   }
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status);
-  await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
+  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
 
-  return { invoice, previousStatus: current.status, claimed: true };
+  return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
 }
 
 async function restoreSendClaim(invoiceId, previousStatus, claimed) {
@@ -1268,6 +1308,60 @@ async function loadAnnualPrepayTermForInvoice(invoiceId) {
 // voids unsent replacements by it.
 function rodentSetupRebillMarker(invoiceId) {
   return `[rodent-setup-rebill:${invoiceId}]`;
+}
+
+// Persists a HELD pay-link SMS (a QUIET_HOURS_HOLD / PUSH_IN_FLIGHT /
+// APP_DELIVERY_HOLD / APP_PROVIDER_RETRY the provider raised) onto the
+// scheduled-SMS rail so the customer still gets it at the window open,
+// instead of the hold silently discarding the send (Codex r12 follow-on P1
+// #4131 — extracted so sendViaSMS's own direct callers share this instead
+// of only sendViaSMSAndEmail having it). Retry-idempotent: a second pass
+// adopts the already-queued row instead of double-queuing. Returns
+// { scheduled: true } once a row durably owns the delivery (existing or
+// freshly inserted), or { scheduled: false } when the insert itself failed
+// — the caller decides what an unowned hold means for the rest of its send.
+async function requeueHeldPayLinkSms({ invoiceId, customerId, code, nextAllowedAt, heldBody, heldToPhone }) {
+  try {
+    const existingQueued = await db("sms_log")
+      .whereIn("status", ["scheduled", "sending"])
+      .whereRaw("metadata->>'entry_point' = 'invoice_send_deferred'")
+      .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+      .first("id");
+    if (existingQueued) {
+      logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} already queued for the window open (${existingQueued.id}) — not re-queued`);
+      return { scheduled: true };
+    }
+    const TWILIO_NUMBERS = require("../config/twilio-numbers");
+    await db("sms_log").insert({
+      customer_id: customerId,
+      direction: "outbound",
+      from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+      to_phone: heldToPhone,
+      message_body: heldBody,
+      status: "scheduled",
+      scheduled_for: new Date(nextAllowedAt),
+      message_type: "invoice",
+      metadata: JSON.stringify({
+        entry_point: "invoice_send_deferred",
+        invoice_id: invoiceId,
+        original_block_code: code,
+        replay_purpose: "payment_link",
+        refresh_customer_phone: true,
+        resolve_from_by_customer: true,
+        // Delivery-time finalization (executor → markDeliverySent): when the
+        // rest of a send also failed, this queued row is the only delivery,
+        // and without the flip the morning SMS would carry a live pay link
+        // while the invoice sits undelivered with follow-ups unarmed.
+        // Idempotent when the invoice already finalized some other way.
+        mark_invoice_delivery: true,
+      }),
+    });
+    logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${nextAllowedAt}`);
+    return { scheduled: true };
+  } catch (queueErr) {
+    logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message}`);
+    return { scheduled: false };
+  }
 }
 
 const InvoiceService = {
@@ -2768,7 +2862,18 @@ const InvoiceService = {
     // can't reverse off the winner's 'sending' row (reverseAppliedCredit refuses
     // 'sending').
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated });
-    const { invoice, previousStatus, claimed } = claim;
+    const { invoice, previousStatus, claimed, consumedQueuedSendRows } = claim;
+    // Claim-restoration + queue-restoration together (Codex r12 follow-on
+    // P1 #4131): consumeQueuedInvoiceSend (inside the claim above) cancels
+    // any pre-existing queued pay-link text BEFORE this delivery is even
+    // attempted, so the worker can never double-send while it's in flight.
+    // If this attempt then fails and nothing else picks up the obligation
+    // (the quiet-hours requeue below), that cancellation must be undone or
+    // the customer's already-scheduled text is silently lost.
+    const restoreClaimAndQueuedSend = async () => {
+      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await restoreConsumedQueuedSend(consumedQueuedSendRows);
+    };
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, so apply credit here too
@@ -2805,7 +2910,7 @@ const InvoiceService = {
     // Third-party Bill-To: never text the homeowner a pay link for a
     // payer-billed invoice — the pay link + AR route to the payer (email).
     if (invoice.payer_id) {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await restoreClaimAndQueuedSend();
       return { sent: false, reason: "Suppressed — invoice billed to a third-party payer", code: "payer_billed" };
     }
 
@@ -2813,7 +2918,7 @@ const InvoiceService = {
       .where({ id: invoice.customer_id })
       .first();
     if (!customer?.phone) {
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await restoreClaimAndQueuedSend();
       await reverseSmsCreditOnFailure();
       throw new Error("Customer has no phone number");
     }
@@ -2962,7 +3067,7 @@ const InvoiceService = {
       logger.warn(
         `[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`,
       );
-      await restoreSendClaim(invoiceId, previousStatus, claimed);
+      await restoreClaimAndQueuedSend();
       await reverseSmsCreditOnFailure();
       return {
         sent: false,
@@ -3152,7 +3257,31 @@ const InvoiceService = {
         }
         return { sent: true, payUrl, finalizeError: err.message };
       }
+      // A DIRECT caller (batch sendImmediately, the AI-assistant send tool,
+      // the collections voice path — no wrapping sendViaSMSAndEmail) has no
+      // other retry rail for a send-window / provider hold: sendViaSMSAndEmail
+      // already requeues this exact shape for ITS OWN direct callers (below,
+      // sharing this same step) — mirror it here so a directly-called
+      // sendViaSMS doesn't just throw the hold away and lose the pay link
+      // (Codex r12 follow-on P1 #4131). A wrapped call (allowClaimed true)
+      // leaves this to the wrapper, which owns the claim and decides per its
+      // own allowClaimed contract.
+      let queuedReplacementSecured = false;
+      if (!allowClaimed
+        && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(err.code)
+        && err.deferred && err.nextAllowedAt && err.smsBody && err.toPhone) {
+        const requeue = await requeueHeldPayLinkSms({
+          invoiceId, customerId: invoice.customer_id, code: err.code,
+          nextAllowedAt: err.nextAllowedAt, heldBody: err.smsBody, heldToPhone: err.toPhone,
+        });
+        queuedReplacementSecured = requeue.scheduled === true;
+      }
       await restoreSendClaim(invoiceId, previousStatus, claimed);
+      // The queue row this claim's adoption cancelled is only safe to leave
+      // cancelled when a fresh replacement now owns the delivery — otherwise
+      // restore it (Codex r12 follow-on P1 #4131): a failed send must never
+      // silently drop a customer's already-scheduled pay-link text.
+      if (!queuedReplacementSecured) await restoreConsumedQueuedSend(consumedQueuedSendRows);
       // Provider/Twilio error after we auto-applied credit above — the pay
       // link was never delivered, so return the credit rather than leave it
       // consumed + the invoice edit-locked.
@@ -3222,7 +3351,7 @@ const InvoiceService = {
         payUrl: null,
       };
     }
-    const { previousStatus, claimed } = claim;
+    const { previousStatus, claimed, consumedQueuedSendRows } = claim;
     const { sendInvoiceEmail } = require("./invoice-email");
     const sms = { ok: false };
     const email = { ok: false };
@@ -3289,59 +3418,27 @@ const InvoiceService = {
       && sms.nextAllowedAt
       && sms.heldBody
       && sms.heldToPhone) {
-      try {
-        // Retry-idempotent: when the email leg fails, this method restores
-        // the send claim and callers legitimately retry — a second pass
-        // must adopt the already-queued row, not enqueue a duplicate that
-        // double-texts the pay link at 8:00 AM.
-        const existingQueued = await db("sms_log")
-          .whereIn("status", ["scheduled", "sending"])
-          .whereRaw("metadata->>'entry_point' = 'invoice_send_deferred'")
-          .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
-          .first("id");
-        if (existingQueued) {
-          sms.scheduled = true;
-          logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} already queued for the window open (${existingQueued.id}) — not re-queued`);
-        } else {
-          const TWILIO_NUMBERS = require("../config/twilio-numbers");
-          await db("sms_log").insert({
-            customer_id: claim.invoice.customer_id,
-            direction: "outbound",
-            from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-            to_phone: sms.heldToPhone,
-            message_body: sms.heldBody,
-            status: "scheduled",
-            scheduled_for: new Date(sms.nextAllowedAt),
-            message_type: "invoice",
-            metadata: JSON.stringify({
-              entry_point: "invoice_send_deferred",
-              invoice_id: invoiceId,
-              original_block_code: sms.code,
-              replay_purpose: "payment_link",
-              refresh_customer_phone: true,
-              resolve_from_by_customer: true,
-              // Delivery-time finalization (executor → markDeliverySent):
-              // when the email leg ALSO failed, this queued row is the only
-              // delivery, and without the flip the morning SMS would carry
-              // a live pay link while the invoice sits in draft with
-              // follow-ups unarmed. Idempotent when the email leg DID
-              // finalize (markDeliverySent no-ops on non-finalizable
-              // status / leaves 'sent' unchanged).
-              mark_invoice_delivery: true,
-            }),
-          });
-          sms.scheduled = true;
-          logger.info(`[invoice] Pay-link SMS for invoice ${invoiceId} held outside the 8AM-8PM ET send window — queued for ${sms.nextAllowedAt}`);
-        }
-      } catch (queueErr) {
+      // Shared with sendViaSMS's own direct-caller catch (Codex r12
+      // follow-on P1 #4131) — one insert-or-adopt step, not two copies.
+      const requeue = await requeueHeldPayLinkSms({
+        invoiceId,
+        customerId: claim.invoice.customer_id,
+        code: sms.code,
+        nextAllowedAt: sms.nextAllowedAt,
+        heldBody: sms.heldBody,
+        heldToPhone: sms.heldToPhone,
+      });
+      if (requeue.scheduled) {
+        sms.scheduled = true;
+      } else {
         // The scheduled rail does NOT own the held text — the email leg
         // below must not run: its success would finalize the invoice and
         // clear the send claim, permanently losing the requested SMS
         // pay-link leg. Failing the whole send keeps the claim
         // restorable, and the caller's retry adopts the queued row (or
-        // re-queues) via the idempotent lookup above.
+        // re-queues) via the idempotent lookup inside requeueHeldPayLinkSms.
         sms.holdUnowned = true;
-        logger.error(`[invoice] Held pay-link SMS requeue FAILED for invoice ${invoiceId}: ${queueErr.message} — deferring the whole send (email leg skipped) so the claim stays retryable`);
+        logger.error(`[invoice] Held pay-link SMS requeue unowned for invoice ${invoiceId} — deferring the whole send (email leg skipped) so the claim stays retryable`);
       }
     }
     delete sms.heldBody;
@@ -3413,6 +3510,12 @@ const InvoiceService = {
       }
     } else {
       await restoreSendClaim(invoiceId, previousStatus, claimed);
+      // The queue row this claim's adoption cancelled is only safe to leave
+      // cancelled when a fresh replacement now owns the delivery
+      // (sms.scheduled) — otherwise restore it (Codex r12 follow-on P1
+      // #4131): no channel delivered here must never silently drop a
+      // customer's already-scheduled pay-link text.
+      if (!sms.scheduled) await restoreConsumedQueuedSend(consumedQueuedSendRows);
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:
