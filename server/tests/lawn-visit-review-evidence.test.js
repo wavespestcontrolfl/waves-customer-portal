@@ -33,6 +33,12 @@ describe('technician lawn evidence and reconciliation', () => {
     ['Checked for chinch bugs and grubs; none found', NO_STRESS_LABEL],
     ['Grubs found and drought ruled out', 'grub activity'],
     ['Chinch bugs confirmed by float test', 'chinch bug activity'],
+    // An unrelated negative observation after a confirmed cause must not negate
+    // it, and ruling one cause out must not erase another observed condition.
+    ['Chinch bugs confirmed by float test; no irrigation today', 'chinch bug activity'],
+    ['No chinch bugs but weeds present', 'weed pressure'],
+    ['Dollar spot confirmed. No pets on site today', 'dollar spot'],
+    ['Checked for chinch bugs; none found, weeds present', 'weed pressure'],
   ])('resolves cause polarity: %s', (text, label) => {
     const built = review(run({ findings: [] }), { addedDetails: [{ text }] });
     expect(built.added_details[0]).toMatchObject({

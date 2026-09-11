@@ -18,6 +18,9 @@ const NEGATED_DETAIL_RE = /\b(?:none|nothing|no|without|not\s+(?:found|seen|pres
 // detail is negated only when every cause-bearing clause is, and a positive
 // clause names the finding (Codex #4149 r12).
 const CLAUSE_SPLIT_RE = /[;.!?]|\b(?:but|while|though|although|however)\b/i;
+// An answer to the clause before it, as opposed to any clause that merely
+// contains a negation word. Anchored: the clause must OPEN with the answer.
+const NEGATIVE_ANSWER_RE = /^(?:and\s+|but\s+)?(?:none|nothing|neither|negative|absent|all\s+clear|clear)\b|^(?:not|no)\s+(?:found|seen|present|observed|detected|evident|visible|active|confirmed|signs?)\b|^(?:ruled\s+out|excluded|did\s*n[o']t\s+(?:find|see|observe|detect|notice)|couldn['’]?t\s+(?:find|see|confirm))\b/i;
 function detailClauses(text) {
   return String(text || '').split(CLAUSE_SPLIT_RE).map((clause) => clause.trim()).filter(Boolean);
 }
@@ -32,10 +35,16 @@ function detailClauses(text) {
 // negation binds to the mentions it governs, not the whole clause (Codex
 // #4149 r13).
 const POSITIVE_MARKER_RE = /\b(?:confirmed|confirms?|active|present|found|seen|observed|visible|spreading|heavy|evident|positive|detected|noted)\b/i;
+// A clause carries a condition when it names a governed cause OR maps to any
+// other allowlisted label. SUMMARY_CAUSE_RE deliberately excludes generic class
+// words such as "weeds", so testing it alone dropped "No chinch bugs but weeds
+// present" down to a clean lawn: ruling one cause out must never erase another
+// condition the technician actually observed.
+const namesCondition = (text) => SUMMARY_CAUSE_RE.test(text) || safeConditionLabel(text, 'moderate') !== NO_STRESS_LABEL;
 function causePartsOf(clause) {
   const mentions = (String(clause).match(new RegExp(SUMMARY_CAUSE_RE.source, 'gi')) || []).length;
   const parts = mentions > 1 ? clause.split(/,|\b(?:and|or)\b/i).map((part) => part.trim()).filter(Boolean) : [clause];
-  const entries = parts.map((part) => ({ clause: part, cause: SUMMARY_CAUSE_RE.test(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
+  const entries = parts.map((part) => ({ clause: part, cause: namesCondition(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
   entries.forEach((entry, index) => {
     if (!entry.cause || entry.negation || entry.positive) return;
     const marked = entries.slice(index + 1).find((other) => other.negation || other.positive) || [...entries.slice(0, index)].reverse().find((other) => other.negation || other.positive);
@@ -47,9 +56,20 @@ function causeClausesOf(text) {
   const clauses = [];
   for (const clause of detailClauses(text)) {
     // Attach an answer such as "none found" before splitting a compound
-    // subject, so it also answers "checked for chinch bugs and grubs".
-    if (clauses.length && !SUMMARY_CAUSE_RE.test(clause) && NEGATED_DETAIL_RE.test(clause)) clauses[clauses.length - 1] += ` ${clause}`;
-    else clauses.push(clause);
+    // subject, so it also answers "checked for chinch bugs and grubs". Only a
+    // clause that OPENS with an answer attaches, and only that leading segment:
+    // NEGATED_DETAIL_RE matches any stray "no", so an unrelated observation
+    // ("…confirmed by float test; no irrigation today") used to be folded into
+    // the confirmed clause and negate it, while anything the answer is followed
+    // by ("none found, weeds present") must stay a clause of its own rather
+    // than ride along as part of the negated subject.
+    const answer = clauses.length ? NEGATIVE_ANSWER_RE.exec(clause) : null;
+    if (answer) {
+      const [head, ...rest] = clause.split(',');
+      clauses[clauses.length - 1] += ` ${head.trim()}`;
+      const remainder = rest.join(',').trim();
+      if (remainder) clauses.push(remainder);
+    } else clauses.push(clause);
   }
   return clauses.flatMap(causePartsOf).filter((entry) => entry.cause);
 }
