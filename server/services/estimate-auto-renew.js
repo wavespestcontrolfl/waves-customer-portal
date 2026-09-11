@@ -88,17 +88,39 @@ const EstimateAutoRenew = {
           }
           const newExpiry = new Date(Date.now() + RENEWAL_DAYS * 86400000);
           const updated = await db.transaction(async (trx) => {
-            if (est.estimate_group_id) {
+            // GH codex P2 r4 on #4309: `est` can be stale by the time this
+            // transaction runs — moved into, out of, or between groups. Lock
+            // and evaluate the row's CURRENT membership (not the outer
+            // read's), then pin that same membership on the write below so a
+            // membership change between the re-read and the update makes the
+            // update match nothing rather than silently renewing (and
+            // emailing) a now-grouped estimate a fixed sibling should block.
+            // Lock ORDER matches proposal saves and grouped sends (group
+            // advisory lock first, row lock second), so the membership is
+            // peeked without a row lock, the group lock is taken, and only
+            // then is the row locked and its membership confirmed.
+            const peek = await trx('estimates').where({ id: est.id }).first('estimate_group_id');
+            if (!peek) return 0;
+            let current = peek;
+            const currentGroupId = peek.estimate_group_id || null;
+            if (currentGroupId) {
               // Same lock proposal saves, grouped sends and extensions take,
               // then the fixed verdict is re-read under it before writing.
               await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-                ['estimate-group-send', String(est.estimate_group_id)]);
-              if (await fixedBidBlocksExtension(trx, est)) return 0;
+                ['estimate-group-send', String(currentGroupId)]);
+              current = await trx('estimates').where({ id: est.id }).forUpdate().first();
+              if (!current || (current.estimate_group_id || null) !== currentGroupId) return 0;
+              if (await fixedBidBlocksExtension(trx, current)) return 0;
             }
-            return trx('estimates').where({ id: est.id }).whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL).update({
-              expires_at: newExpiry,
-              renewal_count: trx.raw('COALESCE(renewal_count, 0) + 1'),
-            });
+            return trx('estimates').where({ id: est.id })
+              .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
+              .modify((qb) => (currentGroupId
+                ? qb.where({ estimate_group_id: currentGroupId })
+                : qb.whereNull('estimate_group_id')))
+              .update({
+                expires_at: newExpiry,
+                renewal_count: trx.raw('COALESCE(renewal_count, 0) + 1'),
+              });
           });
           if (!updated) continue;
 

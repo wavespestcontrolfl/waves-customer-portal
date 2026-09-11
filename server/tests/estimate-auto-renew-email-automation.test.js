@@ -23,6 +23,8 @@ function query(result) {
     forUpdate: jest.fn(() => chain),
     orderBy: jest.fn(() => chain),
     select: jest.fn(async () => result),
+    first: jest.fn(async () => result),
+    modify: jest.fn((fn) => { fn(chain); return chain; }),
     orWhereNull: jest.fn(() => chain),
     orWhereNotNull: jest.fn(() => chain),
     update: jest.fn(async () => 1),
@@ -102,13 +104,61 @@ describe('estimate auto-renew email automation cutover', () => {
   test('a grouped renewal re-reads the fixed verdict under the group lock before writing', async () => {
     const grouped = staleEstimate({ estimate_group_id: 'synthetic-group', estimate_data: { proposal: { enabled: true } } });
     const preflight = query([]);
+    // The transaction's own FOR UPDATE re-read (GH codex P2 r4 on #4309) —
+    // still in the same group at this point.
+    const peek = query({ estimate_group_id: 'synthetic-group' });
+    const reread = query({ ...grouped });
     const locked = query([{ estimate_data: { proposal: { enabled: true, validThrough: '2026-09-22' } } }]);
     const update = query([]);
-    mockDb.__estimateQueries = [query([grouped]), preflight, locked, update];
+    mockDb.__estimateQueries = [query([grouped]), preflight, peek, reread, locked, update];
     const { renewed } = await EstimateAutoRenew.checkAll();
     expect(renewed).toBe(0);
     expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(reread.forUpdate).toHaveBeenCalled();
     expect(mockDb.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), ['estimate-group-send', 'synthetic-group']);
+    expect(update.update).not.toHaveBeenCalled();
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('a candidate moved into a fixed-validity group between the outer read and the transaction is not renewed (GH codex P2 r4 on #4309)', async () => {
+    // Outer read sees it ungrouped — no group lock, no fixed-sibling check
+    // would run under the OLD (pre-fix) logic, which trusted est.estimate_group_id.
+    const ungroupedAtOuterRead = staleEstimate({ estimate_group_id: null, estimate_data: { proposal: { enabled: true } } });
+    // Top-level preflight (still using the stale outer-read est) sees no group, so it never queries siblings.
+    // Between that read and the transaction, an operator moves the row into a group with a live fixed sibling.
+    const peek = query({ estimate_group_id: 'new-fixed-group' });
+    const reread = query({ ...ungroupedAtOuterRead, estimate_group_id: 'new-fixed-group' });
+    const lockedSiblingCheck = query([{ estimate_data: { proposal: { enabled: true, validThrough: '2026-10-01' } } }]);
+    const update = query([]);
+    mockDb.__estimateQueries = [query([ungroupedAtOuterRead]), peek, reread, lockedSiblingCheck, update];
+
+    const { renewed } = await EstimateAutoRenew.checkAll();
+
+    expect(renewed).toBe(0);
+    expect(reread.forUpdate).toHaveBeenCalled();
+    expect(mockDb.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), ['estimate-group-send', 'new-fixed-group']);
+    expect(update.update).not.toHaveBeenCalled();
+    expect(mockProcessTrigger).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('a candidate whose group changed (not just appeared) between the outer read and the transaction is not renewed when the new group has a fixed sibling', async () => {
+    // Outer read sees an old, harmless group — the top-level preflight clears it.
+    const staleGroupEst = staleEstimate({ estimate_group_id: 'old-group', estimate_data: { proposal: { enabled: true } } });
+    const preflightOldGroup = query([]); // no fixed siblings in the old group
+    // Re-read under the transaction finds it now in a different group.
+    const peek = query({ estimate_group_id: 'new-group' });
+    const reread = query({ ...staleGroupEst, estimate_group_id: 'new-group' });
+    const newGroupSiblingCheck = query([{ estimate_data: { proposal: { enabled: true, validThrough: '2026-10-15' } } }]);
+    const update = query([]);
+    mockDb.__estimateQueries = [query([staleGroupEst]), preflightOldGroup, peek, reread, newGroupSiblingCheck, update];
+
+    const { renewed } = await EstimateAutoRenew.checkAll();
+
+    expect(renewed).toBe(0);
+    expect(mockDb.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), ['estimate-group-send', 'new-group']);
     expect(update.update).not.toHaveBeenCalled();
     expect(mockProcessTrigger).not.toHaveBeenCalled();
     expect(mockEmailSend).not.toHaveBeenCalled();
@@ -135,9 +185,23 @@ describe('estimate auto-renew email automation cutover', () => {
     mockSendTemplate.mockResolvedValue({ sent: true, message: { id: 'message-1' } });
   });
 
+  test('a candidate that stays ungrouped still renews, with the update pinned to estimate_group_id IS NULL (regression guard)', async () => {
+    const estimate = staleEstimate();
+    const reread = query(estimate);
+    const update = query(1);
+    mockDb.__estimateQueries.push(query([estimate]), reread, update);
+
+    await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+    expect(reread.forUpdate).not.toHaveBeenCalled();
+    expect(mockDb.raw).not.toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), expect.anything());
+    expect(update.whereNull).toHaveBeenCalledWith('estimate_group_id');
+    expect(update.update).toHaveBeenCalled();
+  });
+
   test('uses the email template automation executor when the gate is enabled', async () => {
     const estimate = staleEstimate();
-    mockDb.__estimateQueries.push(query([estimate]), query(1));
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(1));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -176,7 +240,7 @@ describe('estimate auto-renew email automation cutover', () => {
       estimate_data: JSON.stringify({ noEngagementAutomation: true }),
     });
     const normal = staleEstimate();
-    mockDb.__estimateQueries.push(query([optedOut, normal]), query(1));
+    mockDb.__estimateQueries.push(query([optedOut, normal]), query(normal), query(1));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -204,7 +268,7 @@ describe('estimate auto-renew email automation cutover', () => {
   test('keeps the direct template send fallback when the automation gate is disabled', async () => {
     mockIsEnabled.mockReturnValue(false);
     const estimate = staleEstimate();
-    mockDb.__estimateQueries.push(query([estimate]), query(1));
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(1));
 
     await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
 
@@ -222,4 +286,13 @@ describe('estimate auto-renew email automation cutover', () => {
       }),
     }));
   });
+});
+
+test('a grouped candidate whose membership moves between the group lock and the row lock is left for the next sweep (GH codex P2 r4 on #4309)', async () => {
+  const grouped = { id: 'synthetic-drift', status: 'sent', customer_email: 'drift@example.invalid', estimate_group_id: 'group-a', estimate_data: { proposal: { enabled: true } }, expires_at: new Date(Date.now() - 1000), renewal_count: 0 };
+  const update = query([]);
+  mockDb.__estimateQueries = [query([grouped]), query([]), query({ estimate_group_id: 'group-a' }), query({ ...grouped, estimate_group_id: 'group-b' }), update];
+  const { renewed } = await EstimateAutoRenew.checkAll();
+  expect(renewed).toBe(0);
+  expect(update.update).not.toHaveBeenCalled();
 });

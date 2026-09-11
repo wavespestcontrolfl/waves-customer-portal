@@ -2077,8 +2077,8 @@ async function clearEstimateDeliveryClaim(estimateId, deliveryClaimToken) {
 // on the markers, so a message that still slips out carries a link that
 // serves nothing. DB failure fails CLOSED (the leg is retryable);
 // unparseable estimate_data proceeds, matching the verdict read.
-async function estimateInvalidatedJustBeforeHandoff(estimateId) {
-  const row = await db('estimates').where({ id: estimateId }).first('archived_at', 'estimate_data');
+async function estimateInvalidatedJustBeforeHandoff(estimateId, now = null) {
+  const row = await db('estimates').where({ id: estimateId }).first('id', 'estimate_group_id', 'archived_at', 'estimate_data');
   if (!row) return true;
   if (row.archived_at) return true;
   let data;
@@ -2091,7 +2091,27 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId) {
   // A bedroom re-price in flight (estimate-clarify-asks): the draft's
   // dollars are about to be replaced — not sendable meanwhile.
   if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) return true;
-  return !!(await staleCallLinkageReason(db, data));
+  if (await staleCallLinkageReason(db, data)) return true;
+  // Short-link, template and PDF preparation can carry an immediate send
+  // past midnight after the preflight deadline check (GH codex P2 r4 on
+  // #4309): re-read every property's fixed hold right before the provider
+  // handoff. A passed deadline THROWS the validity 409 so the leg records a
+  // definite failure with that message, never an uncertain handoff.
+  if (typeof now === 'function') {
+    const at = now();
+    if (row.estimate_group_id) {
+      const fixedSiblings = await db('estimates')
+        .where({ estimate_group_id: row.estimate_group_id })
+        .whereNot({ id: row.id })
+        .whereNull('archived_at')
+        .whereIn('status', GROUP_FIXED_HOLD_STATUSES)
+        .whereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`)
+        .select('estimate_data');
+      for (const sibling of Array.isArray(fixedSiblings) ? fixedSiblings : []) assertBidSendDate(sibling, at);
+    }
+    assertBidSendDate(row, at);
+  }
+  return false;
 }
 
 async function recordManualSendAttempt(estimateId, attempt, patch) {
@@ -2568,7 +2588,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
             throw new Error('invalidated_before_delivery');
           }
           const result = await sendCustomerMessage({
@@ -2668,7 +2688,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
           const freshPriceLine = estimateEmailPriceLine(freshEstimate);
-          if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
+          if (await estimateInvalidatedJustBeforeHandoff(estimate.id, now)) {
             throw new Error('invalidated_before_delivery');
           }
           if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
@@ -4299,6 +4319,35 @@ router.put('/:id/proposal', async (req, res, next) => {
           disposition_note: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_note END"),
           updated_at: db.fn.now(),
         });
+    }
+    // A hold that SHRANK or was cleared (GH codex P1 r4 on #4309): members
+    // the old date had widened still carry the obsolete later expiry, and an
+    // ordinary member's public view and acceptance read expires_at, so the
+    // customer could keep accepting it until the old date. Every published
+    // member sitting exactly on the old widened value is brought back to the
+    // longer of its own window (its fixed date, or the standard window from
+    // its delivery) and the group's remaining longest hold. A member on any
+    // other value (its own extension grant) is untouched.
+    const previousAuthoredExpiry = hadFixedValidity ? proposalExpiry(estimate) : null;
+    if (groupId && previousAuthoredExpiry && (!authoredExpiry || authoredExpiry < previousAuthoredExpiry)) {
+      const remainingHold = [authoredExpiry, await longestGroupFixedValidity(trx, estimate)].filter(Boolean)
+        .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
+      const widened = await trx('estimates')
+        .where({ estimate_group_id: groupId })
+        .whereNot({ id: estimate.id })
+        .whereNull('archived_at')
+        .whereNull('price_locked_at')
+        .whereIn('status', ['sent', 'viewed'])
+        .where('expires_at', previousAuthoredExpiry)
+        .select('id', 'sent_at', 'scheduled_at', 'estimate_data');
+      for (const member of Array.isArray(widened) ? widened : []) {
+        const deliveredAt = member.sent_at || member.scheduled_at;
+        const own = estimateExpiresAt(() => (deliveredAt ? new Date(deliveredAt) : new Date()), member);
+        const next = remainingHold && remainingHold > own ? remainingHold : own;
+        if (next < previousAuthoredExpiry) {
+          await trx('estimates').where({ id: member.id, expires_at: previousAuthoredExpiry }).update({ expires_at: next, updated_at: db.fn.now() });
+        }
+      }
     }
     // The version THIS write committed, read under the same lock: the editor
     // keys its next save and its delivery review on it, so a save that lands
