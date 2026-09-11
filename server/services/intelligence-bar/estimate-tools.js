@@ -925,6 +925,11 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'pricingconfig',
   'priorqualifyingservices',
   'recurringcustomer',
+  // Stored-estimate replay stamps: server-derived from the saved row only
+  // (see CLIENT_IDENTITY_FIELDS in admin-estimate-persistence). A model-
+  // supplied termite plan stamp would price the annual plan past its gate.
+  'termitepricingknobs',
+  'treeshrubpricingknobs',
   'routedriveminutes',
   'servicespecificcredits',
   'servicespecificdiscounts',

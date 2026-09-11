@@ -1381,7 +1381,11 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       const plan = constants.TERMITE.annualPlan;
       setNumber(plan, 'setupPerStation', ap.setup_per_station ?? ap.setupPerStation, money);
       setNumber(plan, 'annualBase', ap.annual_base ?? ap.annualBase, money);
-      setNumber(plan, 'annualStep', ap.annual_step ?? ap.annualStep, money);
+      // A ZERO step is a valid shape (flat annual fee regardless of station
+      // count — the admin validator allows it); only a negative or
+      // non-finite step is refused and falls back to the default.
+      const step = readFiniteNumber(ap.annual_step ?? ap.annualStep);
+      if (step !== undefined && step >= 0) plan.annualStep = money(step);
       const bracket = Number(ap.bracket_stations ?? ap.bracketStations);
       if (Number.isInteger(bracket) && bracket > 0) plan.bracketStations = bracket;
       const floor = Number(ap.bracket_floor ?? ap.bracketFloor);

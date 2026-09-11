@@ -1481,7 +1481,14 @@ router.post('/estimate', async (req, res, next) => {
       }
     } catch { /* non-fatal — fall back to in-memory constants */ }
 
-    const estimate = pricingEngine.generateEstimate(req.body || {});
+    // Replay knobs (termitePricingKnobs, treeShrubPricingKnobs, the
+    // recurring-customer identity flags) are server-derived from a STORED
+    // estimate row — never a posted value. This sandbox prices whatever the
+    // admin UI sends, so strip them exactly as the persistence path does: a
+    // posted `termitePricingKnobs.plan` stamp must not price the annual plan
+    // past an unset GATE_TERMITE_ANNUAL_PLAN (pre-push audit #4424).
+    const { sanitizeClientIdentityFields } = require('../services/admin-estimate-persistence');
+    const estimate = pricingEngine.generateEstimate(sanitizeClientIdentityFields({ ...(req.body || {}) }));
     res.json({ estimate });
   } catch (err) { next(err); }
 });

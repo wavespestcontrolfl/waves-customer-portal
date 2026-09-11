@@ -7,12 +7,22 @@
  * instead of today's install + quarterly monitoring; rental and the bond
  * rider are retired on the plan; the plan's own constants replay.
  */
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
+jest.mock('../services/pricing-engine', () => {
+  const actual = jest.requireActual('../services/pricing-engine');
+  return { ...actual, needsSync: () => false };
+});
 const constants = require('../services/pricing-engine/constants');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { termiteAnnualPlanFeeForStations } = require('../services/pricing-engine/service-pricing');
 const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
-const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+const adminPricingConfigRouter = require('../routes/admin-pricing-config');
+const { validatePricingConfigData } = adminPricingConfigRouter;
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 const replay = require('../services/estimate-tree-shrub-knob-replay');
 
@@ -176,6 +186,14 @@ describe('annual plan — DB overlay and admin validation', () => {
     expect(constants.TERMITE.annualPlan).toMatchObject({ setupPerStation: 30, annualBase: 259, annualStep: 50, bracketStations: 5, bracketFloor: 10 });
   });
 
+  test('pricing_config.termite_annual_plan accepts a zero step (flat annual fee) and refuses a negative one', async () => {
+    await expect(syncConstantsFromDB(planDb({ annual_step: 0 }))).resolves.toBe(true);
+    expect(constants.TERMITE.annualPlan.annualStep).toBe(0);
+    expect(termiteAnnualPlanFeeForStations(25)).toBe(249);
+    await expect(syncConstantsFromDB(planDb({ annual_step: -5 }))).resolves.toBe(true);
+    expect(constants.TERMITE.annualPlan.annualStep).toBe(50);
+  });
+
   test('the save path normalizes camelCase aliases to one snake_case spelling', () => {
     const { normalizeIncomingConfigData } = require('../routes/admin-pricing-config');
     expect(normalizeIncomingConfigData('termite_annual_plan', { setupPerStation: 35, annual_base: 259, annualStep: 60 }))
@@ -196,5 +214,31 @@ describe('annual plan — DB overlay and admin validation', () => {
       expect(verdict.ok).toBe(false);
       expect(verdict.error).toContain(`termite_annual_plan.${key}`);
     }
+  });
+});
+
+describe('replay-stamp provenance (pre-push audit #4424)', () => {
+  test('the admin pricing sandbox strips a posted termitePricingKnobs stamp — gate off prices the quarterly program', async () => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const handler = adminPricingConfigRouter.stack
+      .find((layer) => layer.route?.path === '/estimate' && layer.route.methods.post).route.stack[0].handle;
+    const body = {
+      homeSqFt: 2400, lotSqFt: 9000,
+      termitePricingKnobs: { plan: 'annual_protection', stationCost: 24 },
+      services: { termite: { plan: 'annual_protection' } },
+    };
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    const next = jest.fn();
+    await handler({ body }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.json).toHaveBeenCalledTimes(1);
+    const { estimate } = res.json.mock.calls[0][0];
+    // The posted body itself is left alone (a copy is sanitized).
+    expect(body.termitePricingKnobs).toEqual({ plan: 'annual_protection', stationCost: 24 });
+    const termite = (estimate.lineItems || []).find((l) => l.service === 'termite_bait');
+    expect(termite).toBeTruthy();
+    expect(termite.plan).toBe('quarterly');
+    expect(termite.setupFee).toBeUndefined();
+    expect(termite.pricingKnobs.plan).not.toBe('annual_protection');
   });
 });
