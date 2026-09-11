@@ -59,7 +59,7 @@ function addedDetail(entry, path, errors) {
   return { text: entry.text.trim(), zone: normalizePhotoZone(entry.zone) };
 }
 
-function appliedProduct(entry, path, errors, addressable) {
+function appliedProduct(entry, path, errors, issued) {
   if (!isText(entry.product_name, 180)) { errors.push(`${path}.product_name is required (180 characters or fewer)`); return null; }
   for (const [key, max] of [['product_id', 80], ['role', 40]]) {
     if (!optionalText(entry[key], max)) { errors.push(`${path}.${key} must be ${max} characters or fewer`); return null; }
@@ -68,12 +68,13 @@ function appliedProduct(entry, path, errors, addressable) {
   if (!Array.isArray(refs) || refs.length > 20 || refs.some((ref) => !isText(ref, 40))) {
     errors.push(`${path}.addresses_findings must be an array of at most 20 finding ids`); return null;
   }
-  // A product may only address IDs this run already issued: model findings plus
-  // technician details that were persisted with a server-assigned T id. A typo
-  // or client-invented id would otherwise be reported as unmapped treatment and
-  // would raise the technician high-water mark on a value we never issued.
+  // A product may only address IDs this review leaves behind: a model finding of
+  // the run, or a technician detail ID the allocator assigns — including one
+  // assigned to a detail sent in this same request. A typo or invented id would
+  // otherwise be reported as unmapped treatment, and because it feeds
+  // storedTechnicianHighWater it would push the mark past anything we issued.
   const addresses = [...new Set(refs.map((ref) => ref.trim()))];
-  const unknown = addresses.filter((ref) => !addressable.has(ref));
+  const unknown = addresses.filter((ref) => !issued.has(ref));
   if (unknown.length) {
     errors.push(`${path}.addresses_findings is not a finding of this run: ${unknown.join(', ')}`); return null;
   }
@@ -90,15 +91,21 @@ function validateReview(body = {}, run) {
   const source = isObject(body) ? body : {};
   if (!isObject(body)) errors.push('review must be an object');
   const known = new Set(parseJsonArray(run?.findings).map((finding) => finding?.finding_id).filter(Boolean));
-  const addressable = new Set([
-    ...known,
-    ...parseJsonArray(run?.added_details).map((row) => row?.finding_id).filter(Boolean).map(String),
-  ]);
   const seen = new Set();
   const sent = Object.fromEntries(REVIEW_FIELDS.map((field) => [field, source[field] != null]));
   const reviewedFindings = reviewList(source, 'reviewedFindings', 50, errors, (entry, path) => findingEdit(entry, path, known, seen, errors));
   const addedDetails = reviewList(source, 'addedDetails', 10, errors, (entry, path) => addedDetail(entry, path, errors));
-  const appliedProducts = reviewList(source, 'appliedProducts', 25, errors, (entry, path) => appliedProduct(entry, path, errors, addressable));
+  // The technician IDs this review will actually leave behind, from the same
+  // allocator buildReview runs: unchanged details keep their stored ID, so an
+  // upper bound (one new ID per detail sent) would accept a T2 that is never
+  // assigned and report the product as an unsupported application.
+  const { ids } = technicianFindingIds(
+    mergedReviewInputs(run, { sent, reviewedFindings, addedDetails, appliedProducts: [] }).addedDetails,
+    parseJsonArray(run?.added_details),
+    storedTechnicianHighWater(parseJsonObject(run?.reconciliation)),
+  );
+  const issued = new Set([...known, ...ids]);
+  const appliedProducts = reviewList(source, 'appliedProducts', 25, errors, (entry, path) => appliedProduct(entry, path, errors, issued));
   return { errors, review: { provided: Object.values(sent).some(Boolean), sent, reviewedFindings, addedDetails, appliedProducts } };
 }
 
