@@ -53,8 +53,11 @@ export function splitArticleSections(content) {
     if (text.length > 0) sections.push({ kind: "text", body: text.join("\n") });
     text = [];
   };
+  let fenced = false;
   String(content || "").split(/\r?\n/).forEach((line) => {
-    const match = HEADING_LINE.exec(line);
+    // A `# comment` inside a ``` / ~~~ fence is code, not a heading.
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    const match = fenced ? null : HEADING_LINE.exec(line);
     if (!match) {
       text.push(line);
       return;
