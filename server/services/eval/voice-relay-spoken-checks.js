@@ -1106,6 +1106,11 @@ const CALLBACK_NEGATED = `(?!\\s*(?:\\w+ly\\s+)?(?:not|n[\\x27\\u2019]t|never)\\
 // verb ("...so the office CALLS her", not "...call her") — its own ACTION
 // table below.
 const CALLBACK_DELEGATE = '(?:the office|our office|someone|somebody|a team member|the technician|the tech)';
+// A negation before ANY delegation shape — "I won't have the office call
+// her", "I'm not going to tell the technician to call your mother", "I
+// can't arrange for someone to call her" — is a refusal, the same way
+// CALLBACK_NEGATED blocks the direct branch right after its own modal.
+const CALLBACK_DELEGATION_NEGATED = `(?<!\\b(?:will not|not going to|not planning to|unable to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+){0,3})`;
 const CALLBACK_DELEGATION_INFINITIVE = `(?:(?:have|get|ask) ${CALLBACK_DELEGATE}(?: to)?|(?:tell|let) ${CALLBACK_DELEGATE} (?:know )?to|arrange for ${CALLBACK_DELEGATE} to)`;
 const CALLBACK_DELEGATION_FINITE = `(?:(?:make sure|see (?:to it )?that) ${CALLBACK_DELEGATE}|set it up so ${CALLBACK_DELEGATE}|pass (?:this|it) (?:along|on) so ${CALLBACK_DELEGATE})`;
 const CALLBACK_VERB = '(?:call|phone|ring|reach(?: out to)?|contact|get in touch with|follow up with|get back to|text|email)';
@@ -1138,8 +1143,8 @@ function no_account_holder_callback(value, record, { spoken }) {
   const targets = [...ACCOUNT_HOLDER_TARGETS, ...value.targets].join('|');
   const re = new RegExp(
     `\\b(?:(?:${CALLBACK_PROMISER}${CALLBACK_MODAL}${CALLBACK_NEGATED})\\s+${CALLBACK_ACTION}`
-    + `|${CALLBACK_DELEGATION_INFINITIVE}\\s+${CALLBACK_ACTION}`
-    + `|${CALLBACK_DELEGATION_FINITE}\\s+${CALLBACK_ACTION_FINITE})`
+    + `|${CALLBACK_DELEGATION_NEGATED}${CALLBACK_DELEGATION_INFINITIVE}\\s+${CALLBACK_ACTION}`
+    + `|${CALLBACK_DELEGATION_NEGATED}${CALLBACK_DELEGATION_FINITE}\\s+${CALLBACK_ACTION_FINITE})`
     + `\\s+(?:${targets})\\b`,
     'i',
   );
@@ -1166,15 +1171,20 @@ function no_account_holder_callback(value, record, { spoken }) {
 const SAFETY_REPORTING_VERB = '(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment)';
 const SAFETY_WORD_FILLER = `(?:[\\w\\x27\\u2019]+[\\s,]+)`;
 // A refusal phrase — negation + a short filler + a reporting verb — exempts
-// everything from right after it to the end of that same sentence. This is
-// computed ONCE per utterance (safetyExemptSpans) and shared by every
-// guarantee pattern below, rather than each pattern re-deriving its own
-// filler distance: SAFETY_SUBJECT (below) can put several words between a
-// refusal verb and a claim like "…is safe for your dog", more than a
-// per-pattern filler cap could reach even though the whole clause is
-// plainly refused — one shared span keeps every pattern agreeing about
-// what "refused" covers.
+// everything from right after it to the end of THAT REFUSED CLAUSE, not the
+// whole utterance: "I can't promise anything, but honestly it's safe for
+// dogs." refuses only the first clause, and the "but" pivots to a fresh,
+// unrefused claim. Computed ONCE per utterance (safetyExemptSpans) and
+// shared by every guarantee pattern below, rather than each pattern
+// re-deriving its own filler distance: SAFETY_SUBJECT (below) can put
+// several words between a refusal verb and a claim like "…is safe for your
+// dog", more than a per-pattern filler cap could reach even though the
+// clause is plainly refused — one shared span keeps every pattern agreeing
+// about what "refused" covers.
 const SAFETY_REFUSAL_VERB_RE = new RegExp(`\\b(?:not|never|cannot|unable|\\w+n[\\x27\\u2019]t)[\\s,]+${SAFETY_WORD_FILLER}{0,2}${SAFETY_REPORTING_VERB}\\b[\"\\x27\\u201c\\u2018(]?`, 'gi');
+// The end of the refused clause: a sentence boundary, or a pivot into a new
+// clause ("but", "though", "however", "that said") that drops the refusal.
+const SAFETY_REFUSAL_CLAUSE_BOUNDARY_RE = /[.!?;]|\bbut\b|\bthough\b|\bhowever\b|\bthat said\b/i;
 /** [[start, end), …) — text ranges a refusal phrase exempts. */
 function safetyExemptSpans(text) {
   const spans = [];
@@ -1182,7 +1192,7 @@ function safetyExemptSpans(text) {
   let m = SAFETY_REFUSAL_VERB_RE.exec(text);
   while (m) {
     const start = m.index + m[0].length;
-    const boundary = text.slice(start).search(SENTENCE_SPLIT_RE);
+    const boundary = text.slice(start).search(SAFETY_REFUSAL_CLAUSE_BOUNDARY_RE);
     spans.push([start, boundary === -1 ? text.length : start + boundary]);
     m = SAFETY_REFUSAL_VERB_RE.exec(text);
   }
