@@ -12793,6 +12793,12 @@ const CallRecordingProcessor = {
           // advisory only (owner's chosen behavior: the booking proceeds
           // exactly as before; a triage card + admin bell surface the clash).
           let bookingTimeConflicts = [];
+          // Owner ruling 2026-09-11 (capacity activation, option 1): each phone
+          // INSERT tries the shared scheduling fence with a short cap. These
+          // record the outcome per row for the triage card / logs only — a
+          // missed fence changes nothing about the booking.
+          let bookingFence = null;
+          let followUpFence = null;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -13098,6 +13104,23 @@ const CallRecordingProcessor = {
                           logger.warn(`[call-proc] follow-up technician ${followUpTechId} is not assignable; seeding unassigned`);
                           followUpTechId = null;
                         }
+                      }
+                      // Same bounded fence for the child's own date + tech
+                      // (the child usually lands on a different date than the
+                      // primary, so the primary's fence does not cover it).
+                      // Try-only, never waits past the cap, never blocks the
+                      // seed; a miss is recorded for the card and logs. Its
+                      // own nested savepoint (codex r1 P2): a query error must
+                      // not abort THIS savepoint and lose the promised child.
+                      try {
+                        const { fenceBookingDay } = require('./scheduling/occupancy');
+                        followUpFence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId }));
+                        if (!followUpFence.acquired) {
+                          logger.warn(`[call-proc] follow-up fence missed for ${maskSid(callSid)} on ${fuPlan.scheduledDate} (${followUpFence.reason}); seeding unfenced`);
+                        }
+                      } catch (fenceErr) {
+                        followUpFence = { acquired: false, keys: [], reason: 'error' };
+                        logger.warn(`[call-proc] follow-up fence failed for ${maskSid(callSid)} (seeding unfenced): ${fenceErr.message}`);
                       }
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
@@ -13478,21 +13501,46 @@ const CallRecordingProcessor = {
                 // guard above already owns those). Best-effort: a query
                 // failure must never fail the booking txn.
                 //
-                // NO date-wide occupancy lock in THIS txn, and this read is
-                // therefore only the fast-path signal, not the verdict: it
-                // sees committed truth as of now, so a concurrent rung-1
-                // writer mid-commit — or a second concurrent call booking —
-                // is invisible to it. The AUTHORITATIVE detection is the
-                // post-commit recheck below (recheckCallBookingConflicts),
-                // which takes the date lock in a short transaction of its
-                // own. The lock stays out of this txn on purpose: the
-                // booking must never wait on (or lose to) a scheduling
-                // lock, and the post-insert work here row-locks leads/
-                // customers/estimates — tables the estimate-accept txn
-                // locks BEFORE taking rung 1 inside commitReservation, so
-                // holding rung 1 across them would invert the lock order
-                // (deadlock-abort risk to a booking the owner says always
-                // proceeds).
+                // BOUNDED FENCE (owner ruling 2026-09-11, capacity activation
+                // option 1): TRY rung 1 (date occupancy) + rung 3 (tech-day,
+                // or unassigned-day) for this date with pg_try_advisory_xact_lock,
+                // polling for at most ~1.5s (CALL_BOOKING_FENCE_WAIT_MS). A
+                // capacity certification (arrival-route.js verifyArrivalCapacity)
+                // holds these for milliseconds while it FOR UPDATEs the day's
+                // rows and persists the route; under READ COMMITTED that lock
+                // cannot see a phantom phone INSERT, so without a shared fence
+                // a phone row committed between certify and persist left the
+                // reservation's route stale. Holding the fence at INSERT time
+                // makes the row either visible to that read or inserted after
+                // that commit. The fence is taken BEFORE this txn's first row
+                // lock (the re-service customer FOR UPDATE and the technician
+                // FOR SHARE below), matching the global order. try-locks never
+                // wait, so the booking can never deadlock on it; when the cap
+                // expires it books exactly as before — unfenced, with the
+                // post-commit recheck (recheckCallBookingConflicts) as the
+                // authoritative detector. The booking NEVER fails or stalls on
+                // this fence. The attempt runs in its OWN savepoint (codex r1
+                // P2): a PostgreSQL error inside it (statement timeout) would
+                // otherwise leave `trx` aborted and fail the conflict read and
+                // insert with 25P02 — the savepoint rolls that back and the
+                // booking proceeds unfenced. Granted rungs survive the
+                // savepoint's release (xact-scoped). Fenced against the tech
+                // resolved before the txn; if the FOR SHARE recheck below
+                // books unassigned instead, it re-fences the unassigned-day
+                // rung there (codex r1 P2).
+                try {
+                  const { fenceBookingDay } = require('./scheduling/occupancy');
+                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));
+                  if (!bookingFence.acquired) {
+                    logger.warn(`[call-proc] booking fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
+                  }
+                } catch (fenceErr) {
+                  bookingFence = { acquired: false, keys: [], reason: 'error' };
+                  logger.warn(`[call-proc] booking fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                }
+                // With the fence granted this read is authoritative for the
+                // primary's date; without it, it is only the fast-path signal
+                // and the post-commit recheck is the verdict.
                 try {
                   const { findConflictingVisits } = require('./scheduling/occupancy');
                   bookingTimeConflicts = await findConflictingVisits({
@@ -13713,6 +13761,25 @@ const CallRecordingProcessor = {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
                     insertData.technician_id = null;
+                    // The fence above covered the ORIGINAL tech's day rung;
+                    // this row now lands on the unassigned-day rung, which is
+                    // what a capacity certification fences for unassigned
+                    // work. Re-fence it (rung 1 is already held and re-tries
+                    // as a no-op), same try-only savepoint contract, INSIDE
+                    // the first attempt's deadline (codex r2 P2): one insert
+                    // never polls past the single documented cap — an
+                    // exhausted budget means exactly one try, no sleep. The
+                    // outcome replaces the recorded one (codex r1 P2).
+                    try {
+                      const { fenceBookingDay } = require('./scheduling/occupancy');
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));
+                      if (!bookingFence.acquired) {
+                        logger.warn(`[call-proc] unassigned-day re-fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
+                      }
+                    } catch (fenceErr) {
+                      bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      logger.warn(`[call-proc] unassigned-day re-fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                    }
                     // The staff-visible note was built before this recheck; an
                     // unassigned visit must not claim a technician owns it.
                     if (defaultTechnicianName && typeof insertData.notes === 'string') {
@@ -14240,6 +14307,14 @@ const CallRecordingProcessor = {
                         // is about — the card is unreadable without it.
                         window_end: windowEnd || '10:00',
                         service: svc.service_type,
+                        // Whether each INSERT held the shared scheduling fence
+                        // (owner ruling 2026-09-11). A missed fence is the one
+                        // case where an overlap could have been created rather
+                        // than merely detected, so the office can tell them apart.
+                        fence: {
+                          primary: bookingFence ? bookingFence.acquired : null,
+                          follow_up: followUpCreated ? (followUpFence ? followUpFence.acquired : null) : null,
+                        },
                         conflicting_visits: bookingTimeConflicts.map((r) => ({
                           id: r.id,
                           customer_id: r.customer_id,
@@ -14316,6 +14391,8 @@ const CallRecordingProcessor = {
                           callSid,
                           conflicting_visit_ids: bookingTimeConflicts.map((r) => r.id),
                           time_sanity_flags: timeSanityFlags,
+                          fence_primary: bookingFence ? bookingFence.acquired : null,
+                          fence_follow_up: followUpCreated ? (followUpFence ? followUpFence.acquired : null) : null,
                         },
                       },
                     );

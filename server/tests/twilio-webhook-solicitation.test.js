@@ -24,7 +24,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate 
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})), isKnownOwnerPhone: jest.fn(() => false) }));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({})), clearSuppression: jest.fn(async () => ({})),
 }));
@@ -47,7 +47,15 @@ jest.mock('../middleware/spam-block', () => ({ checkInboundBlock: jest.fn(async 
 jest.mock('../services/contact-correction', () => ({ detectContactCorrectionIntent: jest.fn(() => false) }));
 jest.mock('../services/contact-correction-queue', () => ({}));
 jest.mock('../services/recipient-optin', () => ({ markRecipientOptin: jest.fn(async () => true) }));
-jest.mock('../utils/known-caller-phone', () => ({ knownCallerPhoneExists: jest.fn(async () => false) }));
+jest.mock('../utils/known-caller-phone', () => ({
+  knownCallerPhoneExists: jest.fn(async () => false),
+  // The STOP/HELP/START compliance gate (twilio-webhook.js, merged from
+  // fix/sms-compliance-known-senders) also calls this — unrelated to this
+  // file's solicitation-classifier scenarios, but a missing export makes
+  // that gate's `.catch()` handler unreachable (a synchronous throw on a
+  // non-function skips it), erroring every request through this handler.
+  findKnownCallerCustomer: jest.fn(async () => null),
+}));
 jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => true, startSmsThreadDraft: jest.fn(async () => ({})) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: jest.fn(async () => ({})) }));
