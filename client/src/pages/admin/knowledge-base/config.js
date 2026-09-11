@@ -43,7 +43,10 @@ export function formatDate(value, includeTime = false) {
   if (!value) return "Never";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Unavailable";
-  return includeTime ? date.toLocaleString() : date.toLocaleDateString();
+  // Wall-clock fields render in the portal's canonical Eastern time, not the
+  // admin's browser zone (AGENTS.md America/New_York discipline).
+  const options = { timeZone: "America/New_York" };
+  return includeTime ? date.toLocaleString(undefined, options) : date.toLocaleDateString(undefined, options);
 }
 
 export function sentenceCase(value, fallback = "Unknown") {
