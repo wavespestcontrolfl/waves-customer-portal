@@ -145,9 +145,11 @@ describe('EvidenceEditor', () => {
     await waitFor(() => expect(lastCallBody('/allocations')).toBeTruthy());
     expect(lastCallBody('/allocations').net_value_cents).toBe(60000);
     expect(screen.getByLabelText('Performed service')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Close review' })).toBeDisabled();
     resolveAllocation({ id: 'alloc-new', coverage_start: '2026-04-05', coverage_end: '2026-04-05', net_value_cents: 60000, planned_visits: 1 });
     await waitFor(() => expect(screen.getByLabelText('Service-value allocation')).toHaveValue('alloc-new'));
     expect(screen.getByLabelText('Performed service')).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Close review' })).not.toBeDisabled();
     expect(screen.getByLabelText('Application number in original allocation')).toHaveValue(1);
   });
 

@@ -81,7 +81,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   if (detail) visitOptions.set(selected, { value: selected, label: `${detail.visit.service_date} · ${detail.visit.service_type} · ${words(detail.visit.status)}` });
   const options = [{ value: '', label: 'Choose a performed service…' }, ...visitOptions.values()];
   const allocationLocked = detail?.revisions.some(revision => revision.allocation_id != null);
-  return <section className="pg-card pg-form"><div className="pg-row"><h2>Review service evidence</h2><Button variant="secondary" disabled={busy} onClick={onCancel}>Close review</Button></div>{error && <p role="alert" className="pg-error">{error}</p>}
+  return <section className="pg-card pg-form"><div className="pg-row"><h2>Review service evidence</h2><Button variant="secondary" disabled={busy || allocationSaving} onClick={onCancel}>Close review</Button></div>{error && <p role="alert" className="pg-error">{error}</p>}
     <Field label="Performed service" options={options} disabled={busy || allocationSaving} value={selected} onChange={event => setSelected(event.target.value)} />
     {selected && !detail && !error && <p role="status">Loading service evidence…</p>}
     {detail && <>
