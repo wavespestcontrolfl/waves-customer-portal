@@ -73,18 +73,20 @@ async function handleMerge(req, res, { linkAsProperty }) {
     // the IB merge tool and the task-context pair authority — never
     // re-derive tier/reasons logic here.
     const eligibility = await duplicatePairEligibility(winnerId, loserId);
-    if (eligibility.code === 'not_in_queue') {
-      return res.status(409).json({ error: 'Pair is no longer in the duplicate queue — refresh and retry' });
-    }
-    if (eligibility.code === 'red_pair') {
-      return res.status(409).json({ error: eligibility.reason });
-    }
-    // A positive address reason means the duplicate carries a DIFFERENT (or
-    // incomparable) service address — a plain merge would retire its only
-    // copy (the backfill never overwrites the winner's street). Force the
-    // link-as-property path so the address survives as a property row.
-    if (!linkAsProperty && eligibility.code === 'address_conflict') {
-      return res.status(409).json({ error: eligibility.reason });
+    // Every non-eligible answer refuses (not_in_queue, red_pair, an
+    // unreadable dismissals table, any code added later) — never a list of
+    // known refusals that a new code could fall through. The ONE admitted
+    // exception: a positive address reason means the duplicate carries a
+    // DIFFERENT (or incomparable) service address — a plain merge would
+    // retire its only copy (the backfill never overwrites the winner's
+    // street) — and the link-as-property path exists precisely to keep it
+    // as a property row, so that path may proceed on address_conflict.
+    if (!eligibility.eligible && !(linkAsProperty && eligibility.code === 'address_conflict')) {
+      if (eligibility.code === 'not_in_queue') {
+        return res.status(409).json({ error: 'Pair is no longer in the duplicate queue — refresh and retry' });
+      }
+      const status = eligibility.code === 'dismissals_unreadable' ? 503 : 409;
+      return res.status(status).json({ error: eligibility.reason || 'This pair cannot be merged right now' });
     }
     const result = await executeMerge({
       winnerId,
