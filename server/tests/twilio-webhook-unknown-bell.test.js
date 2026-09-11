@@ -274,3 +274,31 @@ test('a consumed START or a courtesy row does not consume the first alert window
   await receive('Please quote pest control.');
   expect(triggerNotification).toHaveBeenCalledTimes(1);
 });
+
+test('a loud reaction from an unknown sender rings the sms_reply bell', async () => {
+  mockState.ai = false;
+  await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('loud reactions from an unknown sender are throttled through the SAME per-sender window as ordinary texts (claude pre-push audit P1)', async () => {
+  mockState.ai = false;
+  await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  // Fixed: the reaction path used to call ringSmsReplyBell directly,
+  // completely unthrottled — a second loud reaction from the same sender
+  // inside the 4h window would ring again, reproducing the exact
+  // 19-alerts-from-one-thread spam incident this throttle exists to
+  // prevent. It now shares dispatchUnknownSenderAlert with the ordinary
+  // alertEligible path, so this second one must NOT ring again.
+  await receive('Questioned "We will treat inside"', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('a loud reaction consumes the window for a later ordinary text from the same sender, and vice versa', async () => {
+  mockState.ai = false;
+  await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});

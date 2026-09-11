@@ -725,21 +725,22 @@ router.post('/sms', async (req, res) => {
       }
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
-      // Unknown sender: route a loud tapback through the SAME sms_reply
-      // bell/push an ordinary text gets (codex #4210 head-round P1) — the
-      // known-customer branch below returned here BEFORE reaching it, so on
-      // an ordinary location line a stranger's loud reaction fell back to
-      // the retired (policy-silenced) internal_alert owner forward, and on
-      // the AI line it skipped even that, ringing nobody. Tracking numbers
-      // stay excluded (their first-contact channel is new_lead, mirroring
-      // alertEligible's isTrackingLeadInbound exclusion above).
+      // Unknown sender: route a loud tapback through the SAME throttled
+      // sms_reply alert an ordinary text gets (codex #4210 head-round P1;
+      // throttle wiring fixed per claude pre-push audit P1 — this used to
+      // call ringSmsReplyBell directly, unthrottled, which could reproduce
+      // the exact 19-alerts-from-one-thread spam incident the throttle
+      // exists to prevent if a spam sender's replies keep tripping the
+      // reaction classifier) — the known-customer branch below returned
+      // here BEFORE reaching it, so on an ordinary location line a
+      // stranger's loud reaction fell back to the retired (policy-silenced)
+      // internal_alert owner forward, and on the AI line it skipped even
+      // that, ringing nobody. Tracking numbers stay excluded (their
+      // first-contact channel is new_lead, mirroring alertEligible's
+      // isTrackingLeadInbound exclusion below).
       if (!quietReaction && !customer && numberConfig.type !== 'domain_tracking' && numberConfig.type !== 'van_tracking'
         && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-        try {
-          await ringSmsReplyBell({ customer: null, From, MessageSid, message: Body });
-        } catch (e) {
-          if (!e.alreadyRead) logger.error(`[notifications] unknown-sender sms_reply (reaction) trigger failed: ${e.message}`);
-        }
+        await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
       }
       if (!quietReaction && !isAiNumber) {
         // Loud reaction (answer to a question, or a dislike/question mark):
@@ -1269,59 +1270,21 @@ router.post('/sms', async (req, res) => {
     const alertEligible = (Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiAnswered && !knownInboundNotified && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE);
 
     if (alertEligible) {
-      // Returns whether a bell/push actually landed, so the claim below
-      // knows whether to release itself for a later message to retry.
-      const ringNow = async () => {
-        try {
-          const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
-          return Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
-        } catch (e) {
-          if (e.alreadyRead) { logger.info('[notifications] sms_reply skipped — thread read before the bell'); return false; }
-          logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
-          return false;
-        }
-      };
-      const windowHeld = async () => {
-        try {
-          const prior = await db('sms_log')
-            .where({ direction: 'inbound', from_phone: From })
-            // Only a prior delivered bell/push consumes the throttle window.
-            // Commands, courtesy replies and successful AI turns do not alert.
-            .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
-            .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
-            .whereNot('twilio_sid', MessageSid)
-            .first('id');
-          return Boolean(prior);
-        } catch (e) {
-          logger.warn('[twilio-webhook] repeat-sender check failed', { code: e.code || 'unknown' });
-          return false; // fail open: a missed alert is worse than a duplicate
-        }
-      };
       if (!customer && smsLogEntry?.created_at) {
-        // Claim the window atomically FIRST — no transaction held across the
-        // check or the dispatch (codex #4210 head-round P1). Losing the
-        // claim means another delivery already owns this sender's window.
-        const claimed = await claimUnknownSenderAlertWindow(From);
-        if (claimed) {
-          // Secondary guard: a row stamped sms_reply_alerted by any other
-          // writer (e.g. the loud-reaction path, which never claims) still
-          // counts — but this claim was just freshly stamped expiring 4h
-          // from NOW, not from that receipt's actual timestamp. Release it
-          // rather than leave an over-long hold: the real expiry already
-          // lives on the receipt itself, so the next message's windowHeld()
-          // keeps reading the correct (possibly much sooner) cutoff instead
-          // of this claim's inflated one (codex pre-push audit P1).
-          if (await windowHeld()) {
-            await releaseUnknownSenderAlertClaim(From);
-          } else if (!(await ringNow())) {
-            // Nothing actually delivered — release so a later message in
-            // this window gets another chance (mirrors the voicemail/
-            // dropped-call claim contract's release-on-non-delivery half).
-            await releaseUnknownSenderAlertClaim(From);
-          }
-        }
+        // Claim + throttle-check + dispatch, shared with the loud-reaction
+        // path above (claude pre-push audit P1: a second unthrottled unknown-
+        // sender alert path defeats the same per-sender throttle both exist
+        // to enforce).
+        await dispatchUnknownSenderAlert({ From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
       } else {
-        await ringNow();
+        // Known customer whose thread bell above did not land — not
+        // throttled; every one of their messages may alert.
+        try {
+          await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
+        } catch (e) {
+          if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
+          else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+        }
       }
     }
 
@@ -2009,6 +1972,66 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
     }
   } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
   return stats;
+}
+
+// Any prior receipt in the 4h window counts (codex #4210 head-round P2): the
+// predicate requires sms_reply_alerted=true (stamped only on a delivered
+// bell) and excludes the current SID, so the same-window double-ring this
+// throttle damps is closed by the atomic claim, not by row ordering.
+async function hasRecentUnknownSenderReceipt(From, excludeSid) {
+  try {
+    const prior = await db('sms_log')
+      .where({ direction: 'inbound', from_phone: From })
+      .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
+      .where('created_at', '>', new Date(Date.now() - UNKNOWN_SENDER_ALERT_WINDOW_MS))
+      .whereNot('twilio_sid', excludeSid)
+      .first('id');
+    return Boolean(prior);
+  } catch (e) {
+    logger.warn('[twilio-webhook] repeat-sender check failed', { code: e.code || 'unknown' });
+    return false; // fail open: a missed alert is worse than a duplicate
+  }
+}
+
+// The ONE throttled path to an unknown-sender sms_reply alert — claim,
+// secondary-check, dispatch, release-on-non-delivery. Used by BOTH the
+// ordinary-text alertEligible path and the loud-reaction path (claude
+// pre-push audit P1: the reaction path used to call ringSmsReplyBell
+// directly, bypassing the throttle entirely — the exact 19-alerts-from-
+// one-thread spam incident this throttle exists to prevent could reproduce
+// through it if a spam sender's replies keep tripping the reaction
+// classifier).
+async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
+  // Claim the window atomically FIRST — no transaction held across the
+  // check or the dispatch (codex #4210 head-round P1). Losing the claim
+  // means another delivery already owns this sender's window.
+  const claimed = await claimUnknownSenderAlertWindow(From);
+  if (!claimed) return;
+  // Secondary guard: a row stamped sms_reply_alerted by any other writer
+  // still counts — but this claim was just freshly stamped expiring 4h from
+  // NOW, not from that receipt's actual timestamp. Release it rather than
+  // leave an over-long hold: the real expiry already lives on the receipt
+  // itself, so the next message's check keeps reading the correct (possibly
+  // much sooner) cutoff instead of this claim's inflated one (codex
+  // pre-push audit P1).
+  if (await hasRecentUnknownSenderReceipt(From, MessageSid)) {
+    await releaseUnknownSenderAlertClaim(From);
+    return;
+  }
+  let delivered = false;
+  try {
+    const stats = await ringSmsReplyBell({ customer: null, From, MessageSid, message });
+    delivered = Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+  } catch (e) {
+    if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
+    else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+  }
+  if (!delivered) {
+    // Nothing actually delivered — release so a later message in this
+    // window gets another chance (mirrors the voicemail/dropped-call claim
+    // contract's release-on-non-delivery half).
+    await releaseUnknownSenderAlertClaim(From);
+  }
 }
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {
