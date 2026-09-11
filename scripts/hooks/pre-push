@@ -560,6 +560,14 @@ run_claude_audit() {
 
   [ "$HAVE_CLAUDE" = "1" ] || return 1
 
+  # The diff and the rubric are assembled ONCE into $base_prompt, and every
+  # attempt is built from it. They used to be assembled inline per attempt,
+  # and the retry rebuild quietly omitted AGENTS.md — so attempt 2, which
+  # fires precisely when the model already struggled, was the one judged
+  # against the short focus list instead of the full rubric. Keeping the
+  # shared part in one file makes that drift impossible rather than merely
+  # fixed.
+  local base_prompt="$TMPDIR_RUN/claude-base-$idx.txt"
   {
     cat "$prompt_file"
     echo ""
@@ -570,6 +578,10 @@ run_claude_audit() {
     echo "short focus list above."
     echo ""
     cat "$AGENTS_MD"
+  } > "$base_prompt"
+
+  {
+    cat "$base_prompt"
     echo ""
     echo "── Output contract ────────────────────────────────────────────────"
     echo "Reply with a SINGLE JSON object and NOTHING else: no prose before"
@@ -698,7 +710,7 @@ run_claude_audit() {
       # nothing is the single worst failure this hook can have, so the retry
       # is built from $prompt_file (diff included) and never replaces it.
       {
-        cat "$prompt_file"
+        cat "$base_prompt"
         echo ""
         echo "── Output contract (RETRY) ────────────────────────────────────────"
         echo "Your previous reply to this exact review request did not follow the"
