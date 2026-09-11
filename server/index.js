@@ -356,9 +356,9 @@ app.use('/api/public/a2a', (req, res, next) => {
 // in-router layer; this is the one that runs first.
 app.use('/api/ops/digest', (req, res, next) => {
   if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
-    // Same body as middleware/errors.js notFound — indistinguishable from
-    // an unknown route while dark.
-    return res.status(404).json({ error: `Route not found: ${req.method} ${String(req.originalUrl || '').split('?')[0]}` });
+    // middleware/errors.js notFoundBody — the one formatter, so this stays
+    // indistinguishable from an unknown route while dark.
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
   }
   next();
 });

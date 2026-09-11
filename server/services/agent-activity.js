@@ -399,6 +399,10 @@ function clampWindowHours(value) {
 // "failed" forever (codex P1 r2 on #4392). The windowed set fills the
 // rest; ids are merged so a row never renders twice.
 const DIGEST_COLUMNS = ['id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at'];
+// Safety bound on the pinned query only — an order of magnitude above any
+// real pinned set (a handful of digests a day; the fall-off retires them),
+// never the feed's MAX_ITEMS, so the "pinned rows survive" promise holds.
+const PINNED_CAP = 5000;
 async function loadDigestRows(db, since) {
   const base = () => db('notifications')
     .select(...DIGEST_COLUMNS)
@@ -411,7 +415,7 @@ async function loadDigestRows(db, since) {
           .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))
         .orWhere((legacy) => legacy.whereNull('read_at').andWhereRaw("title ~* '^FIX:'")))
     .orderBy('created_at', 'desc')
-    .limit(MAX_ITEMS);
+    .limit(PINNED_CAP);
   const windowed = await base()
     .where('created_at', '>=', since)
     .orderBy('created_at', 'desc')

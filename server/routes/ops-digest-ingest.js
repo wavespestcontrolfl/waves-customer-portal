@@ -38,6 +38,7 @@ const rateLimit = require('express-rate-limit');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { safeEqual } = require('../middleware/hermes-auth');
+const { notFoundBody } = require('../middleware/errors');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { inAppEnabled, resolveOpsDigest, CATEGORY } = require('../services/ops-digest');
 
@@ -63,12 +64,11 @@ const ingestLimiter = rateLimit({
   skip: () => process.env.NODE_ENV === 'test',
 });
 
-// The SAME body an unknown route gets from middleware/errors.js notFound —
-// a distinguishable 404 body would tell a prober the route exists while
-// dark (codex P0 r2 on #4392). Built from originalUrl so the text matches
-// whether this runs at app level or inside the mounted router.
+// The SAME body an unknown route gets — middleware/errors.js notFoundBody,
+// the one formatter, never a retyped string — so a distinguishable 404
+// cannot tell a prober the route exists while dark (codex P0 r2 on #4392).
 function genericNotFound(req, res) {
-  return res.status(404).json({ error: `Route not found: ${req.method} ${String(req.originalUrl || req.path || '').split('?')[0]}` });
+  return res.status(404).json(notFoundBody(req));
 }
 
 // Dark-route check FIRST, ahead of the limiter: while the token is unset

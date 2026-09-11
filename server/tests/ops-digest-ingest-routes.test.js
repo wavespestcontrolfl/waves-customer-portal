@@ -253,6 +253,31 @@ describe('POST /resolve (fall-off rule)', () => {
   });
 });
 
+describe('dark 404 body equals the app-level unknown-route body', () => {
+  test('genericNotFound, the router and the pre-router gate all emit exactly what middleware/errors.js notFound emits', async () => {
+    const { notFound } = require('../middleware/errors');
+    const { genericNotFound } = router._private;
+    delete process.env.OPS_DIGEST_INGEST_TOKEN;
+    const capture = () => { const r = { status: jest.fn(() => r), json: jest.fn(() => r) }; return r; };
+    const req = { method: 'POST', originalUrl: '/api/ops/digest?x=1', path: '/api/ops/digest' };
+    const a = capture(); notFound(req, a);
+    const b = capture(); genericNotFound({ ...req, path: '/' }, b); // inside the mounted router req.path is the remainder
+    expect(b.json.mock.calls[0][0]).toEqual(a.json.mock.calls[0][0]);
+    // and over HTTP: an unknown sibling path through the real notFound vs the dark route
+    const app = express();
+    app.use('/api/ops/digest', ...router.ingestPreParsers);
+    app.use('/api/ops/digest', router);
+    app.use(notFound);
+    const s2 = app.listen(0); const base = `http://127.0.0.1:${s2.address().port}`;
+    try {
+      const dark = await (await fetch(`${base}/api/ops/digest`, { method: 'POST' })).json();
+      const unknown = await (await fetch(`${base}/api/ops/nothing`, { method: 'POST' })).json();
+      expect(Object.keys(dark)).toEqual(Object.keys(unknown));
+      expect(dark.error.replace('/api/ops/digest', '/api/ops/nothing')).toBe(unknown.error);
+    } finally { await new Promise((r) => s2.close(r)); }
+  });
+});
+
 describe('pre-parser chain (mounted ahead of the global JSON parser, like server/index.js)', () => {
   function chainServer() {
     const app = express();
