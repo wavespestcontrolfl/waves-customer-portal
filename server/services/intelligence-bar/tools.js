@@ -166,7 +166,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'find_duplicates',
-    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes. If the queue cannot be read, queue is [] and queue_error says why.',
+    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes. If the queue cannot be read, queue is [] and queue_error says why; if there are more groups than fit, queue_truncated says how many were held back.',
     input_schema: {
       type: 'object',
       properties: {
@@ -370,6 +370,11 @@ Use for: "build the report for the customer we just finished", "who did we finis
 
 // actionContext (route-derived, never model-supplied): { technicianId,
 // isAdmin, confirmed } — only writes that must record WHO committed read it.
+// Both halves of find_duplicates(phone) are capped at the same number: the
+// raw phone grouping and the canonical queue built from findDuplicateGroups,
+// whose own query has no cap (codex #4348 r11 P2).
+const DUPLICATE_QUEUE_LIMIT = 50;
+
 async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
@@ -918,7 +923,7 @@ async function findDuplicates(input) {
       .select('phone', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
       .whereNull('deleted_at').whereNotNull('phone').where('phone', '!=', '')
       .groupBy('phone').having(db.raw('COUNT(*)'), '>', 1)
-      .orderByRaw('COUNT(*) DESC').limit(50);
+      .orderByRaw('COUNT(*) DESC').limit(DUPLICATE_QUEUE_LIMIT);
     // The canonical duplicate queue (customer-dedupe.js findDuplicateGroups:
     // normalized phones, pickWinner, tiers, reasons) — the ids and
     // winner/loser roles merge_customers needs; the raw grouping above
@@ -927,11 +932,21 @@ async function findDuplicates(input) {
     // in queue_error so callers never branch on the shape of one field.
     let queue = [];
     let queueError = null;
+    let queueTruncated = null;
     try {
       const { findDuplicateGroups } = require('../customer-dedupe');
       const groups = await findDuplicateGroups();
       const name = (row) => `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
-      queue = groups.map((g) => ({
+      // findDuplicateGroups has no cap of its own, so this payload grows
+      // with the customer base and lands in a model context (codex #4348
+      // r11 P2). Capped at the same 50 the raw grouping above uses, with
+      // the truncation stated rather than silent — the queue is a worklist
+      // the model walks pair by pair, so the top of it is what matters.
+      const capped = groups.slice(0, DUPLICATE_QUEUE_LIMIT);
+      if (groups.length > capped.length) {
+        queueTruncated = { returned: capped.length, total: groups.length, note: `Showing the first ${capped.length} of ${groups.length} duplicate groups — work these, then call find_duplicates again.` };
+      }
+      queue = capped.map((g) => ({
         phone: g.phone10 || null,
         winner: { customer_id: g.winner.id, name: name(g.winner) },
         candidates: g.candidates.map((c) => ({ customer_id: c.loser.id, name: name(c.loser), tier: c.tier, reasons: c.reasons })),
@@ -939,7 +954,7 @@ async function findDuplicates(input) {
     } catch (err) {
       queueError = `duplicate queue unavailable: ${err.message}`;
     }
-    return { match_on: 'phone', duplicates: dupes, queue, ...(queueError ? { queue_error: queueError } : {}) };
+    return { match_on: 'phone', duplicates: dupes, queue, ...(queueTruncated ? { queue_truncated: queueTruncated } : {}), ...(queueError ? { queue_error: queueError } : {}) };
   }
 
   if (match_on === 'email') {

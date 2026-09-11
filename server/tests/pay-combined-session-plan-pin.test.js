@@ -11,7 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/stripe', () => ({ retrievePaymentIntent: jest.fn(async () => null), cancelPaymentIntent: jest.fn() }));
 beforeEach(() => { jest.clearAllMocks(); });
 
-const { listUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessions } = require('../services/pay-combined');
+const { listUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSessions, planStampedSessionRelease, applyStampedSessionRelease } = require('../services/pay-combined');
 
 function database(rowsByCustomer) {
   const fn = jest.fn((table) => {
@@ -156,4 +156,31 @@ test('an intent whose OUTCOME changed since the card refuses with previewChanged
   // No pin at all (a direct call with no card) → the outcome is not asserted.
   StripeService.retrievePaymentIntent.mockImplementation(async () => ({ id: 'pi_a', status: 'processing', metadata: { combined_allocation: '{"x":1}' } }));
   await expect(releaseUnconfirmedCombinedSessions(database({ L: rows }), rows)).resolves.toEqual({ released: 0, inFlight: 1 });
+});
+
+
+test('planning cancels nothing and retrieves each distinct intent ONCE, however many invoices it is stamped on (Codex r11 P1 + P2)', async () => {
+  StripeService.retrievePaymentIntent.mockImplementation(async (id) => PI[id] || null);
+  // pi_a stamped on three invoices, pi_b (processing → in_flight) on one.
+  const rows = [
+    { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' },
+    { id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_a' },
+    { id: 'inv-3', invoice_number: 'INV-3', stripe_payment_intent_id: 'pi_a' },
+    { id: 'inv-4', invoice_number: 'INV-4', stripe_payment_intent_id: 'pi_b' },
+  ];
+  const plan = await planStampedSessionRelease(database({ L: rows }), rows);
+  expect(StripeService.retrievePaymentIntent).toHaveBeenCalledTimes(2); // not 4
+  expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled(); // planning writes nothing
+  expect(plan.inFlight).toBe(1);
+  expect(plan.intents).toEqual([
+    { piId: 'pi_a', outcome: 'cancel', status: 'requires_payment_method' },
+    { piId: 'pi_b', outcome: 'in_flight', status: 'processing' },
+  ]);
+  // Applying the plan performs the writes, and never re-reads Stripe.
+  StripeService.retrievePaymentIntent.mockClear();
+  const applied = await applyStampedSessionRelease(database({ L: rows }), plan);
+  expect(StripeService.retrievePaymentIntent).not.toHaveBeenCalled();
+  expect(StripeService.cancelPaymentIntent).toHaveBeenCalledTimes(1);
+  expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_a');
+  expect(applied).toEqual({ released: 1, inFlight: 1 });
 });

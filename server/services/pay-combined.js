@@ -684,22 +684,32 @@ async function lockCombinedCustomerStable(database, invoiceId, snapshotCustomerI
 }
 
 /**
+ * PHASE 1 of the release: retrieve each DISTINCT stamped PaymentIntent once,
+ * decide its outcome, and check it against the card's pin. Performs NO
+ * Stripe writes, so a caller holding several lists can plan them all and
+ * abort before anything is cancelled (codex #4348 r11 P1 — a cancellation
+ * is an external effect the database transaction cannot roll back).
+ *
+ * One retrieval per intent, not per stamped invoice (codex #4348 r11 P2):
+ * a combined PI is stamped onto every invoice in its allocation, so the
+ * per-row loop re-read the same object up to nine times per pass, and the
+ * final pass runs while the merge locks are held.
+ *
  * `expectedOutcomes`: { [paymentIntentId]: outcome } approved on the card.
  * The id pin (lockAndPinStampedSessionsForCustomer) only proves the SAME
  * intents are still stamped; it says nothing about what they will do. A
  * customer confirming a checkout directly with Stripe between the locked
- * fingerprint check and this release flips `cancel` → `in_flight`, and the
- * caller's own in-flight guards may not cover that side — so the approval
- * would have promised a cancellation that never happens. Any intent whose
- * outcome no longer matches its pin refuses with `previewChanged`
- * (codex #4348 r10 P1).
+ * fingerprint check and this release flips `cancel` → `in_flight`, so the
+ * approval would have promised a cancellation that never happens. Any
+ * intent whose outcome no longer matches its pin refuses with
+ * `previewChanged` (codex #4348 r10 P1).
  */
-async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice = false, expectedOutcomes = null } = {}) {
+async function planStampedSessionRelease(database, rows, { invalidatedSingleInvoice = false, expectedOutcomes = null } = {}) {
   const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
-  let released = 0;
+  const StripeService = require('./stripe');
+  const intents = [];
   let inFlight = 0;
   for (const piId of piIds) {
-    const StripeService = require('./stripe');
     let pi;
     try {
       pi = await StripeService.retrievePaymentIntent(piId);
@@ -719,14 +729,6 @@ async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedS
       err.previewChanged = true;
       throw err;
     }
-    if (outcome === 'kept_single_invoice') continue;
-    // Already canceled (codex r24 P2): a prior release's cancel succeeded
-    // but the stamp cleanup failed — retry the cleanup instead of skipping.
-    if (outcome === 'stamps_cleared') {
-      await clearPaymentIntentStamps(database, piId);
-      released += 1;
-      continue;
-    }
     // NO microdeposit exemption here (codex r10 P1, unlike stop-dunning):
     // a pending bank verification is still an UNCAPTURED session, and the
     // customer completing it later would charge debt that now belongs to
@@ -738,6 +740,26 @@ async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedS
     if (outcome === 'in_flight') {
       logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
       inFlight += 1;
+    }
+    intents.push({ piId, outcome, status: pi.status });
+  }
+  return { intents, inFlight };
+}
+
+/**
+ * PHASE 2: the Stripe writes and stamp cleanup for an already-planned
+ * release. Never re-reads Stripe — the plan decided every outcome.
+ */
+async function applyStampedSessionRelease(database, plan) {
+  const StripeService = require('./stripe');
+  let released = 0;
+  for (const { piId, outcome } of plan.intents) {
+    if (outcome === 'kept_single_invoice' || outcome === 'in_flight') continue;
+    // Already canceled (codex r24 P2): a prior release's cancel succeeded
+    // but the stamp cleanup failed — retry the cleanup instead of skipping.
+    if (outcome === 'stamps_cleared') {
+      await clearPaymentIntentStamps(database, piId);
+      released += 1;
       continue;
     }
     // Remaining outcomes cancel: 'cancel' (a combined session) and
@@ -752,7 +774,13 @@ async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedS
     released += 1;
     logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
   }
-  return { released, inFlight };
+  return { released, inFlight: plan.inFlight };
+}
+
+/** Plan + apply in one step — the contract every existing caller had. */
+async function releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice = false, expectedOutcomes = null } = {}) {
+  const plan = await planStampedSessionRelease(database, rows, { invalidatedSingleInvoice, expectedOutcomes });
+  return applyStampedSessionRelease(database, plan);
 }
 
 /**
@@ -1293,6 +1321,8 @@ module.exports = {
   releaseUnconfirmedCombinedSessionsForCustomer,
   lockAndPinStampedSessionsForCustomer,
   releaseUnconfirmedCombinedSessions,
+  planStampedSessionRelease,
+  applyStampedSessionRelease,
   listUnconfirmedCombinedSessionsForCustomer,
   stampedSessionOutcome,
   releaseCombinedSessionBeforeCollection,

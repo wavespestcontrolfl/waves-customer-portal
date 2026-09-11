@@ -2602,6 +2602,44 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
       return { n: 0 };
     });
   }
+  it('plans BOTH sides before cancelling anything, so a deferring in-flight session never leaves a cancelled checkout behind (Codex r11 P1)', async () => {
+    // The merge aborts on a loser-side in-flight session. If the winner's
+    // cancellable checkout had already been cancelled in Stripe, the
+    // rollback could not undo it — the invoice would point at a dead
+    // payment link on a merge that never happened.
+    const pay = require('../services/pay-combined');
+    const order = [];
+    const planSpy = jest.spyOn(pay, 'planStampedSessionRelease').mockImplementation(async (_db, rows) => {
+      const side = rows[0]?.side;
+      order.push(`plan:${side}`);
+      return { intents: [{ piId: `pi_${side}`, outcome: side === 'loser' ? 'in_flight' : 'cancel' }], inFlight: side === 'loser' ? 1 : 0 };
+    });
+    const applySpy = jest.spyOn(pay, 'applyStampedSessionRelease').mockImplementation(async (_db, plan) => {
+      order.push(`apply:${plan.intents[0].piId}`);
+      return { released: 1, inFlight: plan.inFlight };
+    });
+    try {
+      // Both sides are planned; the loser's in-flight verdict aborts before
+      // either apply runs.
+      const plans = [
+        await pay.planStampedSessionRelease(null, [{ side: 'winner' }]),
+        await pay.planStampedSessionRelease(null, [{ side: 'loser' }]),
+      ];
+      expect(order).toEqual(['plan:winner', 'plan:loser']);
+      expect(plans[1].inFlight).toBe(1);
+      expect(applySpy).not.toHaveBeenCalled();
+      // The executor's fence reads exactly this way: every plan first, the
+      // defer checks next, applies last.
+      const src = require('fs').readFileSync(require.resolve('../services/customer-dedupe.js'), 'utf8');
+      const fence = src.split('const winnerPlan = await PayCombined.planStampedSessionRelease')[1].split('if (Object.keys(backfills).length)')[0];
+      expect(fence.indexOf('loserPlan.inFlight')).toBeLessThan(fence.indexOf('applyStampedSessionRelease'));
+      expect(fence.indexOf('winnerPlan.inFlight')).toBeLessThan(fence.indexOf('applyStampedSessionRelease'));
+    } finally {
+      planSpy.mockRestore();
+      applySpy.mockRestore();
+    }
+  });
+
   it('the pair adjudication lock folds UUID case, so an uppercase dismissal and a lowercase merge take the SAME lock (Codex r10 P1)', async () => {
     const keys = [];
     const trx = { raw: jest.fn(async (_sql, bindings) => { keys.push(bindings[0]); return { rows: [] }; }) };

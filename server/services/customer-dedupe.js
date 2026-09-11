@@ -2076,18 +2076,28 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           .filter((sess) => sess.outcome)
           .map((sess) => [String(sess.payment_intent_id), sess.outcome]))
         : null);
-      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.winner, { invalidatedSingleInvoice: invalidatedSingle.winner, expectedOutcomes: pinnedOutcomes('winner') });
-      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.loser, { invalidatedSingleInvoice: invalidatedSingle.loser, expectedOutcomes: pinnedOutcomes('loser') });
-      if (loserRelease.inFlight > 0) {
+      // PLAN both sides first, CANCEL nothing yet (codex #4348 r11 P1). A
+      // Stripe cancellation is an external effect this transaction cannot
+      // roll back: cancelling the winner's checkout and only then finding
+      // the loser has money in flight would abort the merge having already
+      // killed a live payment link, leaving the invoice pointing at a
+      // cancelled checkout. Every defer decision is made before the first
+      // write, and the same holds within one side's list.
+      const winnerPlan = await PayCombined.planStampedSessionRelease(trx, stampedSessionRows.winner, { invalidatedSingleInvoice: invalidatedSingle.winner, expectedOutcomes: pinnedOutcomes('winner') });
+      const loserPlan = await PayCombined.planStampedSessionRelease(trx, stampedSessionRows.loser, { invalidatedSingleInvoice: invalidatedSingle.loser, expectedOutcomes: pinnedOutcomes('loser') });
+      if (loserPlan.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
       }
       // A payer-CHANGING merge defers on WINNER-side in-flight money too
       // (codex r33 P1): a blank-payer winner absorbing the loser's payer
       // would change the billing owner of a debit the homeowner already
       // authorized — settlement never re-resolves ownership.
-      if (winnerRelease.inFlight > 0 && !winner.payer_id && loser.payer_id) {
+      if (winnerPlan.inFlight > 0 && !winner.payer_id && loser.payer_id) {
         throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
       }
+      // Past every defer: now the Stripe writes.
+      await PayCombined.applyStampedSessionRelease(trx, winnerPlan);
+      await PayCombined.applyStampedSessionRelease(trx, loserPlan);
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
