@@ -145,14 +145,15 @@ describe('callback cards', () => {
   });
 });
 describe('callback actions', () => {
-  it.each(['fulfill', 'two_hours', 'tomorrow'])('sends a versioned canonical PATCH for %s', async (action) => {
+  it.each(['fulfill', 'dismiss', 'two_hours', 'tomorrow'])('sends a versioned canonical PATCH for %s', async (action) => {
     render(<FollowThroughCards ui={ui} />);
     await screen.findByText(row.description);
-    if (action === 'fulfill') fireEvent.click(screen.getByText('Done'));
+    const button = { fulfill: 'Done', dismiss: 'Dismiss' }[action];
+    if (button) fireEvent.click(screen.getByText(button));
     else fireEvent.change(screen.getByLabelText('Snooze callback for Synthetic Caller'), { target: { value: action } });
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/call-recordings/commitments/callback-1', {
-      method: 'PATCH', body: JSON.stringify({ action: action === 'fulfill' ? 'fulfill' : 'snooze',
-        ...(action === 'fulfill' ? {} : { snooze: action }), expected_at: row.updated_at }),
+      method: 'PATCH', body: JSON.stringify({ action: button ? action : 'snooze',
+        ...(button ? {} : { snooze: action }), expected_at: row.updated_at }),
     }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(3));
   });

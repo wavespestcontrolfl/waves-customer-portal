@@ -149,6 +149,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
           to: phone(r), customerId: r.customer_id || undefined, relatedCommitmentId: r.id, expected_at: r.updated_at,
         }) }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>
         <Button secondary disabled={!!busy} onClick={() => act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'fulfill', expected_at: r.updated_at }))}>Done</Button>
+        <Button secondary disabled={!!busy} onClick={() => act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'dismiss', expected_at: r.updated_at }))}>Dismiss</Button>
         <Select aria-label={`Snooze callback for ${who(r)}`} value="" disabled={!!busy} onChange={(e) => {
           const snooze = e.target.value;
           if (snooze) act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'snooze', snooze, expected_at: r.updated_at }));
