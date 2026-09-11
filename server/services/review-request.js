@@ -2186,6 +2186,8 @@ const ReviewService = {
           await db("review_requests").where({ id: requestId }).update({
             sms_sent_at: new Date(),
             status: "sent",
+            // Clear the non-ask pre-send fence (a no-op for ask templates).
+            ...(reservation ? {} : { scheduled_for: fencedFrom }),
           });
           await releaseReviewSmsReservation(reservation);
           reservation = null;
@@ -2202,7 +2204,7 @@ const ReviewService = {
       }
       if (!reservation && isExplicitlyUncertainOutcome(providerOutcome)) {
         try {
-          await db("review_requests").where({ id: requestId }).update({ status: "deferred" });
+          await db("review_requests").where({ id: requestId }).update({ status: "deferred", scheduled_for: fencedFrom });
         } catch (dbErr) {
           logger.error(
             `[review] SMS uncertain AND status update failed (requestId=${requestId} errType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
@@ -3360,6 +3362,26 @@ const ReviewService = {
         continue;
       }
 
+      // Mark the follow-up attempted BEFORE the provider handoff and reopen
+      // it only on a definite not-sent outcome. A post-handoff bookkeeping
+      // failure then leaves the row fenced (a missed follow-up at worst)
+      // instead of eligible for the next run to send twice (codex #4338 P1,
+      // round 4). A marker that cannot be stored is skipped: nothing left.
+      const marked = await db("review_requests").where({ id: request.id, followup_sent: false })
+        .update({ followup_sent: true, followup_sent_at: new Date() })
+        .catch((markErr) => {
+          logger.warn(`[review] Follow-up pre-send marker failed (requestId=${request.id} errType=${markErr?.name || "Error"})`);
+          return 0;
+        });
+      if (!marked) continue;
+      const reopenFollowup = async () => {
+        try {
+          await db("review_requests").where({ id: request.id }).update({ followup_sent: false, followup_sent_at: null });
+        } catch (reopenErr) {
+          // Stays marked: conservative (a skipped follow-up, never a duplicate).
+          logger.error(`[review] Follow-up reopen failed (requestId=${request.id} errType=${reopenErr?.name || "Error"})`);
+        }
+      };
       try {
         const result = await sendCustomerMessage({
           to: contact.phone,
@@ -3381,12 +3403,9 @@ const ReviewService = {
           );
           if (isExplicitlyUncertainOutcome(result)) {
             // The handoff never confirmed accept/reject — the customer may
-            // already hold this follow-up. Mark it attempted so the next
-            // run does not risk a duplicate text (codex #4338 P1).
-            await db("review_requests").where({ id: request.id }).update({
-              followup_sent: true,
-              followup_sent_at: new Date(),
-            });
+            // already hold this follow-up. The pre-send marker stays, and
+            // the customer is closed for this batch too (codex #4338 P1).
+            sentThisRun.add(request.customer_id);
             suppressed++;
             continue;
           }
@@ -3396,19 +3415,15 @@ const ReviewService = {
             !result.retryable &&
             !result.deferred
           ) {
-            await db("review_requests").where({ id: request.id }).update({
-              followup_sent: true,
-              followup_sent_at: new Date(),
-            });
+            // Terminal block: the marker stays as the "handled" stamp.
             suppressed++;
+            continue;
           }
+          // Definite not-sent, retryable: hand the row back for a later run.
+          await reopenFollowup();
           continue;
         }
 
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
         sentThisRun.add(request.customer_id);
         sent++;
       } catch (err) {
@@ -3418,24 +3433,18 @@ const ReviewService = {
         // NEXT run's candidate query stays eligible and re-sends this follow-up
         // (codex #4338 P1). Mark it attempted, same as the returned-result branch
         // above, instead of retrying blind.
+        // The pre-send marker already fences the row; nothing to write here.
         const providerOutcome = err?.providerOutcome || null;
         if (providerOutcome?.sent === true || isExplicitlyUncertainOutcome(providerOutcome)) {
-          try {
-            await db("review_requests").where({ id: request.id }).update({
-              followup_sent: true,
-              followup_sent_at: new Date(),
-            });
-          } catch (dbErr) {
-            logger.error(`[review] Follow-up SMS post-handoff bookkeeping failed (requestId=${request.id} errType=${dbErr?.name || "Error"})`);
-          }
-          if (providerOutcome.sent === true) {
-            sentThisRun.add(request.customer_id);
-            sent++;
-          } else {
-            suppressed++;
-          }
+          sentThisRun.add(request.customer_id);
+          if (providerOutcome.sent === true) sent++;
+          else suppressed++;
           continue;
         }
+        // Only a DEFINITE not-sent hands the row back; a bare throw is
+        // ambiguous and keeps the marker (a skipped follow-up, never a
+        // duplicate).
+        if (providerOutcome?.deliveryOutcome === "not_sent") await reopenFollowup();
         logger.error(`[review] Follow-up SMS failed: ${err.message}`);
       }
     }
@@ -5321,7 +5330,12 @@ const ReviewService = {
     // deferral (provider blip, consent lookup, push in flight) carries a
     // synthesized nextAllowedAt too, so classify by the outcome code, not by
     // the presence of a retry time (codex #4140 r1).
-    const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    let retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    // A weekdays-only step keeps its constraint on the retry too: a Friday
+    // evening quiet-hours hold would otherwise plan Saturday 08:00, and the
+    // spacing floor being satisfied by then lets the touch go out on a
+    // weekend (codex #4330 P2). Weekday retries pass through unchanged.
+    if (plan[seq.current_step]?.weekdaysOnly) retryAt = shiftToWeekdayMorning(retryAt);
     const decision = outcome.code === "QUIET_HOURS_HOLD"
       ? sequenceDecision({ reason: "send_window", plannedAt: retryAt, nextEvalAt: retryAt })
       : sequenceDecision({ reason: outcome.reason || "provider_retry", nextEvalAt: retryAt });
