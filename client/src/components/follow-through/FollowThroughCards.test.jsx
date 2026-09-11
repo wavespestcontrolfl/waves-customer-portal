@@ -49,7 +49,7 @@ describe('callback cards', () => {
     render(<FollowThroughCards ui={ui} hints={false} onSummary={onSummary} />);
     await screen.findByText('Late callback');
     expect(adminFetch).toHaveBeenCalledWith(LIST.replace('&limit', '&hints=0&limit'));
-    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 1 });
+    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 1, hasMore: false });
   });
   it('re-reads every loaded page on a background refresh instead of snapping back to page one', async () => {
     const second = { ...row, id: 'callback-2', description: 'Second page callback' };
@@ -65,14 +65,26 @@ describe('callback cards', () => {
     expect(screen.getByText('Second page callback')).toBeInTheDocument();
     expect(screen.getByText(row.description)).toBeInTheDocument();
   });
-  it('walks the queue by offset when the ledger says there is more', async () => {
+  it('walks the queue by offset when the ledger says there is more, and tells the host more remains', async () => {
+    const onSummary = vi.fn();
     adminFetch.mockResolvedValueOnce({ ...feed, has_more: true, next_offset: 100 })
       .mockResolvedValueOnce({ ...feed, commitments: [{ ...row, id: 'callback-2', description: 'Second page callback' }] });
-    render(<FollowThroughCards ui={ui} />);
+    render(<FollowThroughCards ui={ui} onSummary={onSummary} />);
     fireEvent.click(await screen.findByText('Load more'));
+    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 0, hasMore: true });
     await screen.findByText('Second page callback');
     expect(adminFetch).toHaveBeenLastCalledWith(LIST.replace('offset=0', 'offset=100'));
     expect(screen.getByText(row.description)).toBeInTheDocument();
+    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 0, hasMore: false });
+  });
+  it.each(['outbound', 'outbound-api', 'outbound-dial'])('shows and dials the customer side of a %s call', async (direction) => {
+    adminFetch.mockResolvedValue({ ...feed, commitments: [{ ...row, direction, from_phone: '+15555550100', to_phone: '+15555550199' }] });
+    render(<FollowThroughCards ui={ui} />);
+    await screen.findByText(/^\+15555550199 · Call /);
+    fireEvent.click(screen.getByText('Call'));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith('/admin/communications/call', expect.objectContaining({
+      body: JSON.stringify({ to: '+15555550199', relatedCommitmentId: 'callback-1', expected_at: row.updated_at }),
+    })));
   });
 });
 describe('callback actions', () => {
@@ -86,6 +98,20 @@ describe('callback actions', () => {
         ...(action === 'fulfill' ? {} : { snooze: action }), expected_at: row.updated_at }),
     }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(3));
+  });
+  it('refreshes after an action through the hints filter in force when the action finishes', async () => {
+    let releasePatch;
+    adminFetch.mockImplementation((url, options) => options
+      ? new Promise((resolve) => { releasePatch = () => resolve({ success: true }); }) : Promise.resolve(feed));
+    const { rerender } = render(<FollowThroughCards ui={ui} hints />);
+    fireEvent.click(await screen.findByText('Done'));
+    await waitFor(() => expect(releasePatch).toBeTypeOf('function'));
+    rerender(<FollowThroughCards ui={ui} hints={false} />);
+    adminFetch.mockClear();
+    releasePatch();
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(LIST.replace('&limit', '&hints=0&limit')));
+    await waitFor(() => expect(screen.queryByText(/Done/)).toBeEnabled());
+    expect(adminFetch.mock.calls.map(([url]) => url)).not.toContain(LIST);
   });
   it('refreshes a stale callback after a rejected update and displays the conflict', async () => {
     adminFetch.mockImplementation(async (url, options) => {

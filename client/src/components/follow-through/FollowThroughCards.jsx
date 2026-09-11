@@ -10,7 +10,10 @@ const when = (value) => value ? new Date(value).toLocaleString('en-US', {
   timeZone: TIMEZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
 }) : 'Time needs review';
 const who = (r) => [r.customer_first_name || r.first_name, r.customer_last_name || r.last_name].filter(Boolean).join(' ') || 'Caller';
-const phone = (r) => r.phone || r.customer_phone || (r.direction === 'outbound' ? r.to_phone : r.from_phone);
+// Twilio directions are 'outbound', 'outbound-api', 'outbound-dial', …; the
+// customer is the dialed side of any of them (matches the Owed helper and
+// the bridge's validation).
+const phone = (r) => r.phone || r.customer_phone || (String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone);
 // The deadline the ledger judges the card by: a staffed or stated deadline,
 // else the implicit one it projects (effective_due_at is snooze-aware).
 const dueAt = (r) => r.effective_due_at || r.due_at || null;
@@ -25,7 +28,8 @@ const DEFAULT_POLL_MS = 30000;
 //   "Show possibly-kept" filter); pollMs is the background refresh cadence —
 //   each read also runs the ledger's fulfillment refresh window, so a fleet
 //   of tech tabs polls far less often than the office queue; onSummary reports
-//   the open/overdue counts of the cards so a host can fold them into its own.
+//   whether the cards loaded enabled, their open/overdue counts, and whether
+//   more pages remain, so a host can fold them into its own summary.
 export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, hints = true, pollMs = DEFAULT_POLL_MS }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -65,6 +69,11 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
     } catch (err) { if (mounted.current && seq === request.current) setError(err.message || 'Could not load follow-through.'); }
   }, [fetchPage, onCallbacksEnabled]);
   const refresh = useCallback(() => load({ count: pages.current }), [load]);
+  // Actions resolve their post-action refresh through the latest filter, not
+  // the closure they were started under (a hints change mid-flight would
+  // otherwise repaint the previous filter and cancel the newer request).
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
   useEffect(() => {
     mounted.current = true;
     pages.current = 1;
@@ -82,9 +91,9 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
       const result = await action();
       if (result?.success === false) throw new Error(result.error || 'The action could not finish.');
       if (mounted.current) setNotice(success);
-      await refresh();
+      await refreshRef.current();
     } catch (err) {
-      await refresh();
+      await refreshRef.current();
       if (mounted.current) setError(err.message || 'That action did not finish.');
     } finally { busyRef.current = false; if (mounted.current) setBusy(null); }
   };
@@ -93,7 +102,8 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
   const callbacks = data?.commitments || [];
   const open = enabled ? callbacks.length : 0;
   const overdueCount = enabled ? callbacks.filter((r) => r.overdue === true).length : 0;
-  useEffect(() => { onSummary?.({ enabled, open, overdue: overdueCount }); }, [onSummary, enabled, open, overdueCount]);
+  const hasMore = enabled && data?.has_more === true;
+  useEffect(() => { onSummary?.({ enabled, open, overdue: overdueCount, hasMore }); }, [onSummary, enabled, open, overdueCount, hasMore]);
   if (!enabled && !error) return null;
   const snoozed = callbacks.filter((r) => r.snoozed_until && new Date(r.snoozed_until).getTime() > Date.now());
   const renderCallback = (r) => {

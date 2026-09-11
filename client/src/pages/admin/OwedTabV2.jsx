@@ -82,7 +82,7 @@ export default function OwedTabV2() {
   // The shared callback cards above the list: shown only while the selected
   // party includes Waves, filtered by the same hints toggle, counted with the
   // list so the summary reflects everything on screen.
-  const [cardSummary, setCardSummary] = useState({ enabled: false, open: 0, overdue: 0 });
+  const [cardSummary, setCardSummary] = useState({ enabled: false, open: 0, overdue: 0, hasMore: false });
   const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, callbacksEnabled: false, enabled: true, hasMore: false, nextOffset: null });
   const [loadingMore, setLoadingMore] = useState(false);
   // A minute tick so a deadline that passes while the tab is open re-renders
@@ -172,11 +172,14 @@ export default function OwedTabV2() {
   };
 
   // While callback cards are on, the cards above own Waves' callbacks; the
-  // ledger list keeps every other promise.
-  const cardsShown = party !== "customer" && state.callbacksEnabled;
+  // ledger list keeps every other promise. The cards' own successful load
+  // decides that (not this feed's flag): if the card request fails, the
+  // ledger rows stay visible rather than vanishing behind a card error.
+  const cardsShown = party !== "customer" && cardSummary.enabled;
   const rows = state.rows.filter((r) => !cardsShown || r.kind !== "callback" || r.party !== "waves");
   const openCount = rows.length + (cardsShown ? cardSummary.open : 0);
   const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length + (cardsShown ? cardSummary.overdue : 0);
+  const moreUnloaded = state.hasMore || (cardsShown && cardSummary.hasMore);
 
   return (
     <div className="space-y-3">
@@ -192,7 +195,7 @@ export default function OwedTabV2() {
           Show possibly-kept
         </label>
         <span className="text-13 md:text-12 text-ink-tertiary">
-          {state.status === "ready" ? `${openCount}${state.hasMore ? "+" : ""} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
+          {state.status === "ready" ? `${openCount}${moreUnloaded ? "+" : ""} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
           {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours, a callback ${state.callbacksEnabled ? "after four staffed hours (office hours and blackout dates apply)" : "after the day of the call"}, other promises after ${state.implicitDays} days` : ""}
         </span>
         <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
