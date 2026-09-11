@@ -420,10 +420,17 @@ router.post('/sms', async (req, res) => {
       || Boolean(await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => true))
       || await hasOutboundHistory(From);
     // Enforcement mode also strips a vendor's own reply-instruction footer
-    // before matching (see the comment above `solicitationMode`), so a known
-    // sender's pitch can't earn a false opt-out from its own compliance text.
+    // before matching (see the comment above `solicitationMode`), so an
+    // unknown sender's pitch can't earn a false opt-out from its own
+    // compliance text. Scoped to exactly the population screenInboundSms
+    // actually screens (!customer && !isAiNumber) — codex fallback P1,
+    // 2026-09-11: `complianceEligible` also covers matched customers and
+    // the AI line, neither of which is ever enforced, so stripping their
+    // reply-instruction-shaped wording risked silently dropping a real
+    // customer's own genuine opt-out.
+    const ignoreReplyInstructions = solicitationMode === 'enforce' && !customer && !isAiNumber;
     const optCommand = complianceEligible
-      ? detectSmsOptCommand(Body, { ignoreReplyInstructions: solicitationMode === 'enforce' })
+      ? detectSmsOptCommand(Body, { ignoreReplyInstructions })
       : { action: null };
 
     if (optCommand.action === 'opt_out') {

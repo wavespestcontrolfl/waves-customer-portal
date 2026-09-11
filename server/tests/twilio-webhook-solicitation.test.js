@@ -6,8 +6,11 @@ const mockWhereRawCalls = [];
 // unknown-sender flow is the repeat-sender alert-quota check — queueing a
 // row here simulates "a prior sms_log row exists" for that one check.
 const mockSmsLogFirstQueue = [];
+// findSingleCustomerByPhone runs a raw db('customers')... query — set this
+// to simulate a matched customer for the sender (null/[] = no match).
+let mockCustomersRows = null;
 function mockDb(table) {
-  const query = { rows: [] };
+  const query = { rows: table === 'customers' && mockCustomersRows ? mockCustomersRows : [] };
   for (const method of ['where', 'whereNull', 'whereNot', 'orderBy', 'limit']) {
     query[method] = () => query;
   }
@@ -15,6 +18,9 @@ function mockDb(table) {
   query.insert = (row) => {
     mockWrites.push({ table, row });
     query.rows = [{ id: '00000000-0000-4000-8000-000000000001', created_at: new Date(), ...row }];
+    // notification_prefs upsert (opt-out prefs write) chains onConflict().merge().
+    query.onConflict = () => query;
+    query.merge = async () => query.rows;
     return query;
   };
   query.first = async () => (table === 'sms_log' && mockSmsLogFirstQueue.length ? mockSmsLogFirstQueue.shift() : null);
@@ -107,6 +113,7 @@ beforeEach(() => {
   mockWrites.length = 0;
   mockWhereRawCalls.length = 0;
   mockSmsLogFirstQueue.length = 0;
+  mockCustomersRows = null;
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
@@ -413,4 +420,21 @@ test('the unified copy is marked read only after the legacy sms_log row is persi
   const metadataOnlyCall = callOrder.find((c) => !c.isRead);
   expect(metadataOnlyCall).toBeDefined();
   expect(metadataOnlyCall.smsLogRowsSoFar).toBe(0);
+});
+
+// Claude-fallback P1 (codex out of quota), 2026-09-11: solicitation
+// screening only ever runs for !customer senders, but the footer-stripping
+// flag was keyed on enforcement mode alone and applied to every
+// complianceEligible sender — including a matched customer, who is never a
+// solicitation-screening candidate. A real customer's own opt-out phrased
+// with reply-instruction grammar must never be silently dropped.
+test('a known customer\'s own opt-out is never stripped as a vendor footer, even in enforcement mode', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockCustomersRows = [{ id: 'cust-1', first_name: 'Known', last_name: 'Customer', phone: '+12025550101' }];
+  const res = await receive('Reply STOP to stop messages');
+  expect(res.body).toContain('unsubscribed');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+  expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
+  // A matched customer is never a solicitation-screening candidate.
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
 });
