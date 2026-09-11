@@ -2106,27 +2106,59 @@ describe('duplicatePairEligibility', () => {
 // ---------------------------------------------------------------------------
 // customerFkColumns — FK discovery export, cached per process.
 // ---------------------------------------------------------------------------
-describe('customerFkColumns', () => {
-  it('queries information_schema once and caches the result', async () => {
-    const rawResult = { rows: [{ table_name: 'scheduled_services', column_name: 'customer_id' }, { table_name: 'invoices', column_name: 'customer_id' }] };
-    db.raw = jest.fn(async () => rawResult);
-    const first = await dedupe.customerFkColumns(db);
-    expect(first).toEqual(rawResult.rows);
+describe('previewMergeEffects (shared merge-effect reader)', () => {
+  const FK_ROWS = { rows: [
+    { table_name: 'scheduled_services', column_name: 'customer_id' },
+    { table_name: 'invoices', column_name: 'customer_id' },
+    { table_name: 'sms_log', column_name: 'customer_id' },
+    { table_name: 'customer_merge_journal', column_name: 'winner_customer_id' }, // repoint-excluded
+  ] };
+  const PROMOTER_TABLES = ['referrals', 'referral_invites', 'referral_clicks', 'referral_payouts'];
+
+  it('counts the FK sweep (information_schema once, cached, excluded tables dropped) + polymorphic pointers; a failing table is unknown, zero counts drop', async () => {
+    db.raw = jest.fn(async () => FK_ROWS);
+    const counts = { scheduled_services: 3, sms_log: 5, notifications: 2 };
+    installDb((table, q) => {
+      if (table === 'invoices') throw new Error('relation "invoices" is unreadable');
+      if (table === 'referral_promoters') return null; // not enrolled
+      return { n: counts[table] || 0 };
+    });
+    const out = await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(out.moving).toEqual({ scheduled_services: 3, invoices: 'unknown', sms_log: 5, 'notifications.recipient_id': 2, total_rows: 10 });
+    expect(out.referral).toEqual({ loser_enrolled: false });
     expect(db.raw).toHaveBeenCalledTimes(1);
-    const second = await dedupe.customerFkColumns(db);
-    expect(second).toEqual(rawResult.rows);
-    expect(db.raw).toHaveBeenCalledTimes(1); // cached — no second query
+    await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(db.raw).toHaveBeenCalledTimes(1); // cached — no second information_schema query
   });
 
-  it('filters out the repoint-excluded tables (e.g. customer_merge_journal)', async () => {
-    db.raw = jest.fn(async () => ({
-      rows: [
-        { table_name: 'invoices', column_name: 'customer_id' },
-        { table_name: 'customer_merge_journal', column_name: 'winner_customer_id' },
-      ],
-    }));
-    const columns = await dedupe.customerFkColumns(db);
-    expect(columns.some((c) => c.table_name === 'customer_merge_journal')).toBe(false);
-    expect(columns.some((c) => c.table_name === 'invoices')).toBe(true);
+  it('reads the referral fold through the executor\'s own counter list when both customers are enrolled', async () => {
+    db.raw = jest.fn(async () => FK_ROWS);
+    const loserPromoter = { id: 'p-loser', available_balance_cents: 2500, total_clicks: 4, total_paid_out_cents: 0 };
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return q.args('where')[0].customer_id === 'L' ? loserPromoter : { id: 'p-winner' };
+      if (PROMOTER_TABLES.includes(table)) {
+        expect(q.args('where')[0]).toEqual({ promoter_id: 'p-loser' });
+        return { n: table === 'referral_clicks' ? 4 : 0 };
+      }
+      return { n: 0 };
+    });
+    const out = await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(out.moving).toEqual({ total_rows: 0 });
+    expect(out.referral).toEqual({
+      loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: 'p-loser', winner_promoter_id: 'p-winner',
+      balances_added: { available_balance_cents: 2500, total_clicks: 4 },
+      promoter_rows: { referrals: 0, referral_invites: 0, referral_clicks: 4, referral_payouts: 0 },
+    });
+    expect(dedupe.REFERRAL_FOLD_COUNTERS).toEqual(expect.arrayContaining(['available_balance_cents', 'pending_earnings_cents', 'total_clicks']));
+  });
+
+  it('loser enrolled, winner not: no fold — the enrollment row repoints unchanged', async () => {
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return q.args('where')[0].customer_id === 'L' ? { id: 'p-loser', available_balance_cents: 900 } : null;
+      return { n: 0 };
+    });
+    const out = await dedupe.previewMergeEffects(db, 'W', 'L');
+    expect(out.referral).toMatchObject({ loser_enrolled: true, folded_into_winner_promoter: false, loser_promoter_id: 'p-loser', winner_promoter_id: null, balances_added: {} });
   });
 });

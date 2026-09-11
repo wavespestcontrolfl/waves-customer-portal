@@ -45,8 +45,10 @@ const BILLING_CONTACT_COLUMNS = [
 // is added to the winner; a loser-only per-application billing mode (and its
 // fee) is adopted when the winner has none; the loser's plan-rate rows are
 // DELETED, not repointed (customer_plan_rates is excluded from the generic
-// FK repoint — the ledger is rebuilt on the winner).
-async function financialEffects(database, winner, loser) {
+// FK repoint — the ledger is rebuilt on the winner); a loser referral
+// enrollment is folded into the winner's (balances added, promoter-keyed
+// rows repointed) — that fold is read by the engine's own effect reader.
+async function financialEffects(database, winner, loser, referral) {
   const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
   const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
   const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
@@ -63,6 +65,7 @@ async function financialEffects(database, winner, loser) {
     billing_mode_adopted_from_loser: adoptsBillingMode ? loser.billing_mode : null,
     per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
     loser_plan_rate_rows_deleted: loserPlanRates,
+    referral_fold: referral,
   };
 }
 
@@ -72,50 +75,9 @@ function billingSnapshot(row) {
   return snapshot;
 }
 
-// Per-table row counts for the loser across EVERY table the merge engine
-// itself repoints (customerFkColumns — never a hand-picked subset that could
-// omit a table the executor actually moves). Best-effort: a table that fails
-// to count is disclosed as 'unknown', never a thrown error — one bad table
-// must not blank the whole preview.
-async function fullMovingCounts(database, loserId) {
-  const { customerFkColumns } = require('../customer-dedupe');
-  let fkColumns;
-  try {
-    fkColumns = await customerFkColumns(database);
-  } catch (err) {
-    logger.warn(`[intelligence-bar] merge preview: customerFkColumns failed: ${err.message}`);
-    return { total_rows: 0 };
-  }
-  const byTable = new Map();
-  for (const { table_name: table, column_name: column } of fkColumns) {
-    if (!byTable.has(table)) byTable.set(table, []);
-    byTable.get(table).push(column);
-  }
-  const moving = {};
-  let total = 0;
-  await Promise.all([...byTable].map(async ([table, columns]) => {
-    try {
-      let sum = 0;
-      for (const column of columns) {
-        // Sequential per-column, concurrent per-table: two FK columns on one
-        // table are rare, but summing them concurrently would race on the
-        // same accumulator — sequential here avoids that, tables still run
-        // in parallel with each other.
-        const row = await database(table).where(column, loserId).count({ n: '*' }).first();
-        sum += Number(row?.n || 0);
-      }
-      if (sum > 0) { moving[table] = sum; total += sum; }
-    } catch (err) {
-      moving[table] = 'unknown';
-      logger.warn(`[intelligence-bar] merge preview: count failed for table ${table}: ${err.message}`);
-    }
-  }));
-  moving.total_rows = total;
-  return moving;
-}
-
 // The card's disclosed effect set as one stable string: per-table moving
-// counts + the executor's money effects, key-sorted. The route pins the
+// counts (FK sweep + polymorphic pointers) + the money effects (credits,
+// billing mode, plan rates, referral fold), key-sorted. The route pins the
 // preview's fingerprint on the approved card; the confirmed path recomputes
 // it UNDER executeMerge's row locks and refuses on any difference — a child
 // row (invoice, visit, message) added or removed on the loser since the card
@@ -174,8 +136,9 @@ async function previewMergeCustomers(winnerId, loserId) {
   const check = await loadMergeEligibility(winnerId, loserId);
   if (!check.ok) return { error: check.error, code: check.code };
   const { winner, loser, eligibility } = check;
-  const moving = await fullMovingCounts(db, loserId);
-  const financial_effects = await financialEffects(db, winner, loser);
+  const { previewMergeEffects } = require('../customer-dedupe');
+  const { moving, referral } = await previewMergeEffects(db, winnerId, loserId);
+  const financial_effects = await financialEffects(db, winner, loser, referral);
   const winnerName = customerName(winner);
   const loserName = customerName(loser);
   return {
@@ -232,8 +195,9 @@ async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVe
       // executor's transaction. Without a pin (direct call, no card) the
       // effects are not asserted — the version check above still holds.
       underLock: approvedEffects ? async (trx, { winner, loser }) => {
-        const lockedMoving = await fullMovingCounts(trx, loserId);
-        const lockedEffects = await financialEffects(trx, winner, loser);
+        const { previewMergeEffects } = require('../customer-dedupe');
+        const { moving: lockedMoving, referral } = await previewMergeEffects(trx, winnerId, loserId);
+        const lockedEffects = await financialEffects(trx, winner, loser, referral);
         if (effectsFingerprint(lockedMoving, lockedEffects) !== approvedEffects) {
           const e = new Error('The rows that would move changed after the card was shown — ask again for a fresh confirmation card.');
           e.previewChanged = true;
@@ -311,5 +275,5 @@ module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   executeCustomerLifecycleTool,
   // exported for tests
-  _test: { fullMovingCounts, customerName, effectsFingerprint },
+  _test: { customerName, effectsFingerprint },
 };

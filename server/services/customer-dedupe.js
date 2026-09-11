@@ -869,6 +869,15 @@ const POLYMORPHIC_CUSTOMER_POINTERS = [
   { table: 'data_hygiene_proposals', typeColumn: 'resource_type', idColumn: 'resource_id' },
 ];
 
+// The referral_promoters balance/counter columns executeMerge ADDS from the
+// loser's enrollment onto the winner's when both are enrolled (the loser's
+// row is then retired as a code alias). One list, shared by the executor
+// and the effect reader below, so a preview can never disclose a different
+// set than the fold moves.
+const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
+  'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
+  'available_balance_cents', 'pending_earnings_cents'];
+
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
@@ -1521,11 +1530,8 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // click_balance_cents was DROPPED by 20260401000100_referral_unification
         // — only live columns here (a stale column in the UPDATE below would
         // abort the whole merge).
-        const counters = ['referral_balance_cents', 'total_earned_cents',
-          'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
-          'available_balance_cents', 'pending_earnings_cents'];
         const sums = {};
-        for (const col of counters) {
+        for (const col of REFERRAL_FOLD_COUNTERS) {
           const add = Number(loserRow?.[col] || 0);
           if (add) sums[col] = Number(winnerPromoter[col] || 0) + add;
         }
@@ -4368,6 +4374,84 @@ async function revertMerge({ journalId, performedBy, performedById }) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Merge effect reader (shared preview)
+// ---------------------------------------------------------------------------
+
+// What executeMerge WOULD do to related rows for (winnerId, loserId), read
+// through the same table sets the executor sweeps — the schema-driven FK
+// columns (customerFkColumns), the polymorphic recipient pointers
+// (POLYMORPHIC_CUSTOMER_POINTERS, rows typed 'customer'), and the referral
+// enrollment fold (balances added, promoter-keyed rows repointed). Read-only;
+// runs on any knex handle, so a caller holding the executor's row locks (an
+// approved-card recheck inside the merge transaction) sees the same answer
+// the executor is about to act on. Per-table counts are best-effort: a table
+// that fails to count is reported as 'unknown', never a thrown error — one
+// bad table must not blank the whole disclosure.
+//   moving:   { [table]: n | 'unknown', [table.idColumn]: n | 'unknown', total_rows }
+//             (zero counts are dropped)
+//   referral: { loser_enrolled, folded_into_winner_promoter, loser_promoter_id,
+//               winner_promoter_id, balances_added: { [counter]: n },
+//               promoter_rows: { referrals, referral_invites, referral_clicks, referral_payouts } }
+async function previewMergeEffects(database, winnerId, loserId) {
+  const moving = {};
+  let total = 0;
+  const countInto = async (key, build) => {
+    try {
+      const row = await build().count({ n: '*' }).first();
+      const n = Number(row?.n || 0);
+      if (n > 0) { moving[key] = (Number(moving[key]) || 0) + n; total += n; }
+    } catch (err) {
+      moving[key] = 'unknown';
+      logger.warn(`[customer-dedupe] previewMergeEffects: count failed for ${key}: ${err.message}`);
+    }
+  };
+  let fkColumns = [];
+  try {
+    fkColumns = await customerFkColumns(database);
+  } catch (err) {
+    moving.fk_sweep = 'unknown';
+    logger.warn(`[customer-dedupe] previewMergeEffects: customerFkColumns failed: ${err.message}`);
+  }
+  const byTable = new Map();
+  for (const { table_name: table, column_name: column } of fkColumns) {
+    if (!byTable.has(table)) byTable.set(table, []);
+    byTable.get(table).push(column);
+  }
+  // Sequential per-column, concurrent per-table: two FK columns on one table
+  // are rare, but summing them concurrently would race on one accumulator.
+  await Promise.all([...byTable].map(async ([table, columns]) => {
+    for (const column of columns) await countInto(table, () => database(table).where(column, loserId));
+  }));
+  await Promise.all(POLYMORPHIC_CUSTOMER_POINTERS.map(({ table, typeColumn, idColumn }) =>
+    countInto(`${table}.${idColumn}`, () => database(table).where({ [typeColumn]: 'customer', [idColumn]: loserId }))));
+  moving.total_rows = total;
+  return { moving, referral: await referralFoldEffects(database, winnerId, loserId) };
+}
+
+async function referralFoldEffects(database, winnerId, loserId) {
+  const loserPromoter = await database('referral_promoters').where({ customer_id: loserId }).first();
+  if (!loserPromoter) return { loser_enrolled: false };
+  const winnerPromoter = await database('referral_promoters')
+    .where({ customer_id: winnerId }).whereNot({ id: loserPromoter.id }).first();
+  const promoter_rows = {};
+  for (const table of ['referrals', 'referral_invites', 'referral_clicks', 'referral_payouts']) {
+    const row = await database(table).where({ promoter_id: loserPromoter.id }).count({ n: '*' }).first();
+    promoter_rows[table] = Number(row?.n || 0);
+  }
+  if (!winnerPromoter) {
+    // No fold: the loser's enrollment row itself repoints onto the winner in
+    // the FK sweep (referral_promoters.customer_id) and keeps its balances.
+    return { loser_enrolled: true, folded_into_winner_promoter: false, loser_promoter_id: loserPromoter.id, winner_promoter_id: null, balances_added: {}, promoter_rows };
+  }
+  const balances_added = {};
+  for (const col of REFERRAL_FOLD_COUNTERS) {
+    const add = Number(loserPromoter[col] || 0);
+    if (add) balances_added[col] = add;
+  }
+  return { loser_enrolled: true, folded_into_winner_promoter: true, loser_promoter_id: loserPromoter.id, winner_promoter_id: winnerPromoter.id, balances_added, promoter_rows };
+}
+
 module.exports = {
   findDuplicateGroups,
   duplicatePairEligibility,
@@ -4376,10 +4460,12 @@ module.exports = {
   runRedPairAutoDismissSweep,
   revertMerge,
   recordLinkedProperty,
-  // FK discovery, exported so callers that disclose "what would move" (the
-  // IB merge preview) enumerate the SAME table set the executor repoints —
-  // never a smaller hand-picked subset that could omit tables.
-  customerFkColumns,
+  // The shared effect reader — callers that disclose "what would move" (the
+  // IB merge preview and its under-lock recheck) read the SAME FK,
+  // polymorphic-pointer, and referral-fold sets the executor acts on — never
+  // a hand-picked subset that could omit a table or a fold.
+  previewMergeEffects,
+  REFERRAL_FOLD_COUNTERS,
   // Refuse-policy sets, exported so GET /merges' revertible mirror can never
   // drift from the revert endpoint's own count-only refusals.
   REVERT_FINANCIAL_TABLES,
