@@ -2896,6 +2896,15 @@ router.post('/confirm-action', async (req, res, next) => {
     }
 
     const execParams = { ...action.params };
+    // The merge drift pins are ROUTE-OWNED: they are assigned below from the
+    // live re-run preview and from nowhere else. Stored params originate in
+    // the model's tool input, and the tool schema does not forbid extra
+    // properties, so strip any inbound copy before it can be read as an
+    // approval (pre-push audit P1, defence in depth — the live-preview
+    // fingerprint already has to match for execution to proceed, and
+    // winner_version/loser_version are inside that fingerprint).
+    delete execParams._approved_versions;
+    delete execParams._approved_effects;
     if (execParams._ib_task_context) {
       const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
