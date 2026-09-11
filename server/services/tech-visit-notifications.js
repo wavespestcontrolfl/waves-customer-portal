@@ -549,9 +549,17 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
     // /dismiss, /confirm-start — no stamp) stays quiet. Same
     // supersession-stamp discipline as the dispatch_alerts `already` check
     // (codex P1, pre-push audit on f32a48e35).
+    const revivedAt = new Date();
     const [revived] = await trx('tech_notifications').where({ dedupe_key: dedupeKey })
       .whereNotNull('dismissed_at').whereRaw("payload->>'superseded_at' IS NOT NULL")
-      .update({ technician_id: technicianId, message, payload, read: false, dismissed_at: null, updated_at: new Date() })
+      // created_at is refreshed too (codex P1, pre-push audit on
+      // bb2ff6752): the tech feed (routes/tech-notifications.js) classifies
+      // freshness and orders its 20-row window by created_at — this IS a
+      // new occurrence (a fresh sweep tick re-alerted the same visit under
+      // the same key), and no other reader keys off this row's original
+      // created_at, so a revived notice must not sit in the stale bucket
+      // wearing its first occurrence's timestamp.
+      .update({ technician_id: technicianId, message, payload, read: false, dismissed_at: null, created_at: revivedAt, updated_at: revivedAt })
       .returning('id');
     row = revived;
   }

@@ -574,4 +574,20 @@ describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)',
       technician_id: 'tech-a', message: args.message, payload: args.payload, read: false, dismissed_at: null,
     }));
   });
+
+  // codex P1 (pre-push audit on bb2ff6752): routes/tech-notifications.js's
+  // GET feed classifies freshness and orders its 20-row window by
+  // created_at. A revive that bumped only updated_at would keep the row's
+  // ORIGINAL created_at — a stage-2 tracking card re-alerted days after its
+  // first occurrence would still sort/classify as stale, not the fresh
+  // occurrence it actually is.
+  test('a revive refreshes created_at, not just updated_at — the row reads as a fresh occurrence', async () => {
+    const mocks = fakeTrx({ insertRows: [], reviveRows: [{ id: 'row-1' }] });
+    await recordTrackingNotice(mocks.trx, args);
+    const updateArg = mocks.reviveUpdate.mock.calls[0][0];
+    expect(updateArg.created_at).toBeInstanceOf(Date);
+    expect(updateArg.updated_at).toBeInstanceOf(Date);
+    // Same instant for both — one revive is one "this is now" stamp, not two.
+    expect(updateArg.created_at.getTime()).toBe(updateArg.updated_at.getTime());
+  });
 });
