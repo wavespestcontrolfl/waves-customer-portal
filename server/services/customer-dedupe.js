@@ -1631,6 +1631,34 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     const loserPromoter = await trx('referral_promoters')
       .where({ customer_id: loserId }).first('id');
 
+    // BEFORE the sweep, immediately before the write: demote the loser's
+    // default/autopay cards so they ARRIVE demoted — the winner's own
+    // pre-merge default stays the ONE default/autopay card. This must run
+    // while the cards still carry the LOSER's customer_id: the sweep below
+    // repoints payment_methods onto the winner, after which the shared
+    // reader finds no loser cards at all — a pinned merge then refused every
+    // legitimate demotion as drift and an unpinned (admin queue) merge
+    // silently skipped it, leaving two default/autopay cards (pre-push
+    // Codex P0). RE-DERIVED here, not applied from the early snapshot
+    // (pre-push audit P1): the FOR UPDATE above stops an existing card's
+    // flags moving, but a card INSERTED for the loser mid-merge has no row
+    // to lock — a stale id list would leave it default. A set that differs
+    // from the one the card disclosed is drift: refuse (nothing external
+    // has happened yet — the Stripe fence is further down).
+    const demotionsNow = await predictSavedCardDemotions(trx, winnerId, loserId);
+    if (expectedEffectsFingerprint
+      && JSON.stringify(demotionsNow) !== JSON.stringify(savedCardDemotions)) {
+      const err = new Error('executeMerge: the saved cards this merge would change moved since it was approved — review a fresh proposal');
+      err.previewChanged = true;
+      throw err;
+    }
+    if (demotionsNow.winner_has_default && demotionsNow.cards.length) {
+      const demoted = await trx('payment_methods')
+        .whereIn('id', demotionsNow.cards.map((c) => c.id))
+        .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
+      if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
+    }
+
     // Repoint every FK. Each table gets its own savepoint (knex nested
     // transaction) so a unique-collision on a droppable singleton can be
     // handled without poisoning the outer transaction.
@@ -1787,30 +1815,6 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     } catch (planRateErr) {
       loserPlanRateRows = [];
       logger.warn(`[customer-dedupe] loser plan-rate cleanup failed (merge continues): ${planRateErr.message}`);
-    }
-
-    // Normalize payment-method defaults now that the loser's cards moved:
-    // the winner's own pre-merge default stays the ONE default/autopay card.
-    // RE-DERIVED immediately before the write, not applied from the early
-    // snapshot (pre-push audit P1). The FOR UPDATE above stops an existing
-    // card's flags moving, but a card INSERTED for the loser mid-merge has
-    // no row to lock — applying a stale id list would leave it default and
-    // the winner would carry two autopay cards, which is the exact invariant
-    // this demotion exists to hold. A set that differs from the one the card
-    // disclosed is drift: refuse (nothing external has happened yet — the
-    // Stripe fence is further down).
-    const demotionsNow = await predictSavedCardDemotions(trx, winnerId, loserId);
-    if (expectedEffectsFingerprint
-      && JSON.stringify(demotionsNow) !== JSON.stringify(savedCardDemotions)) {
-      const err = new Error('executeMerge: the saved cards this merge would change moved since it was approved — review a fresh proposal');
-      err.previewChanged = true;
-      throw err;
-    }
-    if (demotionsNow.winner_has_default && demotionsNow.cards.length) {
-      const demoted = await trx('payment_methods')
-        .whereIn('id', demotionsNow.cards.map((c) => c.id))
-        .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
-      if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
     }
 
     // Polymorphic customer pointers (recipient_type/recipient_id) — see

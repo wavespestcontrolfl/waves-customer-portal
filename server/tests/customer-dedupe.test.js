@@ -1961,7 +1961,18 @@ describe('executeMerge', () => {
   it('demotes the loser cards when the winner already has a default payment method, journaling their ORIGINAL flags', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: 'cus_shared' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: 'cus_shared' };
-    const state = { demoted: null, journal: null };
+    const state = { demoted: null, journal: null, events: [] };
+    // A REAL card table: the FK sweep repoints payment_methods.customer_id
+    // onto the winner, and every later read sees the moved rows. The
+    // demotion reader looks for the LOSER's cards, so a post-sweep
+    // derivation finds none and the demotion silently vanishes (pre-push
+    // Codex P0) — this harness reproduces that, the old unconditional
+    // fixture could not.
+    const cards = [
+      { id: 'pm-loser-1', customer_id: LOSER, is_default: true, autopay_enabled: true, stripe_customer_id: 'cus_shared' },
+      { id: 'pm-loser-2', customer_id: LOSER, is_default: false, autopay_enabled: false, stripe_customer_id: 'cus_shared' },
+      { id: 'pm-winner-default', customer_id: WINNER, is_default: true, autopay_enabled: true, stripe_customer_id: 'cus_shared' },
+    ];
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser];
@@ -1973,26 +1984,38 @@ describe('executeMerge', () => {
         return [{ id: 'j1' }];
       }
       if (table === 'payment_methods') {
-        if (q.called('first')) return { id: 'pm-winner-default' };
-        if (q.called('select')) {
-          return q.args('select')[0] === 'stripe_customer_id'
-            ? [{ stripe_customer_id: 'cus_shared' }] // cards live on the shared profile
-            : [
-              { id: 'pm-loser-1', is_default: true, autopay_enabled: true },
-              { id: 'pm-loser-2', is_default: false, autopay_enabled: false },
-            ];
-        }
+        const w = q.args('where')?.[0];
+        const owned = (id) => cards.filter((c) => c.customer_id === id);
         if (q.called('update') && q.called('whereIn')) {
           state.demoted = { ids: q.args('whereIn')[1], payload: q.args('update')[0] };
-          return 2;
+          state.events.push('demote');
+          return state.demoted.ids.length;
         }
-        if (q.called('update')) return 1;
+        if (q.called('update')) {
+          // The sweep: loser → winner.
+          const moving = owned(q.args('where')[1]);
+          moving.forEach((c) => { c.customer_id = q.args('update')[0].customer_id; });
+          state.events.push('sweep');
+          return moving.length;
+        }
+        if (q.called('first')) {
+          return owned(w.customer_id).find((c) => c.is_default) ? { id: 'pm-winner-default' } : undefined;
+        }
+        if (q.called('whereIn')) return cards.map((c) => ({ id: c.id })); // the FOR UPDATE lock
+        if (q.called('select')) {
+          const mine = typeof w === 'object' ? owned(w.customer_id) : owned(q.args('where')[1]);
+          if (q.args('select')[0] === 'stripe_customer_id') return mine.map((c) => ({ stripe_customer_id: c.stripe_customer_id }));
+          // The demotion reader's flag filter is a nested where callback.
+          const flagFilter = q._calls.some(([name, args]) => name === 'where' && typeof args[0] === 'function');
+          if (flagFilter) return mine.filter((c) => c.is_default || c.autopay_enabled).map((c) => ({ id: c.id, is_default: c.is_default, autopay_enabled: c.autopay_enabled }));
+          return mine.map((c) => ({ id: c.id, is_default: c.is_default, autopay_enabled: c.autopay_enabled }));
+        }
       }
       if (table === 'referral_promoters' && q.called('first')) return null;
       if (q.called('update')) return 1;
       return [];
     }));
-    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.raw = jest.fn(async () => ({ rows: [{ table_name: 'payment_methods', column_name: 'customer_id' }] }));
     trx.transaction = jest.fn(async (fn) => fn(trx));
     trx.fn = { now: () => 'NOW' };
     db.transaction.mockImplementation(async (fn) => fn(trx));
@@ -2000,9 +2023,12 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     // The winner's own pre-merge default stays THE default: every loser card
     // arrives demoted from default/autopay.
-    expect(state.demoted.ids).toEqual(['pm-loser-1', 'pm-loser-2']);
+    expect(state.demoted).not.toBeNull();
+    expect(state.demoted.ids).toEqual(['pm-loser-1']);
     expect(state.demoted.payload).toMatchObject({ is_default: false, autopay_enabled: false });
-    expect(result.repointed['payment_methods.demoted_defaults']).toBe(2);
+    expect(result.repointed['payment_methods.demoted_defaults']).toBe(1);
+    // The demotion is written BEFORE the sweep moves the cards.
+    expect(state.events).toEqual(['demote', 'sweep']);
     // The journal keeps each card's PRE-demotion flags so the revert can
     // restore the loser's default/autopay setup exactly.
     const recorded = JSON.parse(state.journal.repointed_ids);
