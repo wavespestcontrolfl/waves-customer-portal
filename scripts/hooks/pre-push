@@ -27,7 +27,8 @@
 #   CODEX_REVIEW_TIMEOUT=300           — per-ref codex budget in seconds (default 180)
 #   CODEX_REVIEW_MAX_DIFF_BYTES=0      — disable the diff-size cap (default 500000)
 #   SKIP_CLAUDE_FALLBACK=1             — Codex only; no Claude fallback auditor
-#   CLAUDE_REVIEW_TIMEOUT=300          — per-ref claude budget in seconds (default 300)
+#   CLAUDE_REVIEW_TIMEOUT=900          — per-ref claude budget in seconds, BOTH
+#                                         attempts (default 600)
 #   CLAUDE_REVIEW_MODEL=opus           — fallback auditor model (default sonnet)
 #   SPLIT_WARN_FILES=25                — advisory split threshold, files (0 disables)
 #   SPLIT_WARN_BYTES=120000            — advisory split threshold, bytes (0 disables)
@@ -325,7 +326,10 @@ SCHEMA=".github/codex-review-schema.json"
 AGENTS_MD="AGENTS.md"
 CODEX_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-180}"
 MAX_DIFF_BYTES="${CODEX_REVIEW_MAX_DIFF_BYTES:-500000}"
-CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-300}"
+# 300s was not enough once the AGENTS.md rubric joined the prompt: a real
+# push of this branch timed out and went UN-AUDITED, which is the failure
+# this feature exists to prevent. The budget covers BOTH attempts for a ref.
+CLAUDE_TIMEOUT="${CLAUDE_REVIEW_TIMEOUT:-600}"
 CLAUDE_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}"
 SPLIT_WARN_FILES="${SPLIT_WARN_FILES:-25}"
 SPLIT_WARN_BYTES="${SPLIT_WARN_BYTES:-120000}"
@@ -632,7 +636,13 @@ run_claude_audit() {
     cat "$SCHEMA"
   } > "$claude_prompt"
 
-  echo "[codex-review] codex unavailable for $label — falling back to claude ($CLAUDE_MODEL)…" >&2
+  # Say how long this can take, every time. The hook has no progress output,
+  # so a silent multi-minute pause reads as a hang — and an engineer who
+  # decides it has hung reaches for SKIP_CODEX_REVIEW, which turns a slow
+  # audit into no audit. Naming the ceiling up front is what stops that.
+  echo "[codex-review] codex unavailable for $label — falling back to claude ($CLAUDE_MODEL)." >&2
+  echo "[codex-review] This reviews the full diff against AGENTS.md and can take several" >&2
+  echo "[codex-review] minutes (budget ${CLAUDE_TIMEOUT}s for this ref). It is not hung — let it finish." >&2
   if [ "${SANDBOX_CHECKED:-0}" != "1" ]; then
     SANDBOX_CHECKED=1
     warn_if_sandbox_unverified
