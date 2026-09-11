@@ -702,6 +702,17 @@ router.post('/sms', async (req, res) => {
         : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
+    // Hoisted above both consumers (codex #4210 round-18 P1, claude
+    // fallback audit): the reaction-path unknown-sender guard just below
+    // and alertEligible further down (inside the deferred setImmediate)
+    // used to compute this same tracking-number exclusion independently —
+    // a hand-rolled `numberConfig.type !== 'domain_tracking' &&
+    // numberConfig.type !== 'van_tracking'` here, the real flag there.
+    // They happened to agree today, but two independent implementations of
+    // the same rule can silently drift the next time either one changes.
+    // One flag, computed once, used by both.
+    const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
+
     if (smsReaction) {
       await db('sms_log').insert({
         customer_id: customer?.id || null,
@@ -736,10 +747,10 @@ router.post('/sms', async (req, res) => {
       // stranger's loud reaction fell back to the retired (policy-silenced)
       // internal_alert owner forward, and on the AI line it skipped even
       // that, ringing nobody. Tracking numbers stay excluded (their
-      // first-contact channel is new_lead, mirroring alertEligible's
-      // isTrackingLeadInbound exclusion below).
+      // first-contact channel is new_lead) via the SAME isTrackingLeadInbound
+      // flag alertEligible uses below.
       let unknownSenderAlertHandled = false;
-      if (!quietReaction && !customer && numberConfig.type !== 'domain_tracking' && numberConfig.type !== 'van_tracking'
+      if (!quietReaction && !customer && !isTrackingLeadInbound
         && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
         unknownSenderAlertHandled = await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
       }
@@ -1061,7 +1072,9 @@ router.post('/sms', async (req, res) => {
     res.type('text/xml').send('<Response></Response>');
     setImmediate(() => { void (async () => {
      try {
-    const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
+    // isTrackingLeadInbound is hoisted above the smsReaction block near the
+    // top of the handler (codex #4210 round-18 P1) so both consumers share
+    // one computation.
     // gbp_tracking is deliberately in this list: a known customer who replies
     // to a GBP tracking number (the number Google shows them) used to skip the
     // sms_reply thread bell entirely and surface only as the legacy
