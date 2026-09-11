@@ -3289,7 +3289,10 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   return (
     <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
-        <h2>{copy.title}</h2>
+        {/* h3, not h2 (owner ruling C5, DECISIONS 2026-09-11): these CTA-card
+            headlines were authored as h2 and then shrunk back down by two
+            separate size exceptions. h3 is 20px on the sheet by itself. */}
+        <h3>{copy.title}</h3>
       </div>
       <a
         data-glass-accent=""
@@ -3385,11 +3388,11 @@ function CrossSellCard({ data, token, mode }) {
           office confirms full per-application terms before anything is
           scheduled (the click-to-estimate PR moves that confirmation onto
           the estimate page itself). City rides the report payload. */}
-      <h2>
+      <h3>
         {priced
           ? `Keep your home${cityPhrase} protected for just ${perApplication}!`
           : `Your exact ${offer.label.toLowerCase()} quote is one tap away`}
-      </h2>
+      </h3>
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -7696,7 +7699,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .review-request-card-top {
           margin-bottom: 16px;
         }
-        .review-request-card h2 {
+        .review-request-card h3 {
           margin-bottom: 0;
         }
         .review-request-card .review-cta {
@@ -7730,14 +7733,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
-        .service-report-v1 .cross-sell-card h2,
-        .service-report-v1 .review-request-card h2 {
-          /* !important matches glass-theme.css's own blanket important
-             h2 sizing — owner ruling 2026-08-13: CTA-card headlines run
-             one step smaller than section headings, centered. */
+        .service-report-v1 .cross-sell-card h3,
+        .service-report-v1 .review-request-card h3 {
+          /* Owner ruling 2026-08-13 still holds — CTA-card headlines run one
+             step smaller than section headings, centered — but the step is
+             now expressed by the element. These were h2 (26px) pulled back to
+             22 here and to 20 in glass-theme.css; both size overrides are gone
+             and h3's own 20px carries the rule. Layout only below. */
           margin-bottom: 4px;
           text-align: center;
-          font-size: 22px !important;
         }
         .cross-sell-price {
           display: flex;
