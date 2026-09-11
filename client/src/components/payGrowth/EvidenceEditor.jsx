@@ -3,19 +3,19 @@ import { etDatetimeLocalValue, etDatetimeLocalToISO } from '../../lib/timezone';
 import { Button } from '../ui/Button';
 import { Field, request, numeric, dollarCents, percentBps, date, words } from './common';
 
-function AllocationForm({ visit, onCreated, onCancel }) {
+function AllocationForm({ visit, onCreated, onCancel, onBusy }) {
   const [data, setData] = useState(() => ({ id: crypto.randomUUID(), coverage_start: visit.service_date, coverage_end: visit.service_date, credit_type: 'routine', net_value: '', planned_visits: '1', source_reference: '' }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const change = (key, value) => setData(current => ({ ...current, [key]: value }));
   async function save(event) {
-    event.preventDefault(); setBusy(true); setError('');
+    event.preventDefault(); setBusy(true); onBusy(true); setError('');
     try {
       const { net_value, planned_visits, ...body } = data;
       const allocation = await request('/allocations', { method: 'POST', body: { ...body, customer_id: visit.customer_id, property_id: visit.property_id, service_key: visit.service_key, planned_visits: Number(planned_visits), net_value_cents: dollarCents(net_value) } });
-      onCreated(allocation);
+      onCreated(allocation, visit.id);
     } catch (failure) { setError(failure.message); }
-    finally { setBusy(false); }
+    finally { setBusy(false); onBusy(false); }
   }
   return <form className="pg-card pg-form" onSubmit={save}><h3>Accepted service-value allocation</h3><p>Enter the net value after discounts for this service line, its coverage period, and the original scheduled application count. Cancellations do not redistribute the value.</p>{error && <p role="alert" className="pg-error">{error}</p>}<fieldset disabled={busy}>
     <p>Service: {visit.service_key || 'Unmapped'}</p><div className="pg-form-grid"><Field label="Coverage begins" type="date" required value={data.coverage_start} onChange={event => change('coverage_start', event.target.value)} /><Field label="Coverage ends" type="date" required value={data.coverage_end} onChange={event => change('coverage_end', event.target.value)} /><Field label="Accepted net service-line value ($)" type="number" min="0" max="1000000" step="0.01" required value={data.net_value} onChange={event => change('net_value', event.target.value)} /><Field label="Original scheduled application count" type="number" min="1" max="366" required value={data.planned_visits} onChange={event => change('planned_visits', event.target.value)} /></div>
@@ -47,6 +47,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [newAllocation, setNewAllocation] = useState(false);
+  const [allocationSaving, setAllocationSaving] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     request(`/visits?${new URLSearchParams({ technicianId, month })}`, { signal: controller.signal }).then(result => {
@@ -55,7 +56,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
     return () => controller.abort();
   }, [technicianId, month]);
   useEffect(() => {
-    setReview({ detail: null, data: null }); setError(''); setNewAllocation(false);
+    setReview({ detail: null, data: null }); setError(''); setNewAllocation(false); setAllocationSaving(false);
     if (!selected) return undefined;
     const controller = new AbortController();
     request(`/services/${selected}/evidence`, { signal: controller.signal }).then(result => {
@@ -81,13 +82,17 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   const options = [{ value: '', label: 'Choose a performed service…' }, ...visitOptions.values()];
   const allocationLocked = detail?.revisions.some(revision => revision.allocation_id != null);
   return <section className="pg-card pg-form"><div className="pg-row"><h2>Review service evidence</h2><Button variant="secondary" disabled={busy} onClick={onCancel}>Close review</Button></div>{error && <p role="alert" className="pg-error">{error}</p>}
-    <Field label="Performed service" options={options} disabled={busy} value={selected} onChange={event => setSelected(event.target.value)} />
+    <Field label="Performed service" options={options} disabled={busy || allocationSaving} value={selected} onChange={event => setSelected(event.target.value)} />
     {selected && !detail && !error && <p role="status">Loading service evidence…</p>}
     {detail && <>
       <p className="pg-muted">{detail.visit.service_key || 'Unmapped service key'} · {detail.revisions.length ? `${detail.revisions.length} retained revisions` : 'First review'}. A no-application decision is assessed against the purchased scope.</p>
       {detail.visit.status !== 'completed' && <p className="pg-error">This service appears performed but is not marked complete. Resolve its completion record before calculating credit.</p>}
       {!newAllocation && !allocationLocked && <Button variant="secondary" disabled={!detail.visit.service_key || busy} onClick={() => setNewAllocation(true)}>Add accepted value allocation</Button>}
-      {newAllocation && <AllocationForm visit={detail.visit} onCancel={() => setNewAllocation(false)} onCreated={allocation => { setReview(current => ({ detail: { ...current.detail, allocations: [allocation, ...current.detail.allocations] }, data: { ...current.data, allocation_id: allocation.id, ordinal: '1' } })); setNewAllocation(false); }} />}
+      {newAllocation && <AllocationForm visit={detail.visit} onBusy={setAllocationSaving} onCancel={() => setNewAllocation(false)} onCreated={(allocation, serviceId) => {
+        // The service selector is disabled while the save is pending; this guard keeps a late response from another service out of this review.
+        setReview(current => current.detail?.visit.id === serviceId ? { detail: { ...current.detail, allocations: [allocation, ...current.detail.allocations] }, data: { ...current.data, allocation_id: allocation.id, ordinal: '1' } } : current);
+        setNewAllocation(false);
+      }} />}
       <form onSubmit={save}><fieldset disabled={busy || newAllocation || detail.visit.status !== 'completed'}>
         <div className="pg-form-grid"><Field label="Service-value allocation" value={data.allocation_id} disabled={allocationLocked} options={[{ value: '', label: 'Not yet recorded' }, ...detail.allocations.map(row => ({ value: row.id, label: `${date(row.coverage_start)} – ${date(row.coverage_end)} · $${(row.net_value_cents / 100).toFixed(2)} / ${row.planned_visits} applications` }))]} onChange={event => { change('allocation_id', event.target.value); change('ordinal', event.target.value ? '1' : ''); }} /><Field label="Application number in original allocation" type="number" min="1" max="366" disabled={allocationLocked || !data.allocation_id} value={data.ordinal} onChange={event => change('ordinal', event.target.value)} /></div>
         <div className="pg-form-grid"><Field label="Value provenance" value={data.provenance} options={['verified', 'backfilled', 'synthetic'].map(value => ({ value, label: words(value) }))} onChange={event => change('provenance', event.target.value)} /><Field label="Production exclusion" value={data.exclusion} options={['none', 'corrective', 'planned_followup', 'duplicate', 'unnecessary', 'inspection'].map(value => ({ value, label: words(value) }))} onChange={event => change('exclusion', event.target.value)} /></div>

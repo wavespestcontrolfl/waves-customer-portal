@@ -106,6 +106,30 @@ describe('EvidenceEditor', () => {
     expect(body.rework_outcome).toBe('unobserved');
   });
 
+  it('locks the service selector while an allocation save is pending and selects the saved allocation', async () => {
+    const detail = baseDetail({ allocations: [] });
+    let resolveAllocation;
+    request.mockImplementation((path, options = {}) => {
+      if (path === '/allocations') return new Promise(resolve => { resolveAllocation = resolve; });
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(detail);
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add accepted value allocation' }));
+    fireEvent.change(screen.getByLabelText('Accepted net service-line value ($)'), { target: { value: '600' } });
+    fireEvent.change(screen.getByLabelText('Accepted scope / price evidence'), { target: { value: 'Accepted annual scope.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retain allocation' }));
+    await waitFor(() => expect(lastCallBody('/allocations')).toBeTruthy());
+    expect(lastCallBody('/allocations').net_value_cents).toBe(60000);
+    expect(screen.getByLabelText('Performed service')).toBeDisabled();
+    resolveAllocation({ id: 'alloc-new', coverage_start: '2026-04-05', coverage_end: '2026-04-05', net_value_cents: 60000, planned_visits: 1 });
+    await waitFor(() => expect(screen.getByLabelText('Service-value allocation')).toHaveValue('alloc-new'));
+    expect(screen.getByLabelText('Performed service')).not.toBeDisabled();
+    expect(screen.getByLabelText('Application number in original allocation')).toHaveValue(1);
+  });
+
   it('disables allocation controls and participant shares once a revision is retained, and carries base_id forward', async () => {
     const detail = baseDetail({
       revisions: [{
