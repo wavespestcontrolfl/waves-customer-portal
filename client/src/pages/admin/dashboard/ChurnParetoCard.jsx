@@ -76,7 +76,7 @@ export default function ChurnParetoCard({ data }) {
               yAxisId="mrr"
               tick={{ fontSize: 14, fill: CHART_TICK }}
               tickFormatter={(v) => `$${v}`}
-              width={44}
+              width={62}
               tickLine={false}
               axisLine={false}
             />
@@ -86,7 +86,7 @@ export default function ChurnParetoCard({ data }) {
               domain={[0, 100]}
               tick={{ fontSize: 14, fill: CHART_TICK }}
               tickFormatter={(v) => `${v}%`}
-              width={36}
+              width={50}
               tickLine={false}
               axisLine={false}
             />

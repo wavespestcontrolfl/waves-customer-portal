@@ -1,4 +1,4 @@
-import { Badge } from "../../../components/ui";
+import { Badge, cn } from "../../../components/ui";
 import { confidenceTier } from "./scorecard-metrics";
 
 // Visible small-sample pill — the warning itself, never a tooltip. Renders
@@ -8,7 +8,10 @@ export default function SampleBadge({ n, className }) {
   const { tier, label } = confidenceTier(n);
   if (tier === "ok") return null;
   return (
-    <Badge className={className} tone="neutral">
+    <Badge
+      className={cn("whitespace-nowrap shrink-0", className)}
+      tone={tier === "low" ? "warn" : "neutral"}
+    >
       {label}
     </Badge>
   );
