@@ -92,6 +92,22 @@ test('sender instructions stay in the untrusted message field, separate from cla
   expect(mockDispatch.mock.calls[1][1].system).toBe(request.system);
 });
 
+// Codex P1, 2026-09-11 (pre-push): with the regex-only enforce chokepoint
+// fixed, an enforce verdict always rests on the model reading THIS text —
+// truncating it before the model call risks silencing a message whose
+// genuine service-request context only appears after the old 600-char
+// cutoff (the SERVICE_REQUEST_OR_REFERRAL_VETO scans the untruncated body,
+// but not every clarification matches its specific phrasing).
+test('a service-request clarification beyond the old 600-character cutoff still reaches the model', async () => {
+  const filler = 'Following up on our conversation. '.repeat(20); // > 600 chars
+  const body = `${filler}Can you quote pest control for my rental property?`;
+  expect(filler.length).toBeGreaterThan(600);
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.9 } });
+  await screenInboundSms({ body });
+  const request = mockDispatch.mock.calls[0][1];
+  expect(JSON.parse(request.text)).toContain('Can you quote pest control');
+});
+
 test('failed or malformed model output remains non-actionable evidence', async () => {
   mockDispatch.mockResolvedValueOnce({ ok: false });
   expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ solicitation: false, method: 'model_failed' });
