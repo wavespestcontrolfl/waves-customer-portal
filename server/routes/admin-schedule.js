@@ -1808,6 +1808,58 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
   };
 }
 
+// buildAppointmentPricing: resolve one service line's discount against its
+// gross and the net the stacking pass will restate, and shape the entry
+// appointmentServiceLines carries — the SAME three steps for the primary
+// line and every add-on line (previously written out once per line;
+// Codex #4405 r1 P2 — a duplicated decision path, not just duplicated code).
+async function resolveServiceLine({ gross, discountInput, serviceKey, serviceCategory, customer, recurringMembershipBooking }) {
+  const discount = await resolveLineDiscount(discountInput, gross || 0, customer, {
+    serviceKey, serviceCategory, recurringMembershipBooking,
+  });
+  const net = gross == null
+    ? null
+    : Math.max(0, Math.round((gross - (discount?.discountDollars || 0)) * 100) / 100);
+  return {
+    discount,
+    net,
+    line: {
+      amount: net || 0,
+      gross: gross || 0,
+      lineDiscount: discount,
+      serviceKey: serviceKey || null,
+      serviceCategory: serviceCategory || null,
+    },
+  };
+}
+
+// Booking create + spawn: the ADD-ON-ONLY total a member-covered series
+// stamps (memberSeriesCovered, below) so the review alert and Charge Now
+// surface the billable amount without the plan-covered base. `a.price` is
+// an add-on's own-line net (resolveServiceLine's `net`, i.e.
+// stackVisitDiscounts' per-line `net`) — it never carried an
+// appointment-level discount's share, which lands on the visit total, not
+// any one line's price. The covered base absorbs that scalar for free
+// (dues cover it regardless), so a member must not pay for an appointment
+// discount the office actually granted on their add-on: net out this
+// line's pro-rata share too (`appointmentDiscountDollars`, stashed
+// alongside `price` by the same restate step) before summing (Codex #4405
+// r1 P1 — a covered add-on scoped for an appointment discount was billed
+// at its undiscounted amount).
+function addonOnlyTotal(lines) {
+  const total = (lines || []).reduce((sum, a) => {
+    const price = Number(a?.price) > 0 ? Number(a.price) : 0;
+    if (price <= 0) return sum;
+    const apptShare = Number(a?.appointmentDiscountDollars) > 0 ? Number(a.appointmentDiscountDollars) : 0;
+    return sum + Math.max(0, Math.round((price - apptShare) * 100) / 100);
+  }, 0);
+  // Re-round the SUM, not just each line: binary float summation of
+  // several already-cents-rounded numbers can still land a hair off a
+  // clean cents value (e.g. 22.43 + 8.59 + 5 → 36.019999999999996), and
+  // this total is stamped straight onto a persisted price column.
+  return Math.round(total * 100) / 100;
+}
+
 // The catalog fields assertStackGroups reads, off a discounts row, plus the
 // lane it lands on: a per-line slot names its line, a document-wide slot
 // (the appointment discount) sets spansAll.
@@ -1989,25 +2041,24 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     ? mosquitoLadderDefault
     : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
-  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
-    serviceKey: serviceRecord?.service_key,
-    serviceCategory: serviceRecord?.category,
+  const primaryServiceKey = serviceRecord?.service_key || null;
+  const primaryServiceCategory = serviceRecord?.category || null;
+  const primaryResolved = await resolveServiceLine({
+    gross: primaryBase,
+    discountInput: primaryLineDiscount,
+    serviceKey: primaryServiceKey,
+    serviceCategory: primaryServiceCategory,
+    customer,
     recurringMembershipBooking,
   });
-  let primaryNet = primaryBase == null
-    ? null
-    : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
-  const appointmentServiceLines = [{
-    amount: primaryNet || 0,
-    gross: primaryBase || 0,
-    lineDiscount: primaryDiscount,
-    serviceKey: serviceRecord?.service_key || null,
-    serviceCategory: serviceRecord?.category || null,
-  }];
+  const primaryDiscount = primaryResolved.discount;
+  let primaryNet = primaryResolved.net;
+  const appointmentServiceLines = [primaryResolved.line];
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
-    let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    const addonPriceLabel = `price for ${addon.name || addon.serviceName || 'add-on'}`;
+    let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, addonPriceLabel);
     const addonService = addon.serviceId
       ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
@@ -2017,28 +2068,26 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     if (base == null && addonService?.service_key === 'mosquito_one_time') {
       const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price);
       const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
-      if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+      if (fallback != null) base = parseMoneyInput(fallback, addonPriceLabel);
     }
-    const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
-      serviceKey: addonService?.service_key,
-      serviceCategory: addonService?.category,
+    const addonServiceKey = addonService?.service_key || null;
+    const addonServiceCategory = addonService?.category || null;
+    const addonResolved = await resolveServiceLine({
+      gross: base,
+      discountInput: addon,
+      serviceKey: addonServiceKey,
+      serviceCategory: addonServiceCategory,
+      customer,
       recurringMembershipBooking,
     });
-    const net = base == null
-      ? null
-      : Math.max(0, Math.round((base - (lineDiscount?.discountDollars || 0)) * 100) / 100);
-    appointmentServiceLines.push({
-      amount: net || 0,
-      gross: base || 0,
-      lineDiscount,
-      serviceKey: addonService?.service_key || null,
-      serviceCategory: addonService?.category || null,
-    });
+    const lineDiscount = addonResolved.discount;
+    const net = addonResolved.net;
+    appointmentServiceLines.push(addonResolved.line);
     addonLines.push({
       serviceId: addon.serviceId || null,
       serviceName: addon.name || addon.serviceName,
-      serviceKey: addonService?.service_key || null,
-      serviceCategory: addonService?.category || null,
+      serviceKey: addonServiceKey,
+      serviceCategory: addonServiceCategory,
       base,
       price: net,
       estimatedDuration: addon.estimatedDuration ?? addon.duration ?? addon.default_duration_minutes ?? null,
@@ -2054,6 +2103,9 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const hasAnyPrice = primaryBase != null || addonLines.some((line) => line.price != null);
   let finalPrice = null;
+  // Single result shape either way (previously a duplicated return object —
+  // hasAnyPrice=false has no price to discount, so this stays null):
+  let appointmentDiscountResult = null;
   if (hasAnyPrice) {
     const subtotal = (primaryNet || 0) + addonLines.reduce((sum, line) => sum + (line.price || 0), 0);
     const appointmentDiscount = await loadInvoiceDiscount(discountId);
@@ -2130,7 +2182,17 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     addonLines.forEach((line, i) => {
       const restated = stacked.lines[i + 1];
       if (line.discount) line.discount.discountDollars = restated.lineDiscountDollars;
-      if (line.base != null) line.price = restated.net;
+      if (line.base != null) {
+        line.price = restated.net;
+        // The add-on's own-line net, restated above, never carried the
+        // appointment-level discount's share — that's a SEPARATE scalar
+        // (stacked.appointmentDiscountDollars) applied to the visit total,
+        // not to any one line's stored price. Stash this line's pro-rata
+        // share too (0 when none) so a member-covered series can net it out
+        // of the add-on-only stamp it bills instead of the plan-covered
+        // base (addonOnlyTotal, below — Codex #4405 r1 P1).
+        line.appointmentDiscountDollars = restated.appointmentDiscountDollars || 0;
+      }
     });
     // Nothing eligible to discount → amount AND dollars are 0, the contract
     // calculateDiscountDollars had: a stored non-zero amount on a $0 visit
@@ -2145,36 +2207,27 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       }
       : null;
     finalPrice = stacked.total;
-    return {
-      finalPrice,
-      primaryBase,
-      primaryNet,
-      primaryServiceKey: serviceRecord?.service_key || null,
-      primaryServiceCategory: serviceRecord?.category || null,
-      primaryDiscount,
-      addonLines,
-      appointmentDiscount: appointmentDiscount ? {
-        discountId: appointmentDiscount.id,
-        discountName: appointmentDiscount.name,
-        discountType: appointmentDiscount.discount_type,
-        discountAmount: resolvedAppointmentDiscount.amount,
-        discountDollars: resolvedAppointmentDiscount.dollars,
-        serviceKeyFilter,
-        serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
-        maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
-      } : null,
-    };
+    appointmentDiscountResult = appointmentDiscount ? {
+      discountId: appointmentDiscount.id,
+      discountName: appointmentDiscount.name,
+      discountType: appointmentDiscount.discount_type,
+      discountAmount: resolvedAppointmentDiscount.amount,
+      discountDollars: resolvedAppointmentDiscount.dollars,
+      serviceKeyFilter,
+      serviceCategoryFilter: appointmentDiscount.service_category_filter || null,
+      maxDiscountDollars: appointmentDiscount.max_discount_dollars != null ? Number(appointmentDiscount.max_discount_dollars) : null,
+    } : null;
   }
 
   return {
     finalPrice,
     primaryBase,
     primaryNet,
-    primaryServiceKey: serviceRecord?.service_key || null,
-    primaryServiceCategory: serviceRecord?.category || null,
+    primaryServiceKey,
+    primaryServiceCategory,
     primaryDiscount,
     addonLines,
-    appointmentDiscount: null,
+    appointmentDiscount: appointmentDiscountResult,
   };
 }
 
@@ -2789,6 +2842,47 @@ function moneyValuesDiffer(a, b) {
   const bn = (b == null || b === '') ? null : Number(b);
   if (an == null || bn == null) return (an == null) !== (bn == null);
   return Math.abs(an - bn) >= 0.005;
+}
+
+// update-details, untouched primary line slot (primaryLineDiscount not
+// posted): reconstruct what the stack should treat that slot as. Gate on,
+// with a stored type/amount to restate: the stored discount's OWN type and
+// amount, so a percentage stays a percentage when this save restacks it
+// against another discount (a new/changed appointment credit, a changed
+// add-on discount) — flattening it to a frozen fixed dollar credit would
+// under/overcharge relative to the client's type-aware preview
+// (Codex #4405 r1 P1). Otherwise (gate off, or nothing stored): the legacy
+// fixed-dollar back-out of line_discount_dollars, unchanged — with the gate
+// off staff can never post a line discount type at all (see the 409 above
+// it), so the stored slot was always a plain dollar credit.
+function reconstructPrimaryLineSlot({ stacking, existing }) {
+  if (stacking && existing?.line_discount_type
+    && existing.line_discount_amount != null && existing.line_discount_amount !== ''
+    && Number(existing.line_discount_amount) > 0) {
+    return {
+      discountType: existing.line_discount_type,
+      discountAmount: Number(existing.line_discount_amount),
+    };
+  }
+  const storedDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
+    ? Math.max(0, Number(existing.line_discount_dollars))
+    : 0;
+  return storedDollars > 0 ? { discountType: 'fixed_amount', discountAmount: storedDollars } : null;
+}
+
+// update-details, multi-line save: is a posted add-on discount id the SAME
+// stamp already stored on that row (kept verbatim, skipping
+// resolveLineDiscount) or a new pick (resolved through the catalog)? The
+// gross must match too — resolveLineDiscount's manualEligibilityFailures
+// check (e.g. a minimum-subtotal rule) is evaluated against the CURRENT
+// gross, so a stamp that bypasses it on an unrelated price cut could leave a
+// discount on a line the operator just reduced below its floor
+// (Codex #4405 r1 P1).
+function addonDiscountStampPreserved(stored, posted) {
+  return !!(stored && String(stored.discount_id || '') === String(posted.discountId || '')
+    && (stored.discount_type || null) === (posted.discountType || null)
+    && !moneyValuesDiffer(stored.discount_amount, posted.discountAmount)
+    && !moneyValuesDiffer(stored.base_price, posted.gross));
 }
 
 // Which propagatable groups this save actually CHANGED on the edited row,
@@ -5425,14 +5519,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
       && !customer?.payer_id
       && resolveBillingLane(customer).mode === 'monthly_membership' && !!isRecurring;
     const createInvoiceStamp = memberSeriesCovered ? false : createInvoiceEffective;
-    // A priced ADD-ON riding a covered member visit keeps a price stamp so
-    // the one-per-series review alert fires and Charge Now surfaces the
-    // billable amount — but the stamp is the ADD-ON-ONLY total (pre-
-    // discount), never the base+add-on subtotal: the base is covered by
-    // dues, and stamping the full price would surface/mint a $100 plan
-    // visit + $20 add-on as $120 instead of the billable $20 (Codex r2+r3).
-    // Base-only rows stay stamp-free.
-    const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
+    // A priced ADD-ON riding a covered member visit keeps a price stamp
+    // (addonOnlyTotal, module scope below) so the one-per-series review
+    // alert fires and Charge Now surfaces the billable amount — but the
+    // stamp is the ADD-ON-ONLY total (pre-discount), never the base+add-on
+    // subtotal: the base is covered by dues, and stamping the full price
+    // would surface/mint a $100 plan visit + $20 add-on as $120 instead of
+    // the billable $20 (Codex r2+r3). Base-only rows stay stamp-free.
 
     const zone = bookingProperty
       ? getZone(bookingProperty.service_address_city, bookingProperty.service_address_zip)
@@ -8661,7 +8754,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // exactly as create does (authoritative amount/cap, eligibility).
       const existingAddonRows = stacking && addons.some((a) => a?.discountId)
         ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
-          .select('service_id', 'service_name', 'discount_id', 'discount_type', 'discount_amount')
+          .select('service_id', 'service_name', 'discount_id', 'discount_type', 'discount_amount', 'base_price')
           .catch(() => [])
         : [];
       const storedAddonFor = (a, serviceName) => existingAddonRows.find((row) => (
@@ -8682,9 +8775,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         let net = gross;
         let lineDiscount = null;
         const stored = a.discountId ? storedAddonFor(a, serviceName) : null;
-        const preservedStamp = !!(stored && String(stored.discount_id || '') === String(a.discountId)
-          && (stored.discount_type || null) === lineType
-          && !moneyValuesDiffer(stored.discount_amount, lineAmount));
+        const preservedStamp = addonDiscountStampPreserved(stored, { discountId: a.discountId, discountType: lineType, discountAmount: lineAmount, gross });
         if (stacking && a.discountId && !preservedStamp) {
           const { customerRow, recurringMembershipBooking } = await editEligibilityContext();
           lineDiscount = await resolveLineDiscount(a, gross || 0, customerRow || {}, {
@@ -8747,6 +8838,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         ];
         if (cols.discount_id) existingFields.push('discount_id');
         if (cols.line_discount_id) existingFields.push('line_discount_id');
+        if (cols.line_discount_type) existingFields.push('line_discount_type');
+        if (cols.line_discount_amount) existingFields.push('line_discount_amount');
         if (cols.service_key_snapshot) existingFields.push('service_key_snapshot');
         if (cols.service_category_snapshot) existingFields.push('service_category_snapshot');
         if (cols.discount_service_key_filter) existingFields.push('discount_service_key_filter');
@@ -8773,17 +8866,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const primaryServiceKey = updates.service_key_snapshot ?? existing?.service_key_snapshot ?? null;
         const primaryServiceCategory = updates.service_category_snapshot ?? existing?.service_category_snapshot ?? null;
 
-        // Primary line slot. Untouched (undefined): the stored dollars ride as
-        // a fixed credit on the gross, which is exactly the legacy back-out
-        // (mirrors calculateStoredVisitFinancials). Posted: cleared, or a
+        // Primary line slot. Untouched (undefined): reconstructed from the
+        // stored slot (see reconstructPrimaryLineSlot). Posted: cleared, or a
         // catalog pick resolved like create's primaryLineDiscount.
         const primaryLineDiscountProvided = primaryLineDiscount !== undefined;
         let primaryLineSlot = null;
         if (!primaryLineDiscountProvided) {
-          const storedDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
-            ? Math.max(0, Number(existing.line_discount_dollars))
-            : 0;
-          primaryLineSlot = storedDollars > 0 ? { discountType: 'fixed_amount', discountAmount: storedDollars } : null;
+          primaryLineSlot = reconstructPrimaryLineSlot({ stacking, existing });
         } else if (primaryLineDiscount && (primaryLineDiscount.discountId || primaryLineDiscount.id)) {
           const { customerRow, recurringMembershipBooking } = await editEligibilityContext();
           primaryLineSlot = await resolveLineDiscount(primaryLineDiscount, primaryGross || 0, customerRow || {}, {
@@ -18564,6 +18653,8 @@ router._test = {
   customerFacingCompanionTypes,
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  resolveServiceLine,
+  addonOnlyTotal,
   resolveAppointmentDiscountLineScope,
   stackRowOf,
   loadStackRows,
@@ -18574,6 +18665,9 @@ router._test = {
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
+  reconstructPrimaryLineSlot,
+  addonDiscountStampPreserved,
+  resolveLineDiscount,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,

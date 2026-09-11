@@ -754,10 +754,13 @@ describe('admin schedule appointment discount eligibility', () => {
       }]);
 
       // $25 off the pest line first, then 10% of $86 = $8.60; the mosquito
-      // line is out of scope and keeps its own 10%.
+      // line is out of scope and keeps its own 10%. The $25 appointment
+      // credit is scoped to the pest line alone, so its whole per-line
+      // share (appointmentDiscountDollars) lands there and nowhere else
+      // (Codex #4405 r1 P1 — the covered-series add-on stamp reads this).
       expect(financials.lines).toEqual([
-        { lineDiscountDollars: 8.6, net: 102.4 },
-        { lineDiscountDollars: 6, net: 54 },
+        { lineDiscountDollars: 8.6, net: 102.4, appointmentDiscountDollars: 25 },
+        { lineDiscountDollars: 6, net: 54, appointmentDiscountDollars: 0 },
       ]);
       expect(financials.appointmentDiscountDollars).toBe(25);
       expect(financials.price).toBe(131.4);

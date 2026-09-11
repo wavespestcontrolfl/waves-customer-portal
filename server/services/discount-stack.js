@@ -20,7 +20,11 @@
  * Any non-stackable catalog group follows the same rule.
  *
  * The client mirror is client/src/lib/discountStack.js — keep the two in
- * step (both test suites run the same worked examples).
+ * step (both test suites run the same worked examples) for stackDiscounts
+ * and stackVisitDiscounts. stackDocumentDiscounts (the invoice-level
+ * discountIds path) is server-to-server only and deliberately NOT
+ * mirrored: no client code sends invoice-level discountIds, and the
+ * client preview only ever stacks line-attached discounts.
  */
 
 function isPercentDiscountType(type) {
@@ -65,6 +69,29 @@ function stackOrder(discounts) {
     .sort((a, b) => rank(a.discount) - rank(b.discount) || a.index - b.index);
 }
 
+// Spread `totalDollars` pro rata across `poolLines` by `weightOf(line)`,
+// the LAST line absorbing the rounding remainder so the shares always sum
+// to exactly totalDollars (never more, by a cent, than what the discount
+// itself resolved to). `pool` is the caller's own sum of weightOf(line)
+// over poolLines — passed in rather than recomputed here because the
+// caller already needed it to size totalDollars via discountStepDollars/
+// stackDiscounts before allocating it. Calls `apply(line, share)` to let
+// the caller fold each share into its own line shape. Shared by
+// stackVisitDiscounts (the fixed-appointment-credit pass and the
+// percentage/free-service pass) and stackDocumentDiscounts (the analogous
+// fixed-document-credit pass) — same technique, same rounding, so a line's
+// pro-rata share means the same cent-for-cent thing on every surface.
+function allocateProRata(poolLines, pool, weightOf, totalDollars, apply) {
+  let allocated = 0;
+  poolLines.forEach((line, i) => {
+    const share = i === poolLines.length - 1
+      ? cents(totalDollars - allocated)
+      : cents(totalDollars * (weightOf(line) / pool));
+    allocated = cents(allocated + share);
+    apply(line, share);
+  });
+}
+
 /**
  * Stack several discounts on one base amount.
  * discounts: [{ discountType, amount, maxDiscountDollars? }]
@@ -101,8 +128,20 @@ function stackDiscounts(base, discounts, { compound = true } = {}) {
  * legacy order instead — every line discount off its own gross, then the
  * appointment discount over the eligible nets.
  *
- * Returns { lines: [{ lineDiscountDollars, net }], subtotal (after line
- * discounts), appointmentDiscountDollars, total }.
+ * Returns { lines: [{ lineDiscountDollars, net, appointmentDiscountDollars }],
+ * subtotal (after line discounts), appointmentDiscountDollars, total }.
+ * Each line's `appointmentDiscountDollars` is its pro-rata SHARE of the
+ * scalar `appointmentDiscountDollars` (0 when the line wasn't eligible, or
+ * compound is false — the legacy order never allocated the appointment
+ * discount to a line, only to the visit total, so this is always 0 there).
+ * The per-line shares always sum to exactly the scalar (last-eligible-line
+ * takes the rounding remainder — same technique for both the fixed-credit
+ * pass and the percentage/free-service pass below). `lineDiscountDollars`,
+ * `net`, `subtotal`, the scalar `appointmentDiscountDollars`, and `total`
+ * are unchanged by this field — it is purely additive, so a caller that
+ * only reads those keeps getting exactly what it got before (Codex #4405
+ * r1 P1: a covered member's add-on total needs this to net out the
+ * appointment-level dollars it currently drops on the floor).
  */
 function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
   const input = Array.isArray(lines) ? lines : [];
@@ -112,6 +151,7 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
     lineDiscount: line?.lineDiscount || null,
     eligible: line?.eligible !== false,
     lineDiscountDollars: 0,
+    appointmentDiscountDollars: 0,
   }));
   const appt = appointmentDiscount && appointmentDiscount.discountType ? appointmentDiscount : null;
 
@@ -129,13 +169,9 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
     const eligible = state.filter((line) => line.eligible && line.remaining > 0);
     const pool = cents(eligible.reduce((sum, line) => sum + line.remaining, 0));
     appointmentDiscountDollars = discountStepDollars(appt, pool);
-    let allocated = 0;
-    eligible.forEach((line, i) => {
-      const share = i === eligible.length - 1
-        ? cents(appointmentDiscountDollars - allocated)
-        : cents(appointmentDiscountDollars * (line.remaining / pool));
-      allocated = cents(allocated + share);
+    allocateProRata(eligible, pool, (line) => line.remaining, appointmentDiscountDollars, (line, share) => {
       line.remaining = cents(Math.max(0, line.remaining - share));
+      line.appointmentDiscountDollars = cents(line.appointmentDiscountDollars + share);
     });
   }
 
@@ -149,15 +185,31 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
   }
 
   // 4. Appointment percentage / free service on the eligible remainder
-  // (legacy: every appointment discount type lands here).
+  // (legacy: every appointment discount type lands here). The scalar is
+  // computed exactly as before; the per-line allocation is a NEW, purely
+  // additive step (same pro-rata / last-takes-the-remainder technique as
+  // step 2) that only runs when compounding — legacy (compound=false) has
+  // no per-line meaning for the appointment discount, so every line's
+  // appointmentDiscountDollars stays 0 there, unchanged from before this
+  // field existed.
   if (appt && (!compound || !isFixedDiscountType(appt.discountType))) {
-    const base = cents(state.reduce((sum, line) => (line.eligible ? sum + line.remaining : sum), 0));
+    const eligibleLines = state.filter((line) => line.eligible);
+    const base = cents(eligibleLines.reduce((sum, line) => sum + line.remaining, 0));
     appointmentDiscountDollars = discountStepDollars(appt, base);
+    if (compound) {
+      // poolLines is empty (a no-op inside allocateProRata) whenever there
+      // is nothing to allocate — no separate `> 0` guard needed.
+      const poolLines = eligibleLines.filter((line) => line.remaining > 0);
+      allocateProRata(poolLines, base, (line) => line.remaining, appointmentDiscountDollars, (line, share) => {
+        line.appointmentDiscountDollars = cents(line.appointmentDiscountDollars + share);
+      });
+    }
   }
 
   const outLines = state.map((line) => ({
     lineDiscountDollars: line.lineDiscountDollars,
     net: cents(Math.max(0, line.gross - line.lineDiscountDollars)),
+    appointmentDiscountDollars: line.appointmentDiscountDollars,
   }));
   const subtotal = cents(outLines.reduce((sum, line) => sum + line.net, 0));
   return {
@@ -165,6 +217,94 @@ function stackVisitDiscounts({ lines, appointmentDiscount, compound = true }) {
     subtotal,
     appointmentDiscountDollars,
     total: cents(Math.max(0, subtotal - appointmentDiscountDollars)),
+  };
+}
+
+/**
+ * The document model: several lines, each carrying its OWN ORDERED list of
+ * discount terms (unlike stackVisitDiscounts' one-slot-per-line model — an
+ * invoice line can carry a frozen stored stamp plus one or more fresh
+ * picks), plus one shared list of document-wide terms that reach every
+ * line (an invoice's manually-picked discountIds). Same four-step order as
+ * stackVisitDiscounts: (1) each line's own fixed terms, in the order
+ * given; (2) fixed document-wide terms, spread pro rata over lines that
+ * still carry a balance (allocateProRata — same technique, same rounding,
+ * as stackVisitDiscounts' fixed-appointment-credit pass); (3) each line's
+ * own percent/free_service terms, on what's left; (4) percent/free_service
+ * document-wide terms, on the total remainder across every line. A
+ * document-level term reaches EVERY line — there is no `eligible` scoping
+ * here, unlike the appointment discount above (no surface today needs a
+ * per-line "Applies to" filter on an invoice-level discount) — and there
+ * is no compound:false: the gate-off path never reaches this function, so
+ * callers keep their own pre-lane math for that case (invoice.js's
+ * create() computes each line discount off its own full line and each
+ * manual discount independently against the untouched subtotal, exactly
+ * as it did before this function existed).
+ *
+ * lines: [{ gross, terms: [{ discountType, amount, maxDiscountDollars? }, ...] }]
+ * documentTerms: [{ discountType, amount, maxDiscountDollars? }, ...]
+ * Returns { lines: [{ termDollars: [...], net }], documentTerms: [{ dollars }] }
+ * — termDollars and documentTerms are parallel to the input arrays, same
+ * convention as stackDiscounts' `items`.
+ */
+function stackDocumentDiscounts({ lines, documentTerms }) {
+  const lineInput = Array.isArray(lines) ? lines : [];
+  const docTerms = Array.isArray(documentTerms) ? documentTerms : [];
+
+  const state = lineInput.map((line) => {
+    const gross = Math.max(0, cents(line?.gross));
+    const terms = Array.isArray(line?.terms) ? line.terms : [];
+    return { gross, terms, termDollars: new Array(terms.length).fill(0), remaining: gross };
+  });
+
+  // 1. Fixed LINE terms, each line on its own gross.
+  for (const line of state) {
+    const fixedIdx = line.terms
+      .map((t, i) => (isFixedDiscountType(t?.discountType) ? i : -1))
+      .filter((i) => i >= 0);
+    const stacked = stackDiscounts(line.gross, fixedIdx.map((i) => line.terms[i]), { compound: true });
+    fixedIdx.forEach((termIdx, i) => { line.termDollars[termIdx] = stacked.items[i].dollars; });
+    line.remaining = stacked.net;
+  }
+
+  // 2. Fixed DOCUMENT terms, spread pro rata over lines that still carry a
+  // balance after step 1.
+  const docDollars = new Array(docTerms.length).fill(0);
+  const docFixedIdx = docTerms
+    .map((t, i) => (isFixedDiscountType(t?.discountType) ? i : -1))
+    .filter((i) => i >= 0);
+  const fixedPool = state.filter((line) => line.remaining > 0);
+  const fixedPoolTotal = cents(fixedPool.reduce((sum, line) => sum + line.remaining, 0));
+  const docFixedStacked = stackDiscounts(fixedPoolTotal, docFixedIdx.map((i) => docTerms[i]), { compound: true });
+  docFixedIdx.forEach((termIdx, i) => { docDollars[termIdx] = docFixedStacked.items[i].dollars; });
+  allocateProRata(fixedPool, fixedPoolTotal, (line) => line.remaining, docFixedStacked.totalDollars, (line, share) => {
+    line.remaining = cents(Math.max(0, line.remaining - share));
+  });
+
+  // 3. LINE percent/free_service terms, on what's left after steps 1-2.
+  for (const line of state) {
+    const nonFixedIdx = line.terms
+      .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
+      .filter((i) => i >= 0);
+    const stacked = stackDiscounts(line.remaining, nonFixedIdx.map((i) => line.terms[i]), { compound: true });
+    nonFixedIdx.forEach((termIdx, i) => { line.termDollars[termIdx] = stacked.items[i].dollars; });
+    line.remaining = stacked.net;
+  }
+
+  // 4. DOCUMENT percent/free_service terms, on the total remainder across
+  // every line (no per-line allocation — no consumer needs a document
+  // percentage's per-line share today, unlike the fixed pass above whose
+  // allocation step 3 depends on).
+  const docNonFixedIdx = docTerms
+    .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
+    .filter((i) => i >= 0);
+  const finalBase = cents(state.reduce((sum, line) => sum + line.remaining, 0));
+  const docNonFixedStacked = stackDiscounts(finalBase, docNonFixedIdx.map((i) => docTerms[i]), { compound: true });
+  docNonFixedIdx.forEach((termIdx, i) => { docDollars[termIdx] = docNonFixedStacked.items[i].dollars; });
+
+  return {
+    lines: state.map((line) => ({ termDollars: line.termDollars, net: line.remaining })),
+    documentTerms: docDollars.map((dollars) => ({ dollars })),
   };
 }
 
@@ -214,6 +354,7 @@ module.exports = {
   isFixedDiscountType,
   stackDiscounts,
   stackVisitDiscounts,
+  stackDocumentDiscounts,
   stackGroupConflict,
   assertStackGroups,
 };

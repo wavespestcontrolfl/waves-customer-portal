@@ -61,7 +61,7 @@ describe('legacy math (compound: false)', () => {
       compound: false,
     });
     // $100 − 10% = $90, then the $30 credit → $60. (Compounded it is $63.)
-    expect(legacy.lines[0]).toEqual({ lineDiscountDollars: 10, net: 90 });
+    expect(legacy.lines[0]).toEqual({ lineDiscountDollars: 10, net: 90, appointmentDiscountDollars: 0 });
     expect(legacy.appointmentDiscountDollars).toBe(30);
     expect(legacy.total).toBe(60);
 
@@ -150,7 +150,7 @@ describe('the visit path while dark', () => {
       primaryServiceCategory: 'pest_control',
       appointmentDiscount: { discountType: 'fixed_amount', discountAmount: 30 },
     }, []);
-    expect(financials.lines[0]).toEqual({ lineDiscountDollars: 10, net: 90 });
+    expect(financials.lines[0]).toEqual({ lineDiscountDollars: 10, net: 90, appointmentDiscountDollars: 0 });
     expect(financials.price).toBe(60);
   });
 });

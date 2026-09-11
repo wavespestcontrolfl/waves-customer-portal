@@ -931,6 +931,42 @@ export function composeAppointmentSuccessToast({ resultsCount, createdCount, est
   ].filter(Boolean).join(' ');
 }
 
+// The appointment-level slot's discount types accepted by the shared stack
+// (server/services/discount-stack.js + client mirror discountStack.js):
+// percentage/fixed_amount plus their operator-entered "custom" siblings and
+// a free-service comp. Also used to filter the appointment-level picker so
+// it offers the same catalog a line discount does (Codex r1 P2 — the picker
+// previously excluded the three custom/free types even though
+// pickAppointmentDiscount already prompts for their amount and the server
+// booking path accepts them).
+export const APPOINTMENT_DISCOUNT_TYPES = [
+  'percentage', 'fixed_amount', 'variable_percentage', 'variable_amount', 'free_service',
+];
+
+// A booking with services on different cadences fans out into separate
+// appointment POSTs (groupServicesForAppointmentSubmit) — one per cadence
+// submit group — each validated independently by the server. A discount
+// picker must only see the tiers already chosen WITHIN the same group: a
+// tier picked on a quarterly pest line has no bearing on a monthly lawn
+// line's picker, since the two book as separate requests (Codex r1 P2).
+// groups is groupServicesForAppointmentSubmit's own output ({ lines }[]).
+export function submitGroupLinesForService(groups, svc, allServices) {
+  return (Array.isArray(groups) ? groups : []).find((g) => g.lines.includes(svc))?.lines || allServices;
+}
+
+// Which submit group's lines the appointment-level slot ITSELF should be
+// scoped against — the group its "Applies to" key targets, else the first
+// group (mirrors the same default the modal's appointmentDiscountGroup
+// resolves once a discount is actually chosen). lineServiceKeyOf is the
+// modal's own lineServiceKey helper: (svc) => string | null.
+export function appointmentDiscountScopeLinesFor(groups, scopeKey, lineServiceKeyOf, allServices) {
+  const list = Array.isArray(groups) ? groups : [];
+  const target = scopeKey
+    ? list.find((g) => g.lines.some((svc) => lineServiceKeyOf(svc) === scopeKey))
+    : list[0];
+  return target?.lines || allServices;
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -1633,9 +1669,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const presetsStackableWith = (chosenRows, lane) => (stackingEnabled
     ? stackablePresets(lineDiscountPresets, chosenRows.filter(Boolean), lane)
     : lineDiscountPresets);
-  const lineLaneRows = (exceptIdx) => services
-    .map((svc, i) => (i === exceptIdx ? null : laneRow(svc.lineDiscount, { scope: `line:${i}` })))
-    .filter(Boolean);
+  // exceptIdx >= 0 scopes to the SAME submit group as that line; exceptIdx
+  // -1 (the appointment-level slot) scopes to whichever group ITS "Applies
+  // to" key targets. Both reference appointmentSubmitGroups /
+  // submitGroupLinesFor / appointmentDiscountScopeLines, defined below
+  // alongside the other cadence-grouping-dependent consts — safe here
+  // because lineLaneRows is only ever CALLED later, after those initialize
+  // (Codex r1 P2: a tier chosen on one cadence must not hide tiers from a
+  // different cadence, since each submit group is a separate, independently
+  // -validated appointment request).
+  const lineLaneRows = (exceptIdx) => {
+    const scope = exceptIdx >= 0 ? submitGroupLinesFor(services[exceptIdx]) : appointmentDiscountScopeLines;
+    return scope
+      .map((svc) => {
+        const i = services.indexOf(svc);
+        return i === exceptIdx ? null : laneRow(svc.lineDiscount, { scope: `line:${i}` });
+      })
+      .filter(Boolean);
+  };
   const matchingLineDiscounts = (idx) => {
     const svc = services[idx];
     const key = svc?.lineId || idx;
@@ -1649,8 +1700,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       .filter((d) => `${d.name || ''} ${d.description || ''} ${formatDiscountLabel(d)}`.toLowerCase().includes(q))
       .slice(0, 10);
   };
-  const appointmentDiscountOptions = presetsStackableWith(lineLaneRows(-1), { spansAll: true })
-    .filter((d) => d.discount_type === 'percentage' || d.discount_type === 'fixed_amount');
   // A custom preset takes the operator's amount, like a line pick.
   const pickAppointmentDiscount = (presetId) => {
     if (!presetId) { setAppointmentDiscount(null); return; }
@@ -2086,9 +2135,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Placed AFTER the cadence-grouping helpers below: these read them
   // during render, so they must not run before those consts initialize.
+  const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
+  const submitGroupLinesFor = (svc) => submitGroupLinesForService(appointmentSubmitGroups, svc, services);
+  const appointmentDiscountScopeLines = appointmentDiscountScopeLinesFor(
+    appointmentSubmitGroups, appointmentDiscountScopeKey, lineServiceKey, services,
+  );
+  const appointmentDiscountOptions = presetsStackableWith(lineLaneRows(-1), { spansAll: true })
+    .filter((d) => APPOINTMENT_DISCOUNT_TYPES.includes(d.discount_type));
   const appointmentDiscountGroup = (() => {
     if (!appointmentDiscount || services.length === 0) return null;
-    const groups = groupServicesForAppointmentSubmit(services);
+    const groups = appointmentSubmitGroups;
     const key = appointmentDiscount.service_key_filter || appointmentDiscountScopeKey || null;
     const target = key
       ? groups.find((group) => group.lines.some((svc) => lineServiceKey(svc) === key))

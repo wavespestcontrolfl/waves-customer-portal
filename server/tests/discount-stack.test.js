@@ -53,8 +53,8 @@ describe('stackVisitDiscounts (line slot + appointment slot)', () => {
       ],
       appointmentDiscount: MILITARY,
     });
-    expect(result.lines[0]).toEqual({ lineDiscountDollars: 11.1, net: 99.9 });
-    expect(result.lines[1]).toEqual({ lineDiscountDollars: 0, net: 60 });
+    expect(result.lines[0]).toEqual({ lineDiscountDollars: 11.1, net: 99.9, appointmentDiscountDollars: 5 });
+    expect(result.lines[1]).toEqual({ lineDiscountDollars: 0, net: 60, appointmentDiscountDollars: 0 });
     expect(result.subtotal).toBe(159.9);
     expect(result.appointmentDiscountDollars).toBe(5);
     expect(result.total).toBe(154.9);
@@ -67,6 +67,7 @@ describe('stackVisitDiscounts (line slot + appointment slot)', () => {
     });
     expect(result.appointmentDiscountDollars).toBe(25);
     expect(result.lines[0].lineDiscountDollars).toBe(8.6);
+    expect(result.lines[0].appointmentDiscountDollars).toBe(25);
     expect(result.total).toBe(77.4);
   });
 
@@ -83,6 +84,11 @@ describe('stackVisitDiscounts (line slot + appointment slot)', () => {
     expect(result.lines.map((l) => l.lineDiscountDollars)).toEqual([8, 4, 0]);
     expect(result.appointmentDiscountDollars).toBe(30);
     expect(result.total).toBe(148);
+    // The scalar allocated pro rata to the two eligible lines; the
+    // ineligible third line gets none — and every line's share sums back
+    // to the scalar exactly (Codex #4405 r1 P1).
+    expect(result.lines.map((l) => l.appointmentDiscountDollars)).toEqual([20, 10, 0]);
+    expect(result.lines.reduce((sum, l) => sum + l.appointmentDiscountDollars, 0)).toBe(result.appointmentDiscountDollars);
   });
 
   test('without a fixed appointment credit the math is the legacy line-then-appointment order', () => {
@@ -92,6 +98,7 @@ describe('stackVisitDiscounts (line slot + appointment slot)', () => {
     });
     expect(result.lines[0].net).toBe(99.9);
     expect(result.appointmentDiscountDollars).toBe(3);
+    expect(result.lines[0].appointmentDiscountDollars).toBe(3);
     expect(result.total).toBe(96.9);
   });
 
@@ -100,6 +107,53 @@ describe('stackVisitDiscounts (line slot + appointment slot)', () => {
     expect(result.subtotal).toBe(15.5);
     expect(result.appointmentDiscountDollars).toBe(0);
     expect(result.total).toBe(15.5);
+  });
+});
+
+describe('stackVisitDiscounts — per-line appointment-discount allocation (Codex #4405 r1 P1)', () => {
+  test('a PERCENTAGE appointment discount over three eligible lines allocates pro rata and sums to the scalar exactly, no rounding drift', () => {
+    // $10 / $17 / $23 = $50 base; a 13% appointment discount is $6.50,
+    // split $1.30 / $2.21 / $2.99 — an intentionally ugly split to stress
+    // the last-line-takes-the-remainder technique.
+    const result = stackVisitDiscounts({
+      lines: [
+        { gross: 10, eligible: true },
+        { gross: 17, eligible: true },
+        { gross: 23, eligible: true },
+      ],
+      appointmentDiscount: { discountType: 'percentage', amount: 13 },
+    });
+    expect(result.appointmentDiscountDollars).toBe(6.5);
+    const shares = result.lines.map((l) => l.appointmentDiscountDollars);
+    expect(shares.reduce((a, b) => a + b, 0)).toBe(6.5);
+    expect(shares.every((n) => Number.isFinite(n) && n >= 0)).toBe(true);
+  });
+
+  test('an ineligible line never receives a share of either appointment-discount shape', () => {
+    const fixed = stackVisitDiscounts({
+      lines: [{ gross: 50, eligible: true }, { gross: 50, eligible: false }],
+      appointmentDiscount: { discountType: 'fixed_amount', amount: 20 },
+    });
+    expect(fixed.lines[1].appointmentDiscountDollars).toBe(0);
+    expect(fixed.lines[0].appointmentDiscountDollars).toBe(20);
+
+    const pct = stackVisitDiscounts({
+      lines: [{ gross: 50, eligible: true }, { gross: 50, eligible: false }],
+      appointmentDiscount: { discountType: 'percentage', amount: 20 },
+    });
+    expect(pct.lines[1].appointmentDiscountDollars).toBe(0);
+    expect(pct.lines[0].appointmentDiscountDollars).toBe(10);
+  });
+
+  test('compound: false (legacy/gate-off) never allocates per line, even with an appointment discount — the field stays 0', () => {
+    const result = stackVisitDiscounts({
+      lines: [{ gross: 100, lineDiscount: { discountType: 'percentage', amount: 10 }, eligible: true }],
+      appointmentDiscount: { discountType: 'fixed_amount', amount: 30 },
+      compound: false,
+    });
+    expect(result.lines[0]).toEqual({ lineDiscountDollars: 10, net: 90, appointmentDiscountDollars: 0 });
+    expect(result.appointmentDiscountDollars).toBe(30);
+    expect(result.total).toBe(60);
   });
 });
 
