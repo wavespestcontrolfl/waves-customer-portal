@@ -7,6 +7,20 @@
 
 const mockNotifyAdmin = jest.fn();
 const mockResolve = jest.fn();
+const mockClampUpdates = [];
+jest.mock('../models/db', () => {
+  const trx = jest.fn(() => {
+    const b = {};
+    b.where = jest.fn(() => b);
+    b.update = jest.fn(async (patch) => { mockClampUpdates.push(patch); return 1; });
+    return b;
+  });
+  trx.raw = (sql, bindings) => ({ sql, bindings });
+  const db = jest.fn(() => trx());
+  db.raw = (sql, bindings) => ({ sql, bindings });
+  db.transaction = jest.fn(async (fn) => fn(trx));
+  return db;
+});
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 jest.mock('../services/ops-digest', () => {
   const actual = jest.requireActual('../services/ops-digest');
@@ -47,6 +61,7 @@ let server; let baseUrl;
 beforeEach(() => {
   mockNotifyAdmin.mockReset();
   mockResolve.mockReset();
+  mockClampUpdates.length = 0;
   process.env.NODE_ENV = 'test';
   process.env.OPS_DIGEST_INGEST_TOKEN = TOKEN;
   lane(true);
@@ -197,6 +212,8 @@ describe('bell write', () => {
       // a later run's recurrence refreshes the standing row (observedAt above all)
       refreshOnDedupe: true,
       dedupeVersion: expect.any(String),
+      // write + clamp share one advisory-locked transaction
+      trx: expect.anything(),
       metadata: {
         check: { id: 'e22-schedule-integrity', title: 'Schedule integrity', cadence: 'daily' },
         opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
@@ -214,6 +231,20 @@ describe('bell write', () => {
     const opts = mockNotifyAdmin.mock.calls[0][3];
     expect(opts.dedupeVersion).toBe('2026-09-11T11:10:00.000Z');
     expect(opts.metadata.observedAt).toBe('2026-09-11T11:10:00.000Z');
+  });
+
+  test('the stored observation is clamped upward in the same transaction, so it never regresses', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-clamp', deduped: true, refreshed: true });
+    await post({ ...good(), observedAt: '2026-09-11T11:00:00Z' });
+    expect(mockClampUpdates).toHaveLength(1);
+    expect(mockClampUpdates[0].metadata.sql).toBe("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{observedAt}', to_jsonb(GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), ?::timestamptz)::text))");
+    expect(mockClampUpdates[0].metadata.bindings).toEqual(['2026-09-11T11:00:00.000Z']);
+  });
+
+  test('no row written means no clamp', async () => {
+    mockNotifyAdmin.mockResolvedValue(null);
+    expect((await post(good())).status).toBe(503);
+    expect(mockClampUpdates).toHaveLength(0);
   });
 
   test('201 with deduped:true when the keyed row already stands', async () => {

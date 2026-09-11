@@ -36,6 +36,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const logger = require('../services/logger');
+const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
@@ -162,23 +163,44 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const title = `${kind}: ${subject}`;
   let row = null;
   try {
-    // Same row shape as services/ops-digest.js deliverOpsDigest (opsKey +
-    // subject in metadata, bell:true past the bell policy — this row is the
-    // only copy once the email is skipped), plus the rolling-day dedupe.
-    row = await NotificationService.notifyAdmin(CATEGORY, title, text, {
-      link,
-      bell: true,
-      dedupeKey: `${SOURCE}:${key}`,
-      dedupeWindowMs: DEDUPE_WINDOW_MS,
-      // A recurrence inside the window (a NEW run re-raising the key) must
-      // refresh the standing row — above all its observedAt, or a later
-      // /resolve from an older clean run would compare against the stale
-      // observation and clear a live failure (codex P1 r2 on #4397).
-      // dedupeVersion = observedAt: the same run re-posting (run.sh retry)
-      // is a plain dedupe; a later run's recurrence rewrites and re-bells.
-      refreshOnDedupe: true,
-      dedupeVersion: observedAt,
-      metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt },
+    // Write and clamp in ONE transaction under the dedupe's advisory lock
+    // (notifyAdmin takes `admin:<dedupeKey>` on the caller's trx), which is
+    // the same lock /resolve takes — so a resolve can never observe the
+    // in-between state.
+    row = await db.transaction(async (trx) => {
+      // Same row shape as services/ops-digest.js deliverOpsDigest (opsKey +
+      // subject in metadata, bell:true past the bell policy — this row is
+      // the only copy once the email is skipped), plus the rolling-day
+      // dedupe. refreshOnDedupe + dedupeVersion = observedAt: the same run
+      // re-posting (a run.sh retry) is a plain dedupe; a LATER run's
+      // recurrence rewrites the standing row and re-bells it.
+      const created = await NotificationService.notifyAdmin(CATEGORY, title, text, {
+        link,
+        bell: true,
+        dedupeKey: `${SOURCE}:${key}`,
+        dedupeWindowMs: DEDUPE_WINDOW_MS,
+        refreshOnDedupe: true,
+        dedupeVersion: observedAt,
+        metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt },
+        trx,
+      });
+      // MONOTONIC observation. notifyAdmin's refresh merge takes the
+      // incoming metadata verbatim (pinned by
+      // notification-dedupe-refresh-semantics.test.js), so a delayed
+      // re-post from an EARLIER run would otherwise lower observedAt below
+      // a recurrence that already raised it — and a clean run in between
+      // would then retire a live finding. This clamps it back up in the
+      // same statement-level transaction, so the stored observation is the
+      // highest ever seen and never regresses (pre-push P1 ×2).
+      if (created?.id) {
+        await trx('notifications').where({ id: created.id }).update({
+          metadata: trx.raw(
+            "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{observedAt}', to_jsonb(GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), ?::timestamptz)::text))",
+            [observedAt],
+          ),
+        });
+      }
+      return created;
     });
   } catch (err) {
     logger.error(`[ops-digest-ingest] ${key}: bell write threw: ${err.message}`);
