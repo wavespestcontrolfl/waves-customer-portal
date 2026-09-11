@@ -26,11 +26,11 @@ const hexToken = (len, seed) => {
 };
 
 // ET calendar dates relative to now — offered slots must stay in the
-// booking window, so nothing here is a literal date.
-const etYmd = (daysOut) => {
-  const d = new Date(Date.now() + daysOut * 86400000);
-  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }); // YYYY-MM-DD
-};
+// booking window, so nothing here is a literal date. Days are advanced on the
+// ET CALENDAR (server/utils/datetime-et.js addETDays), not by 86 400 000 ms:
+// across the fall DST fold a fixed duration lands on the same ET date.
+const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const etYmd = (daysOut) => etDateString(addETDays(new Date(), daysOut)); // YYYY-MM-DD
 const etFullDate = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
 const label12 = (hhmm) => {
   const [h, m] = hhmm.split(':').map(Number);

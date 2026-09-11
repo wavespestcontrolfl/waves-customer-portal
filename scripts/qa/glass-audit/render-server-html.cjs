@@ -241,6 +241,10 @@ function renderNewsletterLanding() {
   const sub = { email: 'jordan.rivera@example.invalid', status: 'active' };
   const quiz = quizSvc.getQuiz(quizSvc.DEFAULT_QUIZ_ID);
   const ans = quizSvc.resolveAnswer(quizSvc.DEFAULT_QUIZ_ID, quiz.answers[0].key);
+  // A quiz whose thank-you page suppresses the booking CTA (the stay-subscribed win-back).
+  const quietQuizId = Object.keys(quizSvc.QUIZZES).find((id) => quizSvc.getQuiz(id) && quizSvc.getQuiz(id).landingCtaSuppressed);
+  if (!quietQuizId) throw new Error('no quiz with landingCtaSuppressed found (newsletter-quiz-thanks-nocta)');
+  const quietQuiz = quizSvc.getQuiz(quietQuizId);
   const needsWork = feedbackSvc.resolveReaction('needs-work');
   const positive = feedbackSvc.REACTIONS.find((r) => r.key !== 'needs-work');
   const missingKeys = feedbackSvc.resolveMissingKeys(['closer-events', 'home-tips']);
@@ -250,15 +254,22 @@ function renderNewsletterLanding() {
     'newsletter-confirm-pending': R('get /confirm/:token', 'One last click.', { email: emailAddr, tokenSafe }),
     'newsletter-confirmed': R('post /confirm/:token', "You're in!", { email: emailAddr }),
     'newsletter-invalid-link': R('get /confirm/:token', 'Link expired or invalid.', { email: '' }),
+    'newsletter-already-active': R('get /confirm/:token', "You're already in.", { email: emailAddr }),
+    'newsletter-confirm-unsubscribed': R('get /confirm/:token', "You're unsubscribed.", { email: emailAddr }),
+    'newsletter-confirmed-unsubscribed': R('post /confirm/:token', "You're unsubscribed.", { email: emailAddr }),
+    'newsletter-confirmed-invalid': R('post /confirm/:token', 'Link expired or invalid.', { email: '' }),
     'newsletter-unsubscribe-confirm': R('get /unsubscribe/:token', 'Confirm unsubscribe.', { email: emailAddr, tokenSafe }),
     'newsletter-already-unsubscribed': R('get /unsubscribe/:token', "You're already unsubscribed.", { email: emailAddr }),
     'newsletter-unsubscribe-invalid': R('get /unsubscribe/:token', 'Link expired or invalid.', { email: '' }),
     'newsletter-unsubscribed': R('post /unsubscribe/:token', "You're unsubscribed.", { sub, email: emailAddr }),
+    'newsletter-unsubscribed-invalid': R('post /unsubscribe/:token', "You're unsubscribed.", { sub: null, email: '' }),
     'newsletter-quiz-confirm': R('get /quiz/:token/:quizId/:answer', 'One tap to confirm.', { label: ans.label, tokenSafe, quizIdSafe: encodeURIComponent(quizSvc.DEFAULT_QUIZ_ID), answerSafe: encodeURIComponent(ans.key) }),
     'newsletter-quiz-thanks': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz, landingLine: quiz.landingLine, bookLabel: quiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quizSvc.DEFAULT_QUIZ_ID) }),
+    'newsletter-quiz-thanks-nocta': R('post /quiz/:token/:quizId/:answer', "Thanks — we've got you.", { quiz: quietQuiz, landingLine: quietQuiz.landingLine, bookLabel: quietQuiz.bookLabel, bookUrl: quizSvc.quizBookingUrl(quietQuizId) }),
     'newsletter-feedback-needs-work': R('get /feedback/:token/:reaction', 'Ouch — help us fix it.', { pick: `${needsWork.emoji} ${needsWork.label}`, reaction: needsWork, formAction: `/api/public/newsletter/feedback/${tokenSafe}/${needsWork.key}` }, ['options']),
     'newsletter-feedback-confirm': R('get /feedback/:token/:reaction', 'One tap to confirm.', { pick: `${positive.emoji} ${positive.label}`, reaction: positive, formAction: `/api/public/newsletter/feedback/${tokenSafe}/${positive.key}` }),
     'newsletter-feedback-thanks': R('post /feedback/:token/:reaction', 'Got it — thanks for the straight talk.', { labels: missingLabels }),
+    'newsletter-feedback-thanks-positive': R('post /feedback/:token/:reaction', 'Thanks — that helps! 🌊', { resolved: positive }),
   };
   for (const [name, { heading, bodyHtml }] of Object.entries(pages)) write(name, renderConfirmPage(heading, bodyHtml));
 }

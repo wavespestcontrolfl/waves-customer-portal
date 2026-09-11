@@ -30,6 +30,13 @@ const landing = [
   ['newsletter-feedback-needs-work', 'GET /api/public/newsletter/feedback/:token/needs-work (checkbox form)', 'help us fix it'],
   ['newsletter-feedback-confirm', 'GET /api/public/newsletter/feedback/:token/:reaction (confirm form)', 'One tap to confirm'],
   ['newsletter-feedback-thanks', 'POST /api/public/newsletter/feedback/:token/needs-work (result)', 'straight talk'],
+  ['newsletter-already-active', 'GET /api/public/newsletter/confirm/:token (already active)', 'already in'],
+  ['newsletter-confirm-unsubscribed', 'GET /api/public/newsletter/confirm/:token (unsubscribed)', 'currently unsubscribed'],
+  ['newsletter-confirmed-unsubscribed', 'POST /api/public/newsletter/confirm/:token (unsubscribed)', 'currently unsubscribed'],
+  ['newsletter-confirmed-invalid', 'POST /api/public/newsletter/confirm/:token (invalid)', 'Link expired or invalid'],
+  ['newsletter-unsubscribed-invalid', 'POST /api/public/newsletter/unsubscribe/:token (form submit, expired link)', 'expired or invalid'],
+  ['newsletter-quiz-thanks-nocta', 'POST /api/public/newsletter/quiz/:token/:quizId/:answer (thank-you, booking CTA suppressed)', 'staying on the list'],
+  ['newsletter-feedback-thanks-positive', 'POST /api/public/newsletter/feedback/:token/:reaction (positive result)', 'that helps'],
 ];
 
 module.exports = [

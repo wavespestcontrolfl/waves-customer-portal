@@ -30,6 +30,9 @@ const family = opt('family', null);
 const widths = opt('widths', '390,1440').split(',').map(Number);
 const extraWidths = flag('extra') ? [320, 375, 430, 768, 1024] : [];
 const engineName = opt('engine', 'chromium');
+// Every capture records `engine`, so an unsupported value must not silently launch Chromium
+// and attribute the evidence to an engine that was never tested.
+if (!['chromium', 'webkit'].includes(engineName)) { console.error(`glass-audit: unsupported --engine "${engineName}" (chromium | webkit)`); process.exit(2); }
 const runName = opt('run', new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19));
 const outRoot = path.join(root, '.tmp/glass-audit', runName);
 const heights = { 320: 568, 375: 667, 390: 844, 430: 932, 768: 1024, 1024: 768, 1440: 1000 };
@@ -121,14 +124,20 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
       for (const t of rec.metrics.text.under14) targets.push({ kind: 'text<14', ...t });
       const items = await page.evaluate(() => {
         const out = [];
+        // Same-origin iframes (newsletter archive article) are walked too; their boxes are translated
+        // into page coordinates through the frame's rect so the screenshot samples land on the text.
+        const docs = [{ doc: document, dx: 0, dy: 0, tag: '' }];
+        for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument && f.contentDocument.body) { const fr = f.getBoundingClientRect(); docs.push({ doc: f.contentDocument, dx: fr.left + f.clientLeft, dy: fr.top + f.clientTop, tag: 'iframe>' }); } } catch (e) { /* cross-origin */ } }
         const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; };
-        const walker = document.createTreeWalker(document.body, 4);
-        let n; const seen = new Set();
-        while ((n = walker.nextNode())) {
-          const el = n.parentElement; if (!el || seen.has(el) || !n.textContent.trim()) continue; if (el.closest('svg, script, style, [aria-hidden="true"], .glass-scene-orbs')) continue; if (!vis(el)) continue; seen.add(el);
-          const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue; // large-text (3:1) threshold applies from 24px; 18.66+/700 handled below
-          const r = el.getBoundingClientRect();
-          out.push({ sel: el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left, y: r.top + window.scrollY, w: r.width, h: r.height } });
+        for (const d of docs) {
+          const walker = d.doc.createTreeWalker(d.doc.body, 4);
+          let n; const seen = new Set();
+          while ((n = walker.nextNode())) {
+            const el = n.parentElement; if (!el || seen.has(el) || !n.textContent.trim()) continue; if (el.closest('svg, script, style, [aria-hidden="true"], .glass-scene-orbs')) continue; if (!vis(el)) continue; seen.add(el);
+            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue; // large-text (3:1) threshold applies from 24px; 18.66+/700 handled below
+            const r = el.getBoundingClientRect();
+            out.push({ sel: d.tag + el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height } });
+          }
         }
         return out;
       });
@@ -204,6 +213,9 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
     // A failed interaction or probe is missing evidence: mark the capture failed (the main shot + metrics are kept).
     const badIx = rec.interactions.filter((i) => !i.ok);
     if (badIx.length) probeFailures.push(`interaction(s) failed: ${badIx.map((i) => `${i.name} (${i.error})`).join('; ')}`);
+    // An uncaught exception in the rendered app is a runtime failure even when the page stayed mounted
+    // long enough to be measured: it must not print [ok] or count as inspected.
+    if (rec.pageErrors.length) probeFailures.push(`uncaught page error(s): ${rec.pageErrors.slice(0, 3).join('; ')}`);
     if (probeFailures.length) rec.failure = probeFailures.join(' | ').slice(0, 500);
   } catch (e) {
     rec.failure = String(e.message).slice(0, 500);

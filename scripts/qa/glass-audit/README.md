@@ -23,7 +23,8 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
   `summary.json`.
 - Exit status is non-zero when any capture failed (readiness timeout, HTTP >= 400
   on navigation, screenshot or metrics error, a contrast or focus probe that
-  threw, or any failed interaction); the remaining captures still run. An
+  threw, an uncaught page error, or any failed interaction); the remaining
+  captures still run. `--engine` accepts only `chromium` or `webkit`. An
   unknown `--only` id or `--family` fails before anything launches (no run
   directory, no server) instead of silently auditing less than was asked.
 - `server-html` scenarios are re-rendered by `render-server-html.cjs` on every run
@@ -35,6 +36,10 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
   inputs, so a copy or markup change in a branch is captured on the next run and
   a missing branch exits non-zero. Their `ready` text is page-specific copy so Vite's fallback document
   can never be captured in their place.
+- Same-origin iframes (the newsletter archive's `srcdoc` article) are traversed by
+  the metrics collector and the contrast walker; their rows are prefixed
+  `iframe>` and their boxes are in top-page coordinates. Landmarks stay
+  top-document.
 - Metrics notes: `controls[].inFooter` marks universal-footer controls (they are
   counted, not hidden); `contrast` composites translucent text over the sampled
   background and screens on the WORST sampled ratio (`min`, with `avg` kept for
