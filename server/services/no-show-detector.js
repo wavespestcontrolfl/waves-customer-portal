@@ -270,23 +270,16 @@ async function sweep(conn, { now = new Date() } = {}) {
       const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
         .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'");
       for (const alert of existing) {
-        if (!office || alert.payload?.tracking_key !== key) {
-          const resolved = await dispatch.resolveAlert({ id: alert.id, trx });
-          // Stamp the AUTOMATIC-supersession marker only when this call
-          // actually performed the resolve (never overwrite a row a human
-          // (or a racing tick) already resolved a moment earlier). trackingKey
-          // is deterministic, so an A -> B -> A reassignment across sweeps
-          // reuses A's original key — without this stamp, the `already`
-          // lookup right below finds THIS same auto-resolved row again on
-          // the third tick and refuses to recreate the alert, leaving the
-          // overdue visit with no open office card (codex P1, pre-push
-          // audit on f32a48e35). A row a dispatcher actually clicked Resolve
-          // on never gets this stamp, so it still stays quiet.
-          if (resolved) {
-            await trx('dispatch_alerts').where({ id: alert.id })
-              .update({ payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [now.toISOString()]) });
-          }
-        }
+        // auto: true stamps payload.superseded_at on this same write
+        // (dispatch-alerts.js#resolveAlert) — trackingKey is deterministic,
+        // so an A -> B -> A reassignment across sweeps reuses A's original
+        // key, and without this stamp the `already` lookup right below
+        // finds THIS same auto-resolved row again on the third tick and
+        // refuses to recreate the alert, leaving the overdue visit with no
+        // open office card (codex P1, pre-push audit on f32a48e35). A row a
+        // dispatcher actually clicked Resolve on never gets this stamp, so
+        // it still stays quiet.
+        if (!office || alert.payload?.tracking_key !== key) await dispatch.resolveAlert({ id: alert.id, trx, auto: true });
       }
       let created = false;
       if (office) {
@@ -327,16 +320,12 @@ async function sweep(conn, { now = new Date() } = {}) {
     const promise = latestPromises(await loadPromiseEvents(trx, [String(alert.job_id)], { now }), now).get(String(alert.job_id));
     const live = evaluateNoShow({ visit, promise, now });
     if (!live || live.stage !== alert.payload.stage || live.promised_window.start_at !== alert.payload.promised_window?.start_at) {
-      const resolved = await dispatch.resolveAlert({ id: alert.id, trx });
       // Same automatic-supersession stamp as the per-card loop above (codex
       // P1) — this pass catches a visit that dropped out of `rows`
       // entirely (arrived, completed, cancelled); if it later re-enters
       // tracking under the exact same tracking_key, the `already` lookup
       // must not treat this row as a human resolution.
-      if (resolved) {
-        await trx('dispatch_alerts').where({ id: alert.id })
-          .update({ payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [now.toISOString()]) });
-      }
+      await dispatch.resolveAlert({ id: alert.id, trx, auto: true });
     }
   });
   // Tech-side notices have no auto-resolve of their own (codex P1): a

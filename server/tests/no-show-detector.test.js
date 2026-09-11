@@ -420,3 +420,71 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     expect(qb.orWhereNotIn).toHaveBeenCalledWith('em.status', ['bounced', 'dropped', 'blocked', 'failed']);
   });
 });
+
+
+describe('cancellation -> reopen lifecycle (same key throughout, not just reassignment)', () => {
+  // Distinguishes this from the A -> B -> A case above: here the tracking
+  // key never changes (same visit, same technician, same promise/stage) —
+  // only the VISIT STATUS does. autoResolveOverdueAlertsForJob
+  // (dispatch-alerts.js) auto-resolves the tracking alert when a job
+  // transitions to cancelled/completed/on_site/skipped/no_show, with no
+  // key mismatch involved at all — the sweep's own reconcile loops never
+  // see this row again once resolved_at is set. Without the auto stamp
+  // there, reopening a WRONGLY cancelled visit (or reversing any of those
+  // statuses) under the exact same promise + technician would find that
+  // resolved row blocking recreation forever (codex P1, pre-push audit on
+  // 925e9e977).
+  function trxOver(rows) {
+    return jest.fn((name) => {
+      expect(name).toBe('dispatch_alerts');
+      return {
+        where: (cond) => ({
+          whereRaw: (_sql, [key]) => ({
+            where: (orCb) => ({
+              first: async () => {
+                const candidates = rows.filter((r) => r.job_id === cond.job_id && r.type === cond.type
+                  && r.payload.tracking_key === key);
+                for (const row of candidates) {
+                  let matched = false;
+                  const qb = {
+                    whereNull: (col) => { if (col === 'resolved_at' && !row.resolved_at) matched = true; return qb; },
+                    orWhereRaw: (sql) => { if (/superseded_at/.test(sql) && row.payload.superseded_at == null) matched = true; return qb; },
+                  };
+                  orCb(qb);
+                  if (matched) return row;
+                }
+                return undefined;
+              },
+            }),
+          }),
+        }),
+      };
+    });
+  }
+
+  test('cancellation auto-resolves (stamped) the tracking alert; reopening under the same key allows a fresh one', async () => {
+    const key = trackingKey({ visitId: 'visit-1', startAt: '2026-09-10T13:00:00.000Z', stage: 2, type: 'tech_late', recipient: 'tech-a' });
+    // The office alert was open when the visit was (mistakenly) cancelled.
+    // autoResolveOverdueAlertsForJob resolves it via resolveAlert({..., auto: true}),
+    // which stamps superseded_at on the SAME write (dispatch-alerts.js).
+    const rows = [
+      { id: 'R1', job_id: 'visit-1', type: 'tech_late', resolved_at: '2026-09-10T14:30:00.000Z',
+        payload: { tracking_key: key, superseded_at: '2026-09-10T14:30:00.000Z' } },
+    ];
+    // The visit is reopened (status corrected back to pending) and, on the
+    // next sweep tick, is overdue again under the EXACT same key.
+    const blocking = await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key });
+    expect(blocking).toBeUndefined();
+  });
+
+  test('a human-resolved tracking alert (dispatcher clicked Resolve, then the same overdue situation recurs) stays quiet', async () => {
+    const key = trackingKey({ visitId: 'visit-1', startAt: '2026-09-10T13:00:00.000Z', stage: 2, type: 'tech_late', recipient: 'tech-a' });
+    const rows = [
+      // PATCH /alerts/:id/resolve (routes/admin-dispatch.js) calls
+      // resolveAlert with no `auto` flag — no stamp.
+      { id: 'R1', job_id: 'visit-1', type: 'tech_late', resolved_at: '2026-09-10T14:30:00.000Z', payload: { tracking_key: key } },
+    ];
+    const blocking = await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key });
+    expect(blocking).toEqual(rows[0]);
+  });
+});

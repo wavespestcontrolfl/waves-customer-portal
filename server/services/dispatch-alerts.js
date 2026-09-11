@@ -213,23 +213,42 @@ async function clearTrackingBells(t, rows) {
  *                                   payload (other dispatchers don't
  *                                   need it for the cache eviction).
  * @param {object} [args.trx]        optional Knex transaction.
+ * @param {boolean} [args.auto]      true when this resolve is a SYSTEM
+ *                                   side effect (a status change, a
+ *                                   reassignment clearing staleness, a
+ *                                   tracking-key supersession) rather
+ *                                   than a person explicitly clicking
+ *                                   Resolve. Stamps payload.superseded_at
+ *                                   on the same write — no-show-
+ *                                   detector.js's alreadyHasOpenAlert /
+ *                                   recordTrackingNotice dedupe checks
+ *                                   read this stamp to tell "the system
+ *                                   cleared this, a fresh alert under
+ *                                   the same tracking_key may still be
+ *                                   warranted" apart from a human's
+ *                                   considered dismissal, which must
+ *                                   keep blocking recreation (codex P1,
+ *                                   pre-push audit on 925e9e977). A
+ *                                   non-tracking alert type picks up an
+ *                                   inert, unread extra payload key.
  * @returns {Promise<object|null>}   the resolved row, or null if no
  *                                   row matched (already resolved or
  *                                   id doesn't exist).
  */
-async function resolveAlert({ id, resolvedBy, trx } = {}) {
+async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
   if (!id) {
     throw new Error('resolveAlert: id is required');
   }
 
   async function doWrite(t) {
+    const patch = { resolved_at: t.fn.now(), resolved_by: resolvedBy || null };
+    if (auto) {
+      patch.payload = t.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [new Date().toISOString()]);
+    }
     const rows = await t('dispatch_alerts')
       .where({ id })
       .whereNull('resolved_at')
-      .update({
-        resolved_at: t.fn.now(),
-        resolved_by: resolvedBy || null,
-      })
+      .update(patch)
       .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
     const row = rows[0] || null;
     await clearTrackingBells(t, row ? [row] : []);
@@ -394,6 +413,12 @@ const OVERDUE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
  * No-op for any toStatus not in OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
  * which makes it safe to call unconditionally on every status write.
  *
+ * auto: true on every resolveAlert call here — a status transition
+ * (including the arrival/on_site case) is a system side effect, never a
+ * person acknowledging the alert card itself, so a wrong status reversed
+ * later under the same promise + technician must still be able to raise
+ * a fresh alert (codex P1, pre-push audit on 925e9e977).
+ *
  * @returns {Promise<{resolved: number}>}
  */
 async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus } = {}) {
@@ -408,7 +433,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
     .select('id');
   let resolved = 0;
   for (const { id } of openAlerts) {
-    const row = await resolveAlert({ id, resolvedBy, trx });
+    const row = await resolveAlert({ id, resolvedBy, trx, auto: true });
     if (row) resolved += 1;
   }
   return { resolved };
