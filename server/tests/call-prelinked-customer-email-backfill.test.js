@@ -1,13 +1,14 @@
 /**
  * Call-captured email on a PRE-LINKED, non-booking call.
  *
- * Incident (Dot Fitzpatrick, 2026-09-11): the inbound webhook linked her
- * second and third calls to the customer row minted on her first call, so
- * Step 3's phone-match branch (the only non-booking email backfill) never
- * ran; the booking-branch backfill never ran either because the office
- * booked her by hand. The dictated email sat on call_log.ai_extraction while
- * customers.email stayed null — and the manual booking sent the no-email
- * prep fallback text instead of the guide email.
+ * Incident 2026-09-11 (customer 7411b13a-3046-4376-b4c8-2d84f32c2ef7): the
+ * inbound webhook linked the second and third calls to the customer row
+ * minted on the first call, so Step 3's phone-match branch (the only
+ * non-booking email backfill) never ran; the booking-branch backfill never
+ * ran either, because the office booked the visit by hand. The dictated
+ * email sat on call_log.ai_extraction while customers.email stayed null —
+ * and the booking sent the no-email prep fallback text instead of the guide
+ * email.
  *
  * Rules under test:
  *   • the shared helper fills an EMPTY or GARBLED email from a valid capture
@@ -15,9 +16,11 @@
  *   • it rides the email-claim guard and only settles the missing-email card
  *     when the guard actually applied the email;
  *   • the pre-linked wiring runs after the phone-match/create chain, gated on
- *     the caller's number being the customer's own, the spoken name not
- *     contradicting the record, and never from a voicemail or a V2
- *     non-customer nature.
+ *     the INBOUND ANI (not a dictated callback number) being the customer's
+ *     own, the spoken name not contradicting the record, and never from a
+ *     voicemail or a third-party call nature — and NOT on the creation-only
+ *     non-customer aggregate, which would skip the existing-customer natures
+ *     this repair exists for.
  */
 
 jest.mock('../models/db', () => { const db = jest.fn(); db.raw = jest.fn(); return db; });
@@ -120,8 +123,11 @@ describe('pre-linked call wiring (source guard)', () => {
     expect(start).toBeGreaterThan(-1);
     const block = src.slice(Math.max(0, start - 1400), start);
     expect(block).toMatch(/customerId && !createdCustomerFromCall && !phoneMatchedThisPass/);
-    expect(block).toMatch(/!extracted\.is_voicemail && !v2NonCustomerCallNature/);
-    expect(block).toMatch(/customerPhoneMatches\(phone, linked\) && extractedNameMatchesCustomer\(extracted, linked\)/);
+    expect(block).toMatch(/!extracted\.is_voicemail && !v2ThirdPartyCallNature/);
+    expect(block).toMatch(/customerPhoneMatches\(backfillIdentityPhone, linked\) && extractedNameMatchesCustomer\(extracted, linked\)/);
+    // Identity is the ANI (or, outbound, the number we dialed) — never
+    // resolveCallContactPhone's dictated-callback-preferring result.
+    expect(block).toMatch(/isOutboundCall\(call\)\s*\n\s*\? firstExternalPhone\(call\.to_phone\)\s*\n\s*: firstExternalPhone\(call\.from_phone\)/);
     expect(block).toMatch(/whereNull\('deleted_at'\)/);
     // Sits in Step 3, before the appointment branch's own backfill.
     expect(start).toBeLessThan(src.indexOf('backfillCustomerFromAppointmentContact(customerId, customer, extracted'));
@@ -132,5 +138,28 @@ describe('pre-linked call wiring (source guard)', () => {
     expect(idx).toBeGreaterThan(-1);
     expect(src.slice(idx - 300, idx)).toMatch(/phoneMatchedThisPass = true/);
     expect(src.slice(idx - 300, idx)).toMatch(/backfillLinkedCustomerFromExtraction\(/);
+  });
+});
+
+describe('third-party call natures (GH codex #4432 r1 P1)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'call-recording-processor.js'), 'utf8');
+
+  test('the backfill gate uses the third-party subset, not the creation-only aggregate', () => {
+    const set = src.match(/const V2_THIRD_PARTY_CALL_NATURES = new Set\(\[([^\]]*)\]\)/);
+    expect(set).not.toBeNull();
+    const natures = set[1].match(/'[a-z_]+'/g).map((s) => s.replace(/'/g, ''));
+    expect(natures.sort()).toEqual(['job_applicant', 'vendor_or_partner']);
+    // The linked-customer natures must NOT gate this backfill off.
+    for (const nature of ['billing_question', 'existing_customer_service', 'existing_customer_scheduling']) {
+      expect(natures).not.toContain(nature);
+    }
+  });
+
+  test('the creation hold keeps the wider set', () => {
+    const set = src.match(/const V2_NON_CUSTOMER_CALL_NATURES = new Set\(\[([\s\S]*?)\]\)/);
+    const natures = set[1].match(/'[a-z_]+'/g).map((s) => s.replace(/'/g, ''));
+    for (const nature of ['job_applicant', 'billing_question', 'existing_customer_service', 'existing_customer_scheduling', 'other', 'vendor_or_partner']) {
+      expect(natures).toContain(nature);
+    }
   });
 });

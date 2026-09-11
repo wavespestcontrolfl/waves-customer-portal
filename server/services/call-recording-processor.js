@@ -7775,6 +7775,19 @@ const CallRecordingProcessor = {
       && v2Result?.status === 'valid'
       && V2_NON_CUSTOMER_CALL_NATURES.has(v2Result.extraction?.call_nature);
 
+    // The subset where the person on the line is definitively NOT the linked
+    // customer. The set above is a CREATION hold — it also covers the
+    // existing-customer natures, where the classification asserts the caller
+    // already has a record. Consumers that update an ALREADY-LINKED customer
+    // (the pre-linked contact backfill in Step 3) must use this narrower set
+    // instead, or the calls it exists to serve are exactly the ones it skips
+    // (GH codex #4432 r1 P1). 'other' stays out: indeterminate is not
+    // third-party, and those consumers carry their own identity gates.
+    const V2_THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
+    const v2ThirdPartyCallNature = callExtractionV2PrimaryEnabled()
+      && v2Result?.status === 'valid'
+      && V2_THIRD_PARTY_CALL_NATURES.has(v2Result.extraction?.call_nature);
+
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
     // A valid V2 extraction now DRIVES the canonical writes: its identity /
     // address / scheduling fields merge into the legacy-shaped `extracted`
@@ -9363,19 +9376,37 @@ const CallRecordingProcessor = {
     // webhook, an operator link, or the transcript-name reconciliation
     // above) skipped the phone-match branch entirely, so a capture on a
     // NON-booking call never reached the customer row: the only other email
-    // backfill sits inside the auto-booking branch. Dot Fitzpatrick
-    // (2026-09-11): the email dictated on her second and third calls stayed
-    // on call_log.ai_extraction while customers.email stayed null, and the
-    // manual booking that evening sent the no-email prep fallback instead of
-    // the guide email. Same trust bar as the phone-match branch: the caller's
-    // number must be the customer's own and the spoken name must not
-    // contradict the record; never from a voicemail or a V2 non-customer
-    // nature (an applicant's email is not the customer's). Fail-soft.
+    // backfill sits inside the auto-booking branch. Incident 2026-09-11
+    // (customer 7411b13a-3046-4376-b4c8-2d84f32c2ef7): the email dictated on
+    // the second and third calls stayed on call_log.ai_extraction while
+    // customers.email stayed null, and the manual booking that evening sent
+    // the no-email prep fallback text instead of the guide email.
+    //
+    // Same trust bar as the phone-match branch: the IDENTITY number must be
+    // the customer's own and the spoken name must not contradict the record.
+    // Identity is the inbound ANI, never resolveCallContactPhone's result —
+    // that helper prefers a DICTATED callback number, which says nothing
+    // about who is on the line and would reject a caller whose verified ANI
+    // is exactly what established the link (GH codex #4432 r1 P2); the same
+    // rule the phone-verification lane below uses. An outbound call's
+    // identity is the number WE dialed.
+    //
+    // Never from a voicemail (a one-sided transcription is too lossy to
+    // trust contact detail from) or from a THIRD-PARTY call nature — an
+    // applicant's or a vendor's email is not the customer's. Deliberately
+    // NOT the creation-only v2NonCustomerCallNature aggregate: that set also
+    // holds billing_question / existing_customer_service /
+    // existing_customer_scheduling, which are precisely the linked-customer
+    // calls this backfill exists to repair (GH codex #4432 r1 P1).
+    // Fail-soft.
+    const backfillIdentityPhone = isOutboundCall(call)
+      ? firstExternalPhone(call.to_phone)
+      : firstExternalPhone(call.from_phone);
     if (customerId && !createdCustomerFromCall && !phoneMatchedThisPass
-      && phone && !extracted.is_voicemail && !v2NonCustomerCallNature) {
+      && backfillIdentityPhone && !extracted.is_voicemail && !v2ThirdPartyCallNature) {
       try {
         const linked = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
-        if (linked && customerPhoneMatches(phone, linked) && extractedNameMatchesCustomer(extracted, linked)) {
+        if (linked && customerPhoneMatches(backfillIdentityPhone, linked) && extractedNameMatchesCustomer(extracted, linked)) {
           await backfillLinkedCustomerFromExtraction({
             customerId, existing: linked, extracted, source: 'call-extraction-backfill-prelinked',
           });
