@@ -107,7 +107,8 @@ describe("Knowledge base interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: /Rodent exclusion protocol/ }));
     await screen.findByRole("button", { name: "Delete" });
     expect(filterGrid.className).not.toMatch(/md:grid-cols-\[/);
-    expect(search.closest(".col-span-2").className).not.toMatch(/md:col-span-1/);
+    expect(search.className).toMatch(/col-span-2/);
+    expect(search.className).not.toMatch(/md:col-span-1/);
   });
 
   it("marks only the audit mode that was started as pending", async () => {

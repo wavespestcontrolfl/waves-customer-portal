@@ -91,18 +91,18 @@ function WikiPageDetail({
               Regenerate
             </Button>
           )}
-          <Field label="Pin review tier" className="w-full sm:w-48">
-            <Select
-              value=""
-              disabled={isBusy}
-              onChange={(event) => onTierPin(page.slug, event.target.value)}
-            >
-              <option value="">Pin tier...</option>
-              <option value="green">Green (auto)</option>
-              <option value="yellow">Yellow (digest)</option>
-              <option value="red">Red (review)</option>
-            </Select>
-          </Field>
+          <Select
+            aria-label="Pin review tier"
+            className="w-full sm:w-48"
+            value=""
+            disabled={isBusy}
+            onChange={(event) => onTierPin(page.slug, event.target.value)}
+          >
+            <option value="">Pin tier...</option>
+            <option value="green">Green (auto)</option>
+            <option value="yellow">Yellow (digest)</option>
+            <option value="red">Red (review)</option>
+          </Select>
         </div>
 
         {page.human_notes && (

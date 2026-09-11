@@ -14,7 +14,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  Field,
   Input,
   Select,
   Textarea,
@@ -82,13 +81,12 @@ function KnowledgeEntryDetail({
 
         {editing ? (
           <div className="space-y-3">
-            <Field label="Content">
-              <Textarea
-                value={editContent}
-                onChange={(event) => setEditContent(event.target.value)}
-                rows={isMobile ? 14 : 20}
-              />
-            </Field>
+            <Textarea
+              aria-label="Content"
+              value={editContent}
+              onChange={(event) => setEditContent(event.target.value)}
+              rows={isMobile ? 14 : 20}
+            />
             <div className="ui-record-actions">
               <Button loading={busy(`save:${selected.id}`)} onClick={onSave}>
                 Save
@@ -352,32 +350,35 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
               selected ? "" : "md:grid-cols-[minmax(0,1fr)_minmax(0,180px)_minmax(0,160px)]"
             }`}
           >
-            <Field
-              label="Search knowledge base"
+            {/* Accessible names only: the pre-migration controls showed the
+                search placeholder and select values with no visible labels. */}
+            <Input
+              aria-label="Search knowledge base"
               className={selected ? "col-span-2" : "col-span-2 md:col-span-1"}
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search knowledge base..."
+            />
+            <Select
+              aria-label="Category"
+              value={filterCategory}
+              onChange={(event) => setFilterCategory(event.target.value)}
             >
-              <Input
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Search knowledge base…"
-              />
-            </Field>
-            <Field label="Category">
-              <Select value={filterCategory} onChange={(event) => setFilterCategory(event.target.value)}>
-                <option value="">All Categories</option>
-                {CATEGORIES.map((category) => (
-                  <option key={category} value={category}>{category}</option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="Status">
-              <Select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}>
-                <option value="">All Status</option>
-                <option value="active">Active</option>
-                <option value="flagged">Flagged</option>
-                <option value="archived">Archived</option>
-              </Select>
-            </Field>
+              <option value="">All Categories</option>
+              {CATEGORIES.map((category) => (
+                <option key={category} value={category}>{category}</option>
+              ))}
+            </Select>
+            <Select
+              aria-label="Status"
+              value={filterStatus}
+              onChange={(event) => setFilterStatus(event.target.value)}
+            >
+              <option value="">All Status</option>
+              <option value="active">Active</option>
+              <option value="flagged">Flagged</option>
+              <option value="archived">Archived</option>
+            </Select>
           </div>
 
           <div className="mb-2 text-ui-caption text-ink-secondary u-nums">
