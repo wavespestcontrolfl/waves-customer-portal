@@ -1,3 +1,4 @@
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // Multi-day time grid (5-day or 7-day Week views).
 // Each column is a calendar day; appointments stack inside their column at
 // their windowStart time. Drag a block to a new (day, time) cell to
@@ -283,7 +284,7 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && height >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
             title="Prepaid"
           >$</span>
         )}
@@ -597,7 +598,7 @@ function RailItem({ service, dayLabel, onEdit, onTreatmentPlan, onViewCustomer, 
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
             title="Prepaid"
           >$</span>
         )}
@@ -657,7 +658,7 @@ function UnassignedRail({ items, onEdit, onTreatmentPlan, onViewCustomer, owesCo
           </button>
         ) : (
           <>
-            <span className="uppercase tracking-label text-ink-tertiary font-medium" style={{ fontSize: 8 }}>Unassigned</span>
+            <span className="uppercase tracking-label text-ink-tertiary font-medium text-11">Unassigned</span>
             <div className="flex items-center gap-2">
               {/* Count rendered in waves-blue + bold so the dispatcher can
                   spot a non-zero unassigned backlog at a glance. */}
@@ -953,12 +954,12 @@ export default function TimeGridDays({
           }),
         });
         if (notifyCustomer && result?.notificationSent === false) {
-          alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+          showScheduleSaveNotice(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
         }
         // Advisory schedule-overlap notes — the move committed (conflicts
         // no longer block staff saves); say what now stacks.
         if (Array.isArray(result?.warnings) && result.warnings.length) {
-          alert(`Moved.\n\n${result.warnings.join('\n\n')}`);
+          showScheduleSaveNotice(`Moved.\n\n${result.warnings.join('\n\n')}`);
         }
       }
       const j = await adminFetch(`/admin/schedule/week?start=${monday}`);

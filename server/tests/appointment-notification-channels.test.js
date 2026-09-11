@@ -15,7 +15,9 @@ jest.mock('../services/appointment-email', () => ({
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+// gateEnvValue: getReminderPrefs now consults the per-property toggle resolver
+// (app property scope, PR 3), which reads GATE_APP_PROPERTY_SCOPE at call time.
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
 
 const db = require('../models/db');
 const AppointmentEmail = require('../services/appointment-email');

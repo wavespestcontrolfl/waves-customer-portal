@@ -74,7 +74,7 @@ beforeEach(() => {
 });
 
 describe('processMonthlyBilling — billing_mode guard', () => {
-  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
+  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-MM', billing_mode: 'monthly_membership' }];
     StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), {
       paymentRecord: { id: 'attempt-1', amount: 55.3 },

@@ -375,10 +375,10 @@ async function optimizeAllRoutes(input) {
     ],
   });
 
-  if (!services.length) return { message: 'No services found for this date', date };
+  if (!services.length) return { blocked: true, message: 'No services found for this date', date };
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
-  if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
+  if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
 
   // The card's approved sequence IS the plan (GH r14 P1): a confirmed run
   // with the fingerprint-verified order applies exactly that order under
@@ -505,10 +505,10 @@ async function optimizeTechRoute(input) {
     ],
   });
 
-  if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
+  if (services.length < 2) return { blocked: true, message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
-  if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
+  if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
 
   // Approved-plan application — same contract as optimize_all_routes above
   // (GH r14 P1).
@@ -838,7 +838,7 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
 
   const services = await db('scheduled_services')
-    .whereIn('id', serviceIds)
+    .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.*',
@@ -1542,9 +1542,27 @@ async function swapTechAssignments(input, actionContext = {}) {
 }
 
 
+// The measurement result is shared with the route-performance ledger, which
+// needs every planned stop's id. The Intelligence Bar does not: inside a
+// task about one customer the other stops on the route are other customers'
+// appointments, so their ids and arrival windows are reduced to counts, the
+// diagnostic id lists (missing coordinates, default durations) become
+// counts, and the late-visit rows lose their ids before the model sees them.
+function withoutStopIdentifiers(result) {
+  if (!Array.isArray(result?.days)) return result;
+  const count = list => (Array.isArray(list) ? list.length : null);
+  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, missingCoordinates, defaultDurations, ...tech }) => ({
+    ...tech,
+    plannedStopCount: count(plannedStops),
+    missingCoordinateCount: count(missingCoordinates),
+    defaultDurationCount: count(defaultDurations),
+    modeledLateVisits: Array.isArray(modeledLateVisits) ? modeledLateVisits.map(({ id, visitId, ...late }) => late) : modeledLateVisits,
+  })) })) };
+}
+
 async function findScheduleGaps(input) {
   if (require('../../config/feature-gates').gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS')) {
-    return require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db);
+    return withoutStopIdentifiers(await require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db));
   }
   const { date, date_from, date_to, service_type } = input;
   const MAX_STOPS_PER_DAY = 10;
@@ -1739,8 +1757,11 @@ async function findAvailableSlotsTool(input) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
-  // Resolve customer → lat/lng if provided
-  if (customer_id && (!lat || !lng)) {
+  // Resolve customer → lat/lng if provided. An explicit address is the
+  // destination: it is geocoded below rather than replaced by the customer's
+  // primary coordinates, so a search for a customer's other property is
+  // run around that property.
+  if (customer_id && !address && (!lat || !lng)) {
     const c = await db('customers').where('id', customer_id).select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
     if (c?.latitude && c?.longitude) { lat = parseFloat(c.latitude); lng = parseFloat(c.longitude); }
     else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');

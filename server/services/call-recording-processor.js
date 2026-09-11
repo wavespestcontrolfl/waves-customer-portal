@@ -99,7 +99,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -107,7 +107,7 @@ const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, 
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
-const { classifyCall, recordVerdict } = require('./call-spam-classifier');
+const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
@@ -976,13 +976,13 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
 
 // Name normalization + nickname-aware first-name matching live in
 // utils/name-match.js (shared with the Zelle notice reconciler, 2026-09-02).
-const { normalizeNamePart, firstNameVariants, sameFirstName } = require('../utils/name-match');
+const { normalizeNamePart, firstNameVariants, sameFirstName, sameSpokenFirstName, spokenFirstNameVariants } = require('../utils/name-match');
 
 function extractedNameMatchesCustomer(extracted = {}, customer = {}) {
   const extractedFirst = normalizeNamePart(extracted.first_name);
   const customerFirst = normalizeNamePart(customer.first_name);
   if (!extractedFirst || !customerFirst) return true;
-  if (!sameFirstName(extractedFirst, customerFirst)) return false;
+  if (!sameSpokenFirstName(extractedFirst, customerFirst)) return false;
 
   const extractedLast = normalizeNamePart(extracted.last_name);
   const customerLast = normalizeNamePart(customer.last_name);
@@ -1153,6 +1153,19 @@ function summarizeKnownCaller(customer) {
     addressCity: String(customer.city || '').trim() || null,
     addressZip: String(customer.zip || '').trim() || null,
   };
+}
+
+// Carrier caller-ID (CNAM) name for the extraction prompt, from the Twilio
+// AddOns envelope the voice webhook persisted. Only when the caller is NOT
+// withheld and the lookup succeeded; a business-line or "WIRELESS CALLER"
+// style placeholder carries no name and is dropped.
+function callerIdNameForPrompt(call) {
+  try {
+    const meta = typeof call?.metadata === 'string' ? JSON.parse(call.metadata) : (call?.metadata || {});
+    const name = String(cnamFromEnvelope(meta.addons) || '').trim();
+    if (!name || /wireless caller|unknown|unavailable|anonymous|private|^\d+$/i.test(name)) return null;
+    return name.slice(0, 80);
+  } catch (_e) { return null; }
 }
 
 // Fail-open V1 address-conflict demotion, shared by the ENFORCE path and the
@@ -2642,7 +2655,7 @@ async function findReusableCallLead(database, { phone, email = null, firstName =
       const row = await query.orderBy('created_at', 'desc').first();
       return { lead: row || null, matchedVia: row ? 'phone' : null };
     }
-    const variants = firstNameVariants(extractedFirst);
+    const variants = spokenFirstNameVariants(extractedFirst);
     const FIRST_NORM = "LOWER(REGEXP_REPLACE(first_name, '[^a-zA-Z0-9]', '', 'g'))";
     const LAST_NORM = "LOWER(REGEXP_REPLACE(last_name, '[^a-zA-Z0-9]', '', 'g'))";
     const compatQuery = query.clone().whereRaw(
@@ -6083,6 +6096,9 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
     knownCaller: opts.knownCaller,
+    // Carrier caller-ID name as a NAME CANDIDATE (2026-09-02..08 audit:
+    // "Smith" won over a spelled S-M-Y-T-H-E and caller ID SMYTHE).
+    callerIdName: opts.callerIdName,
     // Cross-call threading: prior call from this number, so a continuation
     // completes the earlier record instead of restarting from nothing.
     priorCall: opts.priorCall,
@@ -7500,6 +7516,7 @@ const CallRecordingProcessor = {
           callId: call.id,
           bookableServiceNames,
           knownCaller,
+          callerIdName: callerIdNameForPrompt(call),
           priorCall,
         });
         // Address validation runs in shadow on every valid extraction (no-ops
@@ -7584,6 +7601,10 @@ const CallRecordingProcessor = {
       // A NULL call_nature stays out of the hold: the schema reserves null
       // for truly indeterminate calls, where legacy creation behavior stands.
       'other',
+      // A vendor / referral partner is never a customer, whether V1 called
+      // the call spam or V2 cleared it (codex r3 P2): the cleared call keeps
+      // its summary and disposition, not a customer row.
+      'vendor_or_partner',
     ]);
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'
@@ -7955,6 +7976,7 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
     // below reads it, so the ask does not depend on the routing mode
@@ -8369,6 +8391,12 @@ const CallRecordingProcessor = {
               ? routingResult.appointmentBlockingFlags
               : [routingResult.reason || 'routing_rejected'];
             const triageReasons = blockingReasons;
+            // A held scheduling CHANGE (cancel / reschedule / coordination on
+            // an existing visit) is owed work. The card files below, but
+            // review_status is driven by bridgeNeedsConfirmation alone, so the
+            // call itself looked fully processed (2026-09-02..08 audit: a
+            // cancellation, two reschedules and a re-treat with no owner).
+            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
@@ -9163,6 +9191,18 @@ const CallRecordingProcessor = {
           const { createDefaultCustomerRows } = require('./customer-default-rows');
           await createDefaultCustomerRows(db, customerId)
             .catch((e) => logger.warn(`[call-proc] default rows create failed for ${customerId}: ${e.message}`));
+
+          // Line-type check (2026-09-10 incident): `phone` here can be the
+          // caller-ID ANI the customer never spoke (resolveCallContactPhone's
+          // fallback) — landing a landline in customers.phone silently breaks
+          // SMS login and every future text to this customer. Fail-open;
+          // never blocks or delays creation, which has already committed.
+          const { flagNonMobileCallCustomer } = require('./call-created-customer-line-type');
+          await flagNonMobileCallCustomer({
+            customerId,
+            phone,
+            name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+          });
 
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
@@ -12753,6 +12793,12 @@ const CallRecordingProcessor = {
           // advisory only (owner's chosen behavior: the booking proceeds
           // exactly as before; a triage card + admin bell surface the clash).
           let bookingTimeConflicts = [];
+          // Owner ruling 2026-09-11 (capacity activation, option 1): each phone
+          // INSERT tries the shared scheduling fence with a short cap. These
+          // record the outcome per row for the triage card / logs only — a
+          // missed fence changes nothing about the booking.
+          let bookingFence = null;
+          let followUpFence = null;
           try {
             const parsedDt = parseETDateTime(extracted.preferred_date_time);
             let scheduledDate, windowStart;
@@ -13058,6 +13104,23 @@ const CallRecordingProcessor = {
                           logger.warn(`[call-proc] follow-up technician ${followUpTechId} is not assignable; seeding unassigned`);
                           followUpTechId = null;
                         }
+                      }
+                      // Same bounded fence for the child's own date + tech
+                      // (the child usually lands on a different date than the
+                      // primary, so the primary's fence does not cover it).
+                      // Try-only, never waits past the cap, never blocks the
+                      // seed; a miss is recorded for the card and logs. Its
+                      // own nested savepoint (codex r1 P2): a query error must
+                      // not abort THIS savepoint and lose the promised child.
+                      try {
+                        const { fenceBookingDay } = require('./scheduling/occupancy');
+                        followUpFence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId }));
+                        if (!followUpFence.acquired) {
+                          logger.warn(`[call-proc] follow-up fence missed for ${maskSid(callSid)} on ${fuPlan.scheduledDate} (${followUpFence.reason}); seeding unfenced`);
+                        }
+                      } catch (fenceErr) {
+                        followUpFence = { acquired: false, keys: [], reason: 'error' };
+                        logger.warn(`[call-proc] follow-up fence failed for ${maskSid(callSid)} (seeding unfenced): ${fenceErr.message}`);
                       }
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
@@ -13438,21 +13501,46 @@ const CallRecordingProcessor = {
                 // guard above already owns those). Best-effort: a query
                 // failure must never fail the booking txn.
                 //
-                // NO date-wide occupancy lock in THIS txn, and this read is
-                // therefore only the fast-path signal, not the verdict: it
-                // sees committed truth as of now, so a concurrent rung-1
-                // writer mid-commit — or a second concurrent call booking —
-                // is invisible to it. The AUTHORITATIVE detection is the
-                // post-commit recheck below (recheckCallBookingConflicts),
-                // which takes the date lock in a short transaction of its
-                // own. The lock stays out of this txn on purpose: the
-                // booking must never wait on (or lose to) a scheduling
-                // lock, and the post-insert work here row-locks leads/
-                // customers/estimates — tables the estimate-accept txn
-                // locks BEFORE taking rung 1 inside commitReservation, so
-                // holding rung 1 across them would invert the lock order
-                // (deadlock-abort risk to a booking the owner says always
-                // proceeds).
+                // BOUNDED FENCE (owner ruling 2026-09-11, capacity activation
+                // option 1): TRY rung 1 (date occupancy) + rung 3 (tech-day,
+                // or unassigned-day) for this date with pg_try_advisory_xact_lock,
+                // polling for at most ~1.5s (CALL_BOOKING_FENCE_WAIT_MS). A
+                // capacity certification (arrival-route.js verifyArrivalCapacity)
+                // holds these for milliseconds while it FOR UPDATEs the day's
+                // rows and persists the route; under READ COMMITTED that lock
+                // cannot see a phantom phone INSERT, so without a shared fence
+                // a phone row committed between certify and persist left the
+                // reservation's route stale. Holding the fence at INSERT time
+                // makes the row either visible to that read or inserted after
+                // that commit. The fence is taken BEFORE this txn's first row
+                // lock (the re-service customer FOR UPDATE and the technician
+                // FOR SHARE below), matching the global order. try-locks never
+                // wait, so the booking can never deadlock on it; when the cap
+                // expires it books exactly as before — unfenced, with the
+                // post-commit recheck (recheckCallBookingConflicts) as the
+                // authoritative detector. The booking NEVER fails or stalls on
+                // this fence. The attempt runs in its OWN savepoint (codex r1
+                // P2): a PostgreSQL error inside it (statement timeout) would
+                // otherwise leave `trx` aborted and fail the conflict read and
+                // insert with 25P02 — the savepoint rolls that back and the
+                // booking proceeds unfenced. Granted rungs survive the
+                // savepoint's release (xact-scoped). Fenced against the tech
+                // resolved before the txn; if the FOR SHARE recheck below
+                // books unassigned instead, it re-fences the unassigned-day
+                // rung there (codex r1 P2).
+                try {
+                  const { fenceBookingDay } = require('./scheduling/occupancy');
+                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));
+                  if (!bookingFence.acquired) {
+                    logger.warn(`[call-proc] booking fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
+                  }
+                } catch (fenceErr) {
+                  bookingFence = { acquired: false, keys: [], reason: 'error' };
+                  logger.warn(`[call-proc] booking fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                }
+                // With the fence granted this read is authoritative for the
+                // primary's date; without it, it is only the fast-path signal
+                // and the post-commit recheck is the verdict.
                 try {
                   const { findConflictingVisits } = require('./scheduling/occupancy');
                   bookingTimeConflicts = await findConflictingVisits({
@@ -13673,6 +13761,25 @@ const CallRecordingProcessor = {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
                     insertData.technician_id = null;
+                    // The fence above covered the ORIGINAL tech's day rung;
+                    // this row now lands on the unassigned-day rung, which is
+                    // what a capacity certification fences for unassigned
+                    // work. Re-fence it (rung 1 is already held and re-tries
+                    // as a no-op), same try-only savepoint contract, INSIDE
+                    // the first attempt's deadline (codex r2 P2): one insert
+                    // never polls past the single documented cap — an
+                    // exhausted budget means exactly one try, no sleep. The
+                    // outcome replaces the recorded one (codex r1 P2).
+                    try {
+                      const { fenceBookingDay } = require('./scheduling/occupancy');
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));
+                      if (!bookingFence.acquired) {
+                        logger.warn(`[call-proc] unassigned-day re-fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
+                      }
+                    } catch (fenceErr) {
+                      bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      logger.warn(`[call-proc] unassigned-day re-fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                    }
                     // The staff-visible note was built before this recheck; an
                     // unassigned visit must not claim a technician owns it.
                     if (defaultTechnicianName && typeof insertData.notes === 'string') {
@@ -14200,6 +14307,14 @@ const CallRecordingProcessor = {
                         // is about — the card is unreadable without it.
                         window_end: windowEnd || '10:00',
                         service: svc.service_type,
+                        // Whether each INSERT held the shared scheduling fence
+                        // (owner ruling 2026-09-11). A missed fence is the one
+                        // case where an overlap could have been created rather
+                        // than merely detected, so the office can tell them apart.
+                        fence: {
+                          primary: bookingFence ? bookingFence.acquired : null,
+                          follow_up: followUpCreated ? (followUpFence ? followUpFence.acquired : null) : null,
+                        },
                         conflicting_visits: bookingTimeConflicts.map((r) => ({
                           id: r.id,
                           customer_id: r.customer_id,
@@ -14276,6 +14391,8 @@ const CallRecordingProcessor = {
                           callSid,
                           conflicting_visit_ids: bookingTimeConflicts.map((r) => r.id),
                           time_sanity_flags: timeSanityFlags,
+                          fence_primary: bookingFence ? bookingFence.acquired : null,
+                          fence_follow_up: followUpCreated ? (followUpFence ? followUpFence.acquired : null) : null,
                         },
                       },
                     );
@@ -14724,7 +14841,14 @@ const CallRecordingProcessor = {
                     try {
                       const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
                       const freshCustomer = await db('customers').where({ id: customerId }).first();
-                      const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+                      // The visit's NON-primary saved property owns the confirmation
+                      // toggle (app property scope, PR 3): resolve the row through
+                      // the visit; an unreadable property under enforcement reads as
+                      // opted out below (held email, never a send on unknown settings).
+                      const prefsRow = await require('./appointment-reminders').visitPrefsRow(customerId, scheduledServiceId);
+                      if (!prefsRow || prefsRow.__prefsUnavailable === true) {
+                        throw new Error('notification preferences unreadable for the call-booking confirmation');
+                      }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
                       const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(
@@ -15843,7 +15967,7 @@ const CallRecordingProcessor = {
           // a terminal status with a log line and nothing else — no review
           // flag, no card, no sweep — the one honest-failure state nobody
           // could see.
-          ...(bridgeNeedsConfirmation.length || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
+          ...(bridgeNeedsConfirmation.length || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
             ? { review_status: 'open' } : {}),
           metadata: db.raw(
             "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",

@@ -55,6 +55,7 @@ import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
@@ -641,6 +642,7 @@ export default function TechHomePage({ section = 'today' }) {
           loading={loading} error={scheduleError} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
+          followThrough={<TechFollowThroughCards fieldWorkspace />}
           timekeeping={<>
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
@@ -678,13 +680,13 @@ export default function TechHomePage({ section = 'today' }) {
       }}>
         {getGreeting()}, {firstName}
       </h1>
-      <p style={{ fontSize: 13, color: DARK.muted, margin: '0 0 20px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <p style={{ fontSize: 14, color: DARK.muted, margin: '0 0 20px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
         {/* Exception-based rain chip: renders only at ≥40% (amber), ≥50 red.
             Same 🌧 badge language as the RainOutSheet's per-option badges. */}
         {rainChance != null && rainChance >= 40 && (
           <span style={{
-            fontSize: 12, fontWeight: 700, padding: '3px 10px', borderRadius: 12,
+            fontSize: 14, fontWeight: 700, padding: '3px 10px', borderRadius: 12,
             color: rainChance >= 50 ? '#ef4444' : '#f59e0b',
             border: `1px solid ${rainChance >= 50 ? '#ef4444' : '#f59e0b'}`,
             background: rainChance >= 50 ? '#ef44441a' : '#f59e0b1a',
@@ -706,11 +708,12 @@ export default function TechHomePage({ section = 'today' }) {
       <TechIntelligenceBar />
 
       <TechTimeTrackingCard nextStop={nextStop} />
+      <TechFollowThroughCards />
 
       {scheduleError && (
         <div role="alert" style={{
           background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
-          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 13,
+          borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 14,
         }}>
           <div style={{ marginBottom: 8 }}>{scheduleError}</div>
           <button type="button" onClick={fetchSchedule} style={{
@@ -758,7 +761,7 @@ export default function TechHomePage({ section = 'today' }) {
           >
             <span style={{ fontSize: 26 }}>{action.icon}</span>
             <span style={{
-              fontSize: 11, fontWeight: 600, color: DARK.text, textAlign: 'center',
+              fontSize: 14, fontWeight: 600, color: DARK.text, textAlign: 'center',
               fontFamily: "'Nunito Sans', sans-serif",
             }}>{action.label}</span>
           </button>
@@ -790,14 +793,14 @@ export default function TechHomePage({ section = 'today' }) {
               <p style={{ fontSize: 16, fontWeight: 700, color: DARK.text, margin: 0 }}>
                 {nextStop.customer_name || nextStop.customerName || 'Customer'}
               </p>
-              <p style={{ fontSize: 12, color: DARK.muted, margin: '4px 0 0' }}>
+              <p style={{ fontSize: 14, color: DARK.muted, margin: '4px 0 0' }}>
                 {nextStop.address || nextStop.service_type || 'Service'}
               </p>
               {nextStopSummary && (
                 <div data-testid="visit-stop-summary" style={{ marginTop: 6 }}>
-                  <p style={{ fontSize: 12, fontWeight: 600, color: DARK.teal, margin: 0 }}>{nextStopSummary}</p>
+                  <p style={{ fontSize: 14, fontWeight: 600, color: DARK.teal, margin: 0 }}>{nextStopSummary}</p>
                   {nextVisitStop.services.map((s) => (
-                    <p key={s.id} style={{ fontSize: 12, color: DARK.text, margin: '2px 0 0' }}>
+                    <p key={s.id} style={{ fontSize: 14, color: DARK.text, margin: '2px 0 0' }}>
                       • {s.serviceType || s.service_type || 'Service'}
                       {TERMINAL_STATUSES_VISIT.has(s.status) ? <span style={{ color: DARK.muted }}> · {String(s.status).replace(/_/g, ' ')}</span> : null}
                     </p>
@@ -806,7 +809,7 @@ export default function TechHomePage({ section = 'today' }) {
               )}
             </div>
             <span style={{
-              fontSize: 11, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
+              fontSize: 14, fontWeight: 600, padding: '3px 8px', borderRadius: 6,
               background: '#0ea5e920', color: DARK.teal,
             }}>
               {nextStopWindowLabel || 'Pending'}
@@ -830,7 +833,7 @@ export default function TechHomePage({ section = 'today' }) {
                 const accent = isChemical ? '#ef4444' : isNoCard ? '#f59e0b' : null;
                 return (
                   <div key={i} style={{
-                    fontSize: 12,
+                    fontSize: 14,
                     color: accent || DARK.text,
                     fontWeight: isNoCard ? 600 : undefined,
                     marginBottom: 3,
@@ -843,7 +846,7 @@ export default function TechHomePage({ section = 'today' }) {
               })}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             <ActionBtn label="Navigate" icon="🗺️" onClick={() => {
               const addr = nextStop.address;
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
@@ -878,7 +881,7 @@ export default function TechHomePage({ section = 'today' }) {
           </div>
           {(enRouteState.message || onSiteState.message) && (
             <div style={{
-              marginTop: 10, fontSize: 12, padding: '6px 10px', borderRadius: 6,
+              marginTop: 10, fontSize: 14, padding: '6px 10px', borderRadius: 6,
               background: (enRouteState.isError || onSiteState.isError) ? '#ef444422' : '#22c55e22',
               border: `1px solid ${(enRouteState.isError || onSiteState.isError) ? '#ef4444' : '#22c55e'}`,
               color: (enRouteState.isError || onSiteState.isError) ? '#ef4444' : '#22c55e',
@@ -1022,7 +1025,7 @@ export default function TechHomePage({ section = 'today' }) {
 
       {recapService && (
         <ServiceRecapModal
-          theme="dark"
+          key={recapService.id}
           service={{
             id: recapService.id,
             customerName: recapService.customer_name || recapService.customerName,
@@ -1036,6 +1039,7 @@ export default function TechHomePage({ section = 'today' }) {
 
       {photoTarget && (
         <TechServicePhotosModal
+          key={photoTarget.id}
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
@@ -1092,7 +1096,7 @@ export default function TechHomePage({ section = 'today' }) {
       {rainOutResult && (
         <div style={{
           position: 'fixed', bottom: 16, left: 16, right: 16, zIndex: 1100,
-          padding: '10px 14px', borderRadius: 10, fontSize: 13, fontWeight: 600,
+          padding: '10px 14px', borderRadius: 10, fontSize: 14, fontWeight: 600,
           background: '#22c55e22', border: '1px solid #22c55e', color: '#22c55e',
         }}>
           {rainOutResult}
@@ -1385,7 +1389,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
   const serviceLabel = stopSummaryLabel(stop)
     || service.serviceTypeDisplay || service.serviceType || service.service_type || 'Service';
   const chipStyle = (color) => ({
-    fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
+    fontSize: 14, fontWeight: 600, padding: '2px 8px', borderRadius: 10,
     border: `1px solid ${color}`, color, background: `${color}1a`,
   });
   return (
@@ -1401,17 +1405,17 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
         }}
-        style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 44 }}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', minHeight: 48 }}
       >
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
             <p style={{
               margin: 0, fontSize: 14, fontWeight: 600, color: DARK.text,
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
             }}>
               {service.customer_name || service.customerName || 'Customer'}
             </p>
-            <span style={{ fontSize: 12, fontWeight: 600, color: statusColor, textTransform: 'capitalize', flexShrink: 0 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: statusColor, textTransform: 'capitalize', flexShrink: 0 }}>
               {statusLabel}
               {windowLabel && <span style={{ color: DARK.muted, textTransform: 'none' }}> · {windowLabel}</span>}
             </span>
@@ -1468,7 +1472,7 @@ function StatCard({ label, value, color }) {
     }}>
       <p style={{ fontSize: 24, fontWeight: 800, color: color || DARK.teal, margin: 0,
         fontFamily: "'Montserrat', sans-serif" }}>{value}</p>
-      <p style={{ fontSize: 12, color: DARK.muted, margin: '2px 0 0' }}>{label}</p>
+      <p style={{ fontSize: 14, color: DARK.muted, margin: '2px 0 0' }}>{label}</p>
     </div>
   );
 }
@@ -1819,13 +1823,14 @@ function RainOutSheet({ service, onClose, onDone }) {
 function ActionBtn({ label, icon, primary, onClick, disabled }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
-      flex: 1,
+      flex: '1 1 120px',
+      minHeight: 48,
       padding: '8px 4px',
       borderRadius: 8,
       border: primary ? 'none' : `1px solid ${DARK.border}`,
       background: primary ? DARK.teal : 'transparent',
       color: primary ? '#fff' : DARK.text,
-      fontSize: 12,
+      fontSize: 14,
       fontWeight: 600,
       cursor: disabled ? 'wait' : 'pointer',
       opacity: disabled ? 0.6 : 1,

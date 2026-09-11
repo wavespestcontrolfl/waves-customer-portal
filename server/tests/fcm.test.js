@@ -31,6 +31,23 @@ describe('buildFcmMessage', () => {
 });
 
 describe('classifyFcmResponse', () => {
+  test.each([[429, 'QUOTA_EXCEEDED'], [500, 'INTERNAL'], [503, 'UNAVAILABLE']])('temporary %s/%s is retryable', (status, reason) => {
+    expect(classifyFcmResponse(status, reason)).toMatchObject({ ok: false, expired: false, retryable: true, retryAfterMs: 60000 });
+  });
+  test('honors Retry-After seconds and dates, with a one-minute floor for absent or invalid hints', () => {
+    const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-09T16:00:00Z'));
+    try {
+      expect(classifyFcmResponse(503, 'UNAVAILABLE', '300').retryAfterMs).toBe(300000);
+      expect(classifyFcmResponse(503, 'UNAVAILABLE', 'Wed, 09 Sep 2026 16:05:00 GMT').retryAfterMs).toBe(300000);
+      for (const value of [undefined, 'invalid', '0', '10', 'Wed, 09 Sep 2026 15:00:00 GMT']) {
+        expect(classifyFcmResponse(429, 'QUOTA_EXCEEDED', value).retryAfterMs).toBe(60000);
+      }
+    } finally { now.mockRestore(); }
+  });
+  test.each([[400, 'INVALID_ARGUMENT'], [401, 'UNAUTHENTICATED'], [403, 'SENDER_ID_MISMATCH'],
+    [404, 'NOT_FOUND'], [404, 'UNREGISTERED']])('permanent %s/%s is not retried', (status, reason) => {
+    expect(classifyFcmResponse(status, reason).retryable).not.toBe(true);
+  });
   test('2xx is ok', () => {
     expect(classifyFcmResponse(200).ok).toBe(true);
   });

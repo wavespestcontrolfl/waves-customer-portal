@@ -36,6 +36,7 @@ const {
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   serviceKeyFor,
+  separateProgramMatches,
 } = require('../services/recurring-appointment-seeder');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -414,6 +415,31 @@ describe('checkActiveSeriesLocked — race-safe guard (P0: check-then-insert rac
     expect(rawCalls).toHaveLength(2);
   });
 
+  test('two intentional second-program requests share one reviewed set and create only one additional series', async () => {
+    const parent = { id: 10, customer_id: 5, service_type: 'Quarterly Pest Control', is_recurring: true,
+      recurring_ongoing: true, scheduled_date: FUTURE, status: 'pending' };
+    const { db, state } = makeLockEnv({ parents: [parent] });
+    const createSeparateProgram = () => db.transaction(async (trx) => {
+      const { matches, guardError } = await checkActiveSeriesLocked(trx, { customerId: 5, serviceType: parent.service_type });
+      if (guardError || !separateProgramMatches(matches, ['10'])) return false;
+      const { id: _id, ...newProgram } = parent;
+      await trx('scheduled_services').insert(newProgram);
+      return true;
+    });
+    const results = await Promise.all([createSeparateProgram(), createSeparateProgram()]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(state.parents).toHaveLength(2);
+    // A lost response does not turn its retry into a third program.
+    expect(await createSeparateProgram()).toBe(false);
+  });
+
+  test('second-program approval rejects incomplete, changed, or repeated IDs', () => {
+    expect(separateProgramMatches([{ id: 1 }, { id: 2 }], ['2', '1'])).toBe(true);
+    for (const ids of [undefined, [], ['1'], ['1', '1'], ['1', '3']]) {
+      expect(separateProgramMatches([{ id: 1 }, { id: 2 }], ids)).toBe(false);
+    }
+  });
+
   // Runs two creators concurrently against the keyed-lock env and reports how
   // many series ended up seeded. Each mirrors production: locked re-check in
   // the same transaction as the insert, seed only when the guard is empty.
@@ -637,7 +663,7 @@ describe('the series creators consume the guard (source guards)', () => {
     // Bare raw-inference gating (the pre-fix shape) must not come back.
     expect(converterSrc).not.toMatch(/if \(pattern\) \{\s*\n\s*const \{ matches/);
     // Skip-with-note on every guarded path; fail-open log retained.
-    expect((converterSrc.match(/action: 'recurring_series_skipped'/g) || []).length).toBe(3);
+    expect((converterSrc.match(/\.insert\(\{[^}]*action: 'recurring_series_skipped'/g) || []).length).toBe(3);
     expect(converterSrc).toContain('duplicate-series guard failed (scheduling proceeds)');
     // A caller-provided transaction is reused (the lock then holds to THEIR
     // commit); otherwise each seeding step opens its own.

@@ -184,6 +184,172 @@ async function auditRecurringScheduleAnomalies(options = {}, conn = db) {
   };
 }
 
+// Coverage is a measurement of stored visits, not permission to create or move
+// one. Keep calendar-month/seasonal/nth-weekday rules in the existing seeder.
+function recurringCadenceDate(row = {}) {
+  if (row.date_exception) return formatDateOnly(row.date_exception_cadence_date);
+  return formatDateOnly(row.recurring_dispatch_due_date || row.scheduled_date);
+}
+
+function nextCoverageDate(template, row, ordinal = 0, blackoutDates = null) {
+  const seeder = require('./recurring-appointment-seeder');
+  const pattern = seeder.normalizeRecurringPattern(template.recurring_pattern);
+  const baseDate = recurringCadenceDate(template);
+  const previousDate = recurringCadenceDate(row);
+  if (!baseDate || !previousDate || !pattern || (pattern === 'custom' && !(Number(template.recurring_interval_days) > 0))) return null;
+  let position = 0;
+  for (const candidate of seeder.recurringDateCandidates(baseDate, pattern, {
+    recurrenceOptions: { nth: template.recurring_nth, weekday: template.recurring_weekday, intervalDays: template.recurring_interval_days },
+    skipWeekends: !!template.skip_weekends, weekendShift: template.weekend_shift, blackoutDates,
+    maxAttempts: Math.max(ordinal + 1, seeder.etDateDiffDays(baseDate, previousDate) + 1) * 4 + 30,
+  })) {
+    position++;
+    if (position > ordinal && candidate > previousDate) return candidate;
+  }
+  return null;
+}
+
+function measureRecurringSeries(template, visits, { todayET = etDateString(), decision = null, holds = [], blackoutDates = null } = {}) {
+  const { etDateDiffDays } = require('./recurring-appointment-seeder');
+  const retained = visits.filter(row => row.is_recurring && !row.is_callback && !row.followup_included
+    && !['cancelled', 'skipped', 'no_show'].includes(row.status));
+  // A parked reschedule remains owed work. Its date is the abandoned slot,
+  // so it cannot establish future placement or actual visit spacing.
+  const awaitingPlacement = retained.filter(row => row.status === 'rescheduled');
+  const live = retained.filter(row => row.status !== 'rescheduled')
+    .sort((a, b) => formatDateOnly(a.scheduled_date).localeCompare(formatDateOnly(b.scheduled_date))
+      || String(a.id).localeCompare(String(b.id)));
+  const upcoming = live.filter(row => row.status !== 'completed' && formatDateOnly(row.scheduled_date) >= todayET);
+  const overdue = live.filter(row => row.status !== 'completed' && formatDateOnly(row.scheduled_date) < todayET);
+  const completed = live.filter(row => row.status === 'completed');
+  // Compare cadence positions independently of actual appointment order: an
+  // exception can move past the following application. Unknown legacy
+  // positions keep their spacing measurements without erasing the known
+  // positions of other visits in the same series.
+  const cadenceOrder = live.filter(row => recurringCadenceDate(row))
+    .sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b)));
+  const followingDates = new Map(cadenceOrder.map((row, index) => [row.id, nextCoverageDate(template, row, index, blackoutDates)]));
+  const expectedDates = new Map(cadenceOrder.slice(1).map((row, index) => [row.id, followingDates.get(cadenceOrder[index].id)]));
+  const paused = holds.some(hold => hold.status === 'active' && formatDateOnly(hold.starts_on) <= todayET && formatDateOnly(hold.resume_on) > todayET);
+  const stopped = decision === 'cancel_series' || (decision === 'let_lapse' && upcoming.length === 0 && awaitingPlacement.length === 0);
+  const intervals = live.slice(1).map((row, index) => {
+    const previous = live[index];
+    const from = formatDateOnly(previous.scheduled_date);
+    const to = formatDateOnly(row.scheduled_date);
+    const expected = expectedDates.get(row.id) ?? null;
+    const cadenceDate = recurringCadenceDate(row);
+    return {
+      previousAppointmentId: previous.id, appointmentId: row.id,
+      previousDate: from, scheduledDate: to, intervalDays: etDateDiffDays(from, to),
+      expectedDate: expected,
+      // Actual spacing remains visible for an exception; cadence drift uses
+      // its original slot, so an agreed move does not rewrite the plan.
+      cadenceDate, driftDays: expected && cadenceDate ? etDateDiffDays(expected, cadenceDate) : null,
+      dateException: !!(previous.date_exception || row.date_exception),
+      overlapsHold: holds.some(hold => formatDateOnly(hold.starts_on) <= to && formatDateOnly(hold.resume_on) > from),
+      basis: previous.status === 'completed' && row.status === 'completed' ? 'completed_visit_dates' : 'scheduled_visit_dates',
+    };
+  });
+  const lastCompleted = completed.at(-1);
+  const next = upcoming[0];
+  const nextExpectedDate = lastCompleted
+    ? (recurringCadenceDate(lastCompleted) && followingDates.get(cadenceOrder.filter(row => row.status === 'completed').at(-1)?.id)) || null
+    : recurringCadenceDate(live[0] || template);
+  const issues = stopped || paused ? [] : Object.entries({
+    ongoing_plan_has_no_future_visit: template.recurring_ongoing && upcoming.length === 0,
+    overdue_uncompleted_visits: overdue.length > 0,
+    rescheduled_visits_awaiting_placement: awaitingPlacement.length > 0,
+  }).filter(([, present]) => present).map(([issue]) => issue);
+  return {
+    parentId: template.id, customerId: template.customer_id, propertyId: template.property_id || null,
+    serviceType: template.service_type, pattern: template.recurring_pattern,
+    ongoing: !!template.recurring_ongoing,
+    paused, stopped,
+    issues, lastCompletedScheduledDate: formatDateOnly(lastCompleted?.scheduled_date), nextExpectedDate,
+    nextRecordedDate: formatDateOnly(next?.scheduled_date),
+    nextTimedVisitDate: formatDateOnly(upcoming.find(row => row.window_start)?.scheduled_date),
+    continuationDueDate: template.recurring_ongoing && recurringCadenceDate(live.at(-1)) ? followingDates.get(cadenceOrder.at(-1)?.id) || null : null,
+    upcomingVisits: upcoming.length, untimedUpcomingVisits: upcoming.filter(row => !row.window_start).length,
+    overdueVisits: overdue.length,
+    awaitingPlacementVisits: awaitingPlacement.length,
+    daysSinceLastCompletedVisit: etDateDiffDays(formatDateOnly(lastCompleted?.scheduled_date), todayET),
+    intervals,
+  };
+}
+
+async function auditRecurringScheduleCoverage({ now = new Date(), limit = 100, offset = 0, customerId } = {}, conn = db) {
+  const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
+  const { seedingFamilyKey, comboRouteFamiliesFromCatalogKey } = require('./estimate-converter');
+  const { overlayRecurringTemplateOverrides } = require('./recurring-template-overrides');
+  const { preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
+  const pageSize = normalizeLimit(limit);
+  const pageOffset = Math.max(0, parseInt(offset, 10) || 0);
+  const roots = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
+    .where('s.is_recurring', true).whereNull('s.recurring_parent_id')
+    .where('c.active', true).whereNull('c.deleted_at')
+    .where(q => q.whereNull('c.pipeline_stage').orWhereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES))
+    .modify(q => { if (customerId) q.where('s.customer_id', customerId); })
+    .select('s.*')
+    .orderBy('s.id').limit(pageSize + 1).offset(pageOffset);
+  const selected = roots.slice(0, pageSize);
+  const templates = selected.map(root => overlayRecurringTemplateOverrides(root, { recurring_template_overrides: true }));
+  const serviceIds = [...new Set(templates.map(row => row.service_id).filter(Boolean))];
+  const catalogRows = serviceIds.length ? await conn('services').whereIn('id', serviceIds)
+    .select('id', 'service_key', 'billing_type') : [];
+  const catalog = new Map(catalogRows.map(row => [row.id, row]));
+  const eligible = templates.filter(root => root.recurring_pattern !== 'one_time'
+    && catalog.get(root.service_id)?.billing_type !== 'one_time');
+  const rootIds = selected.map(row => row.id);
+  const customerIds = [...new Set(selected.map(row => row.customer_id))];
+  const preferences = customerIds.length ? await conn('property_preferences').whereIn('customer_id', customerIds)
+    .select('customer_id', 'preferred_day') : [];
+  const noWeekends = new Set(preferences.filter(preferenceRowBlocksWeekends).map(row => row.customer_id));
+  const children = rootIds.length ? await conn('scheduled_services')
+    .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds).select('*') : [];
+  // Include the next projected occurrence plus the canonical nudge search.
+  // Current closure rules are shared with generation; a read failure cannot
+  // certify an expected date on an assumed-open day.
+  const horizonDates = [...selected, ...children].map(recurringCadenceDate).filter(Boolean);
+  for (const template of eligible) {
+    const rows = [template, ...children.filter(row => row.recurring_parent_id === template.id)]
+      .filter(row => recurringCadenceDate(row)).sort((a, b) => recurringCadenceDate(a).localeCompare(recurringCadenceDate(b)));
+    const next = nextCoverageDate(template, rows.at(-1), rows.length - 1);
+    if (next) horizonDates.push(next);
+  }
+  horizonDates.sort();
+  const blackoutDates = horizonDates.length ? await require('./scheduling/blackout-dates').getBlackoutLayers(
+    horizonDates[0], etDateString(addETDays(parseETDateTime(`${horizonDates.at(-1)}T12:00`), 75)), conn,
+  ) : null;
+  const decisions = rootIds.length ? await conn('recurring_plan_alerts')
+    .whereIn('recurring_parent_id', rootIds).whereIn('customer_id', customerIds)
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc').orderBy('id', 'desc')
+    .select('recurring_parent_id', 'customer_id', 'resolved_action') : [];
+  const holds = customerIds.length ? await conn('plan_holds').whereIn('customer_id', customerIds)
+    .whereNot('status', 'cancelled').select('customer_id', 'family_key', 'starts_on', 'resume_on', 'status') : [];
+  const todayET = etDateString(now);
+  const series = eligible.map(root => {
+    const identity = catalog.get(root.service_id)?.service_key || root.service_key_snapshot;
+    const combo = comboRouteFamiliesFromCatalogKey(identity);
+    const families = combo.length ? combo : [seedingFamilyKey({ service: identity, name: root.service_type })];
+    const historicalRoot = selected.find(row => row.id === root.id);
+    const effectiveTemplate = { ...root, skip_weekends: root.skip_weekends || noWeekends.has(root.customer_id) };
+    return measureRecurringSeries(effectiveTemplate, [historicalRoot, ...children.filter(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)], {
+      todayET,
+      blackoutDates,
+      decision: decisions.find(row => row.recurring_parent_id === root.id && row.customer_id === root.customer_id)?.resolved_action,
+      holds: holds.filter(row => row.customer_id === root.customer_id && families.includes(row.family_key)),
+    });
+  });
+  return {
+    asOfDate: todayET, limit: pageSize, offset: pageOffset, hasMore: roots.length > pageSize,
+    scannedSeries: selected.length, excludedOneTimeSeries: selected.length - eligible.length,
+    measuredSeries: series.length, seriesWithIssues: series.filter(row => row.issues.length).length,
+    // This is scheduled-date evidence, not measured elapsed field time. Signed
+    // drift is displayed without inventing a new global warning tolerance.
+    basis: 'stored_visit_dates', series,
+  };
+}
+
 // This check starts at ACCEPTANCE, including reservations that never acquired
 // is_recurring. It only reports evidence for staff review: a later manual
 // amendment can legitimately differ from the accepted snapshot.
@@ -226,7 +392,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
       const families = converter.comboRouteFamiliesFromCatalogKey(identity);
       const matches = families.length ? families.includes(family)
         : converter.seedingFamilyKey({ service: identity, name: row.service_type }) === family;
-      return matches && !row.is_callback && !row.followup_included;
+      return matches && !row.is_callback && !row.followup_included && !isBoosterVisit(row);
     });
     if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) continue;
     const rows = matching.filter((row) => !stoppedRoots.has(row.recurring_parent_id || row.id));
@@ -234,6 +400,26 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
     if (finding) findings.push(finding);
   }
   return findings;
+}
+
+// Booster months are deliberately non-recurring rows that hang off a recurring
+// root (is_recurring:false + recurring_parent_id): paid extras, not part of the
+// accepted cadence. Auditing them as plan visits would call a complete series
+// missing recurrence (and flag their off-cadence spacing). The contract is an
+// explicit false: is_recurring is nullable, and a legacy / malformed child
+// whose flag is NULL is still a plan visit the classifier must report. A root
+// reservation that never acquired is_recurring has no parent and is audited.
+function isBoosterVisit(row) {
+  return row.is_recurring === false && !!row.recurring_parent_id;
+}
+
+// An adopted upcoming appointment is recorded as the acceptance's reservation.
+// If it already carries recurrence (or rides a recurring root) it is a real
+// plan visit and stays audited; only a standalone reservation that never
+// acquired recurrence is dropped. Shared by the scheduled reader and the
+// converter's immediate check so the two audits cannot diverge.
+function isStandaloneReservation(row, reservations) {
+  return reservations.has(row.id) && !row.is_recurring && !row.recurring_parent_id;
 }
 
 function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder }) {
@@ -316,6 +502,20 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
   });
 }
 
+function readActiveFamilyHolds(conn, customerIds, todayET) {
+  return conn('plan_holds').whereIn('customer_id', customerIds).where('status', 'active')
+    .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
+}
+
+async function readStoppedRecurringRoots(conn, customerIds) {
+  const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
+    .select('recurring_parent_id', 'resolved_action');
+  // Query is newest-first; Map's last value wins after reversing it.
+  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
+  return new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+}
+
 async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
@@ -352,14 +552,8 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   const retainedSeries = await conn('activity_log').whereIn('customer_id', customerIds)
     .where('action', 'recurring_series_skipped').select('customer_id', 'metadata');
   const todayET = etDateString(now);
-  const holds = await conn('plan_holds').whereIn('customer_id', customerIds).where('status', 'active')
-    .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
-  const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
-    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
-    .select('recurring_parent_id', 'resolved_action');
-  // Query is newest-first; Map's last value wins after reversing it.
-  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
-  const stopped = new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+  const holds = await readActiveFamilyHolds(conn, customerIds, todayET);
+  const stopped = await readStoppedRecurringRoots(conn, customerIds);
   // Index history once: each estimate only walks its explicitly linked roots.
   const customers = new Map(customerIds.map((id) => [id, { roots: new Map(), holds: new Set() }]));
   const estimatesById = new Map(estimates.map((estimate) => [estimate.id, {
@@ -399,7 +593,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     // cancellation exemption; they never contribute to working visit counts.
     const linkedRows = [...roots].flatMap((root) => (customer.roots.get(root) || [])
       .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
-      .filter((row) => row.is_recurring || row.recurring_parent_id || !reservations.has(row.id));
+      .filter((row) => !isStandaloneReservation(row, reservations));
     findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
   }
   return findings;
@@ -413,5 +607,10 @@ module.exports = {
   formatDateOnly,
   normalizeLimit,
   acceptedScheduleFindings,
+  isStandaloneReservation,
+  readActiveFamilyHolds,
+  readStoppedRecurringRoots,
   findAcceptedRecurringScheduleGaps,
+  auditRecurringScheduleCoverage,
+  measureRecurringSeries,
 };

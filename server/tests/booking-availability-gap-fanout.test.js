@@ -69,11 +69,11 @@ function wireDayCapCounts(rows = []) {
   return builder;
 }
 
-async function build() {
+async function build(serviceKey = '', extra = {}) {
   return buildBookingAvailability({
     lat: 27.4, lng: -82.4, duration: 60,
     rangeFrom: D, rangeTo: D,
-    config: CONFIG, today: new Date(),
+    config: CONFIG, today: new Date(), serviceKey, ...extra,
   });
 }
 
@@ -84,6 +84,58 @@ describe('buildBookingAvailability — gap fan-out', () => {
     jest.clearAllMocks();
     wireDayCapCounts([]);
     listOccupiedWindows.mockResolvedValue([]);
+  });
+
+  test('capacity keeps only evaluated morning starts on an empty route with afternoon blocks', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      // Finder rejected 13:00–18:00 due to a technician block, which the
+      // appointment-only occupancy reader does not expose to this builder.
+      findAvailableSlots.mockResolvedValue({ slots: [gapSlot('09:00', {
+        stops_that_day: 0, latest_start_min: 540,
+      })], total_feasible: 1 });
+      expect(startTimes(await build('', { expandOpenDays: true }))).toEqual(['09:00']);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
+  test('capacity public slots ignore another technician while retaining own and unassigned blockers', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    findAvailableSlots.mockResolvedValue({ slots: [gapSlot('10:00', { latest_start_min: 600 })], total_feasible: 1 });
+    try {
+      for (const technician_id of ['tech-2', 'tech-1', null]) {
+        listOccupiedWindows.mockResolvedValue([{ date: D, startMin: 600, endMin: 660, technician_id }]);
+        expect(startTimes(await build())).toEqual(technician_id === 'tech-2' ? ['10:00'] : []);
+      }
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
+  test('capacity offers and commit geometry retain a 16:00 ninety-minute service', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({ slots: [gapSlot('16:00', { latest_start_min: 960 })], total_feasible: 1 });
+      expect(startTimes(await build('termite', { duration: 90 }))).toEqual(['16:00']);
+      const { validateBookingSlotGeometry } = require('../routes/booking')._internals;
+      expect(validateBookingSlotGeometry({ startMin: 960, duration: 90, config: CONFIG })).toBeNull();
+      expect(validateBookingSlotGeometry({ startMin: 1020, duration: 30, config: CONFIG })).not.toBeNull();
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
+  test('passes every selected service category to the capacity finder', async () => {
+    findAvailableSlots.mockResolvedValue({ slots: [], total_feasible: 0 });
+    await build('pest_control+tree_shrub');
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({ serviceTypes: ['Pest Control', 'Tree & Shrub'] }));
   });
 
   test('a gap whose earliest snap lands in lunch still offers its free afternoon hours', async () => {

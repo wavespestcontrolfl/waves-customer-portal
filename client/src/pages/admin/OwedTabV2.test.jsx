@@ -13,7 +13,7 @@ const rows = () => [
   },
   {
     id: "c2", call_log_id: "22222222-2222-4333-8444-555555555555", party: "waves", kind: "callback", description: "Call the caller back (promised by the AI phone assistant)",
-    status: "open", source: "ai", human_state: null, due_at: "2026-09-09T13:00:00Z", overdue: false, call_started_at: "2026-09-02T14:00:00Z",
+    status: "open", source: "ai", human_state: null, due_at: new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString(), overdue: false, call_started_at: "2026-09-02T14:00:00Z",
     customer_id: null, from_phone: "+15555550177", direction: "inbound",
     fulfillment: { kind: "outbound_call", strength: "association", basis: "completed_outbound_call_to_caller_within_14_days", matched_at: "2026-09-03T14:00:00Z" },
     extractor_version: "relay-v1",
@@ -22,7 +22,10 @@ const rows = () => [
 
 let calls;
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-05T15:00:00Z"));
   calls = [];
+  cards.summary = null;
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
@@ -32,8 +35,18 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   window.location.hash = "";
+});
+
+// Follow-through has its own browser workflow; these tests isolate the legacy
+// ledger. The stub reports whatever summary a test hands it (null = the card
+// feed never loaded, which is also what a failed card request reports).
+const cards = vi.hoisted(() => ({ summary: null }));
+vi.mock("../../components/admin/AdminFollowThroughCards", async () => {
+  const { useEffect } = await import("react");
+  return { default: ({ onSummary }) => { useEffect(() => { if (cards.summary) onSummary?.(cards.summary); }, [onSummary]); return null; } };
 });
 
 describe("OwedTabV2", () => {
@@ -53,6 +66,15 @@ describe("OwedTabV2", () => {
     expect(screen.getByText(/Nothing owed/)).toBeInTheDocument();
   });
 
+  it.each([true, false])("explains the server's active callback deadline policy (cards enabled: %s)", async (enabled) => {
+    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({
+      commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: enabled,
+    }) });
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText(enabled ? /a callback after four staffed hours/ : /a callback after the day of the call/)).toBeInTheDocument());
+    expect(screen.queryByText(enabled ? /a callback after the day of the call/ : /a callback after four staffed hours/)).not.toBeInTheDocument();
+  });
+
   it("lists open promises overdue-first with who, source, and the possibly-kept hint", async () => {
     render(<OwedTabV2 />);
     await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
@@ -62,6 +84,23 @@ describe("OwedTabV2", () => {
     expect(screen.getByText("AI assistant")).toBeInTheDocument();
     expect(screen.getByText(/Possibly kept: outbound call/)).toBeInTheDocument();
     expect(screen.getByText(/2 open · 1 overdue/)).toBeInTheDocument();
+  });
+
+  it("keeps Waves' callback rows in the ledger until the card feed itself loads enabled", async () => {
+    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) });
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
+    expect(screen.getByText(/Call the caller back/)).toBeInTheDocument();
+    expect(screen.getByText(/2 open · 1 overdue/)).toBeInTheDocument();
+  });
+
+  it("hands Waves' callbacks to the cards once they load, folding their counts and pagination into the summary", async () => {
+    cards.summary = { enabled: true, open: 100, overdue: 4, hasMore: true };
+    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) });
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
+    expect(screen.queryByText(/Call the caller back/)).not.toBeInTheDocument();
+    expect(screen.getByText(/101\+ open · 5 overdue/)).toBeInTheDocument();
   });
 
   it("walks a queue longer than one page with Load more, appending rows at the server's next offset", async () => {
@@ -124,7 +163,16 @@ describe("OwedTabV2", () => {
     expect(dueLabel({ overdue: false, due_at: "2026-09-05T20:00:00Z" }, now).tone).toBe("strong");
     // A stated deadline that passed after the page loaded is overdue now, whatever the snapshot said (codex #3725 r19 P2).
     expect(dueLabel({ overdue: false, due_at: "2026-09-05T14:00:00Z" }, now)).toMatchObject({ tone: "alert" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T20:00:00Z" }, now))
+      .toMatchObject({ text: expect.stringContaining("Due Sep 5"), tone: "strong" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T14:00:00Z" }, now).tone).toBe("alert");
     expect(dueLabel({ overdue: false, due_at: null }, now)).toEqual({ text: "No due time", tone: "neutral" });
+    // The server's effective_due_at already carries an active snooze; the label says so.
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T18:00:00Z", snoozed_until: "2026-09-05T18:00:00Z" }, now))
+      .toEqual({ text: expect.stringMatching(/^Snoozed until /), tone: "neutral" });
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T14:30:00Z", snoozed_until: "2026-09-05T14:30:00Z" }, now).tone).toBe("alert");
+    // A snooze that ends before the deadline is not the deadline.
+    expect(dueLabel({ overdue: false, due_at: null, effective_due_at: "2026-09-05T20:00:00Z", snoozed_until: "2026-09-05T17:00:00Z" }, now).text).toMatch(/^Due /);
     // A human-recorded promise is open since it was recorded, not since the (older) call.
     expect(dueLabel({ overdue: true, due_at: null, source: "human", created_at: "2026-09-01T15:00:00Z", call_started_at: "2026-07-01T15:00:00Z" }, now).text).toMatch(/open since Sep 1/);
     expect(dueLabel({ overdue: true, due_at: null, source: "ai", created_at: "2026-09-01T15:00:00Z", call_started_at: "2026-07-01T15:00:00Z" }, now).text).toMatch(/open since Jul 1/);

@@ -108,6 +108,9 @@ async function recordManualPayment(id, {
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
+  // Staff user id behind an operator-recorded payment (audit attribution
+  // for the invoice-issued closeout); null for automated settlements.
+  recordedByTechnicianId = null,
 } = {}) {
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
@@ -456,6 +459,13 @@ async function recordManualPayment(id, {
       }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
     }
   }
+
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+  // GATE_INVOICE_ISSUED_CLOSES_VISIT): money received by hand proves the
+  // visit happened — close it out quietly. Best-effort after the payment
+  // is recorded.
+  const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
+  await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId });
 
   const final = await db('invoices').where({ id }).first();
   return {
