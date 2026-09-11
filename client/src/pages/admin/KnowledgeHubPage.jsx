@@ -51,11 +51,17 @@ export default function KnowledgeHubPage() {
           </div>
         )}
       >
-        {area === "base" ? (
-          <KnowledgeBasePage embedded />
-        ) : (
-          <KnowledgePage embedded />
-        )}
+        {/* The children are still on legacy presentation -- their own
+            AdminCommandHeader reads the density from context, so the hub's
+            comfortable scope has to stop here. Migrated panels inside them
+            re-establish comfortable on their own surfaces. */}
+        <UiSurface density="legacy">
+          {area === "base" ? (
+            <KnowledgeBasePage embedded />
+          ) : (
+            <KnowledgePage embedded />
+          )}
+        </UiSurface>
       </Suspense>
     </UiSurface>
   );

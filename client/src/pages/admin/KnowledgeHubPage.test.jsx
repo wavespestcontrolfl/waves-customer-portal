@@ -84,6 +84,25 @@ describe("KnowledgeHubPage", () => {
       .toBeInTheDocument();
   });
 
+  it("keeps the legacy children out of the comfortable density scope", async () => {
+    renderHub();
+
+    // The children render their own AdminCommandHeader, which reads density
+    // from context, so an unscoped provider would silently re-present them.
+    const child = await screen.findByText("Embedded Wiki workspace");
+    expect(child.closest('[data-ui-density]')).toHaveAttribute(
+      "data-ui-density",
+      "legacy",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Knowledge Base" }));
+    const base = await screen.findByText("Embedded Knowledge Base workspace");
+    expect(base.closest('[data-ui-density]')).toHaveAttribute(
+      "data-ui-density",
+      "legacy",
+    );
+  });
+
   it("deep-links and switches areas without dropping query context", async () => {
     renderHub("/admin/knowledge?source=alert&area=base&kbTab=audit");
 
