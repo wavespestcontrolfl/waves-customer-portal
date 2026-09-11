@@ -76,6 +76,24 @@ const PLATFORM_ICONS = { facebook: "", instagram: "", linkedin: "", gbp: "" };
 function statusTone(value) {
   return ["failed", "error", "expired"].includes(value) ? "alert" : "neutral";
 }
+
+// Raw platform keys came off the API lowercase and were displayed through
+// textTransform: "capitalize". The shared type stack drops that, so the label
+// has to be built rather than styled.
+const PLATFORM_LABELS = { gbp: "GBP", facebook: "Facebook", instagram: "Instagram", linkedin: "LinkedIn", gemini: "Gemini", x: "X", tiktok: "TikTok", youtube: "YouTube" };
+function platformLabel(key, overrides = {}) {
+  if (overrides[key]) return overrides[key];
+  if (PLATFORM_LABELS[key]) return PLATFORM_LABELS[key];
+  return typeof key === "string" && key ? key.charAt(0).toUpperCase() + key.slice(1) : key;
+}
+
+// A history row is only an alert when the publish actually failed. draft,
+// scheduled and dry_run are routine workflow states (social-content-studio.js
+// creates drafts, content-scheduler.js creates scheduled rows).
+const FAILED_POST_STATUSES = ["failed", "error", "expired", "rejected"];
+function postStatusTone(value) {
+  return FAILED_POST_STATUSES.includes(value) ? "alert" : "neutral";
+}
 const SOCIAL_TABS = [
   {
     key: "campaigns",
@@ -233,6 +251,101 @@ function MetaHealthStrip({ health, onRefresh }) {
     </Card>
   );
 }
+// Extracted so the page component itself stays under the configured complexity
+// maximum: the automation banner alone carried four status branches and the
+// pause control two more.
+function AUTOMATION_LABEL(automation) {
+  if (automation.paused) return "Paused";
+  if (automation.dryRun) return "Dry Run";
+  return automation.enabled ? "Active" : "Disabled";
+}
+
+// Table-driven so adding a tab does not add a branch to the page component.
+const TAB_BODIES = {
+  campaigns: ({ showToast, loadData }) => <CampaignBuilderTab showToast={showToast} onSaved={loadData} />,
+  audit: ({ showToast, loadData }) => <AutonomousRunAuditTab showToast={showToast} onRan={loadData} />,
+  reviews: ({ showToast }) => <ReviewGraphicsTab showToast={showToast} />,
+  competitors: ({ showToast }) => <CompetitorSwipeTab showToast={showToast} />,
+  compose: ({ showToast, loadData }) => <ComposeTab showToast={showToast} onPublished={loadData} />,
+  rss: ({ showToast, loadData }) => <RSSTab showToast={showToast} onPublished={loadData} />,
+  calendar: () => <CalendarTab />,
+  analytics: () => <AnalyticsTab />,
+  templates: ({ showToast }) => <TemplatesTab showToast={showToast} />,
+  history: ({ history, loadData }) => <HistoryTab history={history} onRefresh={loadData} />,
+};
+
+function TabBody(props) {
+  const render = TAB_BODIES[props.tab];
+  return render ? render(props) : null;
+}
+
+function FailureAlertBanner({ alert, onDismiss }) {
+  if (!alert) return null;
+  return (
+      <Card className="mb-3 flex items-center justify-between gap-3 border-alert-fg bg-alert-bg border-l-4">
+        <div>
+          <div className="text-ui-body font-medium text-alert-fg">
+            {alert.message}
+          </div>
+          <div className="text-ui-body text-ink-secondary">
+            Since{" "}
+            {new Date(alert.raised_at).toLocaleString("en-US", {
+              timeZone: "America/New_York",
+            })}
+          </div>
+        </div>
+        <Button onClick={onDismiss} variant="secondary">
+          Dismiss
+        </Button>
+      </Card>
+  );
+}
+
+function AutomationStatusBanner({ automation, pauseLoading, onTogglePause }) {
+  if (!automation) return null;
+  return (
+      <Card
+        className={cn(
+          "mb-4 flex items-center justify-between border-l-4 flex-wrap gap-3",
+          automation.paused
+            ? "border-l-alert-fg"
+            : automation.enabled
+              ? "border-l-zinc-900"
+              : "border-l-zinc-400",
+        )}
+      >
+        <div className="flex items-center gap-3">
+          <div
+            className={cn(
+              "w-2.5 h-2.5 rounded-full",
+              automation.paused ? "bg-alert-fg" : "bg-zinc-900",
+            )}
+          />
+          <div>
+            <div className="text-ui-body font-medium text-zinc-900">
+              Automation: {AUTOMATION_LABEL(automation)}
+            </div>
+            <div className="text-ui-body text-ink-secondary">
+              RSS: {automation.rssAutopublish ? "On" : "Off"} ·{" "}
+              Scheduled: {automation.scheduledPosts ? "On" : "Off"} ·{" "}
+              Newsletter:{" "}
+              {automation.newsletterAutoshare ? "On" : "Off"}
+            </div>
+          </div>
+        </div>
+        {automation.enabled && (
+          <Button onClick={onTogglePause} disabled={pauseLoading}>
+            {pauseLoading
+              ? "..."
+              : automation.paused
+                ? "Resume"
+                : "Pause All"}
+          </Button>
+        )}
+      </Card>
+  );
+}
+
 export default function SocialMediaPage() {
   const [tab, setTab] = useState("campaigns");
   const activeGroup =
@@ -310,106 +423,37 @@ export default function SocialMediaPage() {
           })}
         </div>
       )}
-      {/* Failure alert banner */}
-      {alert && (
-        <Card className="mb-3 flex items-center justify-between gap-3 border-alert-fg bg-alert-bg border-l-4">
-          <div>
-            <div className="text-ui-body font-medium text-alert-fg">
-              {alert.message}
-            </div>
-            <div className="text-ui-body text-ink-secondary">
-              Since{" "}
-              {new Date(alert.raised_at).toLocaleString("en-US", {
-                timeZone: "America/New_York",
-              })}
-            </div>
-          </div>
-          <Button
-            onClick={async () => {
-              await adminFetch("/admin/social-media/alerts", {
+      <FailureAlertBanner
+        alert={alert}
+        onDismiss={async () => {
+          await adminFetch("/admin/social-media/alerts", {
                 method: "DELETE",
               }).catch(() => {});
-              setAlert(null);
-              showToast("Alert dismissed");
-            }}
-            variant="secondary"
-          >
-            Dismiss
-          </Button>
-        </Card>
-      )}
-      {/* Automation status banner */}
-      {status?.automation && (
-        <Card
-          className={cn(
-            "mb-4 flex items-center justify-between border-l-4 flex-wrap gap-3",
-            status.automation.paused
-              ? "border-l-alert-fg"
-              : status.automation.enabled
-                ? "border-l-zinc-900"
-                : "border-l-zinc-400",
-          )}
-        >
-          <div className="flex items-center gap-3">
-            <div
-              className={cn(
-                "w-2.5 h-2.5 rounded-full",
-                status.automation.paused ? "bg-alert-fg" : "bg-zinc-900",
-              )}
-            />
-            <div>
-              <div className="text-ui-body font-medium text-zinc-900">
-                Automation:{" "}
-                {status.automation.paused
-                  ? "Paused"
-                  : status.automation.dryRun
-                    ? "Dry Run"
-                    : status.automation.enabled
-                      ? "Active"
-                      : "Disabled"}
-              </div>
-              <div className="text-ui-body text-ink-secondary">
-                RSS: {status.automation.rssAutopublish ? "On" : "Off"} ·{" "}
-                Scheduled: {status.automation.scheduledPosts ? "On" : "Off"} ·{" "}
-                Newsletter:{" "}
-                {status.automation.newsletterAutoshare ? "On" : "Off"}
-              </div>
-            </div>
-          </div>
-          {status.automation.enabled && (
-            <Button
-              onClick={async () => {
-                setPauseLoading(true);
-                try {
-                  await adminFetch("/admin/social-media/pause", {
+          setAlert(null);
+          showToast("Alert dismissed");
+        }}
+      />
+      <AutomationStatusBanner
+        automation={status?.automation}
+        pauseLoading={pauseLoading}
+        onTogglePause={async () => {
+          setPauseLoading(true);
+          try {
+            await adminFetch("/admin/social-media/pause", {
                     method: "POST",
                     body: JSON.stringify({
                       paused: !status.automation.paused,
                     }),
                   });
-                  await loadData();
-                  showToast(
-                    status.automation.paused
-                      ? "Automation resumed"
-                      : "Automation paused",
-                  );
-                } catch {
-                  showToast("Failed to toggle pause");
-                } finally {
-                  setPauseLoading(false);
-                }
-              }}
-              disabled={pauseLoading}
-            >
-              {pauseLoading
-                ? "..."
-                : status.automation.paused
-                  ? "Resume"
-                  : "Pause All"}
-            </Button>
-          )}
-        </Card>
-      )}
+            await loadData();
+            showToast(status.automation.paused ? "Automation resumed" : "Automation paused");
+          } catch {
+            showToast("Failed to toggle pause");
+          } finally {
+            setPauseLoading(false);
+          }
+        }}
+      />
       {/* Platform health + connection status */}
       {status && (
         <div className="flex gap-2.5 mb-5 flex-wrap">
@@ -437,7 +481,7 @@ export default function SocialMediaPage() {
                 className="flex-[1_1_140px] min-w-[140px] mb-0 text-center"
               >
                 <div className="text-ui-body font-medium text-zinc-900">
-                  {key === "gbp" ? "GBP" : key}
+                  {platformLabel(key)}
                 </div>
                 <div className="mt-1">
                   <Badge tone={statusTone(healthStatus)}>{statusLabel}</Badge>
@@ -460,9 +504,7 @@ export default function SocialMediaPage() {
           health={health}
           onRefresh={async () => {
             try {
-              const next = await adminFetch(
-                "/admin/social-media/health?force=1",
-              );
+              const next = await adminFetch("/admin/social-media/health?force=1");
               setHealth(next);
               showToast("Meta health refreshed");
             } catch (e) {
@@ -500,30 +542,13 @@ export default function SocialMediaPage() {
           ))}
         </div>
       )}
-      {tab === "campaigns" && (
-        <CampaignBuilderTab showToast={showToast} onSaved={loadData} />
-      )}
-      {tab === "audit" && (
-        <AutonomousRunAuditTab showToast={showToast} onRan={loadData} />
-      )}
-      {tab === "reviews" && <ReviewGraphicsTab showToast={showToast} />}
-      {tab === "competitors" && <CompetitorSwipeTab showToast={showToast} />}
-      {tab === "compose" && (
-        <ComposeTab showToast={showToast} onPublished={loadData} />
-      )}
-      {tab === "rss" && <RSSTab showToast={showToast} onPublished={loadData} />}
-      {tab === "calendar" && <CalendarTab />}
-      {tab === "analytics" && <AnalyticsTab />}
-      {tab === "templates" && <TemplatesTab showToast={showToast} />}
-      {tab === "history" && (
-        <HistoryTab history={history} onRefresh={loadData} />
-      )}
+      <TabBody tab={tab} showToast={showToast} loadData={loadData} history={history} />
       <div
         style={{
           transform: toast ? "translateY(0)" : "translateY(-80px)",
           opacity: toast ? 1 : 0,
         }}
-        className="fixed top-5 right-5 bg-white border-hairline border-zinc-300 rounded-md px-4 py-2.5 flex items-center gap-2 z-[300] text-ui-body transition-all pointer-events-none"
+        className="fixed top-[calc(20px+env(safe-area-inset-top,0px))] right-5 bg-white border-hairline border-zinc-300 rounded-md px-4 py-2.5 flex items-center gap-2 z-[300] text-ui-body transition-all pointer-events-none"
       >
         {" "}
         <span className="text-zinc-900">{toast}</span>{" "}
@@ -628,10 +653,7 @@ function AutonomousStudioPanel({ showToast, onRan }) {
     try {
       const result = await adminFetch("/admin/social-media/autonomous/run", {
         method: "POST",
-        body: JSON.stringify({
-          force: true,
-          mode,
-        }),
+        body: JSON.stringify({ force: true, mode }),
       });
       if (result.skipped) showToast(`Autonomous run skipped: ${result.reason}`);
       else if (result.dryRun) showToast("Autonomous dry run completed");
@@ -753,10 +775,7 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
     try {
       const result = await adminFetch("/admin/social-media/autonomous/run", {
         method: "POST",
-        body: JSON.stringify({
-          force: true,
-          mode,
-        }),
+        body: JSON.stringify({ force: true, mode }),
       });
       if (result.skipped) showToast(`Autonomous run skipped: ${result.reason}`);
       else if (result.dryRun) showToast("Autonomous dry run completed");
@@ -777,15 +796,10 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
   const approveRun = async (run) => {
     setActing(`approve-${run.id}`);
     try {
-      const result = await adminFetch(
-        `/admin/social-media/autonomous/runs/${run.id}/approve`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            variantIndex: variantChoice[run.id] ?? 0,
-          }),
-        },
-      );
+      const result = await adminFetch(`/admin/social-media/autonomous/runs/${run.id}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ variantIndex: variantChoice[run.id] ?? 0 }),
+      });
       if (result.published) showToast("Draft approved and published");
       else if (result.dryRun)
         showToast("Approve ran in dry-run mode — not published");
@@ -1229,13 +1243,10 @@ function CampaignBuilderTab({ showToast, onSaved }) {
     }
     setLoading(true);
     try {
-      const data = await adminFetch(
-        "/admin/social-media/campaign-builder/preview",
-        {
-          method: "POST",
-          body: JSON.stringify(form),
-        },
-      );
+      const data = await adminFetch("/admin/social-media/campaign-builder/preview", {
+        method: "POST",
+        body: JSON.stringify(form),
+      });
       setPreview(data);
       setDrafts(data.drafts || {});
     } catch (e) {
@@ -1248,20 +1259,14 @@ function CampaignBuilderTab({ showToast, onSaved }) {
     if (!preview) return;
     setSaving(true);
     try {
-      const result = await adminFetch(
-        "/admin/social-media/campaign-builder/save",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            ...form,
-            link: preview.suggestedLink,
-            preview: {
-              ...preview,
-              drafts,
-            },
-          }),
-        },
-      );
+      const result = await adminFetch("/admin/social-media/campaign-builder/save", {
+        method: "POST",
+        body: JSON.stringify({
+          ...form,
+          link: preview.suggestedLink,
+          preview: { ...preview, drafts },
+        }),
+      });
       if (result.preview) setPreview(result.preview);
       showToast("Campaign saved as social draft");
       onSaved();
@@ -1417,9 +1422,7 @@ function CampaignBuilderTab({ showToast, onSaved }) {
                   >
                     <div className="flex justify-between gap-3 mb-2">
                       <div className="text-ui-body font-medium text-zinc-900">
-                        {platform === "gbp"
-                          ? "Google Business Profile"
-                          : platform}
+                        {platformLabel(platform, { gbp: "Google Business Profile" })}
                       </div>
                       <Badge
                         tone={validation?.valid === false ? "alert" : "neutral"}
@@ -1531,12 +1534,7 @@ function ReviewGraphicsTab({ showToast }) {
   };
   const approveGraphic = async (graphic) => {
     try {
-      await adminFetch(
-        `/admin/social-media/review-graphics/${graphic.id}/approve`,
-        {
-          method: "POST",
-        },
-      );
+      await adminFetch(`/admin/social-media/review-graphics/${graphic.id}/approve`, { method: "POST" });
       showToast("Review graphic approved");
       load();
     } catch (e) {
@@ -2030,11 +2028,7 @@ function ComposeTab({ showToast, onPublished }) {
     try {
       const data = await adminFetch("/admin/social-media/preview", {
         method: "POST",
-        body: JSON.stringify({
-          title,
-          description,
-          link,
-        }),
+        body: JSON.stringify({ title, description, link }),
       });
       setPreview(data);
       setCustomContent(data);
@@ -2049,12 +2043,7 @@ function ComposeTab({ showToast, onPublished }) {
     try {
       const result = await adminFetch("/admin/social-media/publish", {
         method: "POST",
-        body: JSON.stringify({
-          title,
-          description,
-          link,
-          customContent,
-        }),
+        body: JSON.stringify({ title, description, link, customContent }),
       });
       const successes = result.platforms?.filter((p) => p.success).length || 0;
       const skipped = result.platforms?.filter((p) => p.skipped).length || 0;
@@ -2166,9 +2155,7 @@ function ComposeTab({ showToast, onPublished }) {
                     {PLATFORM_ICONS[platform]}
                   </span>{" "}
                   <span className="text-ui-body font-medium text-zinc-900">
-                    {platform === "gbp"
-                      ? "Google Business (all 4 locations)"
-                      : platform}
+                    {platformLabel(platform, { gbp: "Google Business (all 4 locations)" })}
                   </span>{" "}
                 </div>{" "}
                 <Textarea
@@ -2344,9 +2331,7 @@ function HistoryTab({ history, onRefresh }) {
                 </div>{" "}
                 <div className="flex gap-1 items-center">
                   {" "}
-                  <Badge
-                    tone={post.status === "published" ? "neutral" : "alert"}
-                  >
+                  <Badge tone={postStatusTone(post.status)}>
                     {post.status}
                   </Badge>{" "}
                   <span className="text-ui-body text-ink-secondary">
@@ -2464,12 +2449,14 @@ function AnalyticsTab() {
             >
               {" "}
               <div className="text-ui-body font-medium text-zinc-900">
-                {platform}
+                {platformLabel(platform)}
               </div>{" "}
               <div className="flex gap-2 justify-center mt-2 text-ui-body">
                 {" "}
                 <span className="text-zinc-900">{stats.success} </span>{" "}
-                <span className="text-alert-fg">{stats.failed} No</span>{" "}
+                <span className={stats.failed > 0 ? "text-alert-fg" : "text-ink-secondary"}>
+                  {stats.failed} No
+                </span>{" "}
                 <span className="text-ink-secondary">
                   {stats.total} total
                 </span>{" "}
