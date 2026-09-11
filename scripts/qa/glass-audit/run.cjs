@@ -109,9 +109,15 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
     timezoneId: 'America/New_York', serviceWorkers: 'block', reducedMotion: state.reducedMotion ? 'reduce' : 'no-preference',
     colorScheme: 'light', forcedColors: state.forcedColors ? 'active' : 'none',
   });
+  const rec = { scenario: scenario.id, state: state.name, width, engine: engineName, url: null, pageErrors: [], consoleErrors: [], unmatched: [], external: [], apiCalls: [], screenshot: null, metrics: null, contrast: [], interactions: [], blockedSockets: [], failure: null };
+  // `page.route()` below never sees a WebSocket handshake, so the /socket.io abort does not stop the
+  // websocket-first connections TrackPage and the dispatch hooks open -- those would reach the real
+  // backend through Vite's WS proxy and break the harness's frontend-only guarantee (and the evidence
+  // would reflect live data, not the fixture). Routed on the CONTEXT, before any page exists, and the
+  // socket is closed without `connectToServer()` so nothing is opened upstream.
+  await context.routeWebSocket('**', (ws) => { rec.blockedSockets.push(String(ws.url()).slice(0, 160)); ws.close(); });
   const page = await context.newPage();
   page.setDefaultTimeout(20000);
-  const rec = { scenario: scenario.id, state: state.name, width, engine: engineName, url: null, pageErrors: [], consoleErrors: [], unmatched: [], external: [], apiCalls: [], screenshot: null, metrics: null, contrast: [], interactions: [], failure: null };
   page.on('pageerror', (e) => rec.pageErrors.push(String(e.message).slice(0, 300)));
   page.on('console', (m) => { if (m.type() === 'error') rec.consoleErrors.push(m.text().slice(0, 300)); });
   await page.addInitScript((seed) => {
