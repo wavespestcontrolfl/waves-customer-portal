@@ -65,14 +65,19 @@ const record = {
   performed_at: "2026-09-01T12:00:00Z",
   total_cost: 100,
 };
+// The real costOfOwnership divides total_cost by the SUM of this vehicle's
+// mileage logs (server/services/equipment-maintenance.js), so the cost metrics
+// below and these logs have to be the same number or the Cost/Mile tile the
+// fixture is meant to exercise renders from a figure production never produced.
+const vehicleTotalMiles = 100;
 const mileage = {
   logs: [
     {
       id: "mileage-example",
       log_date: "2026-09-08",
       odometer_start: 11900,
-      odometer_end: 12000,
-      total_miles: 100,
+      odometer_end: 11900 + vehicleTotalMiles,
+      total_miles: vehicleTotalMiles,
       business_miles: 90,
       personal_miles: 10,
       business_pct: 90,
@@ -84,7 +89,7 @@ const mileage = {
     },
   ],
   summary: {
-    total_miles: 100,
+    total_miles: vehicleTotalMiles,
     business_miles: 90,
     total_fuel_cost: 20,
     total_irs_deduction: 63,
@@ -99,20 +104,41 @@ const overview = {
   ytd_fuel_cost: 20,
   ytd_irs_deduction: 63,
 };
-const cost = {
-  equipment_id: id,
-  equipment_name: equipment.name,
-  category: "vehicle",
-  asset_tag: "QA-001",
-  age_months: 32,
-  purchase_price: 25000,
-  total_maintenance: 100,
-  total_fuel: 20,
-  total_cost: 25120,
-  monthly_cost: 785,
-  condition_rating: 8,
-  total_irs_deduction: 63,
-};
+// costOfOwnership computes the age as a live month difference from
+// purchase_date and divides the total by it, so a pinned age_months/monthly_cost
+// pair stops being a response production can return the moment the month rolls
+// over — 32/$785 today, 33/$761.21 from October. Derive both, exactly as the
+// service does, and include the cost_per_mile it always returns for a vehicle
+// with mileage logs.
+const cost = (() => {
+  const [purchaseYear, purchaseMonth] = equipment.purchase_date
+    .split("-")
+    .map(Number);
+  const now = new Date();
+  const ageMonths = Math.max(
+    1,
+    (now.getFullYear() - purchaseYear) * 12 +
+      (now.getMonth() - (purchaseMonth - 1)),
+  );
+  const totalCost = 25000 + 100 + 20;
+  const round = (value) => Math.round(value * 100) / 100;
+  return {
+    equipment_id: id,
+    equipment_name: equipment.name,
+    category: "vehicle",
+    asset_tag: "QA-001",
+    age_months: ageMonths,
+    purchase_price: 25000,
+    total_maintenance: 100,
+    total_fuel: 20,
+    total_cost: totalCost,
+    monthly_cost: round(totalCost / ageMonths),
+    cost_per_mile: round(totalCost / vehicleTotalMiles),
+    total_miles: vehicleTotalMiles,
+    condition_rating: 8,
+    total_irs_deduction: 63,
+  };
+})();
 // Matches the job-cost summary below (1 pest job, $250 revenue, $100 cost,
 // 60% margin) so the list and the summary cannot disagree — the real
 // endpoints read the same `job_costs` table and never do.
@@ -412,6 +438,9 @@ function fixtures(state) {
 async function install(page, server, state) {
   const handlers = fixtures(state),
     contracts = queryContracts();
+  state.fixtureGets = [...handlers.keys()].filter((key) =>
+    key.startsWith("GET "),
+  );
   await page.addInitScript(() => {
     localStorage.setItem("waves_admin_token", "synthetic-token");
     // Chromium can let keepalive fetches outlive Playwright interception.
@@ -893,6 +922,11 @@ async function views(page, server, state, report, device) {
   }
   await section(page, "Maintenance", null, "maintenance");
   await fleetDetail(page);
+  // costOfOwnership always returns cost_per_mile for a vehicle that has mileage
+  // logs, and the detail renders that tile conditionally — without this the
+  // fixture could drop the metric again and every screenshot would still pass.
+  await page.getByText("Cost/Mile", { exact: true }).waitFor();
+  state.checks.push("Expanded detail renders the Cost/Mile tile");
   await capture(page, state, report, device, "maintenance-detail",
     page.getByRole("button", { name: "Record Maintenance", exact: true }));
   for (const [label, key] of [
@@ -1004,6 +1038,18 @@ async function main() {
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
         assert.deepEqual(state.badQuery, [], "Query contract");
+        // A leaf that stops fetching leaves its fixture simply unused: the
+        // geometry and malformed-text checks still pass and the run still
+        // reports success while no longer exercising that response contract at
+        // all. Only GETs — the write routes are asserted absent above.
+        const requested = new Set(
+          state.requests.map((request) => request.key),
+        );
+        assert.deepEqual(
+          state.fixtureGets.filter((key) => !requested.has(key)),
+          [],
+          "Unexercised fixture",
+        );
         // This is a view-only run: it opens dialogs but always Cancels, so the
         // only write it may issue is the admin usage beacon. The write handlers
         // below answer 200, so without this an accidental Save/Recalc/Dismiss
