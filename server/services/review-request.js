@@ -3194,6 +3194,7 @@ const ReviewService = {
     let sent = 0;
     let suppressed = 0;
     let unrecordedDeliveries = 0;
+    let unrecordedReleases = 0;
     const sentThisRun = new Set();
     const { getServiceContactSmsRecipient } = require("./customer-contact");
     for (const candidate of eligible) {
@@ -3328,9 +3329,14 @@ const ReviewService = {
               });
               suppressed++;
             } else {
-              await db("review_requests").where({ id: request.id }).update({
+              // Definite non-delivery: release the reservation so the row
+              // stays eligible for a later attempt. A transient DB error here
+              // must not silently strand the row stamped followup_sent=true
+              // with nothing sent — retry once like the delivered stamp below.
+              const released = await stampWithRetry(() => db("review_requests").where({ id: request.id }).update({
                 followup_sent: false, followup_sent_at: null, followup_reserved_at: null,
-              });
+              }), `follow-up reservation release (requestId=${request.id})`);
+              if (!released) unrecordedReleases++;
             }
             return;
           }
@@ -3362,7 +3368,13 @@ const ReviewService = {
         `[review] Follow-ups: ${sent} sent, ${suppressed} suppressed (dedup), ${internalFollowups} internal`,
       );
     }
-    return { sent, suppressed, internalFollowups, ...(unrecordedDeliveries ? { unrecordedDeliveries } : {}) };
+    return {
+      sent,
+      suppressed,
+      internalFollowups,
+      ...(unrecordedDeliveries ? { unrecordedDeliveries } : {}),
+      ...(unrecordedReleases ? { unrecordedReleases } : {}),
+    };
   },
 
   // ════════════════════════════════════════════════════════════════

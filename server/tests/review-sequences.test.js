@@ -5065,6 +5065,41 @@ describe('legacy follow-up delivery spacing', () => {
     expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
   });
 
+  test('retries the reservation release once after a transient DB error on definite non-delivery (codex #4333 P2)', async () => {
+    let attempts = 0;
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_sent === false) {
+        attempts++;
+        if (attempts === 1) throw new Error('connection terminated');
+      }
+    } });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_RETRY' });
+
+    // The first release attempt threw; the retry inside stampWithRetry
+    // recovered it, so nothing is reported lost and the row is reopened.
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0 });
+    expect(attempts).toBe(2);
+    expect(request.followup_sent).toBe(false);
+    expect(request.followup_reserved_at).toBeNull();
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 1 });
+  });
+
+  test('a lost reservation-release write is reported, not silently stranded, on definite non-delivery (codex #4333 P2)', async () => {
+    const { request } = setup({ onUpdate: (table, patch) => {
+      if (table === 'review_requests' && patch.followup_sent === false) throw new Error('connection terminated');
+    } });
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'PROVIDER_RETRY' });
+
+    // Both attempts failed: the row stays stamped followup_sent=true (the
+    // pre-provider reservation) even though no SMS was ever sent — exactly
+    // the silent-loss the finding calls out — but it is now surfaced via
+    // unrecordedReleases instead of vanishing from every future eligibility
+    // scan unreported.
+    expect(await ReviewService.processFollowups()).toMatchObject({ sent: 0, unrecordedReleases: 1 });
+    expect(request.followup_sent).toBe(true);
+    expect(request.followup_reserved_at).toBeInstanceOf(Date);
+  });
+
   test.each([false, true])('an uncertain follow-up result keeps its reservation and cannot resend (%s)', async auditThrows => {
     const { request } = setup();
     const outcome = { sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_RETRY' };
