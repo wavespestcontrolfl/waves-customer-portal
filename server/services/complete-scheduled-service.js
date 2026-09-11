@@ -42,7 +42,7 @@ const {
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
-const { stripPhotoSummaryForRecovery, expectedImageHashesFor } = require('../services/service-report/photo-summary-recovery');
+const { stripPhotoSummaryForRecovery, restorePhotoSummaryAfterRecovery, expectedImageHashesFor } = require('../services/service-report/photo-summary-recovery');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
 const { buildNoActivityFinding } = require('../services/service-report/no-activity-finding');
@@ -6712,6 +6712,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
             record.service_data = sd;
           }).catch((stripErr) => {
             logger.warn(`[dispatch] photo summary strip failed for ${record.id}: ${stripErr.message}`);
+          });
+        }
+      } else {
+        // A resumed closeout (a later SMS/token step returned 503 and the
+        // client replayed the pinned body) re-uploads the same photos; the
+        // uploader dedupes the ones that landed and attaches the rest. When
+        // none fail now, every closeout photo has a row — put back the
+        // summary a prior attempt parked. Nothing else would: the client
+        // sees failed=0, clears its recovery state and never calls
+        // /photos/reconcile (pre-push Codex P1 on be543f284).
+        const sd = parseJsonObject(record.service_data);
+        if (restorePhotoSummaryAfterRecovery(sd).changed) {
+          await db('service_records').where({ id: record.id }).update({
+            service_data: serializeJsonb(sd),
+          }).then(() => {
+            record.service_data = sd;
+          }).catch((restoreErr) => {
+            logger.error(`[dispatch] parked photo summary restore failed for ${record.id} (still parked; /photos/reconcile can restore it): ${restoreErr.message}`);
           });
         }
       }
