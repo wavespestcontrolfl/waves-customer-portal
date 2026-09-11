@@ -841,12 +841,16 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verdict).toMatchObject({ verdict: admissible ? 'fulfilled' : 'uncertain' });
     if (admissible) expect(verdict).toMatchObject({ record_type: 'email_delivery', record_id: email.id });
     if (admissible) {
-      // Existing conservative behavior: synthetic UUID digit groups can
-      // collide with PAN detection; leave this separate from linkage QA.
+      // A UUID's digit groups can collide with PAN detection (~1 in 500).
+      // The ref is an id this codebase generates, so it is exempt from the
+      // scrubber and still proves the delivery it names.
       const ref = 'email_delivery:32ceafcc-2687-4973-8880-53182e45a0ce';
       expect(groundFulfillment({ verdict: 'fulfilled', record_ref: ref, quote: 'lawn estimate' },
         { ...evidence, records: evidence.records.map((r) => r === witness ? { ...r, ref } : r) }, commitment))
-        .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
+        .toMatchObject({ verdict: 'fulfilled', record_type: 'email_delivery' });
+      // A card number in the model's own quote is still fatal.
+      expect(groundFulfillment({ verdict: 'fulfilled', record_ref: witness.ref, quote: '4242 4242 4242 4242' },
+        evidence, commitment)).toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
     }
   });
 

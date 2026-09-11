@@ -258,9 +258,18 @@ async function switchAppointmentProperty(input, actionContext) {
     void refreshAppointmentAddressBriefs(db, result.updated_service_ids).catch(err => {
       logger.error(`[intelligence-bar] address brief refresh failed: ${err.message}`);
     });
-    const { emitDispatchJobUpdate } = require('../dispatch-assignment');
+    const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../dispatch-assignment');
+    // A property switch restamps every future appointment at once. Each one
+    // changes where its route goes, so the dates need remeasuring — but as a
+    // single pass, not one concurrent route scan per row (codex #4295 r1 P2).
+    const qualityDates = new Set();
     const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
-      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));
+      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId, qualityDates })));
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[intelligence-bar] route quality refresh failed: ${err.message}`);
+    }
     if (broadcasts.some(item => item.status === 'rejected')) {
       logger.warn('[intelligence-bar] address saved but dispatch refresh broadcast failed');
       result.warning = 'Address saved. Live refresh failed; refresh the technician schedule to see the new destination.';
@@ -326,6 +335,14 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     }
     if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
     throw e;
+  }
+  // A manual reorder writes route_order directly, outside the batched
+  // dispatch/rebooker paths — without this the day's card stays stale
+  // after an operator applies the approved plan (codex #4295 r2 P2).
+  try {
+    await require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [date] });
+  } catch (e) {
+    logger.error(`[intelligence-bar:schedule] route quality refresh failed for ${date}: ${e.message}`);
   }
   logger.info(`[intelligence-bar:schedule] Applied approved route order for ${date}: ${approvedIds.length} stops`);
   return {
