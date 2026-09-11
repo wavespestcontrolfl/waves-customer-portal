@@ -26070,6 +26070,11 @@ module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.composeEstimateDataPayload = composeEstimateDataPayload;
+// The route's own estimate_data parser — exported so a reader feeding the
+// SAME provenance gate (callSideBlockForEstimateData) parses the row exactly
+// the way this route does, instead of hand-rolling a second JSON fallback
+// that could disagree on a malformed row (pre-push audit P1, #4345).
+module.exports.parseEstimateDataSafe = parseEstimateDataSafe;
 module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
 module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;

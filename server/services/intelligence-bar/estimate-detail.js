@@ -88,23 +88,11 @@ function money(value) {
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
 }
 
-function parseStoredJson(value) {
-  if (!value) return {};
-  if (typeof value === 'object') return value;
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
 // The public route pulls in the full estimate pipeline; the registry must
 // not load it with the tool list.
 const lazy = {
   publicRoute: () => require('../../routes/estimate-public'),
   claimSql: () => require('../../utils/estimate-claim-sql'),
-  proposalBilling: () => require('../estimate-proposal-billing'),
 };
 
 // ── The page projection ──────────────────────────────────────────────
@@ -132,10 +120,14 @@ const DROPPED_ESTIMATE_KEYS = new Set([
 // are dropped: a sibling is never individually composed, so nothing here
 // knows whether its own page would have withheld them.
 function siblingEntry(sibling) {
-  const { monthlyTotal, annualTotal, onetimeTotal, ...rest } = sibling || {};
+  const { monthlyTotal, annualTotal, onetimeTotal, token, ...rest } = sibling || {};
   const displayed = Number(onetimeTotal) > 0 && !(Number(monthlyTotal) > 0) ? Number(onetimeTotal) : null;
   return {
     ...rest,
+    // Wrapped as a link, never the raw token — the same rule the primary
+    // estimate's own block follows. A sibling token opens that property's
+    // full estimate page to whoever holds it.
+    ...(token ? { link: estimateLink(token) } : {}),
     displayed_one_time_total: displayed,
     // Enough for the operator to know a sibling is a plan without giving a
     // figure its own page may have withheld.
@@ -238,13 +230,23 @@ async function estimateLinks(row, data) {
 // inverse of this shipped as a regression: strictness applied to the PUBLIC
 // route, whose callers ignore the result.)
 //
-// Skipped ENTIRELY for a price-locked row (estimateIsPriceLocked: status
-// accepted/declined, or price_locked_at stamped) — the real reconciler only
-// refuses to touch 'accepted' or an explicit price_locked_at stamp, NOT
-// 'declined', so a declined-but-unstamped row's committed columns could
-// still be repriced in memory by a later membership lapse.
+// Skipped for exactly the rows the real reconciler itself refuses to touch
+// (accepted, or an explicit price_locked_at stamp) — see membershipFrozen.
+// The reconciler's OWN frozen test, mirrored exactly (estimate-public.js
+// reconcileFrozenMembershipSnapshot: `status === 'accepted' ||
+// price_locked_at`). Used for both decisions that depend on it — whether to
+// reconcile at all, and whether a stored total may be reported as committed —
+// so the two can never disagree. The first cut used
+// estimateIsPriceLocked here, which ALSO counts a plain 'declined' row: that
+// row is one the real reconciler would happily reprice, so skipping the
+// reconcile for it and then reporting its stored columns as "committed" was
+// a figure nothing had verified (pre-push audit P1). A declined row is now
+// reconciled like any other, and commits nothing — because it committed
+// nothing.
+const membershipFrozen = (row) => String(row.status || '').trim().toLowerCase() === 'accepted' || !!row.price_locked_at;
+
 async function reconcileMembership(row) {
-  if (lazy.proposalBilling().estimateIsPriceLocked(row)) return null;
+  if (membershipFrozen(row)) return null;
   try {
     const result = await lazy.publicRoute().reconcileFrozenMembershipSnapshot(row, { strictMembership: true });
     if (result && result.ok === false) return `membership reconciliation failed: ${result.error || 'unknown error'}`;
@@ -299,7 +301,7 @@ async function shapeEstimate(row, deposits = []) {
   // the public route runs its own call-side-block check on the
   // post-reconcile row. Reading a pre-mutation copy here would be the same
   // two-projections-of-one-row divergence this re-cut exists to remove.
-  const data = parseStoredJson(row.estimate_data);
+  const data = lazy.publicRoute().parseEstimateDataSafe(row);
   const links = await estimateLinks(row, data);
   if (links.link_state === 'blocked') return blockedRecord(row);
   // Withheld outright when the live membership state could not be verified:
@@ -313,7 +315,7 @@ async function shapeEstimate(row, deposits = []) {
   // and the composer does not recompute them, so they are the answer to
   // "what did he accept" — and ONLY that. An unlocked row has no committed
   // figure: its price is whatever the page renders today, in `page`.
-  const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
+  const priceLocked = membershipFrozen(row);
   return {
     id: row.id,
     customer_id: row.customer_id,
@@ -328,7 +330,7 @@ async function shapeEstimate(row, deposits = []) {
     tier: row.waveguard_tier,
     pricing_version: row.pricing_version || null,
     price_locked: !!priceLocked,
-    ...(priceLocked && !reconciliation_error
+    ...(priceLocked
       ? {
         committed_totals: {
           monthly: money(row.monthly_total),

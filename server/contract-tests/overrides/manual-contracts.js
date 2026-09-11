@@ -52,8 +52,9 @@ module.exports = {
   // (estimate-public composeEstimateDataPayload) instead of re-projecting
   // its pricing, so the walk is short: this file's own column reads, plus
   // the small helpers it still calls with the row
-  // (reconcileFrozenMembershipSnapshot, isEstimateCustomerViewable,
-  // adminDraftPreviewEligible, estimateIsPriceLocked → price_locked_at)
+  // (reconcileFrozenMembershipSnapshot, parseEstimateDataSafe,
+  // isEstimateCustomerViewable, adminDraftPreviewEligible, and the
+  // membershipFrozen mirror → status + price_locked_at)
   // and the link gate's own provenance lookup
   // (estimate-claim-sql callSideBlockForEstimateData → call_log + leads;
   // pre-push audit P1 — it was missing from the first cut's contract too,

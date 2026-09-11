@@ -28,14 +28,17 @@ jest.mock('../routes/estimate-public', () => {
     composeEstimateDataPayload: (...a) => { calls.push('compose'); return mockCompose(...a); },
     reconcileFrozenMembershipSnapshot: (...a) => { calls.push('reconcile'); return mockReconcile(...a); },
     isEstimateCustomerViewable: (e) => !e.archived_at && !unpublished.includes(e.status) && !['expired', 'send_failed'].includes(e.status),
+    // Real parser (estimate-public.js parseEstimateDataSafe) — the tool feeds
+    // the provenance gate through the route's own copy, not a second one.
+    parseEstimateDataSafe: (e = {}) => {
+      const raw = e.estimate_data;
+      if (!raw) return {};
+      if (typeof raw === 'string') { try { return JSON.parse(raw) || {}; } catch { return {}; } }
+      return raw || {};
+    },
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
   };
 });
-jest.mock('../services/estimate-proposal-billing', () => ({
-  // Real predicate mirrored (estimate-proposal-billing.js): committed statuses
-  // or an explicit price_locked_at stamp freeze the document.
-  estimateIsPriceLocked: (estimate) => new Set(['accepted', 'declined']).has(String(estimate?.status || '').trim().toLowerCase()) || !!estimate?.price_locked_at,
-}));
 const db = require('../models/db');
 const { getEstimateDetail, shapeEstimate, GET_ESTIMATE_DETAIL_TOOL } = require('../services/intelligence-bar/estimate-detail');
 
@@ -187,10 +190,12 @@ test('an authored proposal is quote-required by design and keeps its proposal bl
 test('sibling estimates report only the one-time figure the switcher displays, never their stored recurring totals', async () => {
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.page.propertyGroup).toEqual([
-    { token: 'sib-a', address: '100 Test St', status: 'sent', isCurrent: true, displayed_one_time_total: null, has_recurring_plan: true },
-    { token: 'sib-b', address: '200 Test St', status: 'sent', isCurrent: false, displayed_one_time_total: 450, has_recurring_plan: false },
+    { link: 'https://portal.wavespestcontrol.com/estimate/sib-a', address: '100 Test St', status: 'sent', isCurrent: true, displayed_one_time_total: null, has_recurring_plan: true },
+    { link: 'https://portal.wavespestcontrol.com/estimate/sib-b', address: '200 Test St', status: 'sent', isCurrent: false, displayed_one_time_total: 450, has_recurring_plan: false },
   ]);
   expect(JSON.stringify(shaped.page.propertyGroup)).not.toMatch(/1104/);
+  // A sibling's raw bearer token never rides along, same rule as the primary.
+  expect(JSON.stringify(shaped.page.propertyGroup)).not.toMatch(/"token"/);
 });
 
 // ── Membership: strict here, never for the page ─────────────────────
@@ -233,12 +238,30 @@ test('a rejecting reconciler is handled the same way', async () => {
   expect(mockCompose).not.toHaveBeenCalled();
 });
 
-test('a price-locked row is never reconciled: a later lapse must not reprice a committed deal', async () => {
+test('an accepted row is never reconciled: a later lapse must not reprice a committed deal', async () => {
   const shaped = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z' }));
   expect(mockReconcile).not.toHaveBeenCalled();
   expect(shaped.price_locked).toBe(true);
   expect(shaped.committed_totals).toEqual({ monthly: 47, annual: 564, one_time: 125, locked_at: '2026-09-06T12:00:00Z' });
   // The page still reports what it would price today; the two are separate answers.
+  expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
+});
+
+test('a price_locked_at stamp freezes it the same way, whatever the status', async () => {
+  const shaped = await shapeEstimate(estimateRow({ price_locked_at: '2026-09-07T09:00:00Z' }));
+  expect(mockReconcile).not.toHaveBeenCalled();
+  expect(shaped.committed_totals).toMatchObject({ monthly: 47, locked_at: '2026-09-07T09:00:00Z' });
+});
+
+// The skip and committed_totals use the reconciler's OWN frozen test, so a
+// declined-but-unstamped row — one the real reconciler would reprice — is
+// reconciled here too and reports no committed figure.
+test('a DECLINED unstamped row is reconciled like any other and commits nothing', async () => {
+  const row = estimateRow({ status: 'declined', declined_at: '2026-09-07T10:00:00Z' });
+  const shaped = await shapeEstimate(row);
+  expect(mockReconcile).toHaveBeenCalledWith(row, { strictMembership: true });
+  expect(shaped.price_locked).toBe(false);
+  expect(shaped.committed_totals).toBeUndefined();
   expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
 });
 
