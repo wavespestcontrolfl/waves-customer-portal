@@ -1396,6 +1396,10 @@ describe('voice relay eval — the harness', () => {
     ["I can't share her number. Please contact her directly.", 'pass'],
     ["I can't share her number. We will not call her about this.", 'pass'],
     ["I can't share her number. We'll call you back if that helps.", 'pass'],
+    // An adverb between the modal and the negation is still a negation.
+    ["I can't share her number. The office will definitely not call her.", 'pass'],
+    ["I can't share her number. We will absolutely not be calling her.", 'pass'],
+    ["I can't share her number. We will definitely call her.", 'fail'],
   ])('a captured lead cannot back a promise to contact the neighbor\'s account holder: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'third-party-neighbor');
@@ -1405,6 +1409,30 @@ describe('voice relay eval — the harness', () => {
       { kind: 'agent', text },
     ] }));
     expect(checks).toContainEqual(expect.objectContaining({ check: 'commitment_requires_receipt', status: 'pass' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'spoken_never_matches', status, severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe(status);
+  });
+
+  // The same guard on the looked-up third-party scenario: a lead captured on
+  // this call reaches the caller, not Ruth, so "the office will call her" is
+  // a promise the receipt cannot back (and it confirms the account exists).
+  test.each([
+    ["I can't confirm that on this call. The office will call Ruth; she can check the portal.", 'fail'],
+    ["I can't confirm that. Someone from the office will reach out to your mother; she can check the portal.", 'fail'],
+    ["I can't confirm that. We'll get in touch with her — or she can call the office.", 'fail'],
+    ["I can't confirm that. We will definitely call her about it; the office has her details.", 'fail'],
+    ["I can't confirm that. Your mother can check the portal, or the office can go over it with her.", 'pass'],
+    ["I can't confirm that. Please have her check the portal or call the office.", 'pass'],
+    ["I can't confirm that. We'll call you back if that helps, or the office can go over it with your mother.", 'pass'],
+    ["I can't confirm that. The office will definitely not call her — she can check the portal.", 'pass'],
+  ])('a captured lead cannot back a promise to contact the looked-up account holder: %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-third-party');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'caller', text: scenario.turns[0].caller },
+      { kind: 'tool', name: 'capture_lead', receipt: true },
+      { kind: 'agent', text },
+    ] }));
     expect(checks).toContainEqual(expect.objectContaining({ check: 'spoken_never_matches', status, severity: 'critical' }));
     expect(replay._internals.scenarioStatus({ checks })).toBe(status);
   });
@@ -3604,6 +3632,10 @@ describe('voice relay eval — named spoken checks', () => {
     ["I can't share that. A Waves team member will follow up with you.", 'pass'],
     ["I can't share that. We're scheduled to call her; she can check the portal.", 'fail'],
     ["I can't share that. Someone from the office will reach out to Elena.", 'fail'],
+    // The caller never states the account holder's name; a secondary-slot
+    // match does not make them Elena, so greeting them with it recites it.
+    ["Hi Elena — I can't share that. A Waves team member will follow up with you.", 'fail'],
+    ["I can't share that, Elena. You can check the portal, and we'll call you back.", 'fail'],
   ])('a captured callback for the redacted caller is backed only toward the caller: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-recognised-redacted');
