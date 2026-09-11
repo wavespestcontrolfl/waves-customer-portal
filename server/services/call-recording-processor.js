@@ -6413,6 +6413,35 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // (services/call-reschedule-apply.js). Runs after finalization, fenced on
 // this pass's GENERATION. Sends NOTHING to the customer. Dark behind
 // GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
+// The two bookkeeping passes an APPLIED move owes, in one place so the step
+// above states the move and this states what follows from it (codex P2) —
+// both share the same precondition and both are non-blocking by design.
+async function applyRescheduleFollowUps({ call, callSid, result }) {
+  if (result?.outcome !== 'applied') return;
+  // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+  // the move just kept was written open and its proof did not exist yet.
+  // Re-run the fulfillment lookup now that the activity row exists, or the
+  // watchdog reports an overdue promise this pass already kept (GH codex
+  // #4204 r6 P2).
+  if (isEnabled('callCommitments')) {
+    await require('./call-commitments').refreshFulfillment(db, call.id)
+      .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  // An applied move just communicated a NEW promised window to the caller —
+  // record it as promise evidence the same way a freshly booked appointment
+  // does (appointmentResult.scheduledServiceId), or the no-show detector
+  // keeps alerting against the stale pre-move window and never sees the one
+  // the agent just spoke (codex P1). recordAgreedWindow re-derives the agreed
+  // window from the call's own V2 extraction and enforces the same
+  // trusted-speaker gate that other path already requires — result.newDate/
+  // newWindow (the plan this step just applied) exist for logging/future use
+  // but are never a second source of truth.
+  if (result.visitId && isEnabled('noShowDetector')) {
+    await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: result.visitId })
+      .catch((err) => logger.warn(`[call-proc] reschedule-apply promise-window capture failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+}
+
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
   if (extracted?.is_spam || !isEnabled('callRescheduleApply')) return;
   if (v2Result?.status !== 'valid' || !v2Result.extraction) return;
@@ -6427,28 +6456,7 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
     if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
       logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
     }
-    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
-    // the move just kept was written open and its proof did not exist yet.
-    // Re-run the fulfillment lookup now that the activity row exists, or the
-    // watchdog reports an overdue promise this pass already kept (GH codex
-    // #4204 r6 P2). Non-blocking, like every other line in this step.
-    if (result.outcome === 'applied' && isEnabled('callCommitments')) {
-      await require('./call-commitments').refreshFulfillment(db, call.id)
-        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
-    }
-    // An applied move just communicated a NEW promised window to the caller
-    // — record it as promise evidence the same way a freshly booked
-    // appointment does below (appointmentResult.scheduledServiceId), or the
-    // no-show detector keeps alerting against the stale pre-move window and
-    // never sees the one the agent just spoke (codex P1). recordAgreedWindow
-    // re-derives the agreed window from the call's own V2 extraction and
-    // enforces the same trusted-speaker gate that other path already
-    // requires — result.newDate/newWindow (the plan this step just applied)
-    // exist for logging/future use but are never a second source of truth.
-    if (result.outcome === 'applied' && result.visitId && isEnabled('noShowDetector')) {
-      await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: result.visitId })
-        .catch((err) => logger.warn(`[call-proc] reschedule-apply promise-window capture failed for ${maskSid(callSid)}: ${err.message}`));
-    }
+    await applyRescheduleFollowUps({ call, callSid, result });
     return result;
   } catch (err) {
     logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);

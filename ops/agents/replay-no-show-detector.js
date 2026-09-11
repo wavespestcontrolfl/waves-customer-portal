@@ -10,8 +10,62 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { evaluateNoShow, latestPromises } = require('../../server/services/no-show-detector');
+const { evaluateNoShow, latestPromises, LIVE_STATUSES } = require('../../server/services/no-show-detector');
 const { etDateString } = require('../../server/utils/datetime-et');
+
+// One visit's timeline at one threshold. Returns the alerts it would have
+// emitted and whether a usable promised window ever existed at a decision
+// point — split out of replay() so the per-tick rules, the validation and the
+// aggregation can be reviewed independently (codex P2).
+function replayVisit(item, { from, to, threshold }) {
+  if (!item.id || !item.initial?.status || !Array.isArray(item.events) || !Array.isArray(item.promises)) throw new Error('Each visit needs initial state, dated events, and promises');
+  const events = item.events.map((event) => {
+    const at = new Date(event.at).getTime();
+    if (!Number.isFinite(at)) throw new Error('Every state change needs a valid timestamp');
+    return { ...event, at };
+  }).sort((a, b) => a.at - b.at);
+  const promises = item.promises.map((p) => ({ ...p, visit_id: item.id }));
+  const state = { id: item.id, ...item.initial };
+  const alerts = [];
+  const emitted = new Set();
+  let eventIndex = 0;
+  let covered = false;
+  for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
+    const now = new Date(at);
+    while (eventIndex < events.length && events[eventIndex].at <= at) {
+      Object.assign(state, events[eventIndex].patch);
+      eventIndex += 1;
+    }
+    const promise = latestPromises(promises, now).get(String(item.id));
+    // Coverage is measured AT THE DECISION POINTS, not from the final state
+    // at `to`: a promise backfilled or communicated after this visit's
+    // thresholds passed leaves every production tick before it with nothing
+    // usable — reading the end-of-window state instead reported such a visit
+    // as covered and understated missing_promise_visits, which is exactly
+    // the number that says whether a no-alert backtest means "nothing was
+    // wrong" or "we had no evidence to judge with" (codex P1, round 4).
+    // A live status is required for the same reason evaluateNoShow requires
+    // one: a promise that only lands after the visit is completed/cancelled
+    // was never available to judge against. A null/invalid start_at is not
+    // coverage either — it is the unknown-window case latestPromises models
+    // for a legacy move notice, exactly as unusable to evaluateNoShow as no
+    // promise at all (codex P1 af4925f71, and the pre-push audit on #4403's
+    // head: new Date(null).getTime() is 0, a finite instant, so null must be
+    // rejected BEFORE the Date conversion — the same null-before-Date idiom
+    // as no-show-detector.js's own `instant` helper).
+    if (!covered && LIVE_STATUSES.includes(state.status) && promise && promise.start_at != null
+      && Number.isFinite(new Date(promise.start_at).getTime())) covered = true;
+    const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
+    if (!alert) continue;
+    const key = `${alert.promised_window.start_at}:${alert.stage}`;
+    if (emitted.has(key)) continue;
+    emitted.add(key);
+    const complaint = new Date(item.complaint_at).getTime();
+    alerts.push({ visit_id: item.id, stage: alert.stage, at: now.toISOString(), day: etDateString(now),
+      warning_minutes_before_complaint: Number.isFinite(complaint) ? Math.round((complaint - at) / 60000) : null });
+  }
+  return { alerts, covered };
+}
 
 function replay(input) {
   const from = new Date(input.from), to = new Date(input.to);
@@ -21,53 +75,16 @@ function replay(input) {
     const alerts = [], days = {}, counts = { route_attention: 0, tracking_gap: 0, on_time: 0, unknown: 0 };
     let missingPromise = 0;
     for (const item of input.visits) {
-      if (!item.id || !item.initial?.status || !Array.isArray(item.events) || !Array.isArray(item.promises)) throw new Error('Each visit needs initial state, dated events, and promises');
-      const events = item.events.map((event) => {
-        const at = new Date(event.at).getTime();
-        if (!Number.isFinite(at)) throw new Error('Every state change needs a valid timestamp');
-        return { ...event, at };
-      }).sort((a, b) => a.at - b.at);
-      const promises = item.promises.map((p) => ({ ...p, visit_id: item.id }));
-      // Missingness follows the LATEST promise as of the end of the window
-      // (production's own selection rule via latestPromises), not the raw
-      // array length — a nonempty array whose latest entry has a null/invalid
-      // start_at (the unknown-window case latestPromises models for a legacy
-      // move notice) is exactly as unusable to evaluateNoShow as no promise
-      // at all, and silently reported complete coverage before this fix
-      // (codex P1 af4925f71). null must be rejected explicitly, BEFORE the
-      // Date conversion below: new Date(null).getTime() is 0 (a finite,
-      // valid instant — the epoch), not NaN, so `!Number.isFinite(...)`
-      // alone lets a null start_at slip through as "covered" and understate
-      // missing evidence in the backtest (codex P1, pre-push audit on PR
-      // #4403's head). Same null-before-Date idiom as no-show-detector.js's
-      // own `instant` helper (`value == null ? NaN : new Date(value).getTime()`).
-      const finalPromise = latestPromises(promises, to).get(String(item.id));
-      if (!finalPromise || finalPromise.start_at == null
-        || !Number.isFinite(new Date(finalPromise.start_at).getTime())) missingPromise += 1;
-      const state = { id: item.id, ...item.initial };
-      let eventIndex = 0;
-      const emitted = new Set();
-      for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
-        const now = new Date(at);
-        while (eventIndex < events.length && events[eventIndex].at <= at) {
-          Object.assign(state, events[eventIndex].patch);
-          eventIndex += 1;
-        }
-        const promise = latestPromises(promises, now).get(String(item.id));
-        const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
-        if (!alert) continue;
-        const key = `${alert.promised_window.start_at}:${alert.stage}`;
-        if (emitted.has(key)) continue;
-        emitted.add(key);
-        const bucket = ['missed', 'late'].includes(item.outcome) ? 'route_attention'
-          : ['tracking_gap', 'on_time'].includes(item.outcome) ? item.outcome : 'unknown';
+      const { alerts: visitAlerts, covered } = replayVisit(item, { from, to, threshold });
+      if (!covered) missingPromise += 1;
+      const bucket = ['missed', 'late'].includes(item.outcome) ? 'route_attention'
+        : ['tracking_gap', 'on_time'].includes(item.outcome) ? item.outcome : 'unknown';
+      for (const alert of visitAlerts) {
         counts[bucket] += 1;
-        const day = etDateString(now);
-        days[day] ||= { stage1: 0, stage2: 0 };
-        days[day][`stage${alert.stage}`] += 1;
-        const complaint = new Date(item.complaint_at).getTime();
-        alerts.push({ visit_id: item.id, stage: alert.stage, at: now.toISOString(), outcome: bucket,
-          warning_minutes_before_complaint: Number.isFinite(complaint) ? Math.round((complaint - at) / 60000) : null });
+        days[alert.day] ||= { stage1: 0, stage2: 0 };
+        days[alert.day][`stage${alert.stage}`] += 1;
+        const { day: _day, ...row } = alert;
+        alerts.push({ ...row, outcome: bucket });
       }
     }
     reports.push({ stage1_minutes: threshold, counts, missing_promise_visits: missingPromise,
@@ -96,4 +113,4 @@ if (require.main === module) {
   fs.writeFileSync(`${outputPath}.md`, markdown(report));
   process.stdout.write(`Replayed ${report.visits} visits at 45 and 60 minutes; ${report.synthetic ? 'synthetic' : 'operator-supplied'} evidence.\n`);
 }
-module.exports = { replay, markdown };
+module.exports = { replay, replayVisit, markdown };

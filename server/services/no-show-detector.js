@@ -34,40 +34,75 @@ const NOTICE_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h',
 // requests never quote a specific arrival slot and must stay excluded).
 const LEGACY_SCHEDULING_MESSAGE_TYPES = ['reschedule_series_confirmation', 'confirmation'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
+// Stamps that prove the tech reached the stop, in the order job-status.js
+// writes them. Any one of them clears the card.
+const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
+// Past this much after the promised start, a promise no longer MINTS a card
+// (see the ignoreHorizon note on promisedStartAt) — an ancient, presumably
+// already-handled promise must not surface as news.
+const HORIZON_MS = 48 * 3600000;
 
-// Pure, also used by the replay. All evidence must exist by the evaluation
-// time; a later arrival cannot erase an earlier useful warning in a replay.
+// Pure, exported for tests and for the replay's coverage measure: the
+// evidence-validity half of the rule. Returns the promised start instant the
+// stage rules are judged against, or null when this promise cannot be judged
+// at `now` at all — no window on record, a communication dated in the future,
+// a window that has not begun, or (creation only) one past the 48h horizon.
+// Split out of evaluateNoShow so a timing or lifecycle change touches ONE of
+// the two rule sets, not a single over-budget decision function (codex P2).
 //
-// The 48h horizon below gates CREATION, not retention: listNoShows (the
-// candidate feed behind every NEW alert/notice) always calls this with
-// ignoreHorizon left false, so an ancient, presumably-already-handled
-// promise never mints a fresh alert out of nowhere. sweep()'s two
-// reconcile passes (the open dispatch_alerts loop and the tech-notice
-// loop) pass ignoreHorizon: true instead, so a visit that's STILL in
-// LIVE_STATUSES with no arrival/departure evidence and an unchanged
-// promise keeps its already-open alert/notice alive past 48h — without
-// this split, elapsed time alone silently auto-resolved the exact
-// still-unresolved no-show this feature exists to surface (codex P1).
-// Every OTHER exit (status left LIVE_STATUSES, arrival/departure
+// The horizon gates CREATION, not retention: listNoShows (the candidate feed
+// behind every NEW alert/notice) always evaluates with ignoreHorizon left
+// false, so an ancient, presumably-already-handled promise never mints a
+// fresh alert out of nowhere. sweep()'s two reconcile passes (the open
+// dispatch_alerts loop and the tech-notice loop) pass ignoreHorizon: true
+// instead, so a visit that's STILL in LIVE_STATUSES with no arrival/departure
+// evidence and an unchanged promise keeps its already-open alert/notice alive
+// past 48h — without this split, elapsed time alone silently auto-resolved
+// the exact still-unresolved no-show this feature exists to surface (codex
+// P1). Every OTHER exit (status left LIVE_STATUSES, arrival/departure
 // evidence, no promise, a changed promise) still applies unconditionally.
-function evaluateNoShow({ visit, promise, now = new Date(), stage1Minutes = 45, ignoreHorizon = false } = {}) {
-  if (!visit || !LIVE_STATUSES.includes(visit.status) || !promise) return null;
-  const start = instant(promise.start_at);
-  const known = instant(promise.communicated_at);
+// All evidence must exist by the evaluation time; a later arrival cannot
+// erase an earlier useful warning in a replay.
+function promisedStartAt({ promise, now = new Date(), ignoreHorizon = false } = {}) {
+  const start = instant(promise?.start_at);
+  const known = instant(promise?.communicated_at);
   const nowMs = instant(now);
-  if (!Number.isFinite(start) || !Number.isFinite(known) || known > nowMs || nowMs < start
-    || (!ignoreHorizon && nowMs > start + 48 * 3600000)) return null;
+  if (!Number.isFinite(start) || !Number.isFinite(known) || known > nowMs || nowMs < start) return null;
+  return !ignoreHorizon && nowMs > start + HORIZON_MS ? null : start;
+}
+
+// Pure, exported for tests: the stage half of the rule. `null` means nothing
+// to raise — the tech is demonstrably there (an arrival stamp, or on_site),
+// or neither threshold has been crossed yet. Every stamp must fall between
+// the promised day's ET midnight and `now`: a stale stamp from another day
+// is not evidence for this window, and a future one cannot erase a warning
+// that was already true (which is what keeps the replay honest).
+function trackingStage({ visit, start, nowMs, stage1Minutes }) {
   const dayStart = parseETDateTime(`${etDateString(new Date(start))}T00:00`).getTime();
   const observed = (stamp) => Number.isFinite(instant(stamp)) && instant(stamp) >= dayStart && instant(stamp) <= nowMs;
-  const arrived = ['arrived_at', 'actual_start_time', 'check_in_time'].some((key) => observed(visit[key]));
-  if (arrived || visit.status === 'on_site') return null;
+  if (visit.status === 'on_site' || ARRIVAL_STAMPS.some((key) => observed(visit[key]))) return null;
   const departed = observed(visit.en_route_at);
-  const stage = nowMs >= start + 150 * 60000 ? 2 : (!departed && nowMs >= start + stage1Minutes * 60000 ? 1 : null);
-  if (!stage) return null;
+  if (nowMs >= start + 150 * 60000) return { stage: 2, departed };
+  return !departed && nowMs >= start + stage1Minutes * 60000 ? { stage: 1, departed } : null;
+}
+
+function stageMessage(stage, departed) {
+  if (stage === 1) return 'No departure or arrival is recorded for this window yet.';
+  return departed
+    ? 'En Route was recorded, but no arrival is recorded after the promised window.'
+    : 'The promised window ended over 30 minutes ago; no arrival is recorded.';
+}
+
+function evaluateNoShow({ visit, promise, now = new Date(), stage1Minutes = 45, ignoreHorizon = false } = {}) {
+  if (!visit || !LIVE_STATUSES.includes(visit.status) || !promise) return null;
+  const start = promisedStartAt({ promise, now, ignoreHorizon });
+  if (start == null) return null;
+  const nowMs = instant(now);
+  const staged = trackingStage({ visit, start, nowMs, stage1Minutes });
+  if (!staged) return null;
+  const { stage, departed } = staged;
   return { stage, evidence: 'missing_tracking', promised_window: { start_at: new Date(start).toISOString(), end_at: new Date(start + ARRIVAL_WINDOW_MINUTES * 60000).toISOString() },
-    message: stage === 2
-      ? (departed ? 'En Route was recorded, but no arrival is recorded after the promised window.' : 'The promised window ended over 30 minutes ago; no arrival is recorded.')
-      : 'No departure or arrival is recorded for this window yet.',
+    message: stageMessage(stage, departed),
     due_at: new Date(start + (stage === 2 ? 150 : stage1Minutes) * 60000).toISOString(),
     promise_source: promise.source, promise_id: promise.source_id };
 }
@@ -141,18 +176,27 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // appointment-email.js's own send-time customer_interactions row is
     // never updated afterward (it stays status:'sent' forever) — the LIVE
     // delivery state lands on email_messages via the SendGrid webhook
-    // (webhooks-sendgrid.js's computeEmailMessageEventUpdates), joined
-    // through provider_message_id the same identifier both writers use.
-    // A row this webhook later marked bounced/dropped/blocked/failed must
-    // not count as promise evidence — the customer never actually got the
-    // window — same live-status discipline as the sms_log.status check
-    // above (codex P1). No matched email_messages row (em.id IS NULL) is
-    // NOT treated as bad evidence — that's an unlinked/legacy send, not a
-    // known-bad one, and this exclusion is about excluding a CONFIRMED
-    // bounce, not requiring positive proof of delivery.
+    // (webhooks-sendgrid.js's computeEmailMessageEventUpdates). A row that
+    // webhook later marked bounced/dropped/blocked/failed must not count as
+    // promise evidence — the customer never actually got the window — same
+    // live-status discipline as the sms_log.status check above (codex P1).
+    // Joined on the STABLE email_messages primary key
+    // (metadata.email_message_id, stamped by appointment-email.js's
+    // logEmailAttempt), NOT the provider id: transactional-email-provider
+    // -retry.js reuses the same email_messages row and clears/replaces
+    // provider_message_id on every retry claim, so a provider-id join stops
+    // matching after the first retry and the em.id IS NULL branch below
+    // would read a KNOWN-failed delivery as usable evidence — critical
+    // missing-arrival alerts against a window the customer never received
+    // (codex P1, round 4). The provider-id match stays as the fallback for
+    // interaction rows written before email_message_id existed. No matched
+    // row (em.id IS NULL) is still NOT bad evidence — that's an unlinked or
+    // legacy send, and this exclusion is about excluding a CONFIRMED bounce,
+    // not requiring positive proof of delivery.
     () => conn('customer_interactions as ci')
-      .leftJoin('email_messages as em', function joinOnProviderMessageId() {
-        this.on(conn.raw("em.provider_message_id = (ci.metadata->>'provider_message_id')"));
+      .leftJoin('email_messages as em', function joinOnStableMessageId() {
+        this.on(conn.raw(`em.id::text = (ci.metadata->>'email_message_id')
+          OR (ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id'))`));
       })
       .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
@@ -197,6 +241,47 @@ function callerIdentityMatches(call, customer) {
   return counterpartPhoneKeys.some((key) => onFileKeys.has(key));
 }
 
+// Pure, exported for tests. The whole "may this call's spoken slot become a
+// promised-window audit row?" policy in one declarative place, rather than a
+// chain of conditions spread through the transaction body (codex P2). Returns
+// the agreed start instant, or null when ANY rule rejects it:
+//   - the call is still being processed, or is not this visit's customer
+//   - the counterpart phone is not one of the customer's on-file numbers
+//   - the extraction says spam/voicemail, or that no agent commitment was made
+//   - no finite confirmed_start_at was extracted
+//   - the trusted-speaker rule below rejects the Agent:/Caller: labelling
+// The trusted-labels part mirrors canAutoRoute's own guard
+// (call-triage-flags.js ~L1162-1181): the transcript labels
+// hasAgentCommittedEvidence grounds against are themselves LLM-inferred, so a
+// swapped label could let a CALLER-spoken slot pass as an agent commitment.
+// This claim class demands that deterministic-labels opt everywhere else, and
+// a promised-window row is no different (codex P1 af4925f71) — the gate is
+// read live, not from the module-load `gates` snapshot, matching this file's
+// other gate reads.
+// "Does this call speak for this visit's customer at all?" — a settled call
+// (no processing token still held), linked to the same customer the visit
+// belongs to, from/to a number on that customer's file.
+function callSpeaksForVisit({ call, visit, customer }) {
+  if (!call || call.processing_token || !visit || call.customer_id !== visit.customer_id) return false;
+  return callerIdentityMatches(call, customer);
+}
+
+// "What window, if any, did the AGENT commit to on this call?" — the
+// extraction-side half, including the trusted-labels rule described above.
+function agentCommittedStart(call) {
+  const v2 = call?.ai_extraction_enriched;
+  if (v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.agent_committed_booking !== true) return null;
+  const target = instant(v2?.scheduling?.confirmed_start_at);
+  if (!Number.isFinite(target)) return null;
+  if (!gateEnvValue('GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS')
+    || !require('./call-triage-flags').hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return null;
+  return target;
+}
+
+function agreedWindowStart({ call, visit, customer }) {
+  return callSpeaksForVisit({ call, visit, customer }) ? agentCommittedStart(call) : null;
+}
+
 async function recordAgreedWindow(conn, { callId, visitId } = {}) {
   if (!enabled() || !callId || !visitId) return false;
   return conn.transaction(async (trx) => {
@@ -204,21 +289,8 @@ async function recordAgreedWindow(conn, { callId, visitId } = {}) {
     const call = await trx('call_log').where({ id: callId, v2_extraction_status: 'valid' }).first();
     const visit = await trx('scheduled_services').where({ id: visitId }).first('customer_id');
     const customer = visit ? await trx('customers').where({ id: visit.customer_id }).first(...KNOWN_CALLER_PHONE_COLS) : null;
-    const v2 = call?.ai_extraction_enriched;
-    const target = v2?.scheduling?.confirmed_start_at;
-    if (!call || call.processing_token || !visit || call.customer_id !== visit.customer_id
-      || !callerIdentityMatches(call, customer)
-      || v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.agent_committed_booking !== true || !Number.isFinite(instant(target))) return false;
-    // Mirrors canAutoRoute's own trusted-speaker guard (call-triage-flags.js
-    // ~L1162-1181): the Agent:/Caller: transcript labels hasAgentCommitted
-    // Evidence grounds against are themselves LLM-inferred, so a swapped
-    // label could let a caller-spoken slot pass as an agent commitment.
-    // Require the same deterministic-labels opt this claim class demands
-    // everywhere else before writing it as a promised-window audit row
-    // (codex P1 af4925f71) — read live, not the module-load `gates` snapshot,
-    // matching this file's other gate reads.
-    if (!gateEnvValue('GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS')
-      || !require('./call-triage-flags').hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return false;
+    const target = agreedWindowStart({ call, visit, customer });
+    if (target == null) return false;
     const prior = await trx('audit_log').where({ action: 'visit_window_promised', resource_id: visitId })
       .whereRaw("metadata->>'call_log_id' = ?", [callId]).first('id');
     if (prior) return false;
@@ -322,6 +394,51 @@ function noticeStillCurrent({ live, visit, notice, recipientTech }) {
     && live.promised_window.start_at === notice?.payload?.promised_window?.start_at;
 }
 
+// The office half of one card's reconciliation, lifted out of the per-visit
+// transaction so that callback states the LIFECYCLE (notice, then office
+// alert, then audit) and this states the alert rules (codex P2).
+// `office` is false for a stage-1 card with a recipient tech — the tech's own
+// notice is the whole treatment there, and any office row still open from an
+// earlier stage or recipient is superseded rather than kept.
+async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipient, recipientTech, office }) {
+  const dispatch = require('./dispatch-alerts');
+  // Only alerts THIS detector created (matches clearTrackingBells in
+  // dispatch-alerts.js) — a pre-existing tech_late/unassigned_overdue row
+  // from the legacy overdue detectors, or any other future source of that
+  // type, must never be auto-resolved as a side effect of a tracking-key
+  // mismatch it was never party to (codex P1).
+  const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
+    .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'");
+  for (const alert of existing) {
+    // auto: true stamps payload.superseded_at on this same write
+    // (dispatch-alerts.js#resolveAlert) — trackingKey is deterministic, so an
+    // A -> B -> A reassignment across sweeps reuses A's original key, and
+    // without this stamp the `already` lookup right below finds THIS same
+    // auto-resolved row again on the third tick and refuses to recreate the
+    // alert, leaving the overdue visit with no open office card (codex P1,
+    // pre-push audit on f32a48e35). A row a dispatcher actually clicked
+    // Resolve on never gets this stamp, so it still stays quiet.
+    if (!office || alert.payload?.tracking_key !== key) await dispatch.resolveAlert({ id: alert.id, trx, auto: true });
+  }
+  if (!office || await alreadyHasOpenAlert(trx, { jobId: card.id, type, key })) return false;
+  await resolveLegacyCollision(trx, { jobId: card.id, type });
+  const result = await dispatch.createAlertOnce({ type, severity: live.stage === 2 ? 'critical' : 'warn',
+    techId: recipient, jobId: card.id, trx, payload: { source: 'no_show_detector', tracking_key: key, ...live,
+      scheduled_date: visit.scheduled_date, window_start: visit.window_start, window_end: visit.window_end,
+      ...trackingIdentityFields(recipientTech, card) } });
+  if (!result.created) return false;
+  await require('./notification-service').notifyAdmin('alert', 'A promised arrival needs attention', live.message, {
+    // The tracking card lives on the dispatch Action Queue (this office alert
+    // is a tech_late/unassigned_overdue dispatch_alerts row), not
+    // Communications -> Owed — that tab loads only
+    // /admin/call-recordings/commitments/open, which never includes this
+    // alert type (codex P1 af4925f71).
+    dedupeKey: `dispatch-alert:${result.row.id}`, trx, link: '/admin/dispatch', bell: true,
+    metadata: { dispatch_alert_id: result.row.id, scheduled_service_id: card.id, stage: live.stage },
+  });
+  return true;
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -353,46 +470,7 @@ async function sweep(conn, { now = new Date() } = {}) {
         stage: live.stage, dedupeKey: key, message: live.message,
         payload: { ...live, visit_id: card.id, customer_name: customerName, when } });
       const office = live.stage === 2 || !recipient;
-      // Only alerts THIS detector created (matches clearTrackingBells in
-      // dispatch-alerts.js) — a pre-existing tech_late/unassigned_overdue
-      // row from the legacy overdue detectors, or any other future source
-      // of that type, must never be auto-resolved as a side effect of a
-      // tracking-key mismatch it was never party to (codex P1).
-      const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
-        .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'");
-      for (const alert of existing) {
-        // auto: true stamps payload.superseded_at on this same write
-        // (dispatch-alerts.js#resolveAlert) — trackingKey is deterministic,
-        // so an A -> B -> A reassignment across sweeps reuses A's original
-        // key, and without this stamp the `already` lookup right below
-        // finds THIS same auto-resolved row again on the third tick and
-        // refuses to recreate the alert, leaving the overdue visit with no
-        // open office card (codex P1, pre-push audit on f32a48e35). A row a
-        // dispatcher actually clicked Resolve on never gets this stamp, so
-        // it still stays quiet.
-        if (!office || alert.payload?.tracking_key !== key) await dispatch.resolveAlert({ id: alert.id, trx, auto: true });
-      }
-      let created = false;
-      if (office) {
-        const already = await alreadyHasOpenAlert(trx, { jobId: card.id, type, key });
-        if (!already) {
-          await resolveLegacyCollision(trx, { jobId: card.id, type });
-          const result = await dispatch.createAlertOnce({ type, severity: live.stage === 2 ? 'critical' : 'warn',
-            techId: recipient, jobId: card.id, trx, payload: { source: 'no_show_detector', tracking_key: key, ...live,
-              scheduled_date: visit.scheduled_date, window_start: visit.window_start, window_end: visit.window_end,
-              ...trackingIdentityFields(recipientTech, card) } });
-          created = result.created;
-          if (created) await require('./notification-service').notifyAdmin('alert', 'A promised arrival needs attention', live.message, {
-            // The tracking card lives on the dispatch Action Queue (this
-            // office alert is a tech_late/unassigned_overdue dispatch_alerts
-            // row), not Communications -> Owed — that tab loads only
-            // /admin/call-recordings/commitments/open, which never includes
-            // this alert type (codex P1 af4925f71).
-            dedupeKey: `dispatch-alert:${result.row.id}`, trx, link: '/admin/dispatch', bell: true,
-            metadata: { dispatch_alert_id: result.row.id, scheduled_service_id: card.id, stage: live.stage },
-          });
-        }
-      }
+      const created = await reconcileOfficeAlert(trx, { card, visit, live, key, type, recipient, recipientTech, office });
       if (notice || created) {
         await recordAuditEvent({ actor_type: 'system', action: 'missing_tracking_alerted', resource_type: 'scheduled_service', resource_id: card.id,
           metadata: { stage: live.stage, promise_start_at: live.promised_window.start_at, evidence: live.evidence }, critical: true, trx });
@@ -477,4 +555,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };
+module.exports = { enabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, LIVE_STATUSES, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };

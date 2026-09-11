@@ -186,7 +186,7 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   return recipients;
 }
 
-async function logEmailAttempt({ customerId, templateKey, eventType, status, providerMessageId = null, sentAt = null, failureReason = null, metadata = {} }) {
+async function logEmailAttempt({ customerId, templateKey, eventType, status, providerMessageId = null, emailMessageId = null, sentAt = null, failureReason = null, metadata = {} }) {
   try {
     await db('customer_interactions').insert({
       customer_id: customerId,
@@ -201,6 +201,15 @@ async function logEmailAttempt({ customerId, templateKey, eventType, status, pro
         channel: 'email',
         event_type: eventType,
         provider_message_id: providerMessageId,
+        // The email_messages PRIMARY KEY, stamped alongside the provider id
+        // because the provider id is MUTABLE: the transactional retry worker
+        // reuses this same row and clears/replaces provider_message_id on
+        // every claim, so a reader joining on it loses the row's LIVE
+        // delivery state after the first retry (codex P1, PR #4403). This row
+        // itself is never updated after the send, so the stable id is the
+        // only durable link between this attempt log and the message's
+        // current status.
+        email_message_id: emailMessageId,
         status,
         sent_at: sentAt,
         failure_reason: failureReason,
@@ -340,6 +349,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
           eventType,
           status,
           providerMessageId: result.message?.provider_message_id || null,
+          emailMessageId: result.message?.id || null,
           sentAt: result.message?.sent_at || null,
           failureReason: result.sent ? null : result.reason || result.message?.error_message || 'email_not_sent',
           metadata,

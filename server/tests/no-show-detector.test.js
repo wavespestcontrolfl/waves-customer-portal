@@ -68,6 +68,32 @@ describe('missing tracking stages', () => {
     }] });
     for (const result of report.thresholds) expect(result.missing_promise_visits).toBe(1);
   });
+  test('coverage is measured at the decision points, not from the final state at `to` (round-4 P1)', () => {
+    // The promise is communicated AFTER the visit is already completed, but
+    // before the export window closes. Every production tick that could have
+    // judged this visit had nothing usable, so it is missing coverage — the
+    // end-of-window lookup reported it as covered and made an evidence-poor
+    // backtest look complete.
+    const backfilled = { visit_id: 'visit', start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-10T18:00:00-04:00', source: 'call' };
+    const report = replay({ synthetic: true, from: '2026-09-10T00:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, promises: [backfilled], outcome: 'unknown',
+      events: [{ at: '2026-09-10T12:00:00-04:00', patch: { status: 'completed' } }],
+    }] });
+    for (const result of report.thresholds) {
+      expect(result.missing_promise_visits).toBe(1);
+      expect(result.alerts).toEqual([]);
+    }
+    // Communicated a day EARLIER, the same promise is real coverage at the
+    // same decision points — and then the visit's own ticks emit the alerts.
+    const intime = replay({ synthetic: true, from: '2026-09-10T00:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, promises: [{ ...backfilled, communicated_at: '2026-09-09T12:00:00-04:00' }],
+      outcome: 'unknown', events: [{ at: '2026-09-10T12:00:00-04:00', patch: { status: 'completed' } }],
+    }] });
+    for (const result of intime.thresholds) {
+      expect(result.missing_promise_visits).toBe(0);
+      expect(result.alerts.length).toBeGreaterThan(0);
+    }
+  });
 
 });
 
@@ -414,9 +440,15 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     expect(calls.leftJoinTable).toBe('email_messages as em');
     const onClause = { on: jest.fn() };
     calls.leftJoinCb.call(onClause);
-    expect(onClause.on).toHaveBeenCalledWith(expect.objectContaining({
-      sql: expect.stringContaining("em.provider_message_id = (ci.metadata->>'provider_message_id')"),
-    }));
+    // The PRIMARY key match is what survives a retry: the retry worker
+    // clears/replaces provider_message_id on the SAME email_messages row, so
+    // a provider-id-only join stops matching and the em.id IS NULL branch
+    // below would read a known-failed delivery as usable evidence (round-4
+    // P1). The provider-id match remains only as the legacy fallback, for
+    // interaction rows written before email_message_id was stamped.
+    const [{ sql: joinSql }] = onClause.on.mock.calls[0];
+    expect(joinSql).toContain("em.id::text = (ci.metadata->>'email_message_id')");
+    expect(joinSql).toContain("ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id')");
 
     // The exclusion predicate is the one `.where(...)` call whose first arg
     // is a function (every other `.where(...)` call in this read passes a
