@@ -37,6 +37,7 @@ const { isEnabled } = require("../config/feature-gates");
 const { redactAccessCodes } = require("./context-aggregator");
 const { etDateString, etCalendarDayOf: etCalendarDayOfUtil } = require("../utils/datetime-et");
 const { countSegments } = require("./messaging/segment-counter");
+const { excludeUnresolvedSendReservations } = require("./messaging/review-ask-reservation");
 
 const MAX_BODY_CHARS = 145; // pre-render ceiling; the segment gate below is the real bound
 // Representative rendered link for the segment check — matches the length of a
@@ -191,8 +192,13 @@ function etCalendarDaysBetween(a, b) {
 
 async function recentSmsThread(customerId) {
   try {
-    const rows = await db("sms_log")
-      .where({ customer_id: customerId })
+    // Hide unresolved 'sending' placeholders (review-ask / manual / auto-send
+    // reservations) the same way every other sms_log reader does: an ask the
+    // provider may never have accepted must not be fed to the model as
+    // delivered history, and the filter runs at SQL level so it applies
+    // before the limit rather than thinning the window afterwards.
+    const rows = await excludeUnresolvedSendReservations(db("sms_log")
+      .where({ customer_id: customerId }))
       // Bounded grounding window (Codex P1, r1): a sparse thread must not
       // surface a years-old pest issue as "their" current concern.
       .where("created_at", ">", new Date(Date.now() - GROUNDING_WINDOW_DAYS * 86400000))

@@ -2015,6 +2015,57 @@ describe('Communications review ask serialization', () => {
     return () => reservations;
   };
 
+  test('a claimed-link ask reserves sms_log evidence before the review-send lock ever releases — no gap where a racer sees nothing (Codex #4331 P2)', async () => {
+    // admin-communications.js claims the inline link and reserves sms_log
+    // evidence under ONE lock hold, then dispatchReviewAsk re-acquires the
+    // SAME per-customer lock for its own spacing check + the actual send —
+    // two separate acquisitions of 'review-send:cust-A'. Before the fix, the
+    // reservation was created only inside the SECOND hold, leaving a real
+    // unlocked gap between the two where a concurrent scheduled/shared send
+    // for this customer would see neither a stamped delivery nor a
+    // reservation. Assert the reservation already exists the moment the
+    // SECOND acquisition begins.
+    const reservations = wireReservationLedger();
+    let acquisitions = 0;
+    let reservationVisibleBeforeSecondAcquire = null;
+    locks.runExclusive.mockReset().mockImplementation(async (key, callback) => {
+      if (key === 'review-send:cust-A') {
+        acquisitions += 1;
+        if (acquisitions === 2) {
+          reservationVisibleBeforeSecondAcquire = reservations().some(row => row.customer_id === 'cust-A'
+            && row.status === 'sending' && row.metadata?.review_ask_reservation === true);
+        }
+      }
+      if (held.has(key)) return { skipped: true, reason: 'lease_held' };
+      held.add(key);
+      try { return await callback(); } finally { held.delete(key); }
+    });
+
+    await withServer(async baseUrl => {
+      const response = await send(baseUrl, inline);
+      expect(response.status).toBe(200);
+    });
+    expect(acquisitions).toBe(2);
+    expect(reservationVisibleBeforeSecondAcquire).toBe(true);
+  });
+
+  test('a claimed-link ask refused by the spacing check BEFORE provider entry hands its lock-held reservation back (pre-push codex P1 on #4331)', async () => {
+    // The claimed-link seam reserves sms_log evidence under the first lock
+    // hold; dispatchReviewAsk then refuses (another ask is inside the
+    // 72-hour window) without ever running sendAndSettle. Nothing settled
+    // the reservation — it must be released, or the customer is blocked for
+    // 72 hours by a row with no provider attempt behind it.
+    const reservations = wireReservationLedger();
+    history.lastManualAskAt.mockResolvedValue(new Date());
+    await withServer(async baseUrl => {
+      const refused = await send(baseUrl, inline);
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).code).toBe('REVIEW_ASK_SPACING');
+    });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+  });
+
   test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {
     let entered, release;
     const providerEntered = new Promise(resolve => { entered = resolve; });
@@ -2074,7 +2125,13 @@ describe('Communications review ask serialization', () => {
       }
       return b;
     });
-    history.lastManualAskAt.mockImplementation(async () => reserved ? new Date() : null);
+    // The claimed-link seam now reserves BEFORE dispatchReviewAsk's own
+    // spacing check runs, and passes excludeReservationId so this same
+    // attempt's own row (the default builder always returns id 'resv-1')
+    // doesn't self-block it — a later request (no exclude, or a different
+    // id) still sees it as durable spacing evidence.
+    history.lastManualAskAt.mockImplementation(async (_customerId, opts = {}) =>
+      (reserved && opts.excludeReservationId !== 'resv-1') ? new Date() : null);
     sendCustomerMessage.mockImplementation(async () => {
       expect(reserved).toBe(true);
       if (mode.includes('throw')) throw Object.assign(new Error('audit unavailable'), { providerOutcome: { sent: true, providerMessageId: 'SM-accepted' } });
@@ -2118,8 +2175,12 @@ describe('Communications review ask serialization', () => {
   ('$kind $label retains only uncertain delivery (audit throw: $auditThrows)', async ({ kind, auditThrows, providerResult, retained }) => {
     mockGates.smsAutoSend = kind === 'tracked inferred';
     const reservations = wireReservationLedger();
-    history.lastManualAskAt.mockImplementation(async customerId => reservations().some(row =>
-      row.customer_id === customerId && row.metadata.review_ask_reservation) ? new Date() : null);
+    // excludeReservationId: the claimed-link seam reserves before
+    // dispatchReviewAsk's own spacing check now, so this attempt's own row
+    // must not self-block it (kind !== 'bare' routes through that seam).
+    history.lastManualAskAt.mockImplementation(async (customerId, opts = {}) => reservations().some(row =>
+      row.customer_id === customerId && row.metadata.review_ask_reservation
+      && row.id !== opts.excludeReservationId) ? new Date() : null);
     // Exercise the actual adapter's classification, including its thrown-error
     // path. The wrapper's post-provider audit failure preserves this outcome.
     require('../services/twilio').sendSMS = jest.fn(async () => {
@@ -2248,6 +2309,35 @@ describe('Communications review ask serialization', () => {
       expect((await send(baseUrl, inline)).status).toBe(500);
       expect(reviews.markInlineDelivered).toHaveBeenCalledTimes(1);
       expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+    });
+  });
+  test('an UNCLASSIFIED throw after provider entry retains the inline claim — it is not proof the ask never left', async () => {
+    // Deliberate, and the one case the pre-provider normalization above does
+    // not cover: every throw raised before `reviewProviderStarted` is stamped
+    // { sent: false, deliveryOutcome: 'not_sent' } by the route and releases
+    // the claim immediately. A throw with NO providerOutcome can therefore
+    // only come from inside sendCustomerMessage — at or past the provider
+    // handoff — where the text may already have gone out. Releasing there
+    // would let a second operator re-send the same ask; the claim instead
+    // ages out through the normal 10-minute stale-claim reconciliation.
+    sendCustomerMessage.mockRejectedValue(new Error('provider adapter blew up with no outcome'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(500);
+      expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+      expect(reviews.markInlineDelivered).not.toHaveBeenCalled();
+    });
+  });
+  test('a throw raised BEFORE provider entry still releases the inline claim at once', async () => {
+    // The counterpart: the route stamps a definitive not_sent on a throw that
+    // never reached the provider, so an operator can re-insert the link
+    // straight away rather than waiting out the stale window.
+    // The claim recheck sits inside sendAndSettle's try, one line before
+    // reviewProviderStarted flips — a throw here is definitively a non-send.
+    reviews.inlineClaimStillHeld.mockRejectedValueOnce(new Error('claim recheck unavailable'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(503);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.anything());
     });
   });
   test.each([

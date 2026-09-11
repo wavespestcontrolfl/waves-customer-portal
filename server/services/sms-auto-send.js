@@ -64,7 +64,8 @@ const FAILED_STATUS = 'auto_send_failed';
 // claim still holds while recent, but past this window fails like any other
 // orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
 // drafting rather than staying invisibly stuck.
-const UNCERTAIN_CLAIM_HOLD_HOURS = 24;
+// One source of truth with the readers' hide window (review-ask-reservation).
+const { REPLY_RESERVATION_HOLD_HOURS: UNCERTAIN_CLAIM_HOLD_HOURS } = require('./messaging/review-ask-reservation');
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
@@ -108,6 +109,20 @@ function isRealProviderSend(result) {
  * unresolved? Canonical outcomes are authoritative. The retryable/deferred
  * fallback remains only for callers that have not reached that contract yet.
  */
+/**
+ * sendCustomerMessage reports sent:true for upstream SUPPRESSION paths where
+ * no customer SMS actually left — the provider id is a sentinel (the
+ * admin-sms-templates kill switch returns sid 'template-disabled', a closed
+ * gate returns 'gate-blocked', and so on), not a provider sid. Returns that
+ * sentinel id, or null for a real send. Every owner that decides what a
+ * sent:true means has to make this distinction, so it lives here with
+ * SUPPRESSION_SENTINELS rather than being re-derived per caller.
+ */
+function suppressedSendSentinel(result) {
+  const id = result && result.providerMessageId;
+  return id && SUPPRESSION_SENTINELS.has(id) ? id : null;
+}
+
 function isAmbiguousProviderOutcome(result) {
   if (!result) return false;
   if (result.deliveryOutcome === 'uncertain') return true;
@@ -644,6 +659,7 @@ module.exports = {
   SUPPRESSION_SENTINELS,
   isRealProviderSend,
   isAmbiguousProviderOutcome,
+  suppressedSendSentinel,
   autoSendActionsSafe,
   autoSendPreflight,
   hasActiveAutoSendClaim,

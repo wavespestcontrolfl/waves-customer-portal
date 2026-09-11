@@ -6,6 +6,7 @@ const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -528,7 +529,13 @@ class ContextAggregator {
   async getContextForCustomer(customer) {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
-      db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
+      // Unresolved review-ask reservations excluded BEFORE the limit (Codex
+      // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
+      // message Waves definitely sent, nor displace a real row out of this
+      // bounded window — a row that has since resolved to a real status is
+      // unaffected and still appears.
+      excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customer.id }))
+        .orderBy('created_at', 'desc').limit(20),
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
