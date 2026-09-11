@@ -1564,8 +1564,10 @@ function statesNewAddress(extraction, knownCustomer = null) {
 const zip5Of = (v) => (String(v || '').match(/\d{5}/) || [''])[0];
 const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
 // Canonical unit structure distinguishes Bldg 4 Apt 5 from Apt 45; a hyphen
-// inside an identifier remains formatting (4-B = 4B), not a lost separator.
-const unitKey = value => unitLineValueKey(normalizeUnitLine(value)).replace(/-/g, '');
+// between a digit and a letter is formatting (4-B = 4B), but a hyphen
+// between two DIGITS is a real separator (Apt 4-5 is not Apt 45 — codex
+// r10 P1), so only the former is dropped.
+const unitKey = value => unitLineValueKey(normalizeUnitLine(value)).replace(/(?<!\d)-|-(?!\d)/g, '');
 const statedValues = values => values.map(value => String(value || '').trim()).filter(Boolean);
 
 // codex P2: "Parrish FL" / "Parrish, FL 34219" / "34219 Parrish" restate the

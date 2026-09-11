@@ -293,6 +293,15 @@ describe('finding 3 — address fragments and on-file restatements', () => {
 });
 
 describe('regressions', () => {
+  // codex r10 P1: a hyphen between two digits is a real separator.
+  test('a digit-digit hyphen in a unit is not formatting: Apt 4-5 is not Apt 45, but 4-5 restates 4-5', () => {
+    const condo = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressLine2: 'Apt 4-5', addressCity: 'Sarasota', addressZip: '34240' };
+    const stated = unit => v2({ property: { service_address: { street_line_1: '500 Sample Tower Blvd', unit } } });
+    expect(statesNewAddress(stated('Apt 45'), condo)).toBe(true);
+    expect(statesNewAddress(stated('#4-5'), condo)).toBe(false);
+    expect(statesNewAddress(stated('Apt 4-5'), { ...condo, addressLine2: 'Apt 45' })).toBe(true);
+  });
+
   test('a restated unit keeps its digits: Apt 5B is a new address, #4B and Unit 4-B are the on-file one (P1)', () => {
     const condo = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressLine2: 'Apt 4B', addressCity: 'Sarasota', addressZip: '34240' };
     const stated = (unit) => v2({ property: { service_address: { street_line_1: '500 Sample Tower Blvd', unit } } });
