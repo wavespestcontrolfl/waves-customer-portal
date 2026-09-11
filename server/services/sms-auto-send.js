@@ -37,6 +37,7 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { ASK_SPACING_MS } = require('./review-ask-history');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
 const AUTOSEND_AGENT_NAME = 'House Voice Auto-Send';
@@ -588,10 +589,31 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
     logger.warn(`[sms-auto-send] reservation sweep failed: ${err.message}`);
   }
 
-  if (resolved || failed || reservationsCleared) {
-    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations`);
+  // Sweep stale review-ask reservations. review-ask-history's lastManualAskAt
+  // only reads sms_log back to the 72-hour ask-spacing window, so a row still
+  // stuck at 'sending' past that window (an uncertain provider attempt, a
+  // process crash, or a failed delivery-stamp cleanup in settleReviewReservation)
+  // can no longer serve as spacing evidence either way — it is now orphaned.
+  // A row already resolved to 'sent'/'delivered' is real: settleReviewReservation
+  // either deletes it as a confirmed duplicate or promotes it to the durable
+  // sent record when no separate provider log exists, so it must stay out of
+  // this sweep regardless of age.
+  let reviewReservationsExpired = 0;
+  try {
+    const reviewCutoff = new Date(Date.now() - ASK_SPACING_MS);
+    reviewReservationsExpired = await db('sms_log')
+      .where({ direction: 'outbound', status: 'sending' })
+      .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+      .where('created_at', '<', reviewCutoff)
+      .del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] review reservation sweep failed: ${err.message}`);
   }
-  return { resolved, failed, reservationsCleared };
+
+  if (resolved || failed || reservationsCleared || reviewReservationsExpired) {
+    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations, expired ${reviewReservationsExpired} stale review reservations`);
+  }
+  return { resolved, failed, reservationsCleared, reviewReservationsExpired };
 }
 
 module.exports = {
