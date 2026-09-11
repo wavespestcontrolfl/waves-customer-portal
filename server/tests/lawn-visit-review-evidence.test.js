@@ -43,6 +43,9 @@ describe('technician lawn evidence and reconciliation', () => {
     // clause has to split on condition-bearing segments, not cause mentions.
     ['Chinch bugs confirmed, no weeds present', 'chinch bug activity'],
     ['No chinch bugs, weeds present', 'weed pressure'],
+    // An answer-shaped clause that rules out a SECOND cause is not an answer to
+    // the first; it has to stay independently scoped.
+    ['Chinch bugs confirmed by float test; no signs of drought', 'chinch bug activity'],
   ])('resolves cause polarity: %s', (text, label) => {
     const built = review(run({ findings: [] }), { addedDetails: [{ text }] });
     expect(built.added_details[0]).toMatchObject({

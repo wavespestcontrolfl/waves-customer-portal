@@ -41,10 +41,14 @@ const POSITIVE_MARKER_RE = /\b(?:confirmed|confirms?|active|present|found|seen|o
 // present" down to a clean lawn: ruling one cause out must never erase another
 // condition the technician actually observed.
 // Tested with the negation words removed, so "no weeds present" still counts as
-// naming a condition — the polarity is resolved separately, per segment.
+// naming a condition — the polarity is resolved separately, per segment. Only a
+// SPECIFIC label counts: safeConditionLabel falls back to a generic label for
+// any text it cannot place, so testing "!== NO_STRESS_LABEL" would make bare
+// words like "found" read as conditions.
 const NEGATION_WORDS_RE = new RegExp(NEGATED_DETAIL_RE.source, 'gi');
+const UNSPECIFIC_LABELS = new Set([NO_STRESS_LABEL, 'general lawn stress', 'a lawn condition we are monitoring']);
 const namesCondition = (text) => SUMMARY_CAUSE_RE.test(text)
-  || safeConditionLabel(String(text || '').replace(NEGATION_WORDS_RE, ' ').trim(), 'moderate') !== NO_STRESS_LABEL;
+  || !UNSPECIFIC_LABELS.has(safeConditionLabel(String(text || '').replace(NEGATION_WORDS_RE, ' ').trim(), 'moderate'));
 function causePartsOf(clause) {
   // Split whenever more than one SEGMENT names a condition, not just when more
   // than one governed cause is mentioned: SUMMARY_CAUSE_RE excludes generic
@@ -71,9 +75,11 @@ function causeClausesOf(text) {
     // the confirmed clause and negate it, while anything the answer is followed
     // by ("none found, weeds present") must stay a clause of its own rather
     // than ride along as part of the negated subject.
-    const answer = clauses.length ? NEGATIVE_ANSWER_RE.exec(clause) : null;
-    if (answer) {
-      const [head, ...rest] = clause.split(',');
+    const [head, ...rest] = clause.split(',');
+    // …and only when the answer segment names no condition of its own: "no
+    // signs of drought" opens like an answer but rules out a second cause, so
+    // attaching it would let that negation swallow the confirmed clause.
+    if (clauses.length && NEGATIVE_ANSWER_RE.test(clause) && !namesCondition(head)) {
       clauses[clauses.length - 1] += ` ${head.trim()}`;
       const remainder = rest.join(',').trim();
       if (remainder) clauses.push(remainder);
