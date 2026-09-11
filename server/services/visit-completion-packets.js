@@ -341,8 +341,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     let recollect = false;
     payment = await database.transaction(async (trx) => {
       const { visit, billed, payerId: owner } = await resolvePacketOwnershipLocked(packet.id, trx);
-      if (owner) {
-        await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: payment.invoiceId, visit, billed, payerId: owner });
+      if (owner && await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: payment.invoiceId, visit, billed, payerId: owner })) {
         return { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
       }
       const scheduled = await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
@@ -521,6 +520,8 @@ async function resolvePacketOwnershipLocked(packetId, trx) {
 // that already closed records the office-review state (error + one open
 // visit_closeout_review alert). A packet still processing gets that state
 // from its own close. The stamp is what the reconciliation below keys on.
+// Returns whether the invoice was withdrawn (false = it was already terminal
+// or payer-owned when held, and nothing was recorded).
 async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
   const stamp = `payer_billed:${payerId}`;
   const withdrawn = await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
@@ -530,14 +531,20 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // the withdrawal on such a row, so the office review below carries the
   // same signal and the Bill-To reconciliation can lift the hold, the
   // packet error and the alert once ownership returns to self-pay.
-  if (!withdrawn) {
-    await trx('invoices').where({ id: invoiceId }).whereNull('payer_id').whereNotIn('status', INVOICE_TERMINAL_STATUSES)
-      .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() });
+  let stamped = Number(withdrawn || 0);
+  if (!stamped) {
+    stamped = Number(await trx('invoices').where({ id: invoiceId }).whereNull('payer_id').whereNotIn('status', INVOICE_TERMINAL_STATUSES)
+      .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() }));
   }
+  // Neither row moved: the invoice settled or left self-pay between the
+  // caller's read and these held updates. There is nothing to withdraw and
+  // no stamp for the reconciliation to clear, so no hold or office review
+  // is recorded either; the caller decides on the invoice as it is now.
+  if (!stamped) return false;
   await trx('service_visits').where({ id: visit.id }).update({ billing_hold: true, updated_at: trx.fn.now() });
   const closed = await trx('visit_completion_packets').where({ id: packetId, status: 'done' })
     .update({ error: JSON.stringify(officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId })), updated_at: trx.fn.now() });
-  if (!closed) return;
+  if (!closed) return true;
   const open = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
     .whereRaw("payload->>'packetId' = ?", [packetId]).whereRaw("payload->>'reason' = 'payer_assigned'").first('id');
   const member = billed.length ? await trx('scheduled_services').where({ id: billed[0] }).first('id', 'technician_id') : null;
@@ -547,6 +554,7 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
       payload: { visitId: visit.id, packetId, ...officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId }) },
     });
   }
+  return true;
 }
 
 // One shape for the packet's office-review error and the alert payload,

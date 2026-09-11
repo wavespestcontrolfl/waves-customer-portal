@@ -880,8 +880,7 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
       if (!due) return { payerBilled: false, claim: null };
     }
     const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packetId, trx);
-    if (visit && payerId) {
-      await Packets.withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId });
+    if (visit && payerId && await Packets.withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId })) {
       return { payerBilled: true, payerId };
     }
     if (requireDue) {

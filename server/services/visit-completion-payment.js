@@ -129,8 +129,8 @@ async function withdrawPayerOwnedInvoice(packet, database) {
   const run = async (trx) => {
     const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packet.id, trx);
     if (!visit || !payerId) return null;
-    await Packets.withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: candidate.id, visit, billed, payerId });
-    return payerId;
+    const withdrawn = await Packets.withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: candidate.id, visit, billed, payerId });
+    return withdrawn ? payerId : null;
   };
   return database.isTransaction ? run(database) : database.transaction(run);
 }

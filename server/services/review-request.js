@@ -1572,12 +1572,21 @@ const ReviewService = {
       );
       return;
     }
-    // A pending ask whose combined-visit summary is parked as uncertain is
-    // removed, exactly as the parking operation does; the coordinator
-    // re-creates it when the summary settles.
+    // A pending automatic ask whose combined-visit summary is parked as
+    // uncertain is removed, exactly as the parking operation does; the
+    // coordinator re-creates it when the summary settles. A manual ask
+    // (its trigger, copy, channel and timing are the operator's, and the
+    // recovery cannot rebuild them) waits instead.
     if (request.service_record_id && await require("./visit-completion-summary").visitSummaryUncertainForRecord(request.service_record_id)) {
-      await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: requestId }).del().catch(() => {});
-      logger.info(`[review] Parked request (requestId=${requestId} reason=visit_summary_bounced)`);
+      const Summary = require("./visit-completion-summary");
+      if (Summary.PACKET_OWNED_REVIEW_TRIGGERS.includes(request.triggered_by)) {
+        await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: requestId }).del().catch(() => {});
+        logger.info(`[review] Parked request (requestId=${requestId} reason=visit_summary_bounced)`);
+      } else {
+        await db("review_requests").where({ id: requestId, status: "pending" })
+          .update({ scheduled_for: new Date(Date.now() + 30 * 60 * 1000) }).catch(() => {});
+        logger.info(`[review] Deferred manual request (requestId=${requestId} reason=visit_summary_bounced)`);
+      }
       return;
     }
     // Route to the service beneficiary (see services/customer-contact.js) —
@@ -2296,17 +2305,26 @@ const ReviewService = {
     // pre-provider crash, and the claim is safely handed back so the
     // customer's review sends aren't blocked forever. Provider unreachable
     // = unknown → stay blocked (fail closed).
-    const owner = await db("customers").where({ id: row.customer_id }).first("phone");
-    const to = owner?.phone ? toE164(owner.phone) || owner.phone : null;
+    // The ask is routed to the service beneficiary (getServiceContactSmsRecipient),
+    // whose number can differ from the billing customer's, so the provider is
+    // asked about every number the send could have used — the beneficiary's
+    // first — and a beneficiary send is never mistaken for none.
+    const owner = await db("customers").where({ id: row.customer_id }).first();
+    const { getServiceContactSmsRecipient } = require("./customer-contact");
+    const destinations = [...new Set([getServiceContactSmsRecipient(owner).phone, owner?.phone]
+      .filter(Boolean).map((phone) => toE164(phone) || phone))];
+    if (!destinations.length) destinations.push(null);
     const TwilioService = require("./twilio");
-    for (const frag of frags) {
-      const provider = await TwilioService.findOutboundMessageSince({
-        to,
-        sentAfter: row.claimed_at,
-        bodyFragment: frag,
-      });
-      if (provider.unavailable) return { unavailable: true };
-      if (provider.found) return { found: true };
+    for (const to of destinations) {
+      for (const frag of frags) {
+        const provider = await TwilioService.findOutboundMessageSince({
+          to,
+          sentAfter: row.claimed_at,
+          bodyFragment: frag,
+        });
+        if (provider.unavailable) return { unavailable: true };
+        if (provider.found) return { found: true };
+      }
     }
     return { found: false };
   },
@@ -2659,24 +2677,31 @@ const ReviewService = {
   async reconcileStrandedSends() {
     const stranded = await db("review_requests")
       .where({ status: "sending" })
-      .whereNull("sms_sent_at")
       .whereNotNull("claimed_at")
       .where("claimed_at", "<=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
       .where(function () {
         this.whereNull("triggered_by").orWhereNot("triggered_by", "auto_inline");
       })
+      // A texted ask (sms or unset channel) is judged on its text, an email
+      // touch on its email: the email handoff marks `sending` the same way
+      // (_sendOutreachEmail), so it strands the same way.
       .where(function () {
-        this.where("channel", "sms").orWhereNull("channel");
+        this.where(function () {
+          this.where(function () { this.where("channel", "sms").orWhereNull("channel"); }).whereNull("sms_sent_at");
+        }).orWhere(function () {
+          this.where("channel", "email").whereNull("sent_at");
+        });
       })
       .orderBy("claimed_at")
       .limit(20)
-      .select("id", "customer_id", "token", "claimed_at", "sequence_id");
+      .select("id", "customer_id", "token", "claimed_at", "sequence_id", "sequence_step", "channel");
     let finished = 0;
     let released = 0;
     for (const row of stranded) {
+      const email = row.channel === "email";
       let evidence;
       try {
-        evidence = await this._inlineSendEvidence(row);
+        evidence = email ? await this._emailSendEvidence(row) : await this._inlineSendEvidence(row);
       } catch (err) {
         logger.warn(`[review] stranded send evidence failed (requestId=${row.id}): ${err.message}`);
         continue;
@@ -2685,17 +2710,76 @@ const ReviewService = {
       const guard = { id: row.id, status: "sending", claimed_at: row.claimed_at };
       if (evidence.found) {
         const now = new Date();
-        finished += Number(await db("review_requests").where(guard).update({
-          status: "sent", sms_sent_at: now, scheduled_for: null, ...(row.sequence_id ? { sent_at: now } : {}),
+        const done = Number(await db("review_requests").where(guard).update({
+          status: "sent", scheduled_for: null,
+          ...(email ? { sent_at: now } : { sms_sent_at: now, ...(row.sequence_id ? { sent_at: now } : {}) }),
         }));
+        finished += done;
+        if (done && row.sequence_id) await this._advanceStrandedSequenceStep(row, now);
         continue;
       }
-      released += Number(await db("review_requests").where(guard).update(row.sequence_id
+      const freed = Number(await db("review_requests").where(guard).update(row.sequence_id
         ? { status: "deferred", claimed_at: null }
         : { status: "pending", scheduled_for: new Date(), claimed_at: null }));
+      released += freed;
+      // The step runner's claim left the owning sequence unscheduled for
+      // the request; the touch retries on the cron's rail at its usual delay.
+      if (freed && row.sequence_id) {
+        await db("review_sequences").where({ id: row.sequence_id, status: "active" }).whereNull("next_run_at")
+          .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+      }
     }
     if (finished || released) logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released})`);
     return { finished, released };
+  },
+
+  /**
+   * Did a claimed email touch reach the provider? The email library records
+   * one email_messages row per idempotency key (the key the touch sends
+   * under: per sequence step, else per request) before its provider call.
+   * A row the library will not send again is proof the email left; a row
+   * still queued inside the library's in-flight window is unknown; a
+   * failed or absent row is a positive none — a re-send under the same key
+   * is deduped by the library, so releasing the ask cannot double-send.
+   */
+  async _emailSendEvidence(row) {
+    const key = row.sequence_id != null && row.sequence_step != null
+      ? `review_seq:${row.sequence_id}:${row.sequence_step}` : `review_touch:${row.id}`;
+    const message = await db("email_messages").where({ idempotency_key: key }).first("status", "queued_at");
+    if (!message) return { found: false };
+    const EmailLib = require("./email-template-library");
+    if (!EmailLib.shouldRetryExistingMessage(message)) return { found: true };
+    if (EmailLib.queuedRowInFlight(message)) return { unavailable: true };
+    return { found: false };
+  },
+
+  /**
+   * The step runner's atomic claim clears the owning sequence's next_run_at
+   * for the length of the provider request and restores a schedule only in
+   * its own post-send bookkeeping. A touch proven sent after that
+   * bookkeeping was lost leaves the sequence on the same step with no run
+   * time — no cron selects it — so the proof advances the sequence exactly
+   * as the runner would have: to the next step at its schedule, or to
+   * completed. Only a sequence still claimed on this very step moves; a
+   * parked sequence keeps its status (as advanceSentStep does).
+   */
+  async _advanceStrandedSequenceStep(row, now = new Date()) {
+    const seq = await db("review_sequences").where({ id: row.sequence_id }).first();
+    if (!seq || seq.current_step !== row.sequence_step || seq.next_run_at != null) return false;
+    const Summary = require("./visit-completion-summary");
+    const parked = seq.status === "stopped" && seq.stop_reason === Summary.PARKED_REVIEW_REASON;
+    if (seq.status !== "active" && !parked) return false;
+    let plan = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]");
+    if (!Array.isArray(plan)) plan = [];
+    const nextStep = seq.current_step + 1;
+    const advance = { current_step: nextStep, touches_sent: (seq.touches_sent || 0) + 1, last_touch_at: now, updated_at: now };
+    const updates = nextStep >= plan.length
+      ? { ...advance, status: "completed", stop_reason: "completed", next_run_at: null, completed_at: now }
+      : { ...advance, next_run_at: nextTouchRunAt({ startedAt: seq.started_at || now, step: plan[nextStep], now }) };
+    const moved = await db("review_sequences").where({ id: seq.id, status: seq.status, current_step: seq.current_step })
+      .whereNull("next_run_at").update(updates);
+    if (moved) logger.info(`[review] stranded touch advanced its sequence (sequenceId=${seq.id} step=${seq.current_step})`);
+    return Boolean(Number(moved));
   },
 
   async processScheduled() {
@@ -2899,6 +2983,13 @@ const ReviewService = {
     const sentThisRun = new Set();
     const { getServiceContactSmsRecipient } = require("./customer-contact");
     for (const request of eligible) {
+      // The follow-up is review outreach too: while the summary of the visit
+      // that recorded this ask is parked as uncertain (or that state cannot
+      // be read), the row waits unmarked and is judged again next run.
+      if (request.service_record_id
+        && await require("./visit-completion-summary").visitSummaryUncertainForRecord(request.service_record_id) !== false) {
+        continue;
+      }
       // Dedup #1: another row in this same batch already triggered a followup
       if (sentThisRun.has(request.customer_id)) {
         await db("review_requests").where({ id: request.id }).update({

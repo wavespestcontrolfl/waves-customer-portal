@@ -590,6 +590,11 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
 }
 
 const PARKED_REVIEW_REASON = 'visit_summary_bounced';
+// The review asks the closeout owns: the packet's own enrollment and the
+// cadence touches it starts. An admin- or technician-triggered ask is the
+// operator's (its copy, channel and timing cannot be rebuilt by the
+// recovery), so parking leaves it pending for the scheduler to defer.
+const PACKET_OWNED_REVIEW_TRIGGERS = ['auto', 'sequence'];
 // stop_reason is varchar(24).
 const PARKED_SUPERSEDED_REASON = 'summary_park_superseded';
 
@@ -616,16 +621,19 @@ async function visitSummaryUncertainForRecord(serviceRecordId, database = db) {
 // Parks the cadence sequences enrolled for this packet's recorded service
 // records (stopped with a reason of their own and their schedule kept, so
 // the recovery can resume them without a fresh enrollment that the cadence
-// cooldown might refuse) and removes the pending legacy asks. An ask whose
+// cooldown might refuse) and removes the pending automatic asks. An ask whose
 // provider handoff has started is `sending` (see reviewSendThroughSummaryHandoff)
-// and is kept: its delivery is recorded by its own sender.
+// and is kept: its delivery is recorded by its own sender. A manual ask is
+// kept too (PACKET_OWNED_REVIEW_TRIGGERS). A delivered ask's follow-up is
+// held by processFollowups while the summary stays uncertain.
 async function parkVisitReviewOutreach(packetId, database = db) {
   const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
     .whereNotNull('service_record_id').pluck('service_record_id');
   if (!records.length) return { parked: 0 };
   const parked = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' })
     .update({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON, completed_at: database.fn.now(), updated_at: database.fn.now() });
-  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' }).del();
+  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' })
+    .whereIn('triggered_by', PACKET_OWNED_REVIEW_TRIGGERS).del();
   return { parked: Number(parked || 0) + Number(removed || 0) };
 }
 
@@ -819,4 +827,4 @@ module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPub
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
-  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON };
+  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS };
