@@ -1629,6 +1629,32 @@ async function attachScheduledServices(term, conn = db) {
   }
 }
 
+// How many coverage slots a term has NOT yet spent — the budget every
+// series generator must respect before stamping a visit as prepaid.
+//
+// Counts live stamped rows REGARDLESS OF DATE on purpose. coverageRowsForTerm
+// is bounded to term_start..term_end, but annualPrepayCoversVisit honors a
+// stamp with no date restriction, so a window-bounded count would treat a
+// visit scheduled past term_end as unspent and hand out a "free" slot on
+// every extension, indefinitely.
+//
+// Only this module's own stamp counts against the budget: an independently
+// prepaid visit (cash/check/Zelle through the regular schedule) is a
+// per-visit fact that never consumed annual-prepay money.
+async function remainingCoverageSlots(term, conn = db) {
+  const visitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+  if (!term?.id || !(visitCount > 0)) return 0;
+  const row = await conn('scheduled_services')
+    .where({ annual_prepay_term_id: term.id })
+    .whereNotIn('status', [...COVERAGE_EXCLUDED_STATUSES])
+    .where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD)
+    .where('prepaid_amount', '>', 0)
+    .count({ n: '*' })
+    .first();
+  const spent = Number(row?.n ?? row?.count) || 0;
+  return Math.max(0, visitCount - spent);
+}
+
 async function applyPrepaidCoverageForTerm(term, conn = db) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -5596,6 +5622,7 @@ module.exports = {
   checkAndSendPaymentReminders,
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
+  remainingCoverageSlots,
   reconcilePendingWindowCompletions,
   reconcileDisputeWindowMonthlyDues,
   finishDisputeRecoveryForTerm,

@@ -2478,8 +2478,8 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
 // The auto-extend built its next visit without any prepay field, so a
 // customer on an annual prepay got an extension visit that read as
 // UNCOVERED and billed again for service the prepay had already bought
-// (prod 2026-09-11: Tom Kenedy's 2026-10-22 extension spawned with no term
-// link while his fourth paid slot sat on a duplicate row). Coverage is a
+// (one prod term on 2026-09-11 had an extension spawn with no term link
+// while its fourth paid slot sat on a duplicate row). Coverage is a
 // three-field invariant — annualPrepayCoversVisit needs the term id, the
 // method AND a positive amount — so all three are resolved together or
 // none are.
@@ -2498,7 +2498,7 @@ async function resolveExtensionPrepayCoverage(conn, parent, cols, childServiceTy
   if (!termId) return null;
   try {
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    const { splitCoverageAmount, coverageRowsForTerm } = AnnualPrepayRenewals._private;
+    const { splitCoverageAmount } = AnnualPrepayRenewals._private;
     const term = await conn('annual_prepay_terms').where({ id: termId }).first();
     if (!term) return null;
     const visitCount = Number(term.coverage_visit_count);
@@ -2514,15 +2514,14 @@ async function resolveExtensionPrepayCoverage(conn, parent, cols, childServiceTy
       return null;
     }
     // Budget check: the term buys exactly coverage_visit_count visits.
-    // coverageRowsForTerm already drops cancelled/no-show/skipped/rescheduled,
-    // so a written-off slot is free to be reissued.
-    const rows = await coverageRowsForTerm(term, conn);
-    const spent = (rows || []).filter((row) => (
-      String(row.annual_prepay_term_id) === String(termId) && Number(row.prepaid_amount) > 0
-    )).length;
-    if (spent >= visitCount) return null; // plan exhausted — this visit bills, correctly
-    const slices = splitCoverageAmount(term.prepay_amount, visitCount);
-    const amount = slices[Math.min(spent, slices.length - 1)];
+    // remainingCoverageSlots counts live stamped rows with NO date bound —
+    // a window-bounded count would treat an extension past term_end as
+    // unspent and hand out a free slot on every renewal. Cancelled/no-show/
+    // skipped/rescheduled rows are excluded, so a written-off slot is free
+    // to be reissued.
+    const slots = await AnnualPrepayRenewals.remainingCoverageSlots(term, conn);
+    if (!(slots > 0)) return null; // plan exhausted — this visit bills, correctly
+    const [amount] = splitCoverageAmount(term.prepay_amount, visitCount);
     if (!(Number(amount) > 0)) return null;
     return {
       annual_prepay_term_id: termId,

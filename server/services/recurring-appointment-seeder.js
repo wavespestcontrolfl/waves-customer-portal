@@ -23,6 +23,11 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const DEFAULT_WEEKEND_SHIFT = 'forward';
+// Mirrors ANNUAL_PREPAY_PREPAID_METHOD in services/annual-prepay-renewals.
+// Held as a literal rather than imported: that module requires this one, and
+// a top-level require here would close the cycle. A test pins the two
+// together so the mirror cannot drift.
+const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
 
 // Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
 // 2026-07-27). Nine in-season months (Feb-Oct) means a February start runs
@@ -394,6 +399,8 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
   });
   const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
+  // Annual-prepay slots this seed may still spend (see the allocation below).
+  let prepaidSlotsLeft = Math.max(0, Number(opts.prepaidSlots) || 0);
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
   const targetNewRows = Math.max(0, plannedCount - existingDates.size);
@@ -450,15 +457,11 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',
-      // The term link alone does NOT make a visit covered: annualPrepayCoversVisit
-      // requires prepaid_method + a positive prepaid_amount + the term id, all
-      // three. Copying only the link produced children that read as UNCOVERED
-      // (43 such rows in prod, 2026-09-11) and billed again for a visit the
-      // customer had already prepaid — they were rescued only when a later
-      // term activation / schedule edit happened to re-run
-      // applyPrepaidCoverageForTerm. The stamp travels with the link.
-      'prepaid_method',
-      'prepaid_amount',
+      // NOTE: prepaid_method / prepaid_amount are deliberately NOT copied
+      // here — see the budgeted allocation below. Blindly inheriting a stamp
+      // would mark more visits prepaid than the term bought, and would copy
+      // an independent cash/check/Zelle stamp (a per-visit fact) onto a
+      // whole series.
       // Catalog link: follow-ups must resolve the same completion profile
       // as their parent (combined services especially — name matching alone
       // breaks if the catalog row is ever renamed).
@@ -481,19 +484,27 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'zip',
     ]);
     Object.assign(row, require('./booking/visit-financial-stamps').recurringServiceAddress(parent));
-    // Coverage is a three-field invariant (annualPrepayCoversVisit): term id +
-    // method + positive amount. A partial copy is worse than none — a stamp
-    // with no term id makes the CHARGING guard throw "coverage unverifiable"
-    // rather than read as uncovered, so a half-inherited row blocks billing
-    // instead of failing open. Carry all three or carry none.
-    // The LINK is left alone either way (readers and the later coverage
-    // re-stamp rely on it); only a half-copied STAMP is dropped.
-    const prepayStampComplete = row.annual_prepay_term_id
-      && row.prepaid_method
-      && Number(row.prepaid_amount) > 0;
-    if (!prepayStampComplete) {
-      delete row.prepaid_method;
-      delete row.prepaid_amount;
+    // Annual-prepay coverage, allocated against the term's REMAINING budget.
+    //
+    // The term link alone does not make a visit covered — annualPrepayCoversVisit
+    // needs the term id, the method AND a positive amount — so children that
+    // inherited only the link read as UNCOVERED and billed again for service
+    // the prepay had bought (43 such rows in prod, 2026-09-11). But the stamp
+    // cannot simply be copied either: plannedCount is independent of
+    // coverage_visit_count, so a blind copy would mark more visits prepaid
+    // than the customer paid for and suppress those invoices.
+    //
+    // The caller (seedFollowUpsForParent) resolves how many slots are left and
+    // what each is worth; rows past the budget stay uncovered and bill, which
+    // is correct for a visit beyond the plan. With no allocation supplied
+    // nothing is stamped — the safe default for the direct callers of this
+    // exported builder.
+    if (row.annual_prepay_term_id
+      && prepaidSlotsLeft > 0
+      && Number(opts.prepaidSliceAmount) > 0) {
+      row.prepaid_method = ANNUAL_PREPAY_PREPAID_METHOD;
+      row.prepaid_amount = Number(opts.prepaidSliceAmount);
+      prepaidSlotsLeft -= 1;
     }
 
     // Resolved identity outranks the parent's copied link AND snapshot (the
@@ -1161,6 +1172,41 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
   )];
 }
 
+// How much annual-prepay coverage this seed may spend, and what one slot is
+// worth. Read-only: it counts the term's unspent slots rather than calling
+// applyPrepaidCoverageForTerm, which re-slices the whole budget and rewrites
+// prepaid_amount on rows already settled.
+//
+// Returns {} — stamp nothing — for a parent on no term, a legacy term with no
+// coverage config, a spent plan, a service the term does not cover, or any
+// query failure. Leaving a visit uncovered is a billing question someone can
+// correct; over-stamping silently suppresses invoices the customer owes.
+async function resolvePrepaidSeedAllocation(conn, parent, columns) {
+  if (!columns?.annual_prepay_term_id || !columns?.prepaid_method || !columns?.prepaid_amount) return {};
+  const termId = parent?.annual_prepay_term_id;
+  if (!conn || !termId) return {};
+  try {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    const term = await conn('annual_prepay_terms').where({ id: termId }).first();
+    if (!term) return {};
+    if (term.coverage_service_type
+      && parent.service_type
+      && !AnnualPrepayRenewals.serviceMatchesCoverage({ service_type: parent.service_type }, term.coverage_service_type)) {
+      return {};
+    }
+    const slots = await AnnualPrepayRenewals.remainingCoverageSlots(term, conn);
+    if (!(slots > 0)) return {};
+    const [slice] = AnnualPrepayRenewals._private.splitCoverageAmount(
+      term.prepay_amount, term.coverage_visit_count,
+    );
+    if (!(Number(slice) > 0)) return {};
+    return { prepaidSlots: slots, prepaidSliceAmount: Number(slice) };
+  } catch (e) {
+    require('./logger').warn(`[recurring-seeder] prepay allocation lookup failed for parent=${parent?.id}: ${e.message}`);
+    return {};
+  }
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -1200,6 +1246,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // estimate-backed series is left to the estimate linkage.
   const anchoredParent = { ...parent, ...(opts.sourceEstimateId ? { source_estimate_id: opts.sourceEstimateId } : {}) };
   await require('./customer-properties').anchorSoleProperty(anchoredParent, columns, conn);
+  const prepaidAllocation = await resolvePrepaidSeedAllocation(conn, anchoredParent, columns);
   const builtRows = buildRecurringFollowUpRows(anchoredParent, {
     ...opts,
     childIdentity,
@@ -1208,6 +1255,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     stampSkipWeekends,
     existingDates,
     blackoutDates,
+    ...prepaidAllocation,
   });
   const seedShortfall = builtRows.seedShortfall || null;
   // Ring the shortfall bell only once the seed is DURABLE: inside a caller
@@ -1339,6 +1387,7 @@ module.exports = {
   _internals: {
     dateOnly,
     nextRecurringDate,
+    resolvePrepaidSeedAllocation,
     recurrenceOrdinalOptions,
     recurringCandidateTooCloseToAnchor,
   },
