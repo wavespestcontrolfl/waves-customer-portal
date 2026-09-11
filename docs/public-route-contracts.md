@@ -1747,11 +1747,16 @@ standing rows once its check has run clean N times (fall-off rule, owner
 2026-09-11). Token-only auth: `OPS_DIGEST_INGEST_TOKEN` via
 `Authorization: Bearer`, constant-time compare. Fail-closed in ordered
 layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
-gate in server/index.js mounted ahead of the global `/api/` limiter and the
-JSON parser, so while the token is unset a prober sees a plain 404 and
-never a revealing 429, 400 or 413 (the router repeats the check as its own
-first layer): 404 while the token is unset (that IS the kill switch), then
-120/15-min per-IP limiter (/64-collapsed), 401 on mismatch,
+gate in server/index.js mounted ahead of the global `/api/` limiter, and a
+pre-parser chain (`ingestPreParsers`: dark gate → own limiter → bearer auth
+→ 1 MB JSON parse → JSON body-error handler) mounted ahead of the global
+JSON parser, same pattern as `/api/mcp`. While the token is unset every
+request reads the SAME generic 404 an unknown route gets (`Route not
+found: METHOD path`), never a revealing 429, 400 or 413; with the token set
+a malformed or oversized body is parsed only AFTER auth, so an
+unauthenticated caller sees 401, never 400/413. Layers: 404 while the token
+is unset (that IS the kill switch), then 120/15-min per-IP limiter
+(/64-collapsed), 401 on mismatch,
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on

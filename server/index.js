@@ -356,7 +356,9 @@ app.use('/api/public/a2a', (req, res, next) => {
 // in-router layer; this is the one that runs first.
 app.use('/api/ops/digest', (req, res, next) => {
   if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
-    return res.status(404).json({ ok: false, reason: 'not_configured' });
+    // middleware/errors.js notFoundBody — the one formatter, so this stays
+    // indistinguishable from an unknown route while dark.
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
   }
   next();
 });
@@ -456,6 +458,11 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 // parsers so login/reset floods cannot force large JSON parsing work.
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
+
+// Ops-digest ingest: dark 404 → limiter → bearer auth → 1 MB JSON parse,
+// all BEFORE the global body parsers, so an unauthenticated caller can
+// never reach a 400/413 (routes/ops-digest-ingest.js ingestPreParsers).
+app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPreParsers);
 
 // MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
 // body parsing, then parse with its own 256kb cap — same reason as staff

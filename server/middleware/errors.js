@@ -107,8 +107,19 @@ function errorHandler(err, req, res, next) {
   });
 }
 
-function notFound(req, res) {
-  res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` });
+// The one formatter for the unknown-route body. Dark-gated surfaces that
+// must be indistinguishable from an unknown route (routes/ops-digest-ingest
+// and its pre-router gate in server/index.js) call THIS, never a retyped
+// string, so a change here changes them too. Built from originalUrl so the
+// text reads the same at app level (req.path is the full path) and inside
+// a mounted router (req.path is the remainder).
+function notFoundBody(req) {
+  const full = String(req.originalUrl || req.path || '').split('?')[0];
+  return { error: `Route not found: ${req.method} ${full}` };
 }
 
-module.exports = { errorHandler, notFound, redactSensitiveBody };
+function notFound(req, res) {
+  res.status(404).json(notFoundBody(req));
+}
+
+module.exports = { errorHandler, notFound, notFoundBody, redactSensitiveBody };

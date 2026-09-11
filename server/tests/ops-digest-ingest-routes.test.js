@@ -71,7 +71,8 @@ describe('auth and gates', () => {
     delete process.env.OPS_DIGEST_INGEST_TOKEN;
     const { status, json } = await post(good());
     expect(status).toBe(404);
-    expect(json).toEqual({ ok: false, reason: 'not_configured' });
+    // Same body an unknown route gets — nothing to distinguish it while dark.
+    expect(json).toEqual({ error: 'Route not found: POST /api/ops/digest' });
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -79,10 +80,17 @@ describe('auth and gates', () => {
     // Route-level order is the guarantee: darkUnlessConfigured is the first
     // handler on both POSTs (a production limiter would otherwise answer
     // 429 after 120 probes and reveal the route).
-    const { darkUnlessConfigured } = router._private;
+    const { darkUnlessConfigured, ingestAuth, ingestBodyErrorHandler } = router._private;
     for (const layer of router.stack.filter((l) => l.route)) {
       expect(layer.route.stack[0].handle).toBe(darkUnlessConfigured);
+      // the limiter lives only in the pre-chain, so a request is counted once
+      expect(layer.route.stack.map((l) => l.handle)).not.toContain(router.ingestPreParsers[1]);
     }
+    // pre-chain order: dark → limiter → auth → parse → body errors
+    expect(router.ingestPreParsers[0]).toBe(darkUnlessConfigured);
+    expect(router.ingestPreParsers[2]).toBe(ingestAuth);
+    expect(router.ingestPreParsers[4]).toBe(ingestBodyErrorHandler);
+    expect(router.ingestPreParsers).toHaveLength(5);
     delete process.env.OPS_DIGEST_INGEST_TOKEN;
     const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
     const next = jest.fn();
@@ -217,9 +225,11 @@ describe('POST /resolve (fall-off rule)', () => {
     return { status: res.status, json: await res.json() };
   }
 
-  test('same auth as ingest: 404 unset, 401 mismatch', async () => {
+  test('same auth as ingest: 404 unset (generic body), 401 mismatch', async () => {
     delete process.env.OPS_DIGEST_INGEST_TOKEN;
-    expect((await resolve({ key: 'k' })).status).toBe(404);
+    const dark = await resolve({ key: 'k' });
+    expect(dark.status).toBe(404);
+    expect(dark.json).toEqual({ error: 'Route not found: POST /api/ops/digest/resolve' });
     process.env.OPS_DIGEST_INGEST_TOKEN = TOKEN;
     expect((await resolve({ key: 'k' }, { token: 'nope' })).status).toBe(401);
     expect(mockResolve).not.toHaveBeenCalled();
@@ -242,3 +252,102 @@ describe('POST /resolve (fall-off rule)', () => {
     expect((await resolve({})).status).toBe(400);
   });
 });
+
+describe('dark 404 body equals the app-level unknown-route body', () => {
+  test('genericNotFound, the router and the pre-router gate all emit exactly what middleware/errors.js notFound emits', async () => {
+    const { notFound } = require('../middleware/errors');
+    const { genericNotFound } = router._private;
+    delete process.env.OPS_DIGEST_INGEST_TOKEN;
+    const capture = () => { const r = { status: jest.fn(() => r), json: jest.fn(() => r) }; return r; };
+    const req = { method: 'POST', originalUrl: '/api/ops/digest?x=1', path: '/api/ops/digest' };
+    const a = capture(); notFound(req, a);
+    const b = capture(); genericNotFound({ ...req, path: '/' }, b); // inside the mounted router req.path is the remainder
+    expect(b.json.mock.calls[0][0]).toEqual(a.json.mock.calls[0][0]);
+    // and over HTTP: an unknown sibling path through the real notFound vs the dark route
+    const app = express();
+    app.use('/api/ops/digest', ...router.ingestPreParsers);
+    app.use('/api/ops/digest', router);
+    app.use(notFound);
+    const s2 = app.listen(0); const base = `http://127.0.0.1:${s2.address().port}`;
+    try {
+      const dark = await (await fetch(`${base}/api/ops/digest`, { method: 'POST' })).json();
+      const unknown = await (await fetch(`${base}/api/ops/nothing`, { method: 'POST' })).json();
+      expect(Object.keys(dark)).toEqual(Object.keys(unknown));
+      expect(dark.error.replace('/api/ops/digest', '/api/ops/nothing')).toBe(unknown.error);
+    } finally { await new Promise((r) => s2.close(r)); }
+  });
+});
+
+describe('pre-parser chain (mounted ahead of the global JSON parser, like server/index.js)', () => {
+  function chainServer() {
+    const app = express();
+    app.use('/api/ops/digest', ...router.ingestPreParsers);
+    app.use(express.json({ limit: '1mb' })); // the "global" parser comes AFTER
+    app.use('/api/ops/digest', router);
+    const server = app.listen(0);
+    return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
+  }
+  async function raw(baseUrl, body, token) {
+    const res = await fetch(`${baseUrl}/api/ops/digest`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body });
+    let json = null; try { json = await res.json(); } catch { /* html */ }
+    return { status: res.status, json };
+  }
+
+  test('token unset + malformed body → generic 404, never 400', async () => {
+    delete process.env.OPS_DIGEST_INGEST_TOKEN;
+    const { server: s2, baseUrl } = chainServer();
+    try {
+      const out = await raw(baseUrl, '{not json', 'anything');
+      expect(out.status).toBe(404);
+      expect(out.json).toEqual({ error: 'Route not found: POST /api/ops/digest' });
+    } finally { await new Promise((r) => s2.close(r)); }
+  });
+
+  test('token set + wrong bearer + malformed body → 401 (auth before parse)', async () => {
+    const { server: s2, baseUrl } = chainServer();
+    try {
+      expect((await raw(baseUrl, '{not json', 'nope')).status).toBe(401);
+      expect((await raw(baseUrl, '{not json', null)).status).toBe(401);
+    } finally { await new Promise((r) => s2.close(r)); }
+  });
+
+  test('token set + right bearer + malformed body → 400 JSON from the chain handler', async () => {
+    const { server: s2, baseUrl } = chainServer();
+    try {
+      const out = await raw(baseUrl, '{not json', TOKEN);
+      expect(out.status).toBe(400);
+      expect(out.json).toEqual({ ok: false, reason: 'invalid_json' });
+      const big = await raw(baseUrl, JSON.stringify({ ...good(), body: 'x'.repeat(1100 * 1024) }), TOKEN);
+      expect(big.status).toBe(413);
+      expect(big.json).toEqual({ ok: false, reason: 'payload_too_large' });
+    } finally { await new Promise((r) => s2.close(r)); }
+  });
+});
+
+describe('server/index.js mount order (unobservable-when-dark)', () => {
+  // The route contract promises a plain 404 while the token is unset, at any
+  // request volume and for any body. That holds only if the pre-router gate
+  // is mounted BEFORE the global /api/ limiter and BEFORE the global JSON
+  // parser. The real app boots a server + DB, so this pins the ORDER
+  // statically from the entrypoint source instead (pre-push P1 on #4397).
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  const at = (needle) => { const i = src.indexOf(needle); expect(i).toBeGreaterThan(-1); return i; };
+
+  test('the /api/ops/digest dark gate precedes the global /api/ limiter, the global JSON parser, and the router mount', () => {
+    const gate = at("app.use('/api/ops/digest', (req, res, next) => {");
+    expect(src.slice(gate, gate + 400)).toContain('OPS_DIGEST_INGEST_TOKEN');
+    expect(gate).toBeLessThan(at("app.use('/api/', limiter);"));
+    expect(gate).toBeLessThan(at("app.use(express.json({ limit: '1mb'"));
+    expect(gate).toBeLessThan(at("app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));"));
+  });
+
+  test('the ingest pre-parser chain is mounted before the global JSON parser and before the router', () => {
+    const pre = at("app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPreParsers);");
+    expect(pre).toBeLessThan(at("app.use(express.json({ limit: '1mb'"));
+    expect(pre).toBeLessThan(at("app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));"));
+    expect(pre).toBeGreaterThan(at("app.use('/api/', limiter);"));
+  });
+});
+

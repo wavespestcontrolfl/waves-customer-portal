@@ -18,7 +18,8 @@
  * Auth: OPS_DIGEST_INGEST_TOKEN bearer, constant-time compare (mcp.js
  * pattern). Fails closed at every step, and every non-2xx tells the caller
  * to fall back to email so a finding is never lost:
- *   404  token unset — the endpoint does not exist (this IS the kill switch)
+ *   404  token unset — the endpoint does not exist (this IS the kill switch);
+ *        same generic body as an unknown route
  *   401  token mismatch
  *   409  in-app digests off (GATE_OPS_DIGESTS_IN_APP / GATE_AGENT_ACTIVITY)
  *   400  payload rejected (kind not FIX/ACT, shape, size, link off /admin)
@@ -37,6 +38,7 @@ const rateLimit = require('express-rate-limit');
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { safeEqual } = require('../middleware/hermes-auth');
+const { notFoundBody } = require('../middleware/errors');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { inAppEnabled, resolveOpsDigest, CATEGORY } = require('../services/ops-digest');
 
@@ -62,17 +64,24 @@ const ingestLimiter = rateLimit({
   skip: () => process.env.NODE_ENV === 'test',
 });
 
+// The SAME body an unknown route gets — middleware/errors.js notFoundBody,
+// the one formatter, never a retyped string — so a distinguishable 404
+// cannot tell a prober the route exists while dark (codex P0 r2 on #4392).
+function genericNotFound(req, res) {
+  return res.status(404).json(notFoundBody(req));
+}
+
 // Dark-route check FIRST, ahead of the limiter: while the token is unset
 // the endpoint must be a plain 404 at any request volume — a 429 from the
 // limiter would tell a prober the route is real (pre-push P1).
 function darkUnlessConfigured(req, res, next) {
-  if (!process.env.OPS_DIGEST_INGEST_TOKEN) return res.status(404).json({ ok: false, reason: 'not_configured' });
+  if (!process.env.OPS_DIGEST_INGEST_TOKEN) return genericNotFound(req, res);
   return next();
 }
 
 function ingestAuth(req, res, next) {
   const expected = process.env.OPS_DIGEST_INGEST_TOKEN;
-  if (!expected) return res.status(404).json({ ok: false, reason: 'not_configured' });
+  if (!expected) return genericNotFound(req, res);
   const header = String(req.headers.authorization || '');
   const provided = header.startsWith('Bearer ') ? header.slice(7) : '';
   if (!safeEqual(provided, expected)) return res.status(401).json({ ok: false, reason: 'invalid_token' });
@@ -128,7 +137,7 @@ function validateMetadata(raw) {
   return { value };
 }
 
-router.post('/', darkUnlessConfigured, ingestLimiter, ingestAuth, async (req, res) => {
+router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   // Read at CALL time (both gates), same as the in-process senders: with
   // the lane off the caller keeps emailing — nothing is dropped silently.
   if (!inAppEnabled()) return res.status(409).json({ ok: false, reason: 'in_app_disabled' });
@@ -168,7 +177,7 @@ router.post('/', darkUnlessConfigured, ingestLimiter, ingestAuth, async (req, re
 // resolved, kept as history. Idempotent; a key with nothing standing is a
 // 200 with resolved: 0. Only rows this seam wrote (source = ops-crons) are
 // touched — the in-process senders keep their own keys.
-router.post('/resolve', darkUnlessConfigured, ingestLimiter, ingestAuth, async (req, res) => {
+router.post('/resolve', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const body = isPlainObject(req.body) ? req.body : {};
   const key = typeof body.key === 'string' ? body.key.trim() : '';
   if (!KEY_RE.test(key)) return res.status(400).json({ ok: false, reason: 'invalid_payload', error: 'key: 1-120 chars of letters, digits, . _ : -' });
@@ -178,5 +187,25 @@ router.post('/resolve', darkUnlessConfigured, ingestLimiter, ingestAuth, async (
   return res.status(200).json({ ok: true, resolved });
 });
 
+// Parser failures after auth: plain JSON, never the HTML default. Only
+// reachable once ingestAuth passed (the chain below), so a 400/413 here
+// never leaks to an unauthenticated caller.
+function ingestBodyErrorHandler(err, req, res, next) {
+  if (err && err.type === 'entity.too.large') return res.status(413).json({ ok: false, reason: 'payload_too_large' });
+  if (err && err.status === 400) return res.status(400).json({ ok: false, reason: 'invalid_json' });
+  return next(err);
+}
+
+// Mounted by server/index.js on /api/ops/digest AHEAD of the global body
+// parsers (the /api/mcp mcpPreParsers pattern): dark 404 → own limiter →
+// bearer auth → small capped JSON parse → JSON body errors. So while the
+// token is unset nothing but the generic 404 is observable, and with it set
+// an unauthenticated caller gets 401 before any body is parsed (codex P0 r2
+// on #4392). The router repeats the dark check + auth as its own first
+// layers so it stays fail-closed even if mounted without the chain; the
+// limiter lives ONLY here so a request is counted once.
+const ingestPreParsers = [darkUnlessConfigured, ingestLimiter, ingestAuth, express.json({ limit: '1mb' }), ingestBodyErrorHandler];
+
 module.exports = router;
-module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, KINDS, RESERVED_METADATA_KEYS };
+module.exports.ingestPreParsers = ingestPreParsers;
+module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, KINDS, RESERVED_METADATA_KEYS };
