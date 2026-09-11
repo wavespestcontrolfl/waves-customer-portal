@@ -55,6 +55,7 @@ import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
@@ -641,6 +642,7 @@ export default function TechHomePage({ section = 'today' }) {
           loading={loading} error={scheduleError} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
+          followThrough={<TechFollowThroughCards fieldWorkspace />}
           timekeeping={<>
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
@@ -706,6 +708,7 @@ export default function TechHomePage({ section = 'today' }) {
       <TechIntelligenceBar />
 
       <TechTimeTrackingCard nextStop={nextStop} />
+      <TechFollowThroughCards />
 
       {scheduleError && (
         <div role="alert" style={{
