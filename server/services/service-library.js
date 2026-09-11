@@ -7,6 +7,7 @@ const { inferCloseoutDefaults } = require('./service-closeout-requirements');
 const { refreshCatalogNames } = require('./service-catalog-names');
 const logger = require('./logger');
 const { capacityEnabled } = require('./scheduling/policy');
+const { lockCatalogIdentity } = require('./scheduling/catalog-lock');
 
 const SERVICE_COLS = [
   'id', 'service_key', 'name', 'short_name', 'description', 'internal_notes',
@@ -442,6 +443,10 @@ async function createService(data, { audit } = {}) {
   assertOperationalConsistency(insert);
 
   return db.transaction(async (trx) => {
+    // EXCLUSIVE catalog-identity lock before the write (scheduling/
+    // catalog-lock.js): waits out in-flight capacity certifications that
+    // resolved an ABSENT row this insert could now match.
+    await lockCatalogIdentity(trx, { exclusive: true });
     const [row] = await trx('services').insert(insert).returning('*');
     await writeCatalogAudit('create', { after: row, audit, trx });
     return row;
@@ -564,6 +569,9 @@ async function updateService(id, data, { audit } = {}) {
   }
 
   return db.transaction(async (trx) => {
+    // EXCLUSIVE catalog-identity lock before the write (activation, key /
+    // engine-key mapping, duration changes) — see scheduling/catalog-lock.js.
+    await lockCatalogIdentity(trx, { exclusive: true });
     const [row] = await trx('services').where({ id }).update(update).returning('*');
     if (row) {
       const changeType = before.is_archived && row.is_archived === false
@@ -605,6 +613,9 @@ async function deactivateService(id, { audit } = {}) {
   // row cannot be newly LINKED; a text-only late reference is a display
   // label, not a lane.
   return db.transaction(async (trx) => {
+    // EXCLUSIVE catalog-identity lock BEFORE the row lock (lock-then-row
+    // order shared with the readers) — see scheduling/catalog-lock.js.
+    await lockCatalogIdentity(trx, { exclusive: true });
     const before = await trx('services').where({ id }).forUpdate().first();
     if (!before) return null;
     const references = await getServiceReferences(before, trx);

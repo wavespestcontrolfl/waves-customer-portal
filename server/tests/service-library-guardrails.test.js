@@ -87,6 +87,10 @@ describe('service library guardrails', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.transaction = jest.fn(async (callback) => callback(db));
+    // The writers take the catalog-identity advisory lock (exclusive) inside
+    // their transaction — catalog-identity-lock.test.js pins that contract.
+    db.isTransaction = true;
+    db.raw = jest.fn(async () => undefined);
   });
 
   test.each([['true', 45, false], ['false', 60, true], ['false', 90, true]])('validates edits against the effective bounds (gate %s, duration %i)', async (gate, duration, valid) => {

@@ -380,6 +380,18 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   const commercialIdentity = [primary?.engineKey, primary?.key, primary?.serviceKey, primary?.service_key, primary?.name, primary?.label, primary?.displayName]
     .filter(Boolean).join(' ');
   if (primary?.commercial || /commercial/i.test(commercialIdentity)) return null;
+  // ABSENT-MATCH SERIALIZATION (codex #4344 P1, posted after merge): the
+  // FOR SHARE reads below protect a MATCHED row through the outer commit,
+  // but a lookup that finds no row locks nothing — an admin could activate
+  // or map a longer-duration row between this read and the commit, and a
+  // version-2 hold on the 60-minute fallback would graduate against a
+  // policy it never saw. Duration authorities take the catalog-identity
+  // lock SHARED here, before any services row lock, and hold it to their
+  // commit; service-library's create/update/archive take it EXCLUSIVE.
+  // Identity-only callers keep their lock-free fail-open read.
+  if (lockCatalog && validateAllowance) {
+    await require('./scheduling/catalog-lock').lockCatalogIdentity(conn);
+  }
   // A VERIFIED catalog key frozen on the line by a keyed public quote
   // (the standalone cockroach package: cockroach_control's engine key
   // pest_initial_roach is deliberately NOT in any row's engine_keys — the
