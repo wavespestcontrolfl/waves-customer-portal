@@ -3,7 +3,6 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { adminFetch } from "./emailApi";
 import useEmailResource from "./useEmailResource";
 
-const DISCONNECTED = { connected: false };
 const EMPTY_INBOX = { emails: [], total: 0 };
 const EMPTY_BLOCKED = { blocked: [] };
 const SEARCH_DEBOUNCE_MS = 300;
@@ -34,6 +33,30 @@ export default function useEmailInbox(active, clearDraftResult) {
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [thread, setThread] = useState([]);
   const selectedIdRef = useRef(null);
+  const messageSequenceRef = useRef(0);
+  const threadSequenceRef = useRef(0);
+  const [threadState, setThreadState] = useState({ loading: false, error: false });
+  const [messageState, setMessageState] = useState({ loading: false, error: false });
+  const [selectionRetry, setSelectionRetry] = useState(0);
+  const selectionRetryRef = useRef(0);
+  const [actionFeedback, setActionFeedback] = useState(null);
+  const [pendingAction, setPendingAction] = useState(null);
+  const pendingActionRef = useRef(null);
+  const beginAction = (key) => {
+    if (pendingActionRef.current) return false;
+    pendingActionRef.current = key;
+    setPendingAction(key);
+    setActionFeedback(null);
+    return true;
+  };
+  const finishAction = () => {
+    pendingActionRef.current = null;
+    setPendingAction(null);
+  };
+  // Read and attachment feedback is published outside the pendingAction
+  // guard, so it is tagged by source and cleared when that source runs again.
+  const clearFeedback = (source) =>
+    setActionFeedback((current) => (current?.source === source ? null : current));
   const wasActiveRef = useRef(false);
   selectedIdRef.current = selectedEmail?.id;
   useEffect(
@@ -68,20 +91,19 @@ export default function useEmailInbox(active, clearDraftResult) {
   });
   if (filter !== "all") params.set("category", filter);
   if (searchQuery) params.set("search", searchQuery);
-  const [status, loadStatus] = useEmailResource(
+  const [status, loadStatus, setStatus, statusState] = useEmailResource(
     "/api/admin/email/oauth/status",
     null,
-    DISCONNECTED,
   );
-  const [stats, loadStats] = useEmailResource("/api/admin/email/stats");
-  const [digest, loadDigest] = useEmailResource(
+  const [stats, loadStats, , statsState] = useEmailResource("/api/admin/email/stats");
+  const [digest, loadDigest, , digestState] = useEmailResource(
     "/api/admin/email/daily-digest",
   );
-  const [inbox, loadEmails, setInbox] = useEmailResource(
+  const [inbox, loadEmails, setInbox, inboxState] = useEmailResource(
     `/api/admin/email/inbox?${params}`,
     EMPTY_INBOX,
   );
-  const [blockedData, loadBlocked, setBlockedData] = useEmailResource(
+  const [blockedData, loadBlocked, setBlockedData, blockedState] = useEmailResource(
     "/api/admin/email/blocked",
     EMPTY_BLOCKED,
   );
@@ -110,16 +132,18 @@ export default function useEmailInbox(active, clearDraftResult) {
   };
 
   const handleConnectGmail = async () => {
+    if (!beginAction("connect")) return;
     setConnecting(true);
     try {
       const r = await adminFetch("/api/admin/email/oauth/auth-url");
       const d = await r.json();
       if (!r.ok || !d.url) throw new Error(d.error || `HTTP ${r.status}`);
       window.location.assign(d.url);
-    } catch (err) {
-      window.alert("Failed to start Gmail connection: " + err.message);
+    } catch {
+      setActionFeedback({ error: true, message: "Could not start the Gmail connection. Try Connect Gmail again." });
     } finally {
       setConnecting(false);
+      finishAction();
     }
   };
 
@@ -144,20 +168,25 @@ export default function useEmailInbox(active, clearDraftResult) {
   // Old bells/OAuth returns keep working through /admin/email's alias.
   // Observe query changes as well as mount so Back/Forward can select mail.
   useEffect(() => {
+    const retrying = selectionRetry !== selectionRetryRef.current;
+    selectionRetryRef.current = selectionRetry;
     const activated = active && !wasActiveRef.current;
     wasActiveRef.current = active;
     if (!active || !status?.connected) return;
     const id = searchParams.get("id");
-    if (id && id === selectedIdRef.current && !activated) return;
+    if (id && id === selectedIdRef.current && !activated && !retrying) return;
     if (id !== selectedIdRef.current) {
       if (id) setTab("inbox");
       selectedIdRef.current = null;
       setSelectedEmail(null);
       setThread([]);
+      setThreadState({ loading: false, error: false });
       clearDraftResult();
     }
-    if (!id) return;
+    if (!id) { setMessageState({ loading: false, error: false }); return; }
     let cancelled = false;
+    const request = ++messageSequenceRef.current;
+    setMessageState({ loading: true, error: false });
     (async () => {
       try {
         const r = await adminFetch(
@@ -165,51 +194,68 @@ export default function useEmailInbox(active, clearDraftResult) {
         );
         // GET /message/:id already marked it read server-side; hand openEmail
         // the read state so it does not toggle it back (codex P2).
-        if (!r.ok) return;
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const email = await r.json();
-        if (!cancelled) await openEmail({ ...email, is_read: true });
+        if (!cancelled && request === messageSequenceRef.current) await openEmail({ ...email, is_read: true });
       } catch {
-        /* the inbox still renders */
+        if (!cancelled && request === messageSequenceRef.current) setMessageState({ loading: false, error: true });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [active, status?.connected, searchParams]);
+  }, [active, status?.connected, searchParams, selectionRetry]);
 
   const loadThread = async (email) => {
-    const r = await adminFetch(
-      `/api/admin/email/thread/${email.gmail_thread_id}`,
-    );
-    const d = await r.json();
-    if (isSelected(email.id)) setThread(d.thread || []);
+    // A completed send/read for an earlier email must not supersede the
+    // current conversation's request or leave its loading state unresolved.
+    if (!isSelected(email.id)) return;
+    const request = ++threadSequenceRef.current;
+    setThreadState({ loading: true, error: false });
+    try {
+      const response = await adminFetch(
+        `/api/admin/email/thread/${email.gmail_thread_id}`,
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (isSelected(email.id) && request === threadSequenceRef.current) {
+        setThread(data.thread || []);
+        setThreadState({ loading: false, error: false });
+      }
+    } catch {
+      if (isSelected(email.id) && request === threadSequenceRef.current)
+        setThreadState({ loading: false, error: true });
+    }
   };
 
   const openEmail = async (email) => {
+    messageSequenceRef.current += 1;
+    setMessageState({ loading: false, error: false });
+    clearFeedback("read");
     selectedIdRef.current = email.id;
     setSelectedEmail(email);
     setThread([]);
+    setThreadState({ loading: true, error: false });
     clearDraftResult();
-    if (searchParams.get("id") !== email.id) {
-      selectMessageId(email.id);
-    }
-    try {
-      if (!email.is_read) {
-        await adminFetch(`/api/admin/email/message/${email.id}/read`, {
+    if (searchParams.get("id") !== email.id) selectMessageId(email.id);
+    if (!email.is_read) {
+      try {
+        const response = await adminFetch(`/api/admin/email/message/${email.id}/read`, {
           method: "POST",
         });
-        setEmails((prev) =>
-          prev.map((e) => (e.id === email.id ? { ...e, is_read: true } : e)),
-        );
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        patchEmail(email.id, { is_read: true });
         loadStats();
+      } catch {
+        if (isSelected(email.id)) setActionFeedback({ error: true, message: "The email could not be marked as read.", source: "read" });
       }
-      await loadThread(email);
-    } catch {
-      /* ignore */
     }
+    await loadThread(email);
   };
 
   const closeEmail = (emailId, returnToInbox = false) => {
+    messageSequenceRef.current += 1;
+    setMessageState({ loading: false, error: false });
     const selectedInUrl = new URLSearchParams(window.location.search).get("id") === emailId;
     const entry = window.history.state, inboxIndex = entry?.usr?.emailInboxIndex;
     if (returnToInbox && selectedInUrl && Number.isInteger(inboxIndex) && Number.isInteger(entry?.idx) && inboxIndex < entry.idx) {
@@ -224,46 +270,77 @@ export default function useEmailInbox(active, clearDraftResult) {
 
   const handleStar = async (event, email) => {
     event.stopPropagation();
+    if (!beginAction(`star:${email.id}`)) return;
     try {
       const response = await adminFetch(
         `/api/admin/email/message/${email.id}/star`,
         { method: "POST" },
       );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       patchEmail(email.id, { is_starred: data.is_starred });
+      setActionFeedback({ message: data.is_starred ? "Email starred." : "Star removed." });
     } catch {
-      /* ignore */
-    }
+      setActionFeedback({ error: true, message: "Could not update the star. Try again." });
+    } finally { finishAction(); }
   };
 
   const removeEmail = async (emailId, action) => {
+    if (!beginAction(`${action}:${emailId}`)) return;
     try {
-      await adminFetch(`/api/admin/email/message/${emailId}/${action}`, {
+      const response = await adminFetch(`/api/admin/email/message/${emailId}/${action}`, {
         method: "POST",
       });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setEmails((current) => current.filter((email) => email.id !== emailId));
       if (isSelected(emailId)) closeEmail(emailId);
       loadStats();
+      setActionFeedback({ message: action === "archive" ? "Email archived." : "Email removed from the portal inbox." });
     } catch {
-      /* ignore */
-    }
+      setActionFeedback({ error: true, message: action === "archive" ? "Could not archive the email. Try again." : "Could not move the email to trash. Try again." });
+    } finally { finishAction(); }
+  };
+
+  // Re-read one row after a partial-success response; a failed refresh keeps
+  // the current row rather than replacing the server's error message. GET
+  // /message/:id marks an unread row read server-side, so only a row the
+  // client already knows is read is refreshed — that read is side-effect
+  // free and cannot race the open conversation's own mark-as-read request.
+  const refreshEmail = async (emailId) => {
+    const row = emails.find((email) => email.id === emailId) || (selectedEmail?.id === emailId ? selectedEmail : null);
+    if (!row?.is_read) return;
+    try {
+      const r = await adminFetch(`/api/admin/email/message/${encodeURIComponent(emailId)}`);
+      if (!r.ok) return;
+      const email = await r.json();
+      if (email?.id === emailId) patchEmail(emailId, email);
+    } catch { /* keep the stale row; the error feedback still explains the outcome */ }
   };
 
   const handleReclassify = async (emailId) => {
+    if (!beginAction(`reclassify:${emailId}`)) return;
     try {
       const response = await adminFetch(
         `/api/admin/email/message/${emailId}/reclassify`,
         { method: "POST" },
       );
-      const data = await response.json();
-      patchEmail(emailId, {
-        classification: data.classification?.category,
-        extracted_data: data.classification,
-      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        // The endpoint's non-2xx payloads carry operator instructions (restore
+        // from Gmail Trash, retry a failed follow-up), and some 502s fire after
+        // the new category was already persisted — surface the server's own
+        // message and re-read the row so the list shows the real category.
+        await refreshEmail(emailId);
+        setActionFeedback({ error: true, message: typeof data?.error === "string" && data.error.trim() ? data.error : "Could not reclassify the email. Try again." });
+        return;
+      }
+      patchEmail(emailId, { classification: data?.classification?.category, extracted_data: data?.classification });
+      setActionFeedback({ message: "Email reclassified." });
     } catch {
-      /* ignore */
-    }
+      setActionFeedback({ error: true, message: "Could not reclassify the email. Try again." });
+    } finally { finishAction(); }
   };
+
 
   const handleBlock = async () => {
     const value = blockInput.trim().toLowerCase().replace(/^@/, "");
@@ -273,13 +350,12 @@ export default function useEmailInbox(active, clearDraftResult) {
       (isEmail && !EMAIL_RE.test(value)) ||
       (!isEmail && !DOMAIN_RE.test(value))
     ) {
-      window.alert(
-        "Enter a valid email address or domain, like bad@example.com or example.com.",
-      );
+      setActionFeedback({ error: true, message: "Enter a valid email address or domain, like bad@example.com or example.com." });
       return;
     }
+    if (!beginAction("block")) return;
     try {
-      await adminFetch("/api/admin/email/block", {
+      const response = await adminFetch("/api/admin/email/block", {
         method: "POST",
         body: JSON.stringify({
           email_address: isEmail ? value : null,
@@ -287,24 +363,36 @@ export default function useEmailInbox(active, clearDraftResult) {
           reason: "Manual block from admin portal",
         }),
       });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
       setBlockInput("");
       loadBlocked();
+      setActionFeedback({ error: Boolean(data.warning), message: data.warning || "Sender blocked." });
     } catch {
-      /* ignore */
-    }
+      setActionFeedback({ error: true, message: "Could not block the sender. Try again." });
+    } finally { finishAction(); }
   };
 
   const handleUnblock = async (id) => {
+    if (!beginAction(`unblock:${id}`)) return;
     try {
-      await adminFetch(`/api/admin/email/blocked/${id}`, { method: "DELETE" });
-      setBlocked((prev) => prev.filter((b) => b.id !== id));
+      const response = await adminFetch(`/api/admin/email/blocked/${id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setBlocked((current) => current.filter((entry) => entry.id !== id));
+      setActionFeedback({ message: "Sender unblocked." });
     } catch {
-      /* ignore */
-    }
+      setActionFeedback({ error: true, message: "Could not unblock the sender. Try again." });
+    } finally { finishAction(); }
   };
 
+  // Only the latest download may publish an error: a retry or a second
+  // attachment supersedes an older pending request, whose late rejection
+  // would otherwise overwrite a successful newer download's blank feedback.
+  const attachmentSequenceRef = useRef(0);
   const handleDownloadAttachment = async (event, msg, att) => {
     event.preventDefault();
+    clearFeedback("attachment");
+    const request = ++attachmentSequenceRef.current;
     try {
       const r = await adminFetch(
         `/api/admin/email/message/${msg.id}/attachment/${att.gmail_attachment_id}`,
@@ -322,8 +410,9 @@ export default function useEmailInbox(active, clearDraftResult) {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-    } catch (err) {
-      window.alert("Failed to download attachment: " + err.message);
+    } catch {
+      if (request !== attachmentSequenceRef.current) return;
+      setActionFeedback({ error: true, message: "Could not download the attachment. Try again.", source: "attachment" });
     }
   };
 
@@ -334,6 +423,13 @@ export default function useEmailInbox(active, clearDraftResult) {
       : emails;
 
   return {
+    statusState, inboxState, statsState, digestState, blockedState, threadState, messageState,
+    actionFeedback, pendingAction,
+    loadStatus, loadEmails, loadBlocked, loadDigest,
+    retrySelection: () => setSelectionRetry((current) => current + 1),
+    // A retry after a failed check drops the stale status first, so the
+    // workspace does not reappear on old data while the new check is pending.
+    retryStatus: () => { setStatus(null); loadStatus(); },
     status,
     stats,
     digest,

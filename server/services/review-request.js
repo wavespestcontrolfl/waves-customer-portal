@@ -5395,10 +5395,17 @@ const ReviewService = {
       if (parked && map[r.customer_id] && !map[r.customer_id].parked) return;
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
       const nextFrom = r.next_run_at ? new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now())) : null;
+      // An active row overdue by more than 7 days is retired as `stale` by
+      // _runSequenceStep at its next pickup, never sent — promising a tick
+      // for it would advertise a delivery that cannot occur (codex #4140
+      // r24 P2). Same predicate as the runner's guard.
+      const staleRetire = !parked && nextFrom != null
+        && Date.now() - new Date(r.next_run_at).getTime() > 7 * 86400000;
 
       map[r.customer_id] = {
         id: r.id,
         parked,
+        staleRetire,
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
@@ -5406,7 +5413,7 @@ const ReviewService = {
         // runner holds the claim). An overdue row (missed tick, gate re-enabled
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
-        nextSendTickAt: nextFrom ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
+        nextSendTickAt: nextFrom && !staleRetire ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
         // An ask step can swap channel at send time (sendOutreachTouch: the
         // intended channel unavailable, the other allowed) — email→SMS then
         // meets the send window, SMS→email escapes it — so the page shows the

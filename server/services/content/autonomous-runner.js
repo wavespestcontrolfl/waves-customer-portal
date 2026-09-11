@@ -519,7 +519,7 @@ class AutonomousRunner {
       return finalize(run, t0, { outcome: 'failed', failure_message: 'agent-dispatcher unavailable' });
     }
     const t3 = Date.now();
-    const dispatchResult = await dispatcher.runWithBrief(brief, {
+    const dispatchOptions = {
       dryRun,
       sessionTimeoutMs: agentSessionTimeoutMs(run.action_type, brief),
       // W1 in-loop self-lint options — the SAME sync derivation gate 3c
@@ -534,17 +534,45 @@ class AutonomousRunner {
       selfLintOptions: (brief.action_type === 'refresh_existing_page' || !envBool('AUTONOMOUS_WRITER_SELF_LINT', true))
         ? null
         : deriveSyncGuardrailOptions(opp, brief),
-    }).catch((err) => ({
+    };
+    const dispatchOnce = () => dispatcher.runWithBrief(brief, dispatchOptions).catch((err) => ({
       ok: false, reason: `dispatch_threw:${err.message}`,
     }));
+    let dispatchResult = await dispatchOnce();
+    // Agent time spent by attempts that ended in a stream EOF — the final
+    // attempt's duration alone would underreport the "Write draft" stage
+    // (Agent Activity reads run.agent_ms) by the whole failed session.
+    let priorAttemptsMs = 0;
+    // The last attempt that actually reached a session. A retry that dies
+    // before creating one (session_create_failed) carries no session_id, and
+    // persisting null there would lose the ONLY pointer to the real first
+    // session — the observability gap agent_session_id exists to close.
+    let lastSessionResult = dispatchResult;
+    // Provider-side stream EOF (session_stream_eof: the stream closed before
+    // any terminal event, no draft captured) is a transport hiccup, not a
+    // verdict on the brief — prod 2026-09-10 lost two of three catch-up blog
+    // runs to it and halted the batch. Re-dispatch the same brief up to
+    // AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES more times (default 1) before
+    // filing failed_agent. Our own deadline (session_timeout) and session
+    // error events are NOT retried: they cost a full timeout each and
+    // usually mean the brief itself is too heavy. dryRun never retries.
+    const eofRetries = dryRun ? 0 : envInt('AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES', 1);
+    for (let attempt = 1; attempt <= eofRetries && !dispatchResult.ok && dispatchResult.code === 'session_stream_eof'; attempt += 1) {
+      logger.warn(`[autonomous-runner] run ${run.id}: agent stream ended without a terminal event (session ${dispatchResult.session_id || 'unknown'}); re-dispatching (${attempt}/${eofRetries})`);
+      priorAttemptsMs += Number.isFinite(dispatchResult.duration_ms) ? dispatchResult.duration_ms : 0;
+      dispatchResult = await dispatchOnce();
+      if (dispatchResult.session_id) lastSessionResult = dispatchResult;
+    }
     // The dispatcher's own duration excludes its session-ledger GET; the
     // local clock is the fallback for the exits that return none.
-    run.agent_ms = Number.isFinite(dispatchResult.duration_ms) ? dispatchResult.duration_ms : Date.now() - t3;
+    run.agent_ms = Number.isFinite(dispatchResult.duration_ms)
+      ? dispatchResult.duration_ms + priorAttemptsMs
+      : Date.now() - t3; // wall clock since the first dispatch already spans every attempt
     // Persist the session pointer on EVERY outcome, not just success — the
     // 2026-08-08→10 streaming_failed runs stored no agent_session_id, so the
     // hung sessions could not be correlated against the Managed Agents log.
-    run.agent_id = dispatchResult.agent_id || null;
-    run.agent_session_id = dispatchResult.session_id || null;
+    run.agent_id = lastSessionResult.agent_id || null;
+    run.agent_session_id = lastSessionResult.session_id || null;
 
     if (!dispatchResult.ok) {
       if (dispatchResult.reason === 'dry_run') {
@@ -1519,7 +1547,6 @@ class AutonomousRunner {
     // caps, so continuing can't over-publish.
     const maxConsecutiveFailures = envInt('AUTONOMOUS_CONTENT_MAX_CONSECUTIVE_FAILURES', 2);
     const runs = [];
-    let consecutiveFailures = 0;
     let failuresSeen = 0;
     // A failed runNext() releases its claim back to 'pending', so the queue
     // would re-serve the same top opportunity on the next iteration. Exclude
@@ -1527,34 +1554,78 @@ class AutonomousRunner {
     // poison row can't starve the lower-scored queue (it's still eligible on
     // the next cron, where its claim was released to pending).
     const failedOppIds = [];
-    for (let i = 0; i < batchLimit; i += 1) {
+    // The unscoped 9am batch claims by score, so a lane other than the blog
+    // lane can burn the whole consecutive-failure budget before any blog is
+    // attempted (prod 2026-09-06→10: two create_or_refresh_city_service_page
+    // deadline timeouts every morning, batch halted, zero blog runs, and the
+    // drought SMS blamed the miner). The operator's target is a blog post
+    // every day, so when the cap is hit by NON-blog failures and no blog has
+    // been attempted yet, the batch narrows to the blog lane for its
+    // remaining slots instead of halting — the same scoped claim the 1pm
+    // catch-up uses. The failed rows stay excluded; a second cap hit halts
+    // for real (the fallback is armed once per batch). Only for the unscoped
+    // batch: a scoped pass has nothing to narrow to.
+    // Kill: AUTONOMOUS_CONTENT_BLOG_FALLBACK=false.
+    // Armed once per batch: disarmed the moment it fires.
+    let blogFallbackArmed = !actionType && envBool('AUTONOMOUS_CONTENT_BLOG_FALLBACK', true);
+    let scopedActionType = actionType;
+    let blogAttempted = false;
+    // Lanes of the current failure streak (its length IS the consecutive
+    // failure count); while no blog has been attempted every entry is a
+    // non-blog lane, which is the fallback's precondition.
+    const streakLanes = [];
+    // Set only when the batch actually halted on the failure cap before any
+    // blog attempt — the drought SMS reports it verbatim instead of guessing
+    // from the presence of a failure (Codex r1: a lone failure followed by an
+    // empty queue, or a fallback probe that found nothing, is not a halt).
+    let haltBeforeBlog = null;
+    // The fallback must get at least one blog-scoped claim even when the
+    // cap lands on the batch's final slot (Codex r2: three successes then
+    // two failures under the default limit of 5 used to narrow and then
+    // exit the loop with the claim never made). Extending by one slot is
+    // bounded — the fallback fires once per batch — and the downstream
+    // per-day/week publish caps still hold.
+    let slotBudget = batchLimit;
+    for (let i = 0; i < slotBudget; i += 1) {
       // actionType (when set, e.g. the blog-scoped catch-up pass) flows
       // through to claimNext; spread conditionally so the unscoped daily
       // batch's claim args stay byte-identical.
-      const run = await this.runNext({ excludeIds: [...failedOppIds], ...(actionType ? { actionType } : {}) });
+      const run = await this.runNext({ excludeIds: [...failedOppIds], ...(scopedActionType ? { actionType: scopedActionType } : {}) });
       runs.push(run);
       await this._appendToDailyDigest(run).catch(() => {});
       if (run.outcome === 'skipped_no_opportunity') break;
-      if (String(run.outcome || '').startsWith('failed')) {
-        consecutiveFailures += 1;
-        failuresSeen += 1;
-        if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
-        if (consecutiveFailures >= maxConsecutiveFailures) {
-          logger.warn(`[autonomous-runner] runDaily halting batch after ${consecutiveFailures} consecutive failed runs (last: ${run.failure_message || run.outcome})`);
-          break;
-        }
-        logger.warn(`[autonomous-runner] runDaily continuing to the next opportunity past a failure (${run.failure_message || run.outcome}); ${consecutiveFailures}/${maxConsecutiveFailures} consecutive, ${failedOppIds.length} excluded`);
+      if (run.action_type === 'new_supporting_blog') blogAttempted = true;
+      if (!String(run.outcome).startsWith('failed')) {
+        streakLanes.length = 0;
         continue;
       }
-      consecutiveFailures = 0;
+      failuresSeen += 1;
+      streakLanes.push(run.action_type);
+      if (run.opportunity_id != null) failedOppIds.push(run.opportunity_id);
+      const why = run.failure_message || run.outcome;
+      if (streakLanes.length < maxConsecutiveFailures) {
+        logger.warn(`[autonomous-runner] runDaily continuing to the next opportunity past a failure (${why}); ${streakLanes.length}/${maxConsecutiveFailures} consecutive, ${failedOppIds.length} excluded`);
+        continue;
+      }
+      // A lane-less failure died before any claim (engine-level); narrowing
+      // the claim cannot help it, so those still halt fast.
+      if (blogFallbackArmed && !blogAttempted && run.action_type) {
+        blogFallbackArmed = false;
+        scopedActionType = 'new_supporting_blog';
+        slotBudget = Math.max(slotBudget, i + 2);
+        logger.warn(`[autonomous-runner] runDaily: ${streakLanes.length} consecutive ${run.action_type} failures before any blog attempt (last: ${why}); narrowing the rest of the batch to new_supporting_blog`);
+        streakLanes.length = 0;
+        continue;
+      }
+      if (!blogAttempted) haltBeforeBlog = { failures: streakLanes.length, lanes: [...new Set(streakLanes.filter(Boolean))] };
+      logger.warn(`[autonomous-runner] runDaily halting batch after ${streakLanes.length} consecutive failed runs (last: ${why})`);
+      break;
     }
-    if (failuresSeen > 0) {
-      logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
-    }
+    logger.info(`[autonomous-runner] runDaily completed with ${failuresSeen} failed run(s) across ${runs.length} attempt(s)`);
     await this._sendDailyDigestSms(runs).catch((err) => {
       logger.warn(`[autonomous-runner] daily digest SMS failed: ${err.message}`);
     });
-    await this._sendBlogDroughtSms(runs).catch((err) => {
+    await this._sendBlogDroughtSms(runs, { haltBeforeBlog }).catch((err) => {
       logger.warn(`[autonomous-runner] blog drought SMS failed: ${err.message}`);
     });
     return {
@@ -1626,7 +1697,7 @@ class AutonomousRunner {
    * silence); kill via AUTONOMOUS_BLOG_DROUGHT_ALERT=false. Routed as
    * internal_alert so OWNER_SMS_DISABLED still silences everything.
    */
-  async _sendBlogDroughtSms(runs) {
+  async _sendBlogDroughtSms(runs, { haltBeforeBlog = null } = {}) {
     if (!envBool('AUTONOMOUS_BLOG_DROUGHT_ALERT', true)) return;
     const real = (runs || []).filter(Boolean);
     // "Started" = published directly, or parked awaiting its PR merge
@@ -1669,8 +1740,16 @@ class AutonomousRunner {
     }
 
     const blogAttempts = real.filter((r) => r.action_type === 'new_supporting_blog');
+    // haltBeforeBlog is _runDailyInner's explicit record that the batch
+    // halted on the consecutive-failure cap before reaching a blog — say so,
+    // rather than blaming the miner for a queue that still had claimable
+    // blog rows. Never inferred from the runs: a lone failure followed by an
+    // empty queue is a genuine drought, not a halt.
     let why;
-    if (!blogAttempts.length) {
+    if (!blogAttempts.length && haltBeforeBlog && haltBeforeBlog.failures > 0) {
+      const lanes = (haltBeforeBlog.lanes || []).join(', ') || 'non-blog';
+      why = `batch halted after ${haltBeforeBlog.failures} failed ${lanes} run(s) before any blog was attempted`;
+    } else if (!blogAttempts.length) {
       why = 'no blog opportunity cleared the score floor (miner found nothing actionable)';
     } else {
       const reasons = {};

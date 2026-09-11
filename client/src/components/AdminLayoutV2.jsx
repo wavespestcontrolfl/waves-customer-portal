@@ -1,4 +1,5 @@
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
+import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
  * AdminLayoutV2 — Square Dashboard-inspired light admin shell.
  *
@@ -205,6 +206,7 @@ export default function AdminLayoutV2() {
 
   const handleLogout = () => {
     clearEmailDrafts();
+    clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags().catch(() => {});
@@ -672,7 +674,7 @@ export default function AdminLayoutV2() {
         ref={mainRef}
       >
         {canRenderRoute ? (
-          <Outlet context={{ user }} />
+          <><Outlet context={{ user }} /><ScheduleSaveNotice /></>
         ) : (
           <div role={authStatus === "error" ? "alert" : "status"}>
             {authStatus === "error"

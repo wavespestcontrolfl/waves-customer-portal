@@ -379,6 +379,22 @@ absolute $ numbers within the SWFL market band. When updating any of
 them, the same playbook applies (re-derive from cost, update DB seed
 and constant, run margin-check).
 
+Termite bait hardware is the exception to "update the constant": since
+2026-09-09 the Trelona station cost and the replacement-cartridge cost are
+read from the inventory catalog (`products_catalog` rows named in
+`TERMITE.systems.trelona.catalogProductName` /
+`TERMITE.cartridges.catalogProductName`) on every pricing sync — approved
+vendor best price only, sanity-banded to [0.5×, 2×] of the config value,
+fail-open to the config value, source stamped on the line as
+`materialCostSource`. A vendor price change reaches quotes without a
+deploy; `pricing_config.termite_install.link_station_costs_to_catalog =
+false` is the kill switch. The $24.00 constant / config value is the
+fallback, not the price of record. Cartridge inputs (`cartridge_cost`,
+`cartridges_per_station`, `cartridge_replacement_rate`,
+`follow_up_visit_reserve`) are REPORT-ONLY: they feed the termite line's
+`costs` block and `scripts/audit-estimator-pricing.js --termite-plan`,
+never a price.
+
 ---
 
 ## Pricing version + audit trail
