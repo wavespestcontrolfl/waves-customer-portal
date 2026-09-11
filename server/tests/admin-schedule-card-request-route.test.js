@@ -271,9 +271,17 @@ describe('source guards — booking hook and client defaults', () => {
 
   test('the booking checkbox is OFF by default and only the first created group carries the flag', () => {
     expect(createModalSrc).toContain('const [sendCardLink, setSendCardLink] = useState(false);');
+    // The first-group rule now lives in the firstGroupSendFlags helper: pin the
+    // definition, the card flag that rides on it, and the call-site wiring, so the
+    // guard still proves only the first created group carries the link.
     expect(createModalSrc).toContain(
-      'sendCardOnFileLink: cardLinkAvailable && sendCardLink && results.length === 0 && createdGroupKeysRef.current.size === 0 ? true : undefined,',
+      'const firstGroupOfBooking = resultsCount === 0 && createdCount === 0;',
     );
+    expect(createModalSrc).toContain(
+      'sendCardOnFileLink: (cardLinkAvailable && sendCardLink && firstGroupOfBooking) ? true : undefined,',
+    );
+    expect(createModalSrc).toContain('resultsCount: results.length,');
+    expect(createModalSrc).toContain('createdCount: createdGroupKeysRef.current.size,');
     // The checkbox must not render while the lane is dark (Codex #2921 P2).
     expect(createModalSrc).toContain("adminFetch('/admin/schedule/card-request-availability')");
     expect(createModalSrc).toContain('{cardLinkAvailable && (');
