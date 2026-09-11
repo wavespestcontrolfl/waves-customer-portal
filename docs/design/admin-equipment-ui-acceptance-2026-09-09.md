@@ -22,7 +22,7 @@ Completed the Equipment implementation and prepared the review series. Existing 
 
 - The page uses the comfortable shared surface, command header, cards, labeled fields, buttons, tables and equipment edit dialog. Secondary navigation uses the shared section-tab variant while retaining keyboard operation, existing group/leaf routes, and query replacement behavior. Shared command headers on migrated surfaces keep the contract’s 22px title and 1.3 line height on phones; legacy density and secondary heading behavior remain covered by existing tests.
 - Save actions expose stable loading states, reject duplicate invocation, keep failed drafts, and display errors before a retry. Successful actions retain the existing payload coercion, toast, refresh and reset behavior. The equipment dialog keeps focus on return and stays open during a pending save.
-- Read failures distinguish unavailable data from an empty result and offer a local retry, including equipment details and calibration details. Analytics loading and failure states are independent of Fleet equipment, overview and alert reads; an unrelated Fleet failure cannot suppress successfully loaded analytics. Job-cost missing metrics remain distinct from zero.
+- Read failures distinguish unavailable data from an empty result and offer a local retry at every tab-level read and at calibration details. The equivalent surface written for fleet-card details was removed during review: adding an error/retry state where main logs and renders nothing is a behavior change, not a presentation one. That read stays silent on failure and is registered as [ADMIN-BUG-006](../audits/admin-ui-non-ui-bugs.md). Analytics loading and failure states are independent of Fleet equipment, overview and alert reads; an unrelated Fleet failure cannot suppress successfully loaded analytics. Job-cost missing metrics remain distinct from zero.
 - Cost-chart text remains at 14px at its rendered size. The chart scrolls horizontally on narrow screens. Maintenance tables retain enough column width for dates and currency values, with scrolling contained inside the card. Long asset identifiers wrap without moving Edit off-screen.
 - Corrected the unfinished toast condition, invalid table-footer whitespace and missing tank-mix pending indicator. No server routes, business calculations or provider integrations changed.
 
@@ -101,3 +101,27 @@ The refreshed report records these SHA-256 hashes:
 | `scripts/qa/admin-equipment-foundation.js` | `29b546f8f83bf3ce5aef7837ee961f6e5bcb0791138bd2446107ad8fadee0664` |
 
 The refreshed local artifacts remain `.tmp/admin-equipment-foundation/report.json`, `.tmp/admin-equipment-foundation/review.html` and the 60 report-listed PNG captures. The earlier focused suites, production build and physical iPhone acceptance above remain historical evidence; they were not repeated for this one-class pointer-behavior correction.
+
+## Integration onto main — September 11, 2026
+
+The series merged into main one slice at a time between September 10 and 11 (#4230 `456714313`, #4236 `56d86d015`, #4251 `d460c47e2`, #4257 `d8e19114a`, #4262 `1ec574e21`, #4266 `335d8d886`, #4271 `f48a9729c`), each with its own Codex rounds and green CI. The browser-evidence children followed: #4278 carries the fixture, #4279 its write coverage, and this slice the read-recovery and navigation coverage. The September 9 and 10 records above stand as the history of the pre-integration stack; this section records the run against merged main.
+
+Review of the UI slices changed two things the evidence children had to follow:
+
+- The fleet card's opener is named `Expand|Collapse <category> <name> …`, not `Open <name>`. Both the write-pending guard (#4279) and the detail-failure check here now match the real accessible name, so assertions that silently failed to bind are actually running.
+- The fleet-card detail error/retry surface was removed in #4262 as a behavior change. The check that exercised it now asserts main's contract — a failed detail read renders no detail block and no alert, and recovers only when the card is collapsed and expanded again — and the defect is registered as [ADMIN-BUG-006](../audits/admin-ui-non-ui-bugs.md). Tab-level read failures and calibration-detail failures keep their retry surfaces and their checks.
+
+Toast waits no longer race the on-screen lifetime. `showToast` starts a 3.5s timer per call without clearing the previous one, so a second toast inside that window is cleared early — 348ms for `Mileage logged` in desktop Chromium, 337ms in touch WebKit. The fixture records every `role="status"` render through a MutationObserver and asserts against that timeline, which `report.json` keeps per browser; the defect is registered as [ADMIN-BUG-005](../audits/admin-ui-non-ui-bugs.md). Neither register entry is fixed here — both are behavior changes that do not belong in a presentation slice.
+
+The run over merged main at fixture state `5f0fc7b03` started at `2026-09-11T07:40:35.542Z` and passed: 214 geometry cases (107 desktop Chromium and 107 touch WebKit), 66 recorded behavior checks (33 per browser), 60 screenshots, no page errors, no unmatched synthetic API routes and no unexpected console errors — the only console errors were the deliberate 503 failure fixtures. All eight writes passed duplicate-submit, stable pending geometry, failed-draft, retry and exact-payload checks; analytics stayed available under each of the three Fleet reads failed and held pending; empty states, URL aliases, keyboard leaf selection, query preservation, refresh and history, verified-role restrictions, missing-versus-zero job metrics and the long asset name all passed.
+
+Alongside the browser pass: `npx vitest run src/pages/admin/Equipment` — 7 files, 32 tests; `npm run check:ib-coverage` — 0 new or changed unmapped sites; `npm run test:qa-workflow` — 33 tests; focused ESLint on the runner clean; `git diff --check` clean. No backend, database, provider or production environment was accessed, and no product source is touched by this slice — its diff is the QA runner and these records.
+
+The integrated source hashes recorded by `.tmp/admin-equipment-foundation/report.json` are:
+
+| Source | SHA-256 |
+| --- | --- |
+| `client/src/components/admin/AdminCommandHeader.jsx` | `6f8c2f349196321cacfeb1617355b2a092dbf97354c6c3df8ddeed014e12fe8f` |
+| `client/src/pages/admin/EquipmentPage.jsx` | `50a308f3c7e3873f67f33715525be6dfc1c0d1eb4d0e13a60c1f6c1cdc322ced` |
+| `client/src/pages/admin/EquipmentMaintenancePage.jsx` | `58b856ed99939fe7c243643727936be96defe84091e451733e7f419d89d7255e` |
+| `client/src/pages/admin/EquipmentCalibrationPanel.jsx` | `20690e4863751ba7d71986f95db1c251fd31bfae49c1b40998b0b992d8300129` |

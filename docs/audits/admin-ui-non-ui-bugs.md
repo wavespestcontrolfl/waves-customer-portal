@@ -25,6 +25,30 @@ Separate follow-up register requested by the owner. Keep functional/data defects
 - **Expected:** Preserve the recorded calendar day for date-only fields and derive the default verification day in Eastern time, distinguishing those values from actual timestamp fields.
 - **Evidence:** Chromium/WebKit synthetic screenshots and a deterministic Node reproduction under `TZ=America/New_York`. The existing date helper and serialized verification payload matched the starting commit. No database or live calibration was changed.
 - **Fix and validation:** Canonical client helpers preserve date-only fields, use Eastern verification defaults, and serialize selected noon Eastern as an explicit UTC instant. Eight component tests plus four existing date-helper tests passed under both UTC and Eastern process timezones (24 executions). Synthetic desktop/phone captures confirm January 1 purchase dates and the Eastern evening default. Final-head CI and Codex review passed; no live calibration or database migration was run.
+## ADMIN-BUG-005 — A second Equipment toast is dismissed early by the previous toast's timer
+
+- **Status:** Open; not changed by the Equipment UI migration. `showToast` behaves the same way before and after the migration.
+- **Priority:** P3 — a confirmation can vanish in well under a second, so the operator can miss what was saved. No data is affected.
+- **Found:** September 11, 2026, on the integrated Equipment series; `client/src/pages/admin/EquipmentPage.jsx`.
+- **Source:** `EquipmentPage.jsx`, `showToast`: `setToast(m); setTimeout(() => setToast(""), 3500);`. Each call starts a new dismissal timer and never clears the one the previous toast started.
+- **Trigger:** Any two toasts inside 3.5 seconds — recalculating tank-mix costs and then saving, or the record/mileage pair in an expanded fleet card.
+- **Actual:** The earlier toast's timer fires against whatever message is showing. Measured in the synthetic browser run at fixture head `5f0fc7b03`: `Mileage logged` stayed on screen 348ms in desktop Chromium and 337ms in touch WebKit, `Maintenance recorded` 1775ms, `Costs recalculated from current inventory prices` 2273ms — against the intended 3500ms. The timeline is recorded per browser in `.tmp/admin-equipment-foundation/report.json` under `state.toasts`.
+- **Expected:** Each toast is readable for its own full interval; a newer toast replaces the older one and restarts the countdown.
+- **Evidence:** MutationObserver timeline of every `role="status"` render in both browsers, plus the code path above. Frontend only; no database, provider or live record was involved. A one-line `clearTimeout` on a ref would fix it, but the fix is a behavior change and does not belong in a strict 1:1 presentation slice.
+- **Fix and validation:** Not fixed. The QA fixture no longer depends on the defect: it asserts against the recorded toast timeline instead of racing the on-screen lifetime, so the register entry is what tracks the defect itself.
+
+## ADMIN-BUG-006 — A failed fleet-card detail read is silent
+
+- **Status:** Open; not changed by the Equipment UI migration. A local error/retry surface was written for the migration and removed during review because it changed behavior rather than presentation.
+- **Priority:** P2 — the card expands onto an empty area with no error and no way to retry beyond collapsing it again.
+- **Found:** September 11, 2026, on the integrated Equipment series; `client/src/pages/admin/EquipmentMaintenancePage.jsx`.
+- **Source:** `EquipmentCard`'s detail effect: `Promise.all([...]).then(...).catch(console.error)`, with the detail block rendered only when `isExpanded && detail`. The effect's dependencies are `[isExpanded, eq.id, eq.category, detail]`, so after a failure nothing re-requests while the card stays open.
+- **Trigger:** Expand a fleet card while `GET /api/admin/equipment-maintenance/:id` (or, for a vehicle, its `/mileage` companion) fails.
+- **Actual:** The card expands with no detail block, no alert and no pending indicator; the only trace is a console error. Collapsing and re-expanding the card issues the read again and recovers.
+- **Expected:** Distinguish an unavailable detail read from an empty one and offer a retry, as the tab-level reads on this page already do.
+- **Evidence:** Injected 503 in the synthetic browser run at fixture head `5f0fc7b03`, in both desktop Chromium and touch WebKit: no `role="alert"` in `main`, no Record Maintenance action, and recovery only after a collapse/expand cycle. Frontend only; no database or provider was involved.
+- **Fix and validation:** Not fixed. The QA fixture asserts the current contract — silence on failure, recovery on re-expansion — so the behavior is pinned while the defect is tracked here.
+
 ## ADMIN-BUG-001 — Unrelated invoice can block marking a status-only visit free
 
 - **Status:** Open; not changed by the billing UI migration.
