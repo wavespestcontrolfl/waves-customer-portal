@@ -167,13 +167,33 @@ async function fetchBuildManifest(assets) {
   }
 }
 
+// A claim already on the entry. Strength matters: a firm claim must still
+// be written over a provisional tag for the same build, or a chunk cached
+// before its build's list arrived would stay a guess forever and the quota
+// prune could drop it despite the list proving the build owns it.
+function claimSatisfiedBy(rawTags, claim) {
+  if (rawTags.includes(claim)) return true;
+  // A provisional claim is satisfied by an existing firm one; never the reverse.
+  return claim[0] === PROVISIONAL_CLAIM && rawTags.includes(claimIdOf(claim));
+}
+
+// Lists are read on every /assets/ hit and miss, and reading the cache is
+// the cost this worker exists to remove, so keep the ones we have read in
+// memory. Only positive results are memoized: another worker instance may
+// write a list this one has already looked for, and caching that absence
+// would keep this instance guessing for the rest of its life.
+const ownedAssetsMemo = new Map();
 async function ownedAssetsOf(cache, buildId) {
   if (!buildId) return null;
+  if (ownedAssetsMemo.has(buildId)) return ownedAssetsMemo.get(buildId);
   try {
     const stored = await cache.match(manifestKey(buildId));
     if (!stored) return null;
     const owned = JSON.parse(await stored.text());
-    return Array.isArray(owned) ? new Set(owned) : null;
+    if (!Array.isArray(owned)) return null;
+    const set = new Set(owned);
+    ownedAssetsMemo.set(buildId, set);
+    return set;
   } catch {
     return null;
   }
@@ -468,7 +488,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
   if (ownedAssets) {
     await cache.put(manifestKey(buildId), new Response(JSON.stringify(ownedAssets), {
       headers: { 'Content-Type': 'application/json' },
-    })).catch(() => {});
+    })).then(() => ownedAssetsMemo.set(buildId, new Set(ownedAssets))).catch(() => {});
   }
   advanceLiveBuild(buildId, enqueuedSeq);
   // Keep the generation just replaced too: a tab still running the previous
@@ -494,7 +514,11 @@ function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
       // A retained build keeps its file list; a dropped one loses it, or the
       // lists would outlive every generation and grow without bound.
       if (pathname.startsWith(MANIFEST_KEY_PREFIX)) {
-        if (!retained.has(pathname.slice(MANIFEST_KEY_PREFIX.length))) await cache.delete(request);
+        const listedBuild = pathname.slice(MANIFEST_KEY_PREFIX.length);
+        if (!retained.has(listedBuild)) {
+          await cache.delete(request);
+          ownedAssetsMemo.delete(listedBuild);
+        }
         return;
       }
       if (!pathname.startsWith('/assets/')) return;
@@ -635,7 +659,9 @@ self.addEventListener('fetch', event => {
           // not carry the live build's tag (or the cached shell's) yet; add
           // them, keeping older claims, so the prune sees the chunk as the
           // retained builds' when the ones that first stored it age out.
-          const tags = buildTagsOf(cached);
+          const tags = rawTagsOf(cached);
+          // Firm tags only: a provisional tag for either build may still need
+          // upgrading once that build's file list proves it owns the chunk.
           if (liveBuildId && knownCachedBuild && tags.includes(liveBuildId) && tags.includes(knownCachedBuild)) return cached;
           // Clone before handing `cached` to respondWith: on a cold worker the
           // build lookup awaits the cached shell, and the page can lock the
@@ -644,7 +670,7 @@ self.addEventListener('fetch', event => {
           const touch = Promise.all([currentBuildId(cache), cachedBuildId(cache)])
             .then(([buildId, cachedId]) => claimsForAsset(cache, url.pathname, buildId, cachedId))
             .then(claims => {
-              if (!claims.length || claims.every(c => tags.includes(claimIdOf(c)))) return undefined;
+              if (!claims.length || claims.every(claim => claimSatisfiedBy(tags, claim))) return undefined;
               return claimBuilds(cache, event.request, copy, claims);
             }).catch(() => {});
           try { event.waitUntil(touch); } catch { /* fire and forget */ }

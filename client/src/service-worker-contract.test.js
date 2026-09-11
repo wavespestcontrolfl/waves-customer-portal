@@ -738,6 +738,46 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toContain('/assets/Route-AAA.js');
   });
 
+  it('upgrades a provisional claim once the build publishes a list naming the chunk', async () => {
+    // Pre-push Codex P1: the hit shortcuts compared claim IDS, and a
+    // provisional tag reads as the same id as a firm claim. A chunk cached
+    // before its build's list existed therefore stayed a guess forever, and
+    // the quota prune could drop it even though the list proves it belongs.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, pruneStaleAssets, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    const aaa = buildIdOf(['/assets/index-AAA.js']);
+    const noManifest = async (request) => {
+      if (request.url.includes('/build-assets.json')) return fakeResponse('nope', false);
+      return fakeResponse(`asset:${request.url}`);
+    };
+
+    // A is cached before any list is published.
+    setFetch(noManifest);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    // B goes live with a failed refresh; an A tab loads a route, so A's
+    // claim on it is only the worker's guess.
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return noManifest(request);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' });
+    await dispatchFetch('/assets/Route-AAA.js');
+    expect((await cache.match('/assets/Route-AAA.js')).headers.get('x-waves-build').split(','))
+      .toContain(`~${aaa}`);
+
+    // A refresh now publishes A's list, which names that route.
+    setFetch(serveBuild(['/assets/index-AAA.js'], ['/assets/index-AAA.js', '/assets/Route-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/Route-AAA.js'); // a hit must upgrade the guess
+
+    const tags = (await cache.match('/assets/Route-AAA.js')).headers.get('x-waves-build').split(',');
+    expect(tags).toContain(aaa);
+    expect(tags).not.toContain(`~${aaa}`);
+    await pruneStaleAssets(cache, [aaa], { firmOnly: true });
+    expect(await cachedAssets(cache)).toContain('/assets/Route-AAA.js');
+  });
+
   it('does not claim a chunk for a build whose file list leaves it out', async () => {
     // The guess used to give every chunk the cached build's claim, which
     // kept chunks that build never owned. A published list settles it.
