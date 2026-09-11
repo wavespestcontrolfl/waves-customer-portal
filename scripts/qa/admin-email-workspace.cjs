@@ -23,13 +23,16 @@ async function main() {
   let server, browser, safari;
   let stage = 'startup';
   const states = [];
-  async function openPage(width, { engine = browser, role = 'admin', coarse = width < 1100 } = {}) {
+  async function openPage(width, { engine = browser, role = 'admin', coarse = width < 1100, timezone = 'America/New_York' } = {}) {
     const state = { emails: structuredClone(fixtureMail), role, connected: true, fail: new Set(), sends: [], blocked: [{ id: 'fixture-block', domain: 'unwanted.example.invalid', reason: 'Manual block from admin portal', blocked_count: 3, created_at: stamp(200) }] };
     states.push(state);
-    const page = await engine.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: coarse, timezoneId: 'America/New_York', serviceWorkers: 'block' });
+    // The top-frame fixture below disables registration. Playwright's blanket
+    // block script reads denied APIs inside sandboxed HTML email frames.
+    const page = await engine.newPage({ viewport: { width, height: width < 600 ? 844 : 1000 }, hasTouch: coarse, timezoneId: timezone });
     page.setDefaultTimeout(15000);
     page.setDefaultNavigationTimeout(60000);
     await page.addInitScript(() => {
+      if (window !== window.top) return;
       localStorage.setItem('waves_admin_token', 'fixture-token');
       localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'fixture-owner', role: 'admin' }));
       const realFetch = window.fetch.bind(window);
@@ -67,9 +70,9 @@ async function main() {
       else if (api === '/admin/email/daily-digest') body = { total_received: 12, leads_created: 2, spam_quarantined: 1, invoices_processed: 2, domains_blocked_today: 0 };
       else if (api === '/admin/email/blocked') body = { blocked: state.blocked };
       else if (api === '/admin/email/send') { record.payload = request.postDataJSON(); state.sends.push(record.payload); await state.sendHold; body = { success: true, messageId: 'fixture-sent' }; }
-      else if (api.startsWith('/admin/email/thread/')) { await state.threadHold; body = { thread: state.emails.filter((mail) => api.endsWith(mail.gmail_thread_id)) }; }
+      else if (api.startsWith('/admin/email/thread/')) { await state.threadHold; body = { thread: state.history || state.emails.filter((mail) => api.endsWith(mail.gmail_thread_id)) }; }
       else if (api.startsWith('/admin/email/message/')) {
-        const id = api.split('/')[4], mail = state.emails.find((message) => message.id === id) || fixtureMail.find((message) => message.id === id);
+        const id = api.split('/')[4], mail = state.emails.find((message) => message.id === id) || structuredClone(fixtureMail.find((message) => message.id === id));
         if (api.endsWith('/read')) { if (mail) mail.is_read = true; body = { read: true }; }
         else if (api.endsWith('/star')) { if (mail && !state.fail.has(api)) mail.is_starred = !mail.is_starred; body = { is_starred: mail?.is_starred }; }
         else if (/\/(archive|trash)$/.test(api)) { if (!state.fail.has(api)) state.emails = state.emails.filter((message) => message.id !== id); body = { success: true }; }
@@ -98,9 +101,28 @@ async function main() {
   async function shot(page, name) {
     await waitForFonts(page);
     const file = `${name}.png`;
-    await page.screenshot({ path: path.join(output, file), fullPage: true });
+    await page.screenshot({ path: path.join(output, file), fullPage: true, animations: "disabled" });
     if (!baseline) assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, 'Page must fit the viewport');
     report.screenshots.push(file);
+  }
+  const row = (page, mail = a) => page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: mail.subject });
+  async function inbox(page, route = '/admin/communications#tab=email') {
+    await page.goto(`${server.baseUrl}${route}`);
+    await row(page).waitFor();
+  }
+  async function openMail(page, mail = a) {
+    await row(page, mail).click();
+    await page.getByRole('heading', { name: mail.subject, exact: true }).waitFor();
+    await page.getByText(mail.body_text, { exact: true }).waitFor();
+  }
+  async function geometry(page, label) {
+    const measurements = await page.locator('[data-ui-density="comfortable"] button, [data-ui-density="comfortable"] input:not([type="radio"]):not([type="checkbox"]), [data-ui-density="comfortable"] textarea, [data-ui-density="comfortable"] select').evaluateAll((nodes) => nodes.filter((node) => node.getClientRects().length).map((node) => ({ tag: node.tagName, name: node.getAttribute('aria-label') || node.textContent.trim() || node.id, height: node.getBoundingClientRect().height, fontSize: parseFloat(getComputedStyle(node).fontSize) })));
+    assert.ok(measurements.length);
+    for (const item of measurements) {
+      assert.ok(item.height >= 43.5, `${label}: ${item.name} must be at least 44px`);
+      assert.ok(item.fontSize >= (item.tag === 'BUTTON' ? 14 : 16), `${label}: ${item.name} text must be readable`);
+    }
+    report.geometry.push({ label, measurements });
   }
   try {
     server = await previewServer(root);
@@ -115,6 +137,10 @@ async function main() {
           assert.equal(await activity.getAttribute('open'), '');
           assert.equal(await activity.getByText('Unread', { exact: true }).isVisible(), true);
           assert.equal(await activity.evaluate((node) => Boolean(node.compareDocumentPosition(document.querySelector('[aria-label="Email inbox"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), true);
+          await page.locator('dl dd').first().waitFor();
+          assert.equal(await page.locator('dl').evaluate((node) => [...node.children].every((card) =>
+            Math.abs(card.querySelector('dt').getBoundingClientRect().left - card.querySelector('dd').getBoundingClientRect().left) < 1)),
+          true, 'Summary values must align with their labels');
         }
         await shot(page, `inbox-${width}`);
         await page.getByText(a.subject, { exact: false }).first().click();
@@ -127,30 +153,321 @@ async function main() {
         await page.close();
       });
     }
-    if (!baseline) await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
-      const { page } = await openPage(390);
+    if (!baseline) await scenario('Retry a retained conversation after a channel refresh failure', async () => {
+      const { page, state } = await openPage(390);
       await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
-      const row = page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject });
-      await row.focus(); await page.keyboard.press('Enter');
-      const heading = page.getByRole('heading', { name: a.subject, exact: true });
-      await heading.waitFor();
-      assert.equal(await heading.evaluate((node) => document.activeElement === node), true);
-      const downloading = page.waitForEvent('download');
-      await page.getByRole('link', { name: /Patio notes.pdf/ }).click();
-      const download = await downloading;
-      assert.equal(download.suggestedFilename(), 'Patio notes.pdf');
-      assert.equal(await download.failure(), null);
-      await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
-      await page.waitForFunction((subject) => document.activeElement?.textContent?.includes(subject), a.subject);
-      assert.equal(new URL(page.url()).searchParams.has('id'), false);
+      await page.getByRole('button', { name: /^Open email:/ }).filter({ hasText: a.subject }).click();
+      await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Retain this reactivation draft');
+      await channel(page, 'SMS').click();
+      state.fail.add(`/admin/email/message/${a.id}`);
+      await channel(page, 'Email').click();
+      await page.getByText('The linked email is unavailable.', { exact: true }).waitFor();
+      state.fail.delete(`/admin/email/message/${a.id}`);
+      await page.getByRole('button', { name: 'Try again', exact: true }).click();
+      await page.getByText(a.body_text, { exact: true }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retain this reactivation draft');
+      await shot(page, 'reactivation-retry-390');
       await page.close();
     });
+    if (!baseline) await scenario('Mobile inbox escape after a retained message refresh fails', async () => {
+      const { page, state } = await openPage(390);
+      await inbox(page); await openMail(page);
+      await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Keep this reply after returning');
+      await channel(page, 'SMS').click();
+      state.fail.add(`/admin/email/message/${a.id}`);
+      await channel(page, 'Email').click();
+      await page.getByText('The linked email is unavailable.', { exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+      await row(page).waitFor();
+      await openMail(page, b);
+      await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+      await openMail(page);
+      assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Keep this reply after returning');
+      await shot(page, 'retained-message-error-return-390');
+      await page.close();
+    });
+    if (!baseline) {
+      await scenario('Older email dates stay Eastern in a UTC browser', async () => {
+        const { page, state } = await openPage(1440, { timezone: 'UTC' });
+        state.emails[0].received_at = '2020-07-02T02:30:00.000Z';
+        await inbox(page);
+        await row(page).getByText('Jul 1', { exact: true }).waitFor();
+        await page.close();
+      });
+      await scenario('Desktop draft browsing, refresh, channels and browser history', async () => {
+        const { page, state } = await openPage(1440);
+        await inbox(page, `/admin/email?id=${a.id}&source=fixture#tab=email`);
+        await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Retained first reply');
+        await openMail(page, b);
+        assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), '');
+        await page.goBack();
+        await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+        assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retained first reply');
+        await page.goForward();
+        await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+        await openMail(page, a);
+        await channel(page, 'SMS').click();
+        const reads = report.requests.filter((request) => request.path.startsWith('/admin/email/')).length;
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        assert.equal(report.requests.filter((request) => request.path.startsWith('/admin/email/')).length, reads);
+        await channel(page, 'Email').click();
+        await page.getByRole('textbox', { name: 'Reply', exact: true }).waitFor();
+        assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retained first reply');
+        await page.reload();
+        await page.getByRole('textbox', { name: 'Reply', exact: true }).waitFor();
+        assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Retained first reply');
+        assert.equal(new URL(page.url()).searchParams.get('source'), 'fixture');
+        assert.equal(state.sends.length, 0);
+        await shot(page, 'recovered-reply-1440');
+        await page.close();
+      });
+      for (const width of [1440, 390]) {
+        await scenario(`Reply failure, pending guard and confirmed send at ${width}`, async () => {
+          const { page, state } = await openPage(width);
+          await inbox(page); await openMail(page);
+          const reply = page.getByRole('textbox', { name: 'Reply', exact: true });
+          const send = page.getByRole('button', { name: 'Send reply', exact: true });
+          await reply.fill('Fixture reply with a clear recipient');
+          state.fail.add('/admin/email/send');
+          await send.click();
+          await page.getByText('Reply send was not confirmed. Your draft is still here.', { exact: true }).waitFor();
+          assert.equal(await reply.inputValue(), 'Fixture reply with a clear recipient');
+          await shot(page, `failed-reply-${width}`);
+          assert.equal(await send.isDisabled(), true, 'Unknown outcome must block another send');
+          await page.getByRole('button', { name: 'I checked Sent: it was not sent', exact: true }).click();
+          state.fail.delete('/admin/email/send');
+          state.sendHold = new Promise((resolve) => { state.releaseSend = resolve; });
+          await send.click();
+          await page.waitForFunction(() => document.querySelector('button[aria-busy="true"]'));
+          assert.equal(await send.isDisabled(), true);
+          await send.evaluate((button) => button.click());
+          assert.equal(state.sends.length, 2, 'A repeated pending click must not submit again');
+          assert.deepEqual(state.sends[1], { to: a.from_address, subject: `Re: ${a.subject}`, body: 'Fixture reply with a clear recipient', threadId: a.gmail_thread_id });
+          state.releaseSend();
+          await page.getByText('Reply sent.', { exact: true }).waitFor();
+          assert.equal(await reply.inputValue(), '');
+          await shot(page, `sent-reply-${width}`);
+          await page.close();
+        });
+        await scenario(`Compose recovery, customer lookup, Quick Links and focus at ${width}`, async () => {
+          const { page, state } = await openPage(width);
+          await inbox(page);
+          const opener = page.getByRole('button', { name: 'New email', exact: true });
+          await opener.click();
+          const dialog = page.getByRole('dialog', { name: 'New email', exact: true });
+          await dialog.getByLabel('To', { exact: false }).fill('Avery');
+          await dialog.getByRole('button', { name: /Avery Sample/ }).click();
+          assert.equal(await dialog.getByLabel('To', { exact: false }).inputValue(), a.from_address);
+          await dialog.getByLabel('Subject', { exact: true }).fill('Fixture subject');
+          await dialog.getByLabel('Message', { exact: false }).fill('Fixture draft for recovery');
+          const links = dialog.getByRole('button', { name: 'Quick Links', exact: true });
+          await links.click();
+          const picker = page.getByRole('dialog', { name: 'Quick Links', exact: true });
+          await picker.getByRole('searchbox').fill('quote');
+          await shot(page, `quick-links-${width}`);
+          await geometry(page, `Quick Links ${width}`);
+          await page.keyboard.press('Escape');
+          assert.equal(await links.evaluate((element) => element === document.activeElement), true);
+          await links.click();
+          await picker.getByRole('button', { name: /^Request a quote/ }).click();
+          assert.ok((await dialog.getByLabel('Message', { exact: false }).inputValue()).includes('https://www.wavespestcontrol.com/quote/'));
+          await page.keyboard.press('Escape');
+          assert.equal(await page.getByRole('button', { name: 'Resume draft', exact: true }).evaluate((element) => element === document.activeElement), true);
+          await page.reload();
+          await page.getByRole('button', { name: 'Resume draft', exact: true }).click();
+          assert.equal(await dialog.getByLabel('To', { exact: false }).inputValue(), a.from_address);
+          assert.equal(await dialog.getByLabel('Subject', { exact: true }).inputValue(), 'Fixture subject');
+          await shot(page, `recovered-compose-${width}`);
+          await geometry(page, `Compose ${width}`);
+          if (width === 390) {
+            // Desktop engines expose zero env insets. Inject representative
+            // iPhone padding to verify the production panel's sizing rules.
+            const safeArea = await dialog.evaluate((node) => {
+              const original = [node.style.paddingTop, node.style.paddingBottom];
+              node.style.paddingTop = '59px'; node.style.paddingBottom = '34px';
+              const panel = node.getBoundingClientRect();
+              const footer = node.lastElementChild.getBoundingClientRect();
+              return { original, top: panel.top, bottom: panel.bottom, footerBottom: footer.bottom, viewport: innerHeight };
+            });
+            assert.ok(safeArea.top >= -1 && safeArea.bottom <= safeArea.viewport + 1 && safeArea.footerBottom <= safeArea.viewport - 33, 'Safe-area padding must keep the panel and footer inside the viewport');
+            await shot(page, 'compose-simulated-safe-area-390');
+            await dialog.evaluate((node, original) => { [node.style.paddingTop, node.style.paddingBottom] = original; }, safeArea.original);
+            await page.setViewportSize({ width, height: 480 });
+            await dialog.getByLabel('Message', { exact: false }).focus();
+            await dialog.getByLabel('Message', { exact: false }).scrollIntoViewIfNeeded();
+            const footer = await dialog.getByRole('button', { name: 'Send', exact: true }).boundingBox();
+            assert.ok(footer.y >= 0 && footer.y + footer.height <= 480);
+            await shot(page, 'compose-contracted-viewport-390');
+          }
+          await dialog.getByRole('button', { name: 'Discard draft', exact: true }).click();
+          await page.getByRole('button', { name: 'New email', exact: true }).waitFor();
+          assert.equal(state.sends.length, 0);
+          await page.close();
+        });
+      }
+      for (const origin of ['rows', 'direct link']) {
+        await scenario(`Back to inbox preserves browser history from ${origin}`, async () => {
+          const { page, state } = await openPage(1440);
+          const previous = `${server.baseUrl}/synthetic-history-entry`;
+          await page.route(previous, (route) => route.fulfill({ contentType: 'text/html', body: '<title>Synthetic previous page</title>' }));
+          await page.goto(previous);
+          if (origin === 'direct link') { state.emails = []; state.history = [a]; }
+          await page.goto(`${server.baseUrl}/admin/communications?tag=return${origin === 'direct link' ? `&id=${a.id}` : ''}#tab=email`);
+          if (origin === 'rows') {
+            await row(page).click(); await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+            await row(page, b).click(); await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+            await page.reload(); await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+            await page.goBack(); await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+            await page.goForward(); await page.getByRole('heading', { name: b.subject, exact: true }).waitFor();
+          } else {
+            await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+            await page.getByText('0 matching messages', { exact: true }).waitFor();
+          }
+          await page.setViewportSize({ width: 390, height: 844 });
+          await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+          await page.waitForURL((url) => url.pathname === '/admin/communications' && !url.searchParams.has('id'));
+          assert.equal(new URL(page.url()).searchParams.get('tag'), 'return');
+          await page.goBack();
+          assert.equal(page.url(), previous);
+          await page.close();
+        });
+      }
+
+      await scenario('Keyboard inbox selection, mobile return and authenticated attachment download', async () => {
+        const { page } = await openPage(390);
+        await inbox(page);
+        await row(page).focus(); await page.keyboard.press('Enter');
+        await page.getByRole('heading', { name: a.subject, exact: true }).waitFor();
+        assert.equal(await page.getByRole('heading', { name: a.subject, exact: true }).evaluate((node) => document.activeElement === node), true);
+        const downloading = page.waitForEvent('download');
+        await page.getByRole('link', { name: /Patio notes.pdf/ }).click();
+        const download = await downloading;
+        assert.equal(download.suggestedFilename(), 'Patio notes.pdf');
+        assert.equal(await download.failure(), null);
+        await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+        await page.waitForFunction((subject) => document.activeElement?.textContent?.includes(subject), a.subject);
+        assert.equal(new URL(page.url()).searchParams.has('id'), false);
+        await page.close();
+      });
+      await scenario('Loading, connection failure, inbox retry and partial counts', async () => {
+        const { page, state } = await openPage(390);
+        state.statusHold = new Promise((resolve) => { state.releaseStatus = resolve; });
+        await page.goto(`${server.baseUrl}/admin/communications#tab=email`);
+        await page.getByText('Loading email…', { exact: true }).waitFor();
+        await shot(page, 'loading-390');
+        state.fail.add('/admin/email/oauth/status'); state.releaseStatus();
+        await page.getByText('Email connection status is unavailable.', { exact: true }).waitFor();
+        assert.equal(await page.getByRole('button', { name: /Connect Gmail/ }).count(), 0);
+        await shot(page, 'connection-error-390');
+        state.fail.delete('/admin/email/oauth/status'); state.fail.add('/admin/email/inbox');
+        state.fail.add('/admin/email/stats'); state.fail.add('/admin/email/daily-digest');
+        await page.getByRole('button', { name: 'Try again', exact: true }).click();
+        await page.getByText('The email inbox is unavailable.', { exact: true }).waitFor();
+        await page.getByText('Email counts are unavailable.', { exact: true }).waitFor();
+        await shot(page, 'partial-data-390');
+        state.fail.delete('/admin/email/inbox'); state.emails = [];
+        await page.getByRole('region', { name: 'Email inbox', exact: true }).getByRole('button', { name: 'Try again', exact: true }).click();
+        await page.getByText('No emails found', { exact: true }).waitFor();
+        await shot(page, 'empty-inbox-390');
+        await page.close();
+      });
+      await scenario('Blocked sender failures retain the entered address and confirmed writes update the list', async () => {
+        const { page, state } = await openPage(390);
+        await inbox(page);
+        await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked senders', exact: true }).click();
+        await page.getByText('unwanted.example.invalid', { exact: true }).waitFor();
+        assert.equal(await page.getByRole('region', { name: 'Blocked senders', exact: true }).locator('ul').evaluate((node) => {
+          const card = node.parentElement.getBoundingClientRect(), row = node.firstElementChild.getBoundingClientRect();
+          return Math.abs(card.left - row.left) <= 1 && Math.abs(card.right - row.right) <= 1;
+        }), true, 'Blocked rows must fill their card without native list indentation');
+        await page.getByLabel('Domain or email to block', { exact: true }).fill('newsletter.example.invalid');
+        state.fail.add('/admin/email/block');
+        await page.getByRole('button', { name: 'Block', exact: true }).click();
+        await page.getByText('Could not block the sender. Try again.', { exact: true }).waitFor();
+        assert.equal(await page.getByLabel('Domain or email to block', { exact: true }).inputValue(), 'newsletter.example.invalid');
+        await shot(page, 'blocked-send-failure-390');
+        state.fail.delete('/admin/email/block');
+        await page.getByRole('button', { name: 'Block', exact: true }).click();
+        await page.getByText('newsletter.example.invalid', { exact: true }).waitFor();
+        const entry = page.getByRole('listitem').filter({ hasText: 'newsletter.example.invalid' });
+        await entry.getByRole('button', { name: 'Unblock', exact: true }).click();
+        await page.getByText('Sender unblocked.', { exact: true }).waitFor();
+        assert.equal(await entry.count(), 0);
+        await shot(page, 'blocked-senders-390');
+        await page.close();
+      });
+      await scenario('Filters, pagination and sandboxed HTML keep their existing contracts', async () => {
+        const { page, state } = await openPage(1440);
+        state.total = 101;
+        state.emails[0].body_html = '<p>Fixture HTML email content</p><script>parent.fixtureUnsafe = true</script>';
+        await inbox(page);
+        await page.getByRole('button', { name: 'Next', exact: true }).click();
+        await page.getByText('Page 2 of 3', { exact: true }).waitFor();
+        await page.getByRole('button', { name: 'Unread (7)', exact: true }).click();
+        await page.getByText('Page 1 of 3', { exact: true }).waitFor();
+        await page.getByLabel('Search emails', { exact: true }).fill('question');
+        await page.waitForResponse((response) => response.url().includes('/email/inbox?') && response.url().includes('search=question'));
+        const archivedResponse = page.waitForResponse((response) => response.url().includes('/email/inbox?') && response.url().includes('is_archived=true'));
+        await page.getByRole('button', { name: 'Archived', exact: true }).click();
+        await archivedResponse;
+        await row(page).click();
+        await page.frameLocator('iframe[title="Email body"]').getByText('Fixture HTML email content', { exact: true }).waitFor();
+        assert.equal(await page.locator('iframe[title="Email body"]').getAttribute('sandbox'), 'allow-popups allow-popups-to-escape-sandbox');
+        assert.equal(await page.evaluate(() => window.fixtureUnsafe), undefined);
+        await shot(page, 'html-email-1440');
+        await page.close();
+      });
+      await scenario('Long conversations follow new mail while preserving an older reading position', async () => {
+        const { page, state } = await openPage(1440);
+        state.history = Array.from({ length: 18 }, (_, index) => ({ ...a, id: `history-${index}`, has_attachments: false, attachments: [], body_text: `Fixture history message ${index + 1}.\n\nA longer update about the appointment and access notes.`, received_at: stamp(36 - index) }));
+        await inbox(page); await row(page).click();
+        const history = page.getByRole('region', { name: 'Email history', exact: true });
+        await history.getByText(state.history.at(-1).body_text, { exact: true }).waitFor();
+        assert.ok(await history.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 64));
+        await shot(page, 'long-history-1440');
+        await history.evaluate((node) => { node.scrollTop = 0; node.dispatchEvent(new Event('scroll', { bubbles: true })); });
+        const reply = page.getByRole('textbox', { name: 'Reply', exact: true });
+        await reply.fill('Fixture refresh while reading older mail');
+        await page.getByRole('button', { name: 'Send reply', exact: true }).click();
+        await page.getByText('Reply sent.', { exact: true }).waitFor();
+        assert.equal(await history.evaluate((node) => node.scrollTop), 0);
+        await page.close();
+      });
+      await scenario('CSR role cannot open Email or make Email requests', async () => {
+        const { page } = await openPage(390, { role: 'csr' });
+        await page.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
+        await channel(page, 'SMS').waitFor();
+        assert.equal(await channel(page, 'Email').count(), 0);
+        assert.equal(report.requests.filter((request) => request.stage === stage && request.path.startsWith('/admin/email/')).length, 0);
+        await page.close();
+      });
+      safari = await require('playwright').webkit.launch();
+      for (const [width, engine, coarse, label] of [[700, browser, true, '700 coarse'], [820, browser, true, '820 coarse'], [1024, browser, false, '1024 fine'], [1440, browser, false, '1440 fine'], [720, browser, false, '200 percent layout equivalent'], [390, safari, true, 'WebKit 390']]) {
+        await scenario(`Responsive controls and draft return: ${label}`, async () => {
+          const { page } = await openPage(width, { engine, coarse });
+          await inbox(page); await geometry(page, label);
+          await shot(page, `inbox-${label.replaceAll(' ', '-')}`);
+          await openMail(page);
+          await page.getByRole('textbox', { name: 'Reply', exact: true }).fill('Fixture responsive reply');
+          await geometry(page, `${label} reply`);
+          if (width < 1280) {
+            assert.equal(await row(page).isVisible(), false);
+            await page.getByRole('button', { name: 'Back to inbox', exact: true }).click();
+            await row(page).waitFor(); await openMail(page);
+            assert.equal(await page.getByRole('textbox', { name: 'Reply', exact: true }).inputValue(), 'Fixture responsive reply');
+          }
+          await shot(page, `reply-${label.replaceAll(' ', '-')}`);
+          await page.close();
+        });
+      }
+    }
     assert.deepEqual(report.unmatched, []);
     assert.deepEqual(report.pageErrors, []);
     report.passed = true;
   } finally {
     report.finishedAt = new Date().toISOString();
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
+    for (const state of states) { state.releaseSend?.(); state.releaseDraft?.(); state.releaseThread?.(); state.releaseInbox?.(); state.releaseStatus?.(); }
     await server?.close();
     await Promise.allSettled([browser, safari].filter(Boolean).map(async (engine) => {
       for (const context of engine.contexts()) await context.setOffline(true).catch(() => {});

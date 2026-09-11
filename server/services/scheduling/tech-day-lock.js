@@ -17,17 +17,19 @@
 // overlapping day-sets always acquire in the same order (no lock-order
 // deadlock).
 
-async function lockTechDays(trx, pairs) {
+async function lockTechDays(trx, pairs, { wait = true } = {}) {
   const keys = [...new Set(
     pairs
       .filter(p => p && p.date)
       .map(p => `${p.techId || 'unassigned'}:${p.date}`),
   )].sort();
   for (const key of keys) {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    const result = await trx.raw(
+      wait ? 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))'
+        : 'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
       ['slot-reserve', key],
     );
+    if (!wait && result.rows[0]?.locked !== true) return false;
   }
   return keys;
 }

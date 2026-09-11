@@ -596,6 +596,11 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
         [callLogId, recordingSid],
       );
     }
+    // Recompute unreviewed callback fallbacks after extraction, including
+    // source-call timing corrections. Gate-off never references the new column.
+    const callbackDeadlineUpdate = require('./callback-cards').enabled()
+      ? "callback_due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' AND call_commitments.kind = 'callback' AND call_commitments.party = 'waves' THEN NULL ELSE call_commitments.callback_due_at END,"
+      : '';
     let written = 0;
     for (const row of rows) {
       // ON CONFLICT … DO UPDATE only when the row is still the AI's to
@@ -608,6 +613,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
             evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
+           ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
            channel = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.channel ELSE call_commitments.channel END,
            due_at = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_at ELSE call_commitments.due_at END,
@@ -685,6 +691,9 @@ async function recordCallCommitments({
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
+    if (!result.ownershipLost && require('./callback-cards').enabled()) {
+      await require('./callback-cards').prepareCallbackCards(conn, { callId: call.id });
+    }
     return summary;
   } catch (err) {
     logger.warn(`[call-commitments] recording failed for call ${call?.id}: ${err.message}`);
@@ -698,14 +707,30 @@ async function listForCall(conn, callLogId) {
   return rows.map(normalizeRow);
 }
 
+function effectiveDueAt(row, cardsEnabled) {
+  const isCard = row.kind === 'callback' && row.party === 'waves' && cardsEnabled;
+  // An undated card projects the legacy implicit deadline it is judged by.
+  const base = row.due_at || (isCard ? (row.callback_due_at || implicitDueAt(row)) : null) || null;
+  if (!base || !isCard || !row.snoozed_until) return base;
+  return new Date(row.snoozed_until).getTime() > new Date(base).getTime() ? row.snoozed_until : base;
+}
+
 function normalizeRow(row) {
   const parse = (v) => {
     if (v == null) return null;
     if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
     return v;
   };
+  const cardsEnabled = require('./callback-cards').enabled();
   return {
     ...row,
+    // Display the deadline the queue judges — the staffed one, pushed out
+    // to the end of an active snooze — without turning it into an editable
+    // stated promise (due_at and callback_due_at keep the original times).
+    effective_due_at: effectiveDueAt(row, cardsEnabled),
+    // A snooze is card policy: with the gate off the server ignores it, so
+    // no reader sees a snooze the queue no longer honours.
+    ...(row.snoozed_until !== undefined ? { snoozed_until: cardsEnabled ? row.snoozed_until : null } : {}),
     evidence: parse(row.evidence) || [],
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),
@@ -1049,7 +1074,15 @@ function whereEstimateCustomerOwnership(query, customerId) {
 
 async function resolveFulfillment(conn, commitment, call) {
   const started = call?.created_at ? new Date(call.created_at) : null;
-  const after = callEndedAt(call);
+  // Evidence counts from the end of the call — or, for a callback card whose
+  // obligation was RENEWED (reopened by staff, or edited into a new
+  // promise), from that renewal: the record that kept the promise before
+  // is not proof it was kept again. Claiming, snoozing or confirming does
+  // not move the boundary, so a call returned before that action still
+  // counts.
+  const ended = callEndedAt(call);
+  const renewed = ended ? await obligationRenewedAt(conn, commitment) : null;
+  const after = renewed && renewed.getTime() > ended.getTime() ? renewed : ended;
   if (!started || Number.isNaN(started.getTime()) || !after) return null;
   const until = windowEnd(after);
   const phone = contactPhoneOf(call);
@@ -1133,6 +1166,43 @@ async function resolveFulfillment(conn, commitment, call) {
       return sms ? { kind: "sms_sent", record_type: "sms_log", record_id: sms.id, matched_at: sms.created_at, strength: "association", basis: `confirmation_text_to_caller_within_${ASSOCIATION_WINDOW_DAYS}_days` } : null;
     }
     case "callback": {
+      if (!phone) return null;
+      // Each attempt is judged under the policy it was placed under. An
+      // attempt under the CARD policy — the card's commitment link, or the
+      // Call Log action's policy-stamped source-call link — needs a
+      // completed customer leg plus a reviewed extraction of a real
+      // conversation; ringing the staff phone or voicemail is not proof. A
+      // pre-policy call keeps the legacy connected-call rule below. The gate
+      // plays no part, so rollback cannot weaken a card attempt and enabling
+      // the gate cannot strip an earlier attempt of its rule.
+      // Two plain arms, no COALESCE: each arm implies one of the partial
+      // expression indexes on call_log.metadata (relatedCommitmentId;
+      // relatedCallId under the card policy), so the watchdog's per-promise
+      // probes are index lookups rather than sequential scans of call_log.
+      // The source-call arm covers the Call Log action only (no commitment
+      // link): a card call for a SIBLING promise on the same source call
+      // carries both keys and must never be this promise's proof or its
+      // text-fallback suppressor.
+      const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
+      const policyBindings = [commitment.id, commitment.call_log_id];
+      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      const connected = await conn('call_log').where('direction', 'outbound')
+        .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
+        .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+        .whereRaw(policyLink, policyBindings)
+        .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+        .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+        .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+        .modify((b) => { phoneWhere(b, 'to_phone', phone); sameCustomer(b, 'customer_id'); })
+        .orderBy('created_at', 'asc').first('id', 'created_at', 'metadata');
+      if (connected) {
+        // The proof is the completed customer leg, so the promise is kept
+        // when that leg ended, not when the staff leg was dialed.
+        const legEnded = Date.parse(connected.metadata?.customer_leg?.ended_at || '');
+        return { kind: 'outbound_call', record_type: 'call_log', record_id: connected.id,
+          matched_at: Number.isFinite(legEnded) ? new Date(legEnded) : connected.created_at,
+          strength: 'direct', basis: 'callback_customer_conversation' };
+      }
       // A returned callback IS the fulfilment — the phone is the linkage.
       // Same completion predicate as the callbacks digest
       // (unworked-comms-watcher, "Already returned"): a CONNECTED outbound
@@ -1143,18 +1213,23 @@ async function resolveFulfillment(conn, commitment, call) {
       // with no inbound anchor). A LINKED call is returned only by a
       // record linked to the same customer (shared household numbers);
       // an unlinked call keeps the phone-level match. No outer window: a
-      // callback returned late was still returned.
-      if (!phone) return null;
-      const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
+      // callback returned late was still returned. No card-policy attempt
+      // — this promise's or any other's, whose parent-leg duration says
+      // nothing about the customer leg — is ever judged by this rule, and
+      // once one exists for this promise a text no longer stands in for the
+      // conversation it promised.
       const outbound = await conn("call_log")
         .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
         .where("direction", "outbound")
         .where("created_at", ">", after)
+        .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
         .whereRaw("COALESCE(duration_seconds, 0) >= 60")
         .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomer(b, "customer_id"); })
         .orderBy("created_at", "asc")
         .first("id", "created_at");
       if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.created_at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
+      const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
+      if (cardAttempt) return null;
       const text = await conn("sms_log as os")
         .where("os.direction", "outbound")
         .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
@@ -1281,10 +1356,64 @@ async function resolveFulfillment(conn, commitment, call) {
 // Direct proof marks an open AI row fulfilled. Association proof is stored
 // as a hint (status stays open, nothing is invented). Human-touched rows are
 // left to the human either way.
+// When a callback card's obligation was last (re)stated: a human-recorded
+// promise exists from the moment it was typed, and the card's audited
+// callback_edit / callback_reopen events restate it (the row's reviewed_at
+// is overwritten by every later action, so it cannot carry that history).
+// Null for anything that is not a reviewed callback card.
+async function obligationRenewedAt(conn, commitment) {
+  if (!commitment || commitment.kind !== 'callback' || commitment.party !== 'waves') return null;
+  if (!['confirmed', 'edited'].includes(commitment.human_state)) return null;
+  const events = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: commitment.id })
+    .whereIn('action', ['callback_edit', 'callback_reopen']).select('action', 'created_at', 'metadata');
+  const meta = (e) => { try { return typeof e.metadata === 'string' ? JSON.parse(e.metadata) : (e.metadata || {}); } catch { return {}; } };
+  // A save that changed nothing (metadata.restated === false) restates
+  // nothing — but the first such save on a card edited before callback
+  // cards existed carries legacy_boundary: the reviewed_at that pre-card
+  // edit left, captured before the save advanced it.
+  const edits = events.filter((e) => e.action === 'callback_edit');
+  const restatements = events.filter((e) => !(e.action === 'callback_edit' && meta(e).restated === false));
+  // The boundary is the event's renewed_at, stamped after the action took
+  // its row lock: the row's created_at defaults to the transaction start,
+  // and a call returned while the action waited for the lock preceded it.
+  const times = [commitment.source === 'human' ? commitment.created_at : null, ...restatements.map((e) => meta(e).renewed_at || e.created_at),
+    ...edits.map((e) => meta(e).legacy_boundary)];
+  // A card edited before callback cards existed went through the generic
+  // path, which wrote no callback_edit event: while none exists at all its
+  // reviewed_at is the only boundary on record (at worst later than the
+  // edit, never earlier), so an outbound call from before that historical
+  // edit cannot close the revised obligation. Once any callback_edit event
+  // exists, reviewed_at may have been advanced by a save that restated
+  // nothing and is not a boundary.
+  if (commitment.human_state === 'edited' && !edits.length) times.push(commitment.reviewed_at);
+  const ms = times.filter(Boolean).map((t) => new Date(t).getTime()).filter(Number.isFinite);
+  return ms.length ? new Date(Math.max(...ms)) : null;
+}
+
+// The rows fulfillment refresh may still write: no human verdict, or a
+// callback card's confirm / edit while the card policy is on or the card
+// already placed a call (a persisted attempt keeps its proof path after
+// rollback).
+function refreshableVerdictSql() {
+  const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
+  return ["(human_state IS NULL OR (kind = 'callback' AND party = 'waves' AND human_state IN ('confirmed', 'edited') AND (? OR EXISTS ("
+    + "SELECT 1 FROM call_log attempt WHERE (attempt.metadata->>'relatedCommitmentId' = call_commitments.id::text"
+    // The source-call arm covers the Call Log action only: a sibling
+    // promise's card attempt (both keys) must not make THIS row refreshable.
+    + " OR (attempt.metadata->>'relatedCommitmentId' IS NULL AND attempt.metadata->>'relatedCallId' = call_commitments.call_log_id::text AND attempt.metadata->>'callback_policy' = 'card'))"
+    + " AND COALESCE(attempt.source, '') <> ?))))",
+  [require('./callback-cards').enabled(), VOICE_RELAY_SANDBOX_SOURCE]];
+}
+
 async function refreshFulfillment(conn, callLogId, call = null) {
   const row = call || await conn("call_log").where({ id: callLogId }).first("id", "twilio_call_sid", "customer_id", "from_phone", "to_phone", "direction", "created_at", "bridged_at", "duration_seconds", "metadata");
   if (!row) return { checked: 0, fulfilled: 0, hinted: 0 };
-  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereNull("human_state");
+  // A human verdict is the office's call and is never rewritten — except
+  // the review a callback CARD records when staff claim, snooze or start
+  // calling (callback-cards.actOnCallback, the callback bridge): that
+  // confirm protects the promise from a later extraction withdrawing it,
+  // and the card's own conversation evidence must still close it.
+  const open = await conn("call_commitments").where({ call_log_id: callLogId, status: "open" }).whereRaw(...refreshableVerdictSql());
   let fulfilled = 0;
   let hinted = 0;
   let cleared = 0;
@@ -1307,7 +1436,11 @@ async function refreshFulfillment(conn, callLogId, call = null) {
       // completed lookup clears it; an error above leaves it alone.
       cleared += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .whereRaw("fulfillment ->> 'strength' = 'association'")
         .update({ fulfillment: null, updated_at: new Date() });
       continue;
@@ -1315,14 +1448,23 @@ async function refreshFulfillment(conn, callLogId, call = null) {
     if (proof.strength === "direct") {
       fulfilled += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .update({ status: "fulfilled", fulfillment: JSON.stringify(proof), fulfilled_at: proof.matched_at || new Date(), updated_at: new Date() });
     } else {
       // A hint is written once and refreshed only while it is still a hint.
       hinted += await conn("call_commitments")
         .where({ id: c.id, status: "open" })
-        .whereNull("human_state")
+        .whereRaw(...refreshableVerdictSql())
+        // Proof was computed from the snapshot row: a claim or reopen that
+        // landed meanwhile moved the evidence boundary, so the write is
+        // skipped and the next refresh judges the new version.
+        .whereRaw("date_trunc('milliseconds', updated_at) = ?", [c.updated_at])
         .whereRaw("(fulfillment IS NULL OR fulfillment ->> 'strength' = 'association')")
+        .whereRaw("fulfillment IS DISTINCT FROM ?::jsonb", [JSON.stringify(proof)])
         .update({ fulfillment: JSON.stringify(proof), updated_at: new Date() });
     }
   }
@@ -1358,15 +1500,29 @@ function implicitDueAt(row) {
   const from = basis ? new Date(basis) : null;
   if (!from || Number.isNaN(from.getTime())) return null;
   if (row.kind === 'send_estimate') return new Date(from.getTime() + OVERDUE_IMPLICIT_ESTIMATE_HOURS * 60 * 60 * 1000);
-  if (row.kind === 'callback') return endOfETDay(from);
+  // A callback card's staffed deadline; a card left undated (calendar or
+  // configuration failure at preparation) keeps the legacy implicit
+  // deadline — the end of the call's ET day — so it stays in the reminder
+  // lane instead of waiting for someone to open the queue.
+  if (row.kind === 'callback') return require('./callback-cards').enabled()
+    ? (row.callback_due_at ? new Date(row.callback_due_at) : endOfETDay(from)) : endOfETDay(from);
   return new Date(from.getTime() + OVERDUE_IMPLICIT_DAYS * 24 * 60 * 60 * 1000);
+}
+
+// The moment a promise becomes overdue: the stated due time, else the
+// implicit one; a snoozed callback card waits for the later of that and
+// its snooze (effectiveDueSql is the same rule in SQL).
+function overdueAt(row) {
+  const due = row.due_at ? new Date(row.due_at) : implicitDueAt(row);
+  if (!due) return null;
+  const snoozed = row.snoozed_until && require('./callback-cards').enabled() ? new Date(row.snoozed_until) : null;
+  return snoozed && snoozed.getTime() > due.getTime() ? snoozed : due;
 }
 
 function isOverdue(row, now = new Date()) {
   if (!row || row.status !== 'open' || row.human_state === 'dismissed') return false;
-  if (row.due_at) return new Date(row.due_at).getTime() < now.getTime();
-  const implicit = implicitDueAt(row);
-  return !!implicit && implicit.getTime() < now.getTime();
+  const due = overdueAt(row);
+  return !!due && due.getTime() < now.getTime();
 }
 
 // isOverdue's deadline as SQL over a call_commitments alias and its
@@ -1375,12 +1531,22 @@ function isOverdue(row, now = new Date()) {
 function effectiveDueSql(cc = 'cc', cl = 'cl') {
   const basis = `CASE WHEN ${cc}.source = 'human' THEN ${cc}.created_at ELSE ${cl}.created_at END`;
   const promptKinds = [...PROMPT_KINDS].map((k) => `'${k}'`).join(', ');
-  return `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
+  const cardsEnabled = require('./callback-cards').enabled();
+  const legacyCallbackDue = `(((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`;
+  // An undated card keeps the legacy implicit deadline (implicitDueAt).
+  const callbackDue = cardsEnabled ? `COALESCE(${cc}.callback_due_at, ${legacyCallbackDue})` : legacyCallbackDue;
+  const deadline = `CASE WHEN ${cc}.due_at IS NOT NULL THEN ${cc}.due_at`
     + ` WHEN ${cc}.party <> 'waves' THEN NULL`
     + ` WHEN ${cc}.kind = 'send_estimate' THEN (${basis}) + interval '${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours'`
-    + ` WHEN ${cc}.kind = 'callback' THEN (((${basis}) AT TIME ZONE 'America/New_York')::date + 1)::timestamp AT TIME ZONE 'America/New_York'`
+    + ` WHEN ${cc}.kind = 'callback' THEN ${callbackDue}`
     + ` WHEN ${cc}.kind IN (${promptKinds}) THEN (${basis}) + interval '${OVERDUE_IMPLICIT_DAYS} days'`
     + ' ELSE NULL END';
+  if (!cardsEnabled) return deadline;
+  // A snoozed callback card is owed when the snooze ends, not before: the
+  // same rule isOverdue applies, so the queue order, the overdue flag and
+  // the watchdog agree. Only callback cards carry snoozed_until; a NULL
+  // deadline stays NULL (GREATEST of a NULL deadline and NULL is NULL).
+  return `GREATEST((${deadline}), CASE WHEN (${deadline}) IS NULL THEN NULL ELSE ${cc}.snoozed_until END)`;
 }
 
 // An untouched AI row a LATER commitments pass no longer detected: kept for
@@ -1404,7 +1570,28 @@ function selectOverdue(rows, { now = new Date() } = {}) {
   return (rows || []).filter((r) => isOverdue(r, now));
 }
 
-async function listOpenCommitments(conn, { party = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, now = new Date() } = {}) {
+// The customer / lead scope of a commitments read, over the `cl` call_log
+// alias. Shared by the queue query and callback preparation so a filtered
+// read prepares exactly the rows it returns.
+function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSid = null } = {}) {
+  if (customerId) builder.where('cl.customer_id', customerId);
+  if (leadId) {
+    builder.where(function leadScope() {
+      this.whereRaw("cl.metadata ->> 'lead_id' = ?", [String(leadId)]);
+      // A relay call that REUSED an existing lead leaves leads.twilio_call_sid
+      // on the original call and stamps itself relay_lead_id (capture_lead).
+      this.orWhereRaw("cl.metadata ->> 'relay_lead_id' = ?", [String(leadId)]);
+      if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
+    });
+  }
+  return builder;
+}
+
+// `prepare`: the staff queue and the reminder scan initialize undated
+// callback cards (deadline, default owner, audit row) as they read; every
+// other caller — the Intelligence Bar's read-only tool, the integrations
+// worker — gets a pure read and sees whatever those paths persisted.
+async function listOpenCommitments(conn, { party = null, kind = null, customerId = null, leadId = null, limit = 100, offset = 0, includeHints = true, prepare = false, now = new Date() } = {}) {
   let leadSid = null;
   if (leadId) {
     // No local catch: a failed lookup must reach the route's error handler
@@ -1413,6 +1600,12 @@ async function listOpenCommitments(conn, { party = null, customerId = null, lead
     const lead = await conn('leads').where({ id: leadId }).first('twilio_call_sid');
     leadSid = lead?.twilio_call_sid || null;
   }
+  // Preparation happens on the FIRST page only: a deadline installed
+  // between pages re-sorts the queue under a walker's offset (Load more,
+  // the watchdog scan) and would skip rows or repeat them. Later pages read
+  // the snapshot the first page established; the next first-page read
+  // prepares whatever arrived meanwhile.
+  if (prepare && !(Number(offset) > 0)) await require('./callback-cards').prepareCallbackCards(conn, { customerId, leadId, leadSid });
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
     .leftJoin('customers as cu', 'cu.id', 'cl.customer_id')
@@ -1420,16 +1613,8 @@ async function listOpenCommitments(conn, { party = null, customerId = null, lead
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
     .modify((b) => {
       if (party === 'waves' || party === 'customer') b.where('cc.party', party);
-      if (customerId) b.where('cl.customer_id', customerId);
-      if (leadId) {
-        b.where(function leadScope() {
-          this.whereRaw("cl.metadata ->> 'lead_id' = ?", [String(leadId)]);
-          // A relay call that REUSED an existing lead leaves leads.twilio_call_sid
-          // on the original call and stamps itself relay_lead_id (capture_lead).
-          this.orWhereRaw("cl.metadata ->> 'relay_lead_id' = ?", [String(leadId)]);
-          if (leadSid) this.orWhere('cl.twilio_call_sid', leadSid);
-        });
-      }
+      if (kind) b.where('cc.kind', kind);
+      scopeCommitmentRows(b, { customerId, leadId, leadSid });
       if (!includeHints) b.whereNull('cc.fulfillment');
     })
     // Overdue first — by the SAME rule isOverdue applies (the stated due
@@ -1459,7 +1644,7 @@ async function listOpenCommitments(conn, { party = null, customerId = null, lead
 // out of the queue). The watchdog re-checks its snapshot immediately
 // before paging, so a promise the office settled — or a pass withdrew —
 // while the scan was refreshing never rings.
-async function stillOpenIds(conn, ids) {
+async function stillOpenIds(conn, ids, { now = new Date() } = {}) {
   if (!ids?.length) return new Set();
   const rows = await conn('call_commitments as cc')
     .join('call_log as cl', 'cl.id', 'cc.call_log_id')
@@ -1467,6 +1652,10 @@ async function stillOpenIds(conn, ids) {
     .where('cc.status', 'open')
     .whereRaw("cc.human_state IS DISTINCT FROM 'dismissed'")
     .whereRaw(`NOT ${staleAiRowSql('cc')}`)
+    .modify((q) => {
+      if (require('./callback-cards').enabled()) q.whereRaw(
+        "(cc.kind <> 'callback' OR cc.party <> 'waves' OR cc.snoozed_until IS NULL OR cc.snoozed_until <= ?)", [now]);
+    })
     .select('cc.id');
   return new Set(rows.map((r) => r.id));
 }
@@ -1626,6 +1815,11 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
       if (!items.length) return summary;
       const result = await upsertCommitments(trx, call.id, items, { generation: null, extractorVersion: RELAY_EXTRACTOR_VERSION });
       summary.written = result.written;
+      // A late relay pass re-upserting an unreviewed callback clears its
+      // prepared deadline (the upsert's callback_due_at reset): prepare it
+      // again here, in the same transaction, the way recordCallCommitments
+      // does, so no pure consumer sees a dated card turn undated.
+      if (result.written && require('./callback-cards').enabled()) await require('./callback-cards').prepareCallbackCards(trx, { callId: call.id });
       return summary;
     });
   } catch (err) {
@@ -1637,13 +1831,40 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
 // ── Human corrections ──────────────────────────────────────────────────────
 const HUMAN_ACTIONS = new Set(['confirm', 'dismiss', 'fulfill', 'reopen', 'edit']);
 
-async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy } = {}) {
+// `renewalAudit`: a callback card's reopen, or an edit that changes the
+// obligation, moves the evidence boundary fulfillment refresh honours
+// (obligationRenewedAt reads the audited callback_reopen / callback_edit
+// events). The card action path (callback-cards.actOnCallback) records
+// those events itself and passes false; every other caller — the generic
+// PATCH while the card gate is off, SMS actions — gets them recorded here,
+// so a card reopened after a gate rollback is not closed again by the
+// conversation that fulfilled it before.
+async function applyHumanUpdate(conn, id, { action, description, due_at, note, reviewedBy, renewalAudit = true } = {}) {
   if (!HUMAN_ACTIONS.has(action)) throw Object.assign(new Error(`Unknown commitment action: ${action}`), { status: 400 });
+  // The row update and its renewal boundary commit together: a refresh
+  // running between them would close a reopened callback on the old
+  // conversation, and a failed audit insert would leave the boundary
+  // missing for good. Callers that pass the plain connection get one
+  // transaction here; a caller's own transaction is reused as is.
+  if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
+  // Locked: the edit is classified (restated or not) against the row the
+  // update will overwrite, never a snapshot another save has since changed.
+  const before = renewalAudit && ['reopen', 'edit'].includes(action)
+    ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
     case 'confirm':
-      patch.human_state = 'confirmed';
+      // Confirming an EDITED callback card reaffirms the edit rather than
+      // un-editing it: the edited state and its review time stay, because
+      // for a card edited before callback cards existed that reviewed_at
+      // is the only evidence boundary on record (obligationRenewedAt).
+      // Other commitments keep the plain confirm.
+      patch.human_state = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN 'edited' ELSE 'confirmed' END");
+      patch.reviewed_at = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN reviewed_at ELSE ? END", [patch.reviewed_at]);
+      patch.reviewed_by = conn.raw("CASE WHEN kind = 'callback' AND party = 'waves' AND human_state = 'edited' THEN reviewed_by ELSE ? END", [patch.reviewed_by]);
       break;
     case 'dismiss':
       patch.human_state = 'dismissed';
@@ -1690,7 +1911,41 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   }
   const updated = await conn('call_commitments').where({ id }).update(patch);
   if (!updated) throw Object.assign(new Error('Commitment not found'), { status: 404 });
+  if (before && before.kind === 'callback' && before.party === 'waves') {
+    const renewal = action === 'edit' ? await callbackEditEventMetadata(conn, before, { description, due_at }) : {};
+    // renewed_at is taken here, after the locked pre-read and the update —
+    // not the audit row's created_at, which is the transaction start.
+    await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
+      action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
+}
+
+// The callback_edit event's metadata, read against the LOCKED pre-update
+// row: whether the obligation was restated, and — for the first save that
+// restates nothing on a card edited before callback cards existed (no
+// callback_edit event yet) — legacy_boundary, the reviewed_at that pre-card
+// edit left, so obligationRenewedAt keeps it once reviewed_at moves on.
+async function callbackEditEventMetadata(conn, row, { description, due_at }) {
+  const restated = editRestatesRow(row, { description, due_at });
+  if (restated || row.human_state !== 'edited') return { restated };
+  const prior = await conn('audit_log').where({ resource_type: 'call_commitment', resource_id: row.id, action: 'callback_edit' }).first('id');
+  return prior ? { restated } : { restated, legacy_boundary: row.reviewed_at ? new Date(row.reviewed_at).toISOString() : null };
+}
+
+// Whether an edit changes the obligation itself: the wording, or the stated
+// deadline at the minute precision the editor round-trips. A malformed
+// due_at counts as a restatement (applyHumanUpdate rejects it anyway).
+function editRestatesRow(row, { description, due_at }) {
+  if (description !== undefined && String(description || '').trim().slice(0, 2000) !== String(row.description || '')) return true;
+  if (due_at !== undefined) {
+    const parsed = parseDueAt(due_at);
+    if (Number.isNaN(parsed)) return true;
+    const minute = (t) => (t ? Math.floor(new Date(t).getTime() / 60000) : null);
+    if (minute(parsed) !== minute(row.due_at)) return true;
+  }
+  return false;
 }
 
 async function addHumanCommitment(conn, callLogId, { party, kind, description, due_at = null, channel = null, reviewedBy = null } = {}) {
@@ -1730,7 +1985,8 @@ async function addHumanCommitment(conn, callLogId, { party, kind, description, d
     reviewed_at: new Date(),
     status: 'open',
   }).onConflict(['call_log_id', 'commitment_key']).ignore().returning('*');
-  if (row) return normalizeRow(row);
+  const prepared = await require('./callback-cards').prepareCallbackCards(conn, { callId: callLogId });
+  if (row && !prepared) return normalizeRow(row);
   const existing = await conn('call_commitments').where({ call_log_id: callLogId, commitment_key: key }).first();
   return normalizeRow(existing);
 }
@@ -1842,6 +2098,7 @@ module.exports = {
   witnessAt,
   directEstimatesSentAfter,
   implicitDueAt,
+  effectiveDueSql,
   staleAiRowSql,
   stillOpenIds,
   OVERDUE_IMPLICIT_ESTIMATE_HOURS,
@@ -1856,13 +2113,17 @@ module.exports = {
   resolveFulfillment,
   refreshFulfillment,
   applyHumanUpdate,
+  editRestatesRow,
+  callbackEditEventMetadata,
   addHumanCommitment,
   buildCallOutcomes,
   OVERDUE_IMPLICIT_DAYS,
   PROMPT_KINDS,
   RELAY_EXTRACTOR_VERSION,
   isOverdue,
+  overdueAt,
   selectOverdue,
+  scopeCommitmentRows,
   listOpenCommitments,
   deriveRelayCommitments,
   recordRelayCommitments,

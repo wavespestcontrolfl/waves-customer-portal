@@ -104,8 +104,12 @@ describe('Home under a saved-property selection', () => {
   it('shows the lawn teaser under a secondary house when the lawn read echoes it', async () => {
     api.getLawnHealth.mockResolvedValue({ hasLawnCare: true, scores: { overallScore: 80 }, initialScores: { overallScore: 60 }, photos: [], trend: [], propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
     render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
-    expect(await screen.findByTestId('home-primary-facts-notice')).toHaveTextContent('Your protection score and local alerts');
+    // The notice renders with the "lawn health" wording until the lawn read
+    // resolves, so wait for the echoed scope to drop it rather than asserting
+    // the moment the element exists.
     await waitFor(() => expect(api.getLawnHealth).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId('home-primary-facts-notice')).toHaveTextContent('Your protection score and local alerts'));
+    expect(screen.getByTestId('home-primary-facts-notice')).not.toHaveTextContent('lawn health');
   });
   it('withholds the lawn teaser and re-reads the list when the lawn echo names ANOTHER house', async () => {
     const refresh = vi.fn();

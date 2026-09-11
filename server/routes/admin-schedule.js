@@ -7006,10 +7006,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // options.expect); deliberately NOT SELECT..FOR UPDATE, which
               // would widen this quick single-row mover's tx shape for no
               // added safety. updated_at stays out of the predicate: knex
-              // never auto-touches it and not every mover stamps it (this
-              // UPDATE doesn't), so it isn't a reliable change marker. Zero
-              // rows matched = the row changed under us; refuse this id (the
-              // batch carries the reason).
+              // never auto-touches it, so it isn't a reliable CAS marker; this
+              // UPDATE does stamp it (the movers' change time, which SMS
+              // follow-up reads). Zero rows matched = the row changed under
+              // us; refuse this id (the batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
               // Tech-day membership change (bulk board move): shared fence
               // for the leaving and joining day + drop the stale sequence
@@ -7042,7 +7042,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   }),
                 svc,
               )
-                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates) })
+                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates), updated_at: new Date() })
                 // The technician on the COMMITTED row (the CAS does not pin
                 // technician_id): the move notice below goes to them.
                 .returning(['id', 'technician_id']);
@@ -8711,6 +8711,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await acquireOccupancyLocks(trx, [...lockedRecurrenceDates]);
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
+      }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung (slot-reservation's order) and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      if (reServiceConversionZeroPrice) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
@@ -11107,7 +11120,13 @@ async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false
 // atomic paid transition; open PaymentIntent cancelled/refused first), then send
 // the receipt. Never throws to the route: every non-send path returns a typed
 // reason the modal can explain.
-async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false } = {}) {
+// actorTechnicianId: the operator recording the prepayment — the actor of
+// the invoice-issued closeout's visit transition (GitHub r4 P1 #4127).
+// actorRole: their AUTHENTICATED staff role (req.techRole) — this route
+// admits technicians (requireTechOrAdmin), so the closeout's own audit
+// must record 'technician' rather than folding every non-null actor into
+// 'admin' (GitHub r7 P2 #4127).
+async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null, actorRole = null } = {}) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -11140,9 +11159,21 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
   const invoice = minted.invoice;
   if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
 
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+  // GATE_INVOICE_ISSUED_CLOSES_VISIT): cash taken at the visit and applied
+  // to its invoice is money received by hand — the same proof
+  // recordManualPayment closes the visit on (GitHub r4 P1 #4127). Runs
+  // after the paid flip commits (and again on the already-paid resend, the
+  // operator's reachable retry); a completed visit refuses quietly.
+  const closeOutOnPaid = async () => {
+    const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+    await closeOutVisitForIssuedInvoice({ invoiceId: invoice.id, trigger: 'paid', actorTechnicianId, actorRole });
+  };
+
   // Already settled (a prior mark-prepaid, or a card/ACH payment landed): just
   // (idempotently) send the receipt for the existing paid invoice.
   if (['paid', 'prepaid'].includes(invoice.status)) {
+    await closeOutOnPaid();
     return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated });
   }
 
@@ -11256,6 +11287,10 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
     }
   }
 
+  // The visit-linked invoice is paid (this call, or a race winner's): close
+  // the visit it bills out quietly.
+  await closeOutOnPaid();
+
   return sendPrepaidReceiptForInvoice(outcome.invoice, { operatorInitiated });
 }
 
@@ -11344,7 +11379,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (decision.attempt) {
       // Authenticated operator action with an explicit receipt request —
       // operator provenance for the 8AM-8PM send window.
-      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true }).catch((err) => {
+      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null }).catch((err) => {
         logger.error(`[schedule] prepaid receipt failed for ${req.params.id}: ${err.message}`);
         return { sent: false, reason: 'error' };
       });
@@ -17695,16 +17730,24 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
     const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
       .sort((a, b) => a - b);
-    const { WEEKLY_DAYS_OFF_KEY } = require('../services/scheduling/blackout-dates');
-    await db('system_settings')
-      .insert({
-        key: WEEKLY_DAYS_OFF_KEY,
-        value: JSON.stringify(days),
-        category: 'scheduling',
-        description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
-      })
-      .onConflict('key')
-      .merge({ value: JSON.stringify(days), updated_at: db.fn.now() });
+    const { WEEKLY_DAYS_OFF_KEY, lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — serializes against a
+    // capacity reservation transaction's shared read (arrival-route.js
+    // assertCapacityEligibility) so a hold cannot commit for a day this
+    // write is about to close (codex #4346 P2). See blackout-dates.js for
+    // lock order.
+    await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      await trx('system_settings')
+        .insert({
+          key: WEEKLY_DAYS_OFF_KEY,
+          value: JSON.stringify(days),
+          category: 'scheduling',
+          description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
+        })
+        .onConflict('key')
+        .merge({ value: JSON.stringify(days), updated_at: trx.fn.now() });
+    });
     logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
     flushEstimateSlotCaches();
     res.json({ success: true, weeklyDaysOff: days });
@@ -17720,11 +17763,18 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     }
     // Upsert keeps the button idempotent — re-adding a date just updates
     // the reason instead of tripping the unique constraint.
-    const [row] = await db('schedule_blackout_dates')
-      .insert({ date, reason: reason || null })
-      .onConflict('date')
-      .merge({ reason: reason || null })
-      .returning(['id', 'date', 'reason']);
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const row = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      const [inserted] = await trx('schedule_blackout_dates')
+        .insert({ date, reason: reason || null })
+        .onConflict('date')
+        .merge({ reason: reason || null })
+        .returning(['id', 'date', 'reason']);
+      return inserted;
+    });
     // Reason is free-form admin text — never log it (PII rule): a staffer
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
@@ -17735,7 +17785,13 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
 
 router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
-    const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const deleted = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      return trx('schedule_blackout_dates').where({ id: req.params.id }).del();
+    });
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     flushEstimateSlotCaches();
     res.json({ success: true });
