@@ -33,7 +33,6 @@ const {
   DEPOSIT_FOLLOWUP_WINDOW,
 } = require("./estimate-deposits");
 const { customerConvertedSince } = require("./estimate-conversion-guard");
-const { publicExpiresAt, FIXED_BID_VALIDITY_ABSENT_SQL } = require("./proposal-bid");
 
 // ── Safety gates (see: "don't be annoying" PR) ──────────────────────────
 // Centralized so the behavior stays consistent across all four stages.
@@ -1443,17 +1442,13 @@ const EstimateFollowUp = {
       if (!delivery.expiring.anyEnabled) {
         logger.info("[est-followup] Expiring stage disabled — SMS and email templates inactive");
       }
-      // A fixed-validity anchor's shown expires_at can be widened to a
-      // grouped sibling's later hold while the anchor's OWN bid is only
-      // honored through its authored validThrough — the raw-column window
-      // below would then miss an anchor whose authored deadline is
-      // approaching (raw expires_at sits further out) and, worse, keep
-      // matching one whose authored deadline already passed (raw expires_at
-      // still in the window), sending copy that claims availability through
-      // the sibling's date (GH codex P1 r6 on #4309). The OR admits every
-      // fixed-validity row regardless of the raw column so the authored-date
-      // check below (publicExpiresAt) — not this SQL bound — decides
-      // eligibility and copy for those rows.
+      // expires_at is never widened by a grouped sibling any more (#4309
+      // round 7), so the ordinary one-to-three-day window is correct for
+      // every row again — fixed-validity included. The blanket
+      // fixed-validity OR that used to admit rows whose raw column had been
+      // pushed outward is gone with it, which restores the ONE-DAY LOWER
+      // BOUND this stage is supposed to have: a bid inside its final day is
+      // not reminded (GH codex P2 r7 on #4309).
       const expiring = delivery.expiring.anyEnabled ? await db("estimates")
         .whereIn("status", ["sent", "viewed"])
         .whereNull("archived_at")
@@ -1461,14 +1456,10 @@ const EstimateFollowUp = {
         .where((q) =>
           q.whereNotNull("customer_phone").orWhereNotNull("customer_email"),
         )
-        .where((q) =>
-          q
-            .whereBetween("expires_at", [
-              new Date(Date.now() + 1 * 86400000),
-              new Date(Date.now() + 3 * 86400000),
-            ])
-            .orWhereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`),
-        )
+        .whereBetween("expires_at", [
+          new Date(Date.now() + 1 * 86400000),
+          new Date(Date.now() + 3 * 86400000),
+        ])
         .where((q) =>
           q
             .where("followup_expiring_sent", false)
@@ -1490,16 +1481,6 @@ const EstimateFollowUp = {
       for (const est of expiring) {
         let claimed = false;
         try {
-          // The authored deadline, not the (possibly group-widened) raw
-          // column, decides eligibility and copy for this stage — see the
-          // query comment above (GH codex P1 r6 on #4309).
-          const authoredExpiryMs = new Date(publicExpiresAt(est)).getTime();
-          if (!Number.isFinite(authoredExpiryMs)
-            || authoredExpiryMs <= Date.now()
-            || authoredExpiryMs > Date.now() + 3 * 86400000) {
-            logger.info(`[est-followup] Expiring skip ${est.id}: authored-deadline-outside-window`);
-            continue;
-          }
           const gate = await safetyGate(est);
           if (gate.skip) {
             logger.info(
@@ -1516,7 +1497,10 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_expiring");
-          const expDate = new Date(authoredExpiryMs).toLocaleDateString("en-US", {
+          // The row's own offer deadline — the same value the candidate bound
+          // selected on, so the copy can never quote a different date than
+          // the one that made this estimate eligible (#4309 round 7).
+          const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
             month: "long",
             day: "numeric",
             year: "numeric",

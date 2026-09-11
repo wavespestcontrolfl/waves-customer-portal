@@ -854,13 +854,17 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'link-expired' }));
   });
 
-  test('a fixed-validity anchor past its OWN authored deadline skips link-expired even though the group-widened expires_at is still future (GH codex P1 r6 on #4309)', async () => {
+  test('a row past its own offer deadline skips link-expired, and a far-future group-link viewability window does NOT rescue it (owner ruling on #4309 r7)', async () => {
     enqueueProcessorHappyPath({
       est: baseEstimate({
-        // Raw expires_at was widened to a grouped sibling's later fixed
-        // hold, but this property's own authored bid lapsed days ago.
-        expires_at: new Date(NOW.getTime() + 10 * 86400000),
-        estimate_data: { proposal: { enabled: true, validThrough: '2026-06-08' } },
+        // expires_at IS this property's own offer deadline now — lapsed.
+        expires_at: new Date(NOW.getTime() - 2 * 86400000),
+        estimate_data: {
+          proposal: { enabled: true, validThrough: '2026-06-08' },
+          // Navigation state only: the delivered group link stays reachable
+          // for months. It must never make an expired offer sendable.
+          groupLinkViewableThrough: new Date(NOW.getTime() + 90 * 86400000).toISOString(),
+        },
       }),
     });
 

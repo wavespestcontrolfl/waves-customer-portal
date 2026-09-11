@@ -44,7 +44,6 @@ const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagem
 const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
 const { followupEmailVars } = require('./estimate-followup-copy');
-const { publicExpiresAt, FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
 
@@ -352,18 +351,15 @@ async function sweepTimeRules(now = new Date()) {
           .whereRaw('GREATEST(last_viewed_at, COALESCE(sent_at, last_viewed_at)) < ?', [new Date(nowMs - p.minQuietHours * 3600000)])
           .whereRaw('GREATEST(last_viewed_at, COALESCE(sent_at, last_viewed_at)) > ?', [new Date(nowMs - p.maxQuietHours * 3600000)]);
       } else if (rule.rule_key === 'expiring_engaged') {
-        // Widened so a fixed-validity anchor whose shown expires_at was
-        // pushed to a grouped sibling's later hold is still a candidate —
-        // the authored-deadline filter below (publicExpiresAt), not this
-        // raw-column bound, decides eligibility for those rows (GH codex P1
-        // r6 on #4309).
+        // expires_at is this row's own offer deadline and is never widened
+        // by a grouped sibling (#4309 round 7), so the plain window bound is
+        // correct again and the blanket fixed-validity OR is gone.
         q = q.select('estimates.expires_at', 'estimates.estimate_data')
           .whereIn('status', ACTIVE_STATUSES)
           .whereNotNull('viewed_at')
           .whereNotNull('expires_at')
           .where((sub) => sub
-            .where((b) => b.where('expires_at', '>', now).where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000)))
-            .orWhereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`))
+            .where((b) => b.where('expires_at', '>', now).where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))))
           .where((sub) => sub.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
       } else if (rule.rule_key === 'expiring_never_viewed') {
         q = q.select('estimates.expires_at', 'estimates.estimate_data')
@@ -371,21 +367,13 @@ async function sweepTimeRules(now = new Date()) {
           .whereNull('viewed_at')
           .whereNotNull('expires_at')
           .where((sub) => sub
-            .where((b) => b.where('expires_at', '>', now).where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000)))
-            .orWhereRaw(`NOT (${FIXED_BID_VALIDITY_ABSENT_SQL})`))
+            .where((b) => b.where('expires_at', '>', now).where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))))
           .where((sub) => sub.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
       } else {
         continue; // unknown sweep rule — nothing to scan
       }
       const candidates = await q;
       for (const row of candidates) {
-        // Authored-deadline eligibility for the two expiring rules — the
-        // widened SQL bound above only admits candidates; this decides
-        // (GH codex P1 r6 on #4309).
-        if (['expiring_engaged', 'expiring_never_viewed'].includes(rule.rule_key)) {
-          const authoredMs = new Date(publicExpiresAt(row)).getTime();
-          if (!Number.isFinite(authoredMs) || authoredMs <= nowMs || authoredMs >= nowMs + p.expiresWithinDays * 86400000) continue;
-        }
         if (await enqueueJob(row.id, rule, now, { sweep: rule.rule_key })) queued++;
       }
     } catch (err) {
@@ -433,9 +421,7 @@ function rulePredicateStillHolds(est, rule, nowMs) {
     // Legacy-lane dedupe: the 2h cron's expiring stage claims
     // followup_expiring_sent — one expiry reminder per deadline across lanes.
     if (est.followup_expiring_sent) return false;
-    // Authored deadline, not the possibly group-widened raw column (GH codex
-    // P1 r6 on #4309) — same reasoning as the sweep above.
-    const expires = est.expires_at ? new Date(publicExpiresAt(est)).getTime() : 0;
+    const expires = est.expires_at ? new Date(est.expires_at).getTime() : 0;
     if (!expires || expires <= nowMs || expires >= nowMs + p.expiresWithinDays * 86400000) return false;
     return rule.rule_key === 'expiring_engaged' ? !!est.viewed_at : !est.viewed_at;
   }
@@ -557,11 +543,9 @@ async function processDueBatch(now = new Date()) {
       // expires_at can lapse HOURS before the daily expiration sweep flips
       // status to 'expired', and the public route already renders those
       // links as expired (codex 2736 r2) — never email a link that dead-ends.
-      // publicExpiresAt (not the raw column) so a fixed-validity anchor
-      // whose shown expires_at was widened to a grouped sibling's later
-      // hold is judged on its OWN authored deadline, matching what the
-      // public page and CTA already enforce (GH codex P1 r6 on #4309).
-      if (est.expires_at && new Date(publicExpiresAt(est)).getTime() <= nowMs) {
+      // expires_at is the row's own offer deadline (#4309 round 7), which is
+      // exactly what the public page and CTA enforce.
+      if (est.expires_at && new Date(est.expires_at).getTime() <= nowMs) {
         await markJob(job.id, 'skipped', 'link-expired');
         continue;
       }

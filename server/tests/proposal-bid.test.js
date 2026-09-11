@@ -91,29 +91,47 @@ describe('fixed bid validity', () => {
   });
 });
 
-describe('publicExpiresAt (GH codex P1 r3 on #4309)', () => {
-  const { publicExpiresAt, proposalExpiry } = require('../services/proposal-bid');
-  const fixed = (validThrough) => ({ estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough } }) });
-  test('shows the authored fixed date when the entry expiry was widened past it', () => {
-    const estimate = { ...fixed('2030-03-10'), expires_at: '2030-04-01T03:59:59.999Z' };
-    expect(publicExpiresAt(estimate)).toEqual(proposalExpiry(estimate));
+describe('group-link viewability is separate from the offer deadline (owner ruling on #4309 r7)', () => {
+  const { groupLinkViewableThrough, groupLinkStillViewable } = require('../services/proposal-bid');
+  const withWindow = (at) => ({ estimate_data: JSON.stringify({ groupLinkViewableThrough: at }) });
+  test('reads the stored window, tolerating absent and malformed values', () => {
+    expect(groupLinkViewableThrough(withWindow('2030-04-01T03:59:59.999Z'))).toEqual(new Date('2030-04-01T03:59:59.999Z'));
+    expect(groupLinkViewableThrough({ estimate_data: '{}' })).toBeNull();
+    expect(groupLinkViewableThrough({ estimate_data: JSON.stringify({ groupLinkViewableThrough: 'not-a-date' }) })).toBeNull();
+    expect(groupLinkViewableThrough({})).toBeNull();
   });
-  test('keeps the entry expiry when it is the earlier date, and when there is no fixed date', () => {
-    expect(publicExpiresAt({ ...fixed('2030-03-10'), expires_at: '2030-03-01T03:59:59.999Z' })).toBe('2030-03-01T03:59:59.999Z');
-    expect(publicExpiresAt({ estimate_data: '{}', expires_at: '2030-03-01T03:59:59.999Z' })).toBe('2030-03-01T03:59:59.999Z');
-    expect(publicExpiresAt({ ...fixed('2030-03-10'), expires_at: null })).toEqual(proposalExpiry(fixed('2030-03-10')));
-    expect(publicExpiresAt({ estimate_data: '{}', expires_at: null })).toBeNull();
+  test('viewability is a window, open through its instant and closed after', () => {
+    const row = withWindow('2030-04-01T03:59:59.999Z');
+    expect(groupLinkStillViewable(row, new Date('2030-03-31T00:00:00Z'))).toBe(true);
+    expect(groupLinkStillViewable(row, new Date('2030-04-01T03:59:59.999Z'))).toBe(true);
+    expect(groupLinkStillViewable(row, new Date('2030-04-01T04:00:00.000Z'))).toBe(false);
+    expect(groupLinkStillViewable({ estimate_data: '{}' }, new Date('2030-01-01T00:00:00Z'))).toBe(false);
   });
-  test('both public renderers show that deadline (the SSR page and the /data response)', () => {
+  test('the narrowing helper is gone and every public deadline reads expires_at directly', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
-    expect(src.match(/expiresAt: publicExpiresAt\(estimate\)/g)).toHaveLength(1);
-    expect(src.match(/expiresAt: docRenderPin\?\.validThrough \|\| publicExpiresAt\(estimate\)/g)).toHaveLength(1);
-    expect(src.match(/expiresAt: estimate\.expires_at\b/g)).toBeNull();
+    expect(src).not.toMatch(/publicExpiresAt/);
+    expect(src.match(/expiresAt: estimate\.expires_at,/g)).toHaveLength(1);
+    expect(src.match(/expiresAt: docRenderPin\?\.validThrough \|\| estimate\.expires_at,/g)).toHaveLength(1);
+    expect(src).toMatch(/const shownExpiry = estimate\.expires_at;/);
+    expect(src).toMatch(/isEstimateAskAnswerable\(estimate\)/);
   });
-  test('the CTA state, the ask route and the legacy expired page judge the same shown deadline (GH codex P2 r4 on #4309)', () => {
+  test('viewability is consulted ONLY where the delivered link would dead-end, never by an actionable path', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
-    expect(src).toMatch(/const shownExpiry = publicExpiresAt\(estimate\);\n\s+if \(shownExpiry && new Date\(shownExpiry\) < new Date\(\)\) return 'expired';/);
-    expect(src).toMatch(/isEstimateAskAnswerable\(\{ \.\.\.estimate, expires_at: publicExpiresAt\(estimate\) \}\)/);
-    expect(src).toMatch(/new Date\(publicExpiresAt\(estimate\)\) < new Date\(\) && estimate\.status !== 'accepted'/);
+    // Exactly one reader, and it guards the expired-stub branch.
+    expect(src.match(/groupLinkStillViewable\(/g)).toHaveLength(1);
+    expect(src).toMatch(/&& !\(estimate\.estimate_group_id && groupLinkStillViewable\(estimate\)\)/);
+    // Nothing that decides an offer may read the navigation window.
+    for (const actionable of ['estimate-follow-up.js', 'estimate-engagement-engine.js']) {
+      const mod = require('fs').readFileSync(require('path').join(__dirname, '../services/', actionable), 'utf8');
+      expect(mod).not.toMatch(/groupLinkViewableThrough|groupLinkStillViewable/);
+      expect(mod).not.toMatch(/publicExpiresAt/);
+    }
+  });
+  test('no sibling expiry is rewritten on save, and the shrink-reconstruction floor is gone', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-estimates.js'), 'utf8');
+    expect(src).not.toMatch(/groupWidenFloorExpiresAt'\]|'\{groupWidenFloorExpiresAt\}'/);
+    expect(src).not.toMatch(/previousAuthoredExpiry/);
+    // The anchor's own expiry is what its save writes.
+    expect(src).toMatch(/\? \{ expires_at: expiryUpdate \} :/);
   });
 });

@@ -1,13 +1,21 @@
 /**
- * "Expiring in 1-3 days" stage (estimate-follow-up.js checkAll) must judge a
- * fixed-validity property on its OWN authored deadline (publicExpiresAt), not
- * the raw expires_at column — which a grouped fixed sibling can widen to a
- * LATER date on the anchor's row. Two failure modes fixed here (GH codex P1
- * r6 on #4309):
- *   - an anchor whose authored deadline already passed must never be
- *     nudged/emailed, even though the widened raw column is still future;
- *   - a nudge that DOES go out must quote the authored deadline, never the
- *     later widened one.
+ * "Expiring in 1-3 days" stage (estimate-follow-up.js checkAll) after the
+ * #4309 round-7 inversion (owner ruling 2026-09-11).
+ *
+ * `expires_at` is now ALWAYS the row's own offer deadline and is never widened
+ * by a grouped fixed sibling, so this stage's ordinary window bound is correct
+ * for fixed-validity rows too. Two things that must hold:
+ *   - the window keeps its ONE-DAY LOWER BOUND for every row, with no
+ *     fixed-validity escape hatch admitting rows outside it. The blanket
+ *     `NOT (FIXED_BID_VALIDITY_ABSENT_SQL)` OR that used to admit any fixed row
+ *     regardless of the column is gone; leaving it in place is what dropped the
+ *     lower bound and let a bid be nudged inside its final day (GH codex P2 r7).
+ *   - a nudge that goes out quotes that same deadline.
+ *
+ * The candidate bound lives inside a `where((q) => ...)` callback the knex
+ * stub never invokes, so the bound itself is asserted against the source (the
+ * same technique proposal-bid.test.js uses for the public renderers) and the
+ * send path is asserted behaviourally.
  *
  * Modeled on estimate-followup-channel-links.test.js's checkAll harness —
  * only the stage-4 "estimates" candidate slot is populated; stages 1-3 see
@@ -94,7 +102,6 @@ function skipStagesOneThroughThree() {
 
 const NOW = new Date('2026-06-10T15:00:00Z'); // 11:00 ET — inside the send window
 const H = 3600000;
-const D = 86400000;
 
 function expiringEstimate(overrides = {}) {
   return {
@@ -127,35 +134,31 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-describe('expiring stage judges the AUTHORED deadline, not the group-widened raw column (GH codex P1 r6 on #4309)', () => {
-  test('an anchor past its OWN authored deadline is never nudged, even though the widened expires_at is still 2 days out', async () => {
-    skipStagesOneThroughThree();
-    enqueue('estimates', {
-      rows: [expiringEstimate({
-        // Authored bid lapsed 2026-06-05 — days ago.
-        estimate_data: { proposal: { enabled: true, validThrough: '2026-06-05' } },
-        // Raw column widened to a grouped sibling's later fixed hold — still
-        // sits inside the naive 1-3 day window the old code trusted.
-        expires_at: new Date(NOW.getTime() + 2 * D),
-      })],
-    });
-
-    await EstimateFollowUp.checkAll();
-
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-    expect(sendCustomerMessage).not.toHaveBeenCalled();
+describe('expiring stage after the #4309 r7 inversion: one window, one-day lower bound', () => {
+  test('keeps the 1-3 day window and adds NO fixed-validity escape, so a bid inside its final day is not nudged (GH codex P2 r7)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-follow-up.js'), 'utf8');
+    // The expiring candidate bound, with its one-day lower edge intact.
+    expect(src).toMatch(/\.whereBetween\("expires_at", \[\s*new Date\(Date\.now\(\) \+ 1 \* 86400000\),\s*new Date\(Date\.now\(\) \+ 3 \* 86400000\),\s*\]\)/);
+    // The copy quotes the same column the bound selected on.
+    expect(src).toMatch(/const expDate = new Date\(est\.expires_at\)\.toLocaleDateString/);
+    // No blanket fixed-validity OR may re-admit rows that bound excluded —
+    // that escape is what dropped the lower bound.
+    expect(src).not.toMatch(/FIXED_BID_VALIDITY_ABSENT_SQL/);
+    // And no in-memory authored-deadline re-check replaces it.
+    expect(src).not.toMatch(/authoredExpiryMs/);
   });
 
-  test('an anchor within its OWN authored window sends, quoting the AUTHORED date — not the later widened raw column', async () => {
+  test('a row inside the window sends, quoting its own expires_at', async () => {
     skipStagesOneThroughThree();
     enqueue('estimates', {
       rows: [expiringEstimate({
-        // Authored bid ends 2026-06-12 (ET) — inside the 1-3 day window.
+        // A fixed bid ending 2026-06-12 ET. expires_at IS that authored
+        // deadline now — no sibling widens it, so there is nothing to narrow.
         estimate_data: { proposal: { enabled: true, validThrough: '2026-06-12' } },
-        // Raw column widened far out by a grouped sibling's later hold —
-        // outside the naive window, but the row is still eligible on its
-        // own authored date.
-        expires_at: new Date(NOW.getTime() + 20 * D),
+        expires_at: new Date('2026-06-13T03:59:59.999Z'),
+        // A far-future group-link viewability window must NOT influence the
+        // offer: it is navigation state only.
+        ...{},
       })],
     });
 
@@ -163,8 +166,11 @@ describe('expiring stage judges the AUTHORED deadline, not the group-widened raw
 
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
     const payload = EmailTemplates.sendTemplate.mock.calls[0][0].payload;
-    // The authored deadline (June 12 ET), never the widened raw column
-    // (June 30).
     expect(payload.expires_at).toBe('June 12, 2026');
+  });
+
+  test('the stored group-link viewability window never reaches this stage', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-follow-up.js'), 'utf8');
+    expect(src).not.toMatch(/groupLinkViewableThrough|groupLinkStillViewable|publicExpiresAt/);
   });
 });

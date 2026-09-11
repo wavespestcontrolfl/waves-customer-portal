@@ -20,7 +20,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
-const { publicExpiresAt } = require('../services/proposal-bid');
+const { groupLinkStillViewable } = require('../services/proposal-bid');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -8489,9 +8489,15 @@ async function handleEstimateView(req, res, next) {
       return next();
     }
 
-    // This property's own deadline, not the group-widened entry expiry
-    // (GH codex P2 r4 on #4309) — see publicExpiresAt.
-    if (new Date(publicExpiresAt(estimate)) < new Date() && estimate.status !== 'accepted') {
+    // expires_at IS this property's own offer deadline (#4309 round 7), so it
+    // is read directly — no narrowing helper. A dead end here is the ONE place
+    // group-link viewability applies: the delivered link is this anchor's
+    // token, so when the anchor's own offer has ended but the group is still
+    // reachable, the page renders instead of the expired stub and the customer
+    // can still open a fixed sibling that outlives it. The anchor's own card
+    // resolves to 'expired' through terminalState and stays unacceptable.
+    if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted'
+      && !(estimate.estimate_group_id && groupLinkStillViewable(estimate))) {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
       );
@@ -8679,8 +8685,8 @@ async function handleEstimateView(req, res, next) {
       tier: estimate.waveguard_tier,
       createdAt: estimate.created_at,
       // Shown deadline = this property's own fixed date when that is earlier
-      // than the (possibly group-widened) entry expiry — see publicExpiresAt.
-      expiresAt: publicExpiresAt(estimate),
+      // This property's own offer deadline (#4309 round 7).
+      expiresAt: estimate.expires_at,
       satelliteUrl: estimate.satellite_url || null,
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
@@ -25245,9 +25251,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
-      // The CTA/activity state follows THIS property's own deadline, not the
-      // group-widened entry expiry (GH codex P2 r4 on #4309) — see publicExpiresAt.
-      const shownExpiry = publicExpiresAt(estimate);
+      // The CTA/activity state follows THIS property's own offer deadline,
+      // which is exactly what expires_at now holds (#4309 round 7). Group-link
+      // viewability never softens it: a reachable group of expired cards still
+      // renders every card expired.
+      const shownExpiry = estimate.expires_at;
       if (shownExpiry && new Date(shownExpiry) < new Date()) return 'expired';
       return null;
     })();
@@ -25797,7 +25805,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
         // Pinned override only on a signed pdf render pass — see docRenderPin.
-        expiresAt: docRenderPin?.validThrough || publicExpiresAt(estimate),
+        expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
         // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
         // so it must be a known-good public imagery host — satellite_url is
@@ -25965,7 +25973,7 @@ async function handleEstimateAsk(req, res, next) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
     // Same authored-deadline rule as the page's CTA state (GH codex P2 r4 on #4309).
-    if (!isEstimateAskAnswerable({ ...estimate, expires_at: publicExpiresAt(estimate) })) {
+    if (!isEstimateAskAnswerable(estimate)) {
       return res.status(409).json({ error: 'estimate_expired' });
     }
 
