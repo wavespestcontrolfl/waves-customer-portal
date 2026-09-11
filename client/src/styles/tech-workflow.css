@@ -1,0 +1,113 @@
+/* Tech visit compositions share field, density, feedback and focus behavior.
+   These explicit surface classes retain Tech's own palette and type. */
+.tech-visit-surface {
+  --tech-bg: #0f1923;
+  --tech-card: #1e293b;
+  --tech-border: #334155;
+  --tech-accent: #0ea5e9;
+  --tech-text: #e2e8f0;
+  --tech-muted: #94a3b8;
+  color: var(--tech-text);
+  font-family: 'Nunito Sans', sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+.tech-visit-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: calc(24px + env(safe-area-inset-top, 0px)) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
+  background: rgba(2, 6, 12, .72);
+}
+/* Full-screen on narrow viewports (PR #4327): the sheet fills the whole
+   overlay instead of leaving a top gap, so the on-screen keyboard has room
+   and the sticky footer stays reachable above the home indicator. */
+.tech-visit-overlay--fullscreen { padding: 0; }
+.tech-visit-dialog {
+  width: 100%;
+  max-width: 560px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid var(--tech-border);
+  border-radius: 18px 18px 0 0;
+  background: var(--tech-bg);
+  box-shadow: 0 -8px 40px rgba(0, 0, 0, .35);
+}
+.tech-visit-dialog--fullscreen {
+  max-width: none;
+  height: 100%;
+  max-height: 100%;
+  border-radius: 0;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+.tech-visit-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--tech-border);
+  background: var(--tech-bg);
+}
+.tech-visit-title { margin: 0; font-family: 'Montserrat', sans-serif; font-size: 20px; font-weight: 600; }
+.tech-visit-section-title { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.tech-visit-muted { margin: 4px 0; color: var(--tech-muted); font-size: 14px; overflow-wrap: anywhere; }
+.tech-visit-warning { color: #fca5a5; }
+/* Scrollable middle region — header and footer stay fixed around it so the
+   actions and any submit error remain visible without scrolling. */
+.tech-visit-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px 18px 18px;
+}
+.tech-visit-loading { padding: 28px 18px; text-align: center; }
+.tech-visit-form { min-width: 0; margin: 0; padding: 0; border: 0; }
+.tech-visit-footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 18px calc(18px + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid var(--tech-border);
+  background: var(--tech-bg);
+}
+.tech-visit-footer .tech-visit-actions { flex: 1; margin-top: 0; }
+.tech-visit-footer .tech-visit-error-banner { flex-basis: 100%; margin: 0; }
+.tech-visit-card { margin-bottom: 16px; padding: 12px; border: 1px solid var(--tech-border); border-radius: 12px; background: var(--tech-card); }
+.tech-visit-field { margin-bottom: 16px; }
+.tech-visit-field > .ui-label { color: var(--tech-text); }
+.ui-control.tech-visit-control { color: var(--tech-text); background: var(--tech-card); border-color: var(--tech-border); border-radius: 10px; }
+.ui-control.tech-visit-control:focus { --tw-ring-color: var(--tech-accent); border-color: var(--tech-accent); }
+.ui-control.tech-visit-control::placeholder { color: var(--tech-muted); }
+.ui-action.tech-visit-action { font-family: inherit; font-size: 16px; border-radius: 10px; color: var(--tech-text); border: 1px solid var(--tech-border); background: var(--tech-card); }
+.ui-action.tech-visit-action:hover { background: #243244; }
+.ui-action.tech-visit-primary { background: #075985; border-color: var(--tech-accent); color: #fff; }
+.ui-action.tech-visit-primary:hover { background: #0369a1; }
+.ui-action.tech-visit-wide { width: 100%; }
+.ui-action.tech-visit-action:focus-visible { outline: 2px solid var(--tech-accent); outline-offset: 2px; }
+.ui-action.tech-visit-action[aria-pressed='true'] { background: #075985; border-color: var(--tech-accent); color: #fff; }
+.ui-action.tech-visit-close { flex-shrink: 0; width: 48px; padding: 0; background: transparent; border-color: transparent; font-size: 24px; }
+.ui-action.tech-visit-complete { flex: 1; background: #047857; border-color: #10b981; color: #fff; }
+.ui-action.tech-visit-complete:hover { background: #065f46; }
+.tech-visit-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.tech-visit-products { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.ui-action.tech-visit-product { border-radius: 24px; white-space: normal; }
+.tech-visit-timeline-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
+.tech-visit-choice { display: flex; gap: 12px; color: var(--tech-text); margin-top: 8px; font-size: 14px; }
+.tech-visit-checkbox { flex-shrink: 0; background: var(--tech-card); border-color: var(--tech-muted); }
+.tech-visit-checkbox:checked { background: #075985; border-color: var(--tech-accent); }
+.tech-visit-checkbox:focus { --tw-ring-color: var(--tech-accent); }
+.tech-visit-feedback { color: var(--tech-muted); margin: 8px 0 16px; }
+.tech-visit-feedback[role='alert'] { color: #fca5a5; }

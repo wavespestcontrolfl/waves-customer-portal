@@ -284,6 +284,22 @@ describe('getAvailableSlots — funnel end to end', () => {
     expect(result.metadata.firstDayAvailability?.date).toBe('2027-05-20');
   });
 
+  test.each([false, true])('capacity preserves south-zone day filtering (clustered=%s)', async clustered => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      mockDb({ scheduledRows: clustered ? [zoneStopRow()] : [] });
+      findAvailableSlots.mockResolvedValue({ slots: ['2027-05-21', '2027-05-20'].map(date => ({
+        date, start_time: '10:00', end_time: '11:00', route_mode: 'arrival_windows',
+        technician: { id: 'tech-1', name: 'Fixture' }, detour_minutes: 4, stops_that_day: 2,
+      })) });
+      const result = await getAvailableSlots('est-funnel-1', WINDOW);
+      const slots = [...result.primary, ...result.expander];
+      expect(slots.length).toBeGreaterThan(0);
+      expect(new Set(slots.map(s => s.date))).toEqual(new Set([clustered ? '2027-05-20' : '2027-05-21']));
+      expect(result.metadata.zoneDayFunnel.mode).toBe(clustered ? 'clustered' : 'seeded');
+    } finally { delete process.env.GATE_SCHEDULING_CAPACITY; }
+  });
+
   test('clustered via legacy zone slug (underscore compound of the modern slug)', async () => {
     mockDb({ scheduledRows: [zoneStopRow({ zone: 'venice_north_port', customer_city: null })] });
     const result = await getAvailableSlots('est-funnel-1', WINDOW);

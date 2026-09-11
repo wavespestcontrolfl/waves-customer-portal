@@ -96,6 +96,7 @@
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
+ *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -121,8 +122,18 @@ const gates = {
   // ignores propertyId — tonight's behavior exactly. Registered for
   // logGateStatus; consumers read it at CALL time (gateEnvValue).
   appPropertyScope: gateEnvValue('GATE_APP_PROPERTY_SCOPE'),
+  // GATE_APP_PROPERTY_TEXTS: appointment texts for a NON-primary saved
+  // property follow that property's own toggles (property_notification_prefs,
+  // ruling-R1 defaults). Off (ruling R5): the sender seams resolve the
+  // property decision and record it in property_text_decisions next to the
+  // customer-row decision — the shadow log — with zero change to sends. Only
+  // meaningful with GATE_APP_PROPERTY_SCOPE on. Consumers read it at CALL
+  // time (gateEnvValue).
+  appPropertyTexts: gateEnvValue('GATE_APP_PROPERTY_TEXTS'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
+  // Registered for startup logging; the completion writer reads it at call time (strict 'true').
+  lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -1225,6 +1236,8 @@ const gates = {
   // Layered spam classifier: records verdicts to call_spam_verdicts (100%
   // precision offline; any discard action is a separate consumer decision).
   callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
+  // SMS shadow classification is active only for `shadow`; enforcement is unavailable.
+  smsSpamClassifier: String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase() === 'shadow',
   // Profile-enrichment writer: gate codes/pets/notes from extraction into
   // property_preferences + customers.internal_notes (admin-edit-preserving).
   callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
@@ -1308,6 +1321,7 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
@@ -2588,6 +2602,8 @@ const gates = {
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
+  // Field Team Program rev 2b: evidence and simulation only; never payroll.
+  fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

@@ -4690,23 +4690,99 @@ function priceTermiteStationRental(installPrice) {
   };
 }
 
-function priceTermiteBait(property, options = {}) {
-  const {
-    // No destructure default (codex P2): an absent system must reach
-    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
-    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
-    // it and quote 10-ft Advance for direct callers.
-    system,
-    monitoringTier = 'basic',
-    // 'own' (customer buys the stations, one-time install charge) or 'rent'
-    // (Waves retains ownership, $0 install, recovery rides the quarterly).
-    // Anything unrecognized falls back to 'own' — the long-standing behavior.
-    ownership: requestedOwnership = 'own',
-    modifiers = {},
-  } = options;
-  const ownership = String(requestedOwnership).toLowerCase() === 'rent' ? 'rent' : 'own';
+// Termite program cost model (plan 2026-09-03 §A1, LAB-006 — REPORT ONLY).
+// Install = hardware + laborMaterial + misc per station plus the computed
+// (never billed) install labor. Steady-state annual = service labor
+// (5 min/station + the shared drive time, per visit × visits) + cartridge
+// replacement (installed cartridges × label-driven replacement rate × the
+// cartridge cost) + an ASSUMED activity follow-up reserve (fraction of one
+// service visit's labor). Cartridge inputs live on TERMITE.cartridges and
+// are DB-tunable via pricing_config.termite_install; the station and
+// cartridge costs may come from the inventory catalog (db-bridge link),
+// which is what materialCostSource reports.
+// Install-price knobs for one quote: the replayed snapshot's values where
+// present and sane, else the live system/config values. See priceTermiteBait.
+function resolveTermiteInstallBasis(sys, selectedSystem, knobs) {
+  const snap = knobs && typeof knobs === 'object' && (!knobs.system || knobs.system === selectedSystem) ? knobs : null;
+  const positive = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const nonNegative = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+  const replayedStationCost = snap ? positive(snap.stationCost) : null;
+  return {
+    stationCost: replayedStationCost ?? sys.stationCost,
+    stationCostSource: replayedStationCost != null ? 'replay' : (sys.stationCostSource === 'catalog' ? 'catalog' : 'config'),
+    laborMaterial: (snap && nonNegative(snap.laborMaterial)) ?? sys.laborMaterial,
+    misc: (snap && nonNegative(snap.misc)) ?? sys.misc,
+    installMultiplier: (snap && positive(snap.installMultiplier)) ?? TERMITE.installMultiplier,
+    minStations: (snap && positive(snap.minStations)) ?? TERMITE.minStations,
+  };
+}
 
-  property = property || {};
+// Steady-state annual program cost for a termite line that persisted only
+// its station count (the Admin V1 CLIENT_FALLBACK envelope carries no costs
+// block) — the same model priceTermiteBait emits, on the LIVE basis, for
+// the production pricing audit's COGS view (codex #4313 r8 P1). Report only.
+function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultSystem) {
+  const n = Number(stations);
+  if (!(n > 0)) return null;
+  const selected = TERMITE.systems[system] ? system : TERMITE.defaultSystem;
+  const sys = TERMITE.systems[selected];
+  const stationCost = Number(sys?.stationCost) || 0;
+  const model = termiteProgramCostModel({
+    stations: n,
+    installMaterialCost: n * (stationCost + (Number(sys?.laborMaterial) || 0) + (Number(sys?.misc) || 0)),
+    installLabor: n * 0.083 * GLOBAL.LABOR_RATE,
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    stationCost,
+    system: selected,
+  });
+  return model.annualTotal;
+}
+
+const TERMITE_SERVICE_MINUTES_PER_STATION = 5;
+function termiteProgramCostModel({ stations, installMaterialCost, installLabor, visitsPerYear, stationCost, system }) {
+  // TERMITE.cartridges describes Trelona ATBS (two cartridges per station,
+  // Trelona replacement rate and cartridge cost). Advance stays priceable
+  // for stored-estimate replay only and has no consumable model here —
+  // its cartridge terms are zero, never Trelona's (codex #4313 r1 P2).
+  const hasCartridgeModel = system === 'trelona' && TERMITE.cartridges && typeof TERMITE.cartridges === 'object';
+  const c = hasCartridgeModel ? TERMITE.cartridges : {};
+  const nonNegative = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : 0);
+  const cartridgesPerStation = nonNegative(c.cartridgesPerStation);
+  const replacementRate = nonNegative(c.replacementRate);
+  const cartridgeCost = nonNegative(c.cartridgeCost);
+  const followUpVisitReserve = nonNegative(c.followUpVisitReserve);
+  const visits = nonNegative(visitsPerYear);
+  const onSiteMinutes = stations * TERMITE_SERVICE_MINUTES_PER_STATION;
+  const serviceLaborPerVisit = laborCost(onSiteMinutes);
+  const serviceLaborAnnual = serviceLaborPerVisit * visits;
+  const cartridgeReplacementAnnual = stations * cartridgesPerStation * replacementRate * cartridgeCost;
+  const followUpReserveAnnual = followUpVisitReserve * serviceLaborPerVisit;
+  return {
+    installMaterial: roundMoney(installMaterialCost),
+    installLabor: roundMoney(installLabor),
+    installTotal: roundMoney(installMaterialCost + installLabor),
+    stationCost: roundMoney(nonNegative(stationCost)),
+    cartridgeCost: roundMoney(cartridgeCost),
+    cartridgesPerStation,
+    cartridgeReplacementRate: replacementRate,
+    followUpVisitReserve,
+    serviceMinutesPerVisit: onSiteMinutes + GLOBAL.DRIVE_TIME,
+    serviceLaborPerVisit: roundMoney(serviceLaborPerVisit),
+    serviceVisitsPerYear: visits,
+    serviceLaborAnnual: roundMoney(serviceLaborAnnual),
+    cartridgeReplacementAnnual: roundMoney(cartridgeReplacementAnnual),
+    followUpReserveAnnual: roundMoney(followUpReserveAnnual),
+    annualTotal: roundMoney(serviceLaborAnnual + cartridgeReplacementAnnual + followUpReserveAnnual),
+    cartridgeModel: hasCartridgeModel ? 'trelona' : 'none',
+  };
+}
+
+// Everything priceTermiteBait resolves BEFORE it can price: the system and
+// tier requests, the footprint / perimeter measurements and their state, the
+// property install modifiers, and the warning / review lists they produce.
+// Pure resolution — no price is computed here (extracted so the pricer
+// itself stays under the complexity limit, codex #4313 r9 P2).
+function resolveTermiteBaitContext(property, options, { system, monitoringTier, modifiers }) {
   const systemResolution = normalizeTermiteSystem(system);
   const monitoringResolution = normalizeTermiteMonitoringTier(monitoringTier);
   const selectedSystem = systemResolution.selectedSystem;
@@ -4754,6 +4830,40 @@ function priceTermiteBait(property, options = {}) {
       ? ['stories_estimated']
       : []),
   ]);
+  return {
+    systemResolution, monitoringResolution, selectedSystem, selectedMonitoringTier,
+    footprintResolution, perimeterResolution, complexity, computedPerimeter, footprintRequired,
+    measurementState, constructionMult, foundationAdj, measurementWarnings, manualReviewReasons,
+  };
+}
+
+function priceTermiteBait(property, options = {}) {
+  const {
+    // No destructure default (codex P2): an absent system must reach
+    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
+    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
+    // it and quote 10-ft Advance for direct callers.
+    system,
+    // Quote-time cost-basis snapshot replayed from a stored estimate
+    // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay, injected
+    // by both authoritative replay paths). Absent on fresh quotes, which
+    // resolve the live constant / catalog-linked station cost.
+    knobs = null,
+    monitoringTier = 'basic',
+    // 'own' (customer buys the stations, one-time install charge) or 'rent'
+    // (Waves retains ownership, $0 install, recovery rides the quarterly).
+    // Anything unrecognized falls back to 'own' — the long-standing behavior.
+    ownership: requestedOwnership = 'own',
+    modifiers = {},
+  } = options;
+  const ownership = String(requestedOwnership).toLowerCase() === 'rent' ? 'rent' : 'own';
+
+  property = property || {};
+  const {
+    systemResolution, monitoringResolution, selectedSystem, selectedMonitoringTier,
+    footprintResolution, perimeterResolution, complexity, computedPerimeter, footprintRequired,
+    measurementState, constructionMult, foundationAdj, measurementWarnings, manualReviewReasons,
+  } = resolveTermiteBaitContext(property, options, { system, monitoringTier, modifiers });
   if (perimeterResolution.value === null) {
     return {
       service: 'termite_bait',
@@ -4816,18 +4926,27 @@ function priceTermiteBait(property, options = {}) {
   // 2026-07-28) wins over the legacy global; the DB termite_install row can
   // still tune the FALLBACK spacing but never a system's label spacing.
   const spacingFt = Number(sys.spacingFt) > 0 ? Number(sys.spacingFt) : TERMITE.stationSpacing;
-  const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / spacingFt));
+  // Every install-price knob this quote prices under, resolved ONCE: a
+  // replayed snapshot wins (only when it was stamped for THIS system — a
+  // stored Trelona quote must never lend its basis to an Advance replay),
+  // otherwise the live values (station cost possibly from the catalog). The
+  // full set is stamped back as pricingKnobs so a later change to ANY of
+  // them — station cost, per-station buildup, multiplier, station floor —
+  // cannot re-price an already-sent install on replay (codex #4313 r5 P1).
+  const basis = resolveTermiteInstallBasis(sys, selectedSystem, knobs);
+  const stations = Math.max(basis.minStations, Math.ceil(perimeter / spacingFt));
 
   const conMult = constructionMult.value;
   const foundAdj = foundationAdj.value;
-  const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
+  const { stationCost, stationCostSource } = basis;
+  const installMaterialCost = stations * (stationCost + basis.laborMaterial + basis.misc);
   // 5 min per station — calibrated Apr 2026 against All U Need invoice
   // (21 Sentricon stations installed in 78 min by one tech = 3.7 min/sta).
   // Prior value was 0.25 hr (15 min/sta), ~4x the observed pace, which made
   // reported install margin look artificially negative under the 1.45x mult.
   const installLabor = stations * 0.083 * GLOBAL.LABOR_RATE;
   const installCost = installMaterialCost + installLabor;
-  const installPrice = Math.round(installMaterialCost * TERMITE.installMultiplier * conMult + foundAdj);
+  const installPrice = Math.round(installMaterialCost * basis.installMultiplier * conMult + foundAdj);
   const installMargin = installPrice > 0 ? (installPrice - installCost) / installPrice : 0;
   // Rental: the customer is charged nothing to install. The full install
   // price stays on the line as installation.retailValue so the options sheet
@@ -4842,6 +4961,14 @@ function priceTermiteBait(property, options = {}) {
   // 2026-07-28) — the flat Basic/Premier tiers are retired.
   const monitoringMonthly = termiteMonitoringMonthlyForStations(stations);
   const monitoringAnnual = monitoringMonthly * 12;
+  const costs = termiteProgramCostModel({
+    stations,
+    installMaterialCost,
+    installLabor,
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    stationCost,
+    system: selectedSystem,
+  });
 
   return {
     service: 'termite_bait',
@@ -4895,6 +5022,40 @@ function priceTermiteBait(property, options = {}) {
       monthly: monitoringMonthly,
       annual: monitoringAnnual,
     },
+    // Where the hardware cost behind installation.price came from (plan
+    // 2026-09-03 §A1): 'catalog' = the inventory catalog's approved vendor
+    // price on the last pricing sync, 'config' = pricing_config /
+    // constants fallback, 'replay' = the stamped cost of an already-sent
+    // quote. Never silent — a stale catalog prices as 'config'.
+    materialCostSource: {
+      station: stationCostSource,
+      // The cartridge model is Trelona's (two pre-baited cartridges per
+      // ATBS station); a legacy Advance replay carries no consumable model.
+      cartridge: costs.cartridgeModel === 'trelona'
+        ? (TERMITE.cartridges?.cartridgeCostSource === 'catalog' ? 'catalog' : 'config')
+        : 'none',
+    },
+    // Quote-time cost-basis snapshot (plan §A1 replay rule — the T&S
+    // pricingKnobs shape). Persisted with the estimate so a later constant,
+    // pricing_config or catalog change cannot re-price an already-sent
+    // install on replay; the knob-replay module reads it back and both
+    // authoritative replay paths inject it as options.knobs.
+    pricingKnobs: {
+      system: selectedSystem,
+      // EXACT values, never rounded: the replay guarantee is "reprices to
+      // the cent" (codex #4313 r1 P2).
+      stationCost,
+      stationCostSource,
+      laborMaterial: basis.laborMaterial,
+      misc: basis.misc,
+      installMultiplier: basis.installMultiplier,
+      minStations: basis.minStations,
+    },
+    // Report-only program cost model (LAB-006): install cost plus the
+    // steady-state annual cost of servicing the stations — service labor per
+    // visit, label-driven cartridge replacement, and the activity follow-up
+    // reserve. Feeds margin reporting; nothing here changes a price.
+    costs,
     annual: monitoringAnnual,
     monthly: monitoringMonthly,
     // Quarterly station checks, billed per application (owner 2026-07-20).
@@ -8975,7 +9136,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,

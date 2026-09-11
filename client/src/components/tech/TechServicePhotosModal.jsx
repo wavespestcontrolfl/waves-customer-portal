@@ -18,7 +18,10 @@
 // upload so photos categorize correctly for the missed_photo
 // detector / customer-track view downstream.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { DVH } from '../../lib/viewportUnits';
 import TechPhotoMarksModal from './TechPhotoMarksModal';
 
 const DARK = {
@@ -39,13 +42,18 @@ const PHOTO_TYPES = ['before', 'after', 'progress', 'issue'];
 const MARKABLE_PHOTO_TYPES = new Set(['after', 'progress', 'issue']);
 
 export default function TechServicePhotosModal({ serviceId, customerName, onClose }) {
+  const isMobile = useIsMobile();
   const [photos, setPhotos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [photoType, setPhotoType] = useState('after');
   const [caption, setCaption] = useState('');
   const [uploading, setUploading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [statusMsg, setStatusMsg] = useState('');
+  const [pendingPhoto, setPendingPhoto] = useState(null);
+  const uploadInFlight = useRef(false);
+  const loadSequence = useRef(0);
   // Treated-point marking (GATE_PHOTO_MARKS, dark). The probe 404s when the
   // gate is off, which leaves marksSupported false and the affordance absent —
   // no separate client-side flag to keep in sync.
@@ -53,9 +61,22 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   const [markTarget, setMarkTarget] = useState(null);
   const fileInputRef = useRef(null);
 
+  const close = () => {
+    if (uploadInFlight.current) return;
+    if (pendingPhoto && !window.confirm('This photo has not uploaded. Close and discard the selected photo?')) return;
+    onClose?.();
+  };
+  useEffect(() => {
+    if (!pendingPhoto) return undefined;
+    const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [pendingPhoto]);
+
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
-    setErrorMsg('');
+    setLoadError('');
     try {
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
@@ -66,14 +87,14 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      setPhotos(data.photos || []);
+      if (sequence === loadSequence.current) setPhotos(data.photos || []);
     } catch (err) {
-      setErrorMsg(err.message || 'Failed to load photos');
+      if (sequence === loadSequence.current) setLoadError(err.message || 'Failed to load photos');
     }
-    setLoading(false);
+    if (sequence === loadSequence.current) setLoading(false);
   }, [serviceId]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { void load(); return () => { loadSequence.current += 1; }; }, [load]);
 
   // Probe whether this lane takes treated-point marks. Fail-soft in both
   // directions: gate off returns 404 and any error leaves the affordance
@@ -95,7 +116,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
   }, [serviceId]);
 
   const handlePickFile = () => {
-    if (uploading) return;
+    if (uploadInFlight.current || pendingPhoto) return;
     setErrorMsg('');
     setStatusMsg('');
     if (fileInputRef.current) {
@@ -104,18 +125,18 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
     }
   };
 
-  const handleFileSelected = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file || uploading) return;
+  const uploadPhoto = async (photo) => {
+    if (!photo || uploadInFlight.current) return;
+    uploadInFlight.current = true;
     setUploading(true);
     setErrorMsg('');
     setStatusMsg('');
     try {
       const fd = new FormData();
-      fd.append('photo', file);
-      fd.append('photoType', photoType);
-      fd.append('capturedAt', new Date(file.lastModified || Date.now()).toISOString());
-      if (caption.trim()) fd.append('caption', caption.trim());
+      fd.append('photo', photo.file);
+      fd.append('photoType', photo.photoType);
+      fd.append('capturedAt', photo.capturedAt);
+      if (photo.caption) fd.append('caption', photo.caption);
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/photos`, {
         method: 'POST',
@@ -129,19 +150,29 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       setStatusMsg(data.photo?.staged
         ? 'Photo saved — it will attach when the visit is completed'
         : 'Photo uploaded');
+      setPendingPhoto(null);
       setCaption('');
-      await load();
+      void load();
     } catch (err) {
       setErrorMsg(err.message || 'Upload failed');
     }
+    uploadInFlight.current = false;
     setUploading(false);
   };
 
-  return (
+  const handleFileSelected = (event) => {
+    const file = event.target.files?.[0];
+    if (!file || uploadInFlight.current || pendingPhoto) return;
+    const photo = { file, photoType, caption: caption.trim(), capturedAt: new Date(file.lastModified || Date.now()).toISOString() };
+    setPendingPhoto(photo);
+    void uploadPhoto(photo);
+  };
+
+  return createPortal(
     <div
-      onClick={onClose}
+      onClick={close}
       style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+        position: 'fixed', inset: 0, fontFamily: "'DM Sans', sans-serif", background: 'rgba(0,0,0,0.7)',
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
         zIndex: 1000,
       }}
@@ -149,24 +180,30 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: DARK.bg, width: '100%', maxWidth: 480,
-          borderTopLeftRadius: 16, borderTopRightRadius: 16,
-          boxSizing: 'border-box', padding: 16, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))', maxHeight: '90vh', overflowY: 'auto',
+          background: DARK.bg, width: '100%', maxWidth: isMobile ? 'none' : 480,
+          borderTopLeftRadius: isMobile ? 0 : 16, borderTopRightRadius: isMobile ? 0 : 16,
+          boxSizing: 'border-box', height: isMobile ? '100%' : undefined, maxHeight: isMobile ? '100%' : `90${DVH}`,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden',
+          paddingTop: 'calc(16px + env(safe-area-inset-top, 0px))',
+          paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))',
+          paddingLeft: 'calc(16px + env(safe-area-inset-left, 0px))',
+          paddingRight: 'calc(16px + env(safe-area-inset-right, 0px))',
           border: `1px solid ${DARK.border}`,
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexShrink: 0 }}>
           <h2 style={{
             margin: 0, fontSize: 18, fontWeight: 700, color: DARK.text,
             fontFamily: "'Montserrat', sans-serif",
           }}>
             Service Photos
           </h2>
-          <button onClick={onClose} style={{
+          <button type="button" aria-label="Close service photos" onClick={close} disabled={uploading} style={{
             background: 'transparent', border: 'none', color: DARK.muted,
-            fontSize: 24, cursor: 'pointer', padding: '0 4px', lineHeight: 1,
+            fontSize: 24, cursor: 'pointer', padding: '0 4px', lineHeight: 1, minWidth: 44, minHeight: 44,
           }}>×</button>
         </div>
+        <div style={{ minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
         {customerName && (
           <p style={{ margin: '0 0 14px', fontSize: 13, color: DARK.muted }}>{customerName}</p>
         )}
@@ -184,7 +221,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
               <button
                 key={t}
                 onClick={() => setPhotoType(t)}
-                disabled={uploading}
+                disabled={uploading || !!pendingPhoto}
                 style={{
                   padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
                   border: `1px solid ${photoType === t ? DARK.teal : DARK.border}`,
@@ -205,7 +242,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             value={caption}
             onChange={(e) => setCaption(e.target.value)}
             placeholder="e.g., Front yard before treatment"
-            disabled={uploading}
+            disabled={uploading || !!pendingPhoto}
             style={{
               width: '100%', padding: '8px 10px', borderRadius: 6,
               border: `1px solid ${DARK.border}`, background: DARK.bg,
@@ -214,7 +251,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
           />
           <button
             onClick={handlePickFile}
-            disabled={uploading}
+            disabled={uploading || !!pendingPhoto}
             style={{
               width: '100%', padding: '10px', borderRadius: 8,
               border: 'none', background: uploading ? DARK.border : DARK.teal,
@@ -232,6 +269,15 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             style={{ display: 'none' }}
           />
         </div>
+
+        {pendingPhoto && <div role="status" style={{ color: DARK.text, marginBottom: 12 }}>
+          <p>{uploading ? 'Uploading photo…' : 'Photo not uploaded. Keep this visit open to retry.'}</p>
+          <p>{pendingPhoto.file.name}</p>
+          {!uploading && <>
+            <button type="button" onClick={() => uploadPhoto(pendingPhoto)}>Retry upload</button>{' '}
+            <button type="button" onClick={() => { setPendingPhoto(null); setErrorMsg(''); }}>Discard selected photo</button>
+          </>}
+        </div>}
 
         {errorMsg && (
           <div style={{
@@ -255,12 +301,17 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
           margin: '0 0 8px', fontSize: 12, color: DARK.muted, fontWeight: 700,
           textTransform: 'uppercase', letterSpacing: 1,
         }}>
-          Attached ({photos.length})
+          Attached{!loading && !loadError ? ` (${photos.length})` : ''}
         </h3>
         {loading ? (
           <p style={{ color: DARK.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>
             Loading…
           </p>
+        ) : loadError ? (
+          <div>
+            <p role="alert" style={{ color: DARK.red, fontSize: 14 }}>{loadError}</p>
+            <button type="button" onClick={load} style={{ minHeight: 48, fontSize: 14, color: DARK.text, background: DARK.card, border: `1px solid ${DARK.border}`, borderRadius: 6, padding: '8px 12px' }}>Retry photos</button>
+          </div>
         ) : photos.length === 0 ? (
           <p style={{ color: DARK.muted, fontSize: 13, textAlign: 'center', padding: 20 }}>
             No photos yet.
@@ -320,6 +371,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
             ))}
           </div>
         )}
+        </div>
       </div>
       {markTarget && (
         <TechPhotoMarksModal
@@ -328,6 +380,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
           onClose={() => setMarkTarget(null)}
         />
       )}
-    </div>
+    </div>,
+    document.body
   );
 }

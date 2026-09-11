@@ -20,7 +20,10 @@
 // nag, and saving an empty set is how a tech clears marks they previously
 // placed.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { DVH } from '../../lib/viewportUnits';
 // The SHARED palette (codex P1). A local copy made the comment below a lie:
 // a correction to markColor would have updated the live card and the PDF and
 // left the capture UI showing the technician different colours from the ones
@@ -41,6 +44,7 @@ const API = import.meta.env.VITE_API_URL || '';
 const LONG_PRESS_MS = 500;
 
 export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved }) {
+  const isMobile = useIsMobile();
   const [kinds, setKinds] = useState([]);
   const [activeKind, setActiveKind] = useState(null);
   const [marks, setMarks] = useState([]);
@@ -157,7 +161,7 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
     cursor: 'pointer', fontWeight: on ? 600 : 500,
   });
 
-  return (
+  return createPortal(
     <div
       // This modal mounts INSIDE the photo manager, whose backdrop closes it
       // on click. Without stopping propagation here the very first tap — the
@@ -166,8 +170,8 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
       // every descendant is covered, including the photo and the chips.
       onClick={(e) => e.stopPropagation()}
       style={{
-        position: 'fixed', inset: 0, zIndex: 1001, background: 'rgba(4,10,16,.72)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14,
+        position: 'fixed', inset: 0, fontFamily: "'DM Sans', sans-serif", zIndex: 1001, background: 'rgba(4,10,16,.72)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: isMobile ? 0 : 14,
       }}
       role="dialog"
       aria-modal="true"
@@ -175,15 +179,22 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
     >
       <div style={{
         background: DARK.bg, border: `1px solid ${DARK.border}`, borderRadius: 14,
-        padding: 14, width: '100%', maxWidth: 420, maxHeight: '92vh', overflowY: 'auto',
+        width: '100%', maxWidth: 420, maxHeight: `calc(100${DVH} - 28px)`, boxSizing: 'border-box',
+        ...(isMobile ? { borderRadius: 0, maxWidth: 'none', height: '100%', maxHeight: '100%' } : {}),
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        paddingTop: 'calc(14px + env(safe-area-inset-top, 0px))',
+        paddingBottom: 'calc(14px + env(safe-area-inset-bottom, 0px))',
+        paddingLeft: 'calc(14px + env(safe-area-inset-left, 0px))',
+        paddingRight: 'calc(14px + env(safe-area-inset-right, 0px))',
       }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 11 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 11, flexShrink: 0 }}>
           <span style={{ color: DARK.text, fontWeight: 650, fontSize: 15 }}>Mark treated spots</span>
           <span style={{ color: DARK.muted, fontSize: 12 }}>
             {marks.length} {marks.length === 1 ? 'mark' : 'marks'}
           </span>
         </div>
 
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' }}>
         {loading && <p style={{ color: DARK.muted, fontSize: 13 }}>Loading…</p>}
 
         {!loading && !kinds.length && (
@@ -276,6 +287,8 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
           </>
         )}
 
+        </div>
+        <div style={{ flexShrink: 0 }}>
         {errorMsg && (
           <p style={{ color: DARK.red, fontSize: 13, marginTop: 10 }}>{errorMsg}</p>
         )}
@@ -308,7 +321,9 @@ export default function TechPhotoMarksModal({ serviceId, photo, onClose, onSaved
             {saving ? 'Saving…' : 'Save marks'}
           </button>
         </div>
+        </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

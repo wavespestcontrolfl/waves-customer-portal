@@ -5,6 +5,7 @@ let mockConn;
 jest.mock('../models/db', () => {
   const proxy = (...args) => mockConn(...args);
   proxy.raw = (...args) => mockConn.raw(...args);
+  proxy.transaction = (...args) => mockConn.transaction(...args);
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -71,6 +72,128 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     await acquireOccupancyLock(mockConn, DAY);
   });
   afterEach(async () => { await mockConn.rollback(); });
+
+  test('capacity finder reads live blocks, eligibility and whole-hour arrivals from PostgreSQL', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    let trafficSpy;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+      const offers = await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' });
+      expect(offers.slots.length).toBeGreaterThan(0);
+      expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control', bufferMinutes: 15 })).slots).toEqual(offers.slots);
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      const moving = await findAvailableSlots({ ...OPTIONS, arrivalWindow: undefined });
+      expect(moving.slots.length).toBeGreaterThan(0);
+      expect(moving.slots.every(slot => slot.route_arrivals.every(row => row.id !== TARGET))).toBe(true);
+      expect(offers.slots.every(slot => /^\d{2}:00$/.test(slot.start_time) && slot.start_time <= '16:00')).toBe(true);
+      expect(offers.slots.every(slot => slot.travel_source === 'conservative_model')).toBe(true);
+      const optimizer = require('../services/route-optimizer');
+      const createTravel = optimizer.createSchedulingTravel;
+      trafficSpy = jest.spyOn(optimizer, 'createSchedulingTravel').mockImplementation(opts => opts?.maxRequests === 0 ? createTravel(opts)
+        : { lookup: () => ({ minutes: 0, source: 'google_traffic' }), preload: async () => {}, diagnostics: () => ({ requests: 0, elements: 0 }) });
+      expect((await findAvailableSlots({ ...OPTIONS, durationMinutes: 120 })).slots.some(slot => slot.start_time === '16:00')).toBe(false);
+      trafficSpy.mockRestore();
+      await mockConn('tech_schedule_blocks').insert({ date: DAY, technician_id: TECH, block_type: 'unavailable', start_time: '08:00', end_time: '18:00' });
+      expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
+      await mockConn('tech_schedule_blocks').delete();
+      await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'general', active: false });
+      expect((await findAvailableSlots({ ...OPTIONS, serviceType: 'Pest Control' })).slots).toEqual([]);
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ service_type: 'Lawn Care' });
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ service_type: 'Lawn Care' });
+      expect((await findAvailableSlots({ ...OPTIONS, arrivalWindow: undefined, serviceTypes: ['Lawn Care'] })).slots.some(slot => slot.service_family_score > 0)).toBe(true);
+      expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
+      await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'lawn', active: false });
+      expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
+      await mockConn('technician_capabilities').delete();
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 1 });
+      await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 2 });
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: OLD_DAY });
+      expect((await findAvailableSlots(OPTIONS)).slots.every(slot => slot.route_arrivals.at(-1).id === TARGET)).toBe(true);
+      await mockConn('schedule_blackout_dates').insert({ date: DAY });
+      expect((await findAvailableSlots(OPTIONS)).slots.length).toBeGreaterThan(0);
+      expect((await findAvailableSlots({ ...OPTIONS, includeBlackoutDates: false })).slots).toEqual([]);
+    } finally {
+      trafficSpy?.mockRestore();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  }, 30000);
+
+  describe('reservation capacity proofs', () => {
+    let gate;
+    const capacity = require('../services/scheduling/arrival-route');
+    const prepare = () => capacity.prepareArrivalCapacity({ serviceId: TARGET, date: DAY, technicianId: TECH,
+      windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60 });
+    beforeEach(async () => {
+      gate = process.env.GATE_SCHEDULING_CAPACITY;
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities', 'system_settings', 'schedule_blackout_dates', 'audit_log']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+    });
+    afterEach(() => {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    });
+    test('a changed live route invalidates a prepared proof', async () => {
+      const prepared = await prepare();
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ estimated_duration_minutes: 180 });
+      await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'route_changed' });
+    });
+    test('verified insertion persists its order and audit without fetching travel under the lock', async () => {
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 1 });
+      await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 2 });
+      expect((await findAvailableSlots({ ...OPTIONS, capacityPlacement: true })).slots.some(slot => slot.start_time === '09:00')).toBe(true);
+      expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(false);
+      const prepared = await prepare();
+      prepared.travel.preload = jest.fn(() => { throw new Error('network work under lock'); });
+      const fit = await capacity.verifyArrivalCapacity(prepared, { conn: mockConn });
+      await mockConn('scheduled_services').where({ id: TARGET }).update({ scheduled_date: DAY });
+      await capacity.persistArrivalOrder(mockConn, fit, TARGET);
+      expect((await mockConn('scheduled_services').orderBy('route_order').pluck('id'))).toEqual([NORTH, TARGET, SOUTH]);
+      expect(await mockConn('audit_log').first('action', 'metadata')).toMatchObject({ action: 'schedule.capacity_verified', metadata: { route_order: [NORTH, TARGET, SOUTH], travel_source: 'conservative_model' } });
+      expect(prepared.travel.preload).not.toHaveBeenCalled();
+      expect(await mockConn('scheduled_services').where({ id: SOUTH }).first('window_start')).toEqual({ window_start: '10:00:00' });
+    });
+    test('a capability disabled after preparation refuses the unchanged route', async () => {
+      const prepared = await prepare();
+      await mockConn('technician_capabilities').insert({ technician_id: TECH, service_category: 'general', active: false });
+      await expect(capacity.verifyArrivalCapacity(prepared, { conn: mockConn })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'technician_unavailable' });
+    });
+  });
+  test('capacity offers and save probes isolate technicians while retaining unassigned blockers', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      for (const table of ['tech_schedule_blocks', 'technician_capabilities']) {
+        await mockConn.raw('CREATE TEMP TABLE ?? ON COMMIT DROP AS SELECT * FROM public.?? WITH NO DATA', [table, table]);
+      }
+      const otherTech = '10000000-0000-4000-8000-000000000002';
+      await mockConn('technicians').insert({ id: otherTech, name: 'Other fixture technician', active: true,
+        employment_status: 'active', field_dispatchable: true });
+      await mockConn('scheduled_services').where({ id: SOUTH }).delete();
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ technician_id: otherTech,
+        window_start: '09:00', window_end: '10:00' });
+      const request = { ...OPTIONS, earliestStartMin: 960 };
+      expect((await findAvailableSlots(request)).slots).toEqual(expect.arrayContaining([
+        expect.objectContaining({ start_time: '16:00', technician: expect.objectContaining({ id: TECH }) }),
+      ]));
+      expect((await findAvailableSlots({ ...request, arrivalWindow: undefined })).slots)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ start_time: '16:00' })]));
+      expect(await probe({ windowStart: '16:00', windowEnd: '17:00' })).toEqual([]);
+      await mockConn('scheduled_services').where({ id: NORTH }).update({ technician_id: null,
+        window_start: '16:00', window_end: '18:00', estimated_duration_minutes: 120 });
+      expect((await findAvailableSlots(request)).slots).toEqual([]);
+      expect((await probe({ windowStart: '16:00', windowEnd: '17:00' }))[0])
+        .toMatchObject({ conflict_reason: 'arrival_window' });
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  }, 30000);
 
   test('ranks the nearby morning placement first, and picker/live-check/save agree without rewriting other promises', async () => {
     const offers = await findAvailableSlots(OPTIONS);
