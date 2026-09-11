@@ -349,6 +349,41 @@ describe('admin-communications ai-draft context — excludes only the unresolved
   });
 });
 
+describe('review-ask-drafter recentSmsThread — the grounding window excludes only the unresolved reservation', () => {
+  // The last reader in the sweep (codex #4331 P2, round 2): this history is
+  // fed to the model that writes the customer-facing ask, so an unresolved
+  // reservation would be presented as a message Waves definitely sent — and,
+  // being the newest row, would displace real context inside MAX_SMS_HISTORY.
+  test('a reservation newer than the real thread cannot take a grounding slot', () => {
+    const real = Array.from({ length: 6 }, (_, i) => ({
+      direction: i % 2 === 0 ? 'inbound' : 'outbound', status: 'delivered',
+      message_body: `real-${i}`, created_at: new Date(Date.UTC(2026, 8, 1, 0, i)),
+    }));
+    const reservation = {
+      direction: 'outbound', status: 'sending',
+      message_body: 'Would you leave us a quick review?',
+      metadata: { review_ask_reservation: true },
+      created_at: new Date(Date.UTC(2026, 8, 1, 1, 0)),
+    };
+    const knex = require('knex')({ client: 'pg' });
+    // The exact composition recentSmsThread uses — the filter is applied to
+    // the builder BEFORE the window/order/limit, so it runs at SQL level
+    // ahead of the LIMIT rather than thinning the result afterwards.
+    const { sql } = excludeUnresolvedSendReservations(knex('sms_log').where({ customer_id: 'cust-1' }))
+      .where('created_at', '>', new Date(Date.UTC(2026, 7, 1)))
+      .orderBy('created_at', 'desc').limit(6).toSQL();
+    expect(sql).toContain("NOT (sms_log.status = 'sending'");
+
+    const matched = [...real, reservation].filter((r) => !isUnresolvedReviewAskReservation(r))
+      .sort((a, b) => b.created_at - a.created_at).slice(0, 6);
+    expect(matched.length).toBe(6);
+    expect(matched.some((r) => r.message_body.includes('leave us a quick review'))).toBe(false);
+    // A resolved reservation is a real message and stays in the thread.
+    const settled = [...real, { ...reservation, status: 'sent' }].filter((r) => !isUnresolvedReviewAskReservation(r));
+    expect(settled.some((r) => r.message_body.includes('leave us a quick review'))).toBe(true);
+  });
+});
+
 describe('csr-coach verifyFollowUps — an unresolved reservation is not proof staff completed the follow-up', () => {
   jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
   const csrCoach = require('../services/csr/csr-coach');
