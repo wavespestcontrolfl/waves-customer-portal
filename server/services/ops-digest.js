@@ -125,12 +125,15 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
  * Fall-off rule (owner 2026-09-11): an exception bell must not sit unread
  * forever once the condition behind it has cleared. When the check that
  * raised a finding has run clean N times in a row (the runner counts), it
- * asks for the finding's standing rows to be retired: every UNREAD admin
- * ops_digest row carrying that opsKey (and source, when given) is marked
- * read and stamped resolved in metadata. The row stays in the feed as
- * history ("cleared"); nothing is deleted. Returns the number of rows
- * retired. Never throws — a failed retire is logged and reported as 0 so
- * the caller can retry on its next clean run.
+ * asks for the finding's standing rows to be retired: every admin
+ * ops_digest row carrying that opsKey (and source, when given) that is not
+ * yet resolved is stamped resolved in metadata and, if still unread, marked
+ * read. Keyed off the resolved marker, NOT read_at: the owner opening a
+ * FIX/ACT bell before the check runs clean must not leave it "needs a fix"
+ * forever (pre-push P1). The row stays in the feed as history ("cleared");
+ * nothing is deleted. Returns the number of rows retired. Never throws — a
+ * failed retire is logged and reported as 0 so the caller can retry on its
+ * next clean run.
  */
 async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons' } = {}) {
   const opsKey = String(key || '').trim();
@@ -140,11 +143,11 @@ async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons' }
     const stamp = new Date().toISOString();
     let q = db('notifications')
       .where({ recipient_type: 'admin', category: CATEGORY })
-      .whereNull('read_at')
+      .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
     if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
     const count = await q.update({
-      read_at: db.fn.now(),
+      read_at: db.raw('COALESCE(read_at, NOW())'),
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
     });
     logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s) (${resolvedBy})`);
