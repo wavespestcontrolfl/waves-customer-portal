@@ -11,9 +11,9 @@ const fixture = {
   estimate: { id: 'synthetic-proposal', status: 'draft', editVersion: 'loaded-version', customerName: 'Synthetic Office', customerEmail: 'office@example.invalid', customerPhone: '+19415550100' },
   proposal: { enabled: true, title: 'Synthetic proposal', buildings: [{ name: 'Office', lineItems: [{ description: 'Quarterly service', quantity: 1, unitPrice: 100, frequency: 'quarterly', taxable: false }] }] },
 };
-let saved; let previewVersion; let failSave; let calls; let interloperAfterSave;
+let saved; let previewVersion; let failSave; let calls; let interloperAfterSave; let duringSave;
 beforeEach(() => {
-  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false;
+  saved = structuredClone(fixture); previewVersion = 'loaded-version'; failSave = false; calls = []; interloperAfterSave = false; duringSave = null;
   localStorage.setItem('waves_admin_token', 'synthetic-token');
   vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), ...options });
@@ -24,15 +24,13 @@ beforeEach(() => {
       messages: { sms: 'Synthetic proposal link', email: { subject: 'Synthetic proposal', text: 'Review the proposal PDF.' } },
     };
     else if (String(url).endsWith('/send')) data = { channels: { email: { ok: true, real: true } } };
+    else if (String(url).endsWith('/bid-form.pdf')) data = {};
     else if (options.method === 'PUT') {
+      if (duringSave) { const fn = duringSave; duringSave = null; fn(); }
       if (failSave) { status = 409; data = { error: 'Proposal changed; reload.' }; }
-      else {
-        saved.proposal = JSON.parse(options.body).proposal; saved.estimate.editVersion = 'saved-version'; previewVersion = 'saved-version';
-        data = { editVersion: 'saved-version' };
-        if (interloperAfterSave) { saved.proposal = { ...saved.proposal, title: 'Interloper edit' }; saved.estimate.editVersion = 'interloper-version'; previewVersion = 'interloper-version'; }
-      }
+      else { saved.proposal = JSON.parse(options.body).proposal; saved.projectCosting = JSON.parse(options.body).projectCosting; saved.estimate.editVersion = 'saved-version'; previewVersion = 'saved-version'; data = { editVersion: 'saved-version' }; if (interloperAfterSave) { saved.proposal = { ...saved.proposal, title: 'Interloper edit' }; saved.estimate.editVersion = 'interloper-version'; previewVersion = 'interloper-version'; } }
     } else data = saved;
-    return { ok: status < 400, status, json: async () => structuredClone(data), clone() { return this; } };
+    return { ok: status < 400, status, json: async () => structuredClone(data), blob: async () => new Blob(['%PDF-']), clone() { return this; } };
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear(); });
@@ -42,42 +40,55 @@ it('hides bid controls while disabled and omits fields that an older editor cann
   saved.bidToolsEnabled = false;
   mount(); await screen.findByDisplayValue('Synthetic proposal');
   expect(screen.queryByLabelText('Quantity unit')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Add project cost' })).toBeNull();
   expect(screen.queryByLabelText(/Valid through \(Eastern time\)/)).toBeNull();
   fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Ordinary edit' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   await screen.findByRole('button', { name: 'Saved' });
   const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
+  expect(payload).not.toHaveProperty('projectCosting');
   expect(payload.proposal).not.toHaveProperty('validThrough');
 });
 
-it('preserves decimal quantities, units, unit rates, and validity through save/reload', async () => {
+it('preserves decimal quantities, units, unit rates, validity and private cost inputs through save/reload', async () => {
   mount();
   await screen.findByDisplayValue('Synthetic proposal');
   fireEvent.change(screen.getByLabelText('Quantity', { exact: true }), { target: { value: '25.8' } });
   fireEvent.change(screen.getByLabelText('Quantity unit'), { target: { value: 'acre' } });
   fireEvent.change(screen.getByLabelText('Unit price', { exact: true }), { target: { value: '0.0755' } });
   fireEvent.change(screen.getByLabelText(/Valid through \(Eastern time\)/), { target: { value: '2026-12-21' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add project cost' }));
+  fireEvent.change(screen.getByLabelText('Cost description'), { target: { value: 'Private crew hours' } });
+  fireEvent.change(screen.getByLabelText('Cost quantity', { exact: true }), { target: { value: '40' } });
+  fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '35' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   await screen.findByRole('button', { name: 'Saved' });
   const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
   expect(payload.proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: '25.8', unit: 'acre', unitPrice: '0.0755' });
   expect(payload.proposal.validThrough).toBe('2026-12-21');
+  expect(payload.projectCosting.rows[0]).toMatchObject({ quantity: '40', unitCost: '35', description: 'Private crew hours' });
+  expect(JSON.stringify(payload.proposal)).not.toContain('Private crew hours');
   expect(screen.getByLabelText('Quantity', { exact: true })).toHaveValue(25.8);
+  expect(screen.getByLabelText('Cost description')).toHaveValue('Private crew hours');
 });
 
 it('keeps saved bid details visible but read-only after the gate is disabled', async () => {
   saved.bidToolsEnabled = false;
   saved.proposal.validThrough = '2099-12-21';
   Object.assign(saved.proposal.buildings[0].lineItems[0], { id: 'saved-line', unit: 'acre', quantity: 25.8, unitPrice: 0.0755 });
+  saved.projectCosting = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'Private crew hours', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 1 }] };
   mount(); await screen.findByDisplayValue('Synthetic proposal');
   expect(screen.getByLabelText('Quantity unit')).toBeDisabled();
   expect(screen.getByLabelText('Quantity unit')).toHaveValue('acre');
   expect(screen.getByLabelText(/Valid through \(Eastern time\)/)).toBeDisabled();
+  expect(screen.getByLabelText('Cost description')).toBeDisabled();
+  expect(screen.queryByRole('heading', { name: 'Required bid form' })).toBeNull();
   fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Ordinary bid title edit' } });
   fireEvent.click(screen.getByRole('button', { name: 'Save proposal' }));
   await screen.findByRole('button', { name: 'Saved' });
   const payload = JSON.parse(calls.find((call) => call.method === 'PUT').body);
   expect(payload.proposal.buildings[0].lineItems[0]).toMatchObject({ unit: 'acre', quantity: 25.8, unitPrice: 0.0755 });
+  expect(payload).not.toHaveProperty('projectCosting');
   expect(payload.proposal).not.toHaveProperty('validThrough');
 });
 
@@ -144,6 +155,47 @@ it('duplicates a unit-bearing building as a unit-less copy while the gate is off
   expect(payload.proposal.buildings[0].lineItems[0]).toMatchObject({ id: 'saved-line', unit: 'acre' });
   expect(payload.proposal.buildings[1].lineItems[0].unit).toBeFalsy();
   expect(payload.proposal.buildings[1].lineItems[0].id).not.toBe('saved-line');
+});
+
+const bidFormExport = async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.change(screen.getByLabelText('Original PDF'), { target: { files: [new File(['%PDF-'], 'original.pdf', { type: 'application/pdf' })] } });
+  fireEvent.change(screen.getByLabelText('Form row for Quarterly service'), { target: { value: 'application' } });
+  vi.stubGlobal('URL', { ...URL, createObjectURL: () => 'blob:synthetic', revokeObjectURL: () => {} });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  fireEvent.click(screen.getByRole('button', { name: 'Download filled bid form' }));
+};
+
+it('exports the bid form with the row mapping captured at the click after a clean save', async () => {
+  await bidFormExport();
+  await waitFor(() => expect(calls.some((call) => call.url.endsWith('/bid-form.pdf'))).toBe(true));
+  const options = JSON.parse(calls.find((call) => call.url.endsWith('/bid-form.pdf')).body.get('options'));
+  expect(options.template).toBe('north_port_pr27_02');
+  expect(options.expectedEditVersion).toBe('saved-version');
+  expect(Object.values(options.mapping)).toEqual(['application']);
+});
+
+it('refuses the export when a proposal edit lands while the pre-export save is in flight (GH codex P2 r6 on #4270)', async () => {
+  duringSave = () => fireEvent.change(screen.getByDisplayValue('Synthetic proposal'), { target: { value: 'Edited mid-save' } });
+  await bidFormExport();
+  await screen.findByRole('alert');
+  expect(screen.getByRole('alert')).toHaveTextContent('The proposal changed while the form was being prepared');
+  expect(calls.some((call) => call.url.endsWith('/bid-form.pdf'))).toBe(false);
+  expect(calls.filter((call) => call.method === 'PUT').length).toBeGreaterThanOrEqual(2);
+});
+
+it('withholds the costing margin while any program row is incomplete, exactly as the save refuses it (GH codex P2 r10 on #4270)', async () => {
+  mount();
+  await screen.findByDisplayValue('Synthetic proposal');
+  fireEvent.click(screen.getByRole('button', { name: 'Add project cost' }));
+  fireEvent.change(screen.getByLabelText('Cost description'), { target: { value: 'Private crew hours' } });
+  fireEvent.change(screen.getByLabelText('Cost quantity', { exact: true }), { target: { value: '1' } });
+  fireEvent.change(screen.getByLabelText('Cost per unit'), { target: { value: '1' } });
+  expect(screen.getByText('$399.00')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Add program' }));
+  expect(screen.queryByText('$399.00')).not.toBeInTheDocument();
+  expect(screen.getByText(/Fix the quoted itemization before comparing costs: Every program row needs a name/)).toBeInTheDocument();
 });
 
 it('offers neither Review and send nor Mark won while the saved fixed date has passed, and again once a later date is saved (GH codex P2 r5 on #4309)', async () => {

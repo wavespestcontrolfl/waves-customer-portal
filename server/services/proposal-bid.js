@@ -1,4 +1,4 @@
-const { PROPOSAL_UNITS, roundDecimal } = require('../../shared/proposal-bid.cjs');
+const { PROPOSAL_UNITS, roundDecimal, decimalValid, costRowIssue, COST_ROW_LIMITS } = require('../../shared/proposal-bid.cjs');
 const { validDateOnly } = require('../utils/date-only');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -52,21 +52,7 @@ function assertBidScheduleDate(estimate, scheduledTime) {
   assertBidSendDate(estimate, scheduledTime);
   if (expiry < earliestScheduledDelivery(scheduledTime)) throw Object.assign(new Error('The scheduled time is too close to the end of the bid validity day; scheduled sends run every five minutes. Choose an earlier time or update Valid through in the proposal builder.'), { statusCode: 409 });
 }
-function decimalValid(value, { min = 0, max = 99999999.99 } = {}) {
-  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return false;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < min || n > max) return false;
-  if (typeof value === 'string') {
-    const match = /^[+-]?(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(value.trim());
-    if (!match) return false;
-    const fraction = match[2] || '';
-    const digits = match[1] + fraction;
-    const trailingZeros = digits.length - digits.replace(/0+$/, '').length;
-    return fraction.length - Number(match[3] || 0) - trailingZeros <= 4;
-  }
-  return Math.abs(n - roundDecimal(n)) <= Number.EPSILON * Math.abs(n);
-}
-function validateBidFields(proposal) {
+function validateBidFields(proposal, costing) {
   if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)) return 'A proposal must be an object.';
   if (proposal.buildings != null && !Array.isArray(proposal.buildings)) return 'Proposal buildings must be a list.';
   if (proposal.validThrough && !validDateOnly(proposal.validThrough)) return 'Valid through must be a real calendar date (YYYY-MM-DD).';
@@ -86,6 +72,23 @@ function validateBidFields(proposal) {
       }
     }
   }
+  if (costing == null) return null;
+  if (!Array.isArray(costing.rows) || costing.rows.length > COST_ROW_LIMITS.rowsMax) return 'Project costing supports up to 100 cost rows.';
+  if (!Number.isInteger(Number(costing.revenueYears)) || Number(costing.revenueYears) < 1 || Number(costing.revenueYears) > 30) return 'Cost comparison needs a revenue period of 1–30 whole years.';
+  for (const row of costing.rows) {
+    const issue = costRowIssue(row);
+    if (issue) return issue;
+  }
   return null;
 }
-module.exports = { proposalExpiry, publicExpiresAt, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields };
+function normalizeProjectCosting(raw) {
+  if (!raw || !Array.isArray(raw.rows)) return null;
+  return {
+    revenueYears: Number(raw.revenueYears),
+    rows: raw.rows.map((row) => ({
+      category: row.category, phase: String(row.phase || '').trim(), description: row.description.trim(),
+      quantity: roundDecimal(row.quantity), unit: row.unit, unitCost: roundDecimal(row.unitCost), occurrences: Number(row.occurrences),
+    })),
+  };
+}
+module.exports = { proposalExpiry, publicExpiresAt, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields, normalizeProjectCosting };

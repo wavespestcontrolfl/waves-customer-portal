@@ -59,7 +59,8 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
-const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
+const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
   acceptanceServiceLists,
@@ -3744,6 +3745,8 @@ router.get('/:id/proposal', async (req, res, next) => {
       proposal,
       totals: computeProposalTotals(proposal),
       bidToolsEnabled: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
+      // Private operator inputs live beside the public proposal allowlist.
+      projectCosting: parseEstimateData(estimate.estimate_data)?.proposalCosting || null,
       // Engine-composed prospect research (commercial proposal lane) — the
       // builder page shows it read-only above the line items. Additive:
       // null for operator-originated proposals.
@@ -3846,7 +3849,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     // Older proposal editors do not send the new date field. An omission
     // preserves the authored hold; clearing it requires an explicit null.
     if (!Object.hasOwn(incoming, 'validThrough')) incoming.validThrough = savedProposal.validThrough;
-    const bidValidation = validateBidFields(incoming);
+    const bidValidation = validateBidFields(incoming, req.body?.projectCosting);
     if (bidValidation) return res.status(400).json({ error: bidValidation });
     // Programs-only callers may omit buildings entirely — normalize once
     // and use the array everywhere (pre-push codex P1: undefined.some threw).
@@ -3856,9 +3859,9 @@ router.put('/:id/proposal', async (req, res, next) => {
       const incomingLines = incomingBuildings.flatMap((building) => building.lineItems || building.line_items || []);
       const omittedIdentifiers = [...savedUnits.values()].some(Boolean) && incomingLines.some((line) => !line.id);
       const unitsChanged = omittedIdentifiers || incomingLines.some((line) => (line.unit || null) !== (savedUnits.get(line.id) || null));
-      if (unitsChanged
+      if (Object.hasOwn(req.body || {}, 'projectCosting') || unitsChanged
         || (incoming.validThrough || null) !== (savedProposal.validThrough || null)) {
-        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units and validity dates remain in place.' });
+        return res.status(409).json({ error: 'Bid authoring is currently disabled. Reload the proposal before editing; saved bid units, costs and validity dates remain in place.' });
       }
     }
     const hasBuildings = incomingBuildings.length > 0;
@@ -3882,18 +3885,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Proposals are limited to 10 service programs.' });
       }
       for (const program of incomingPrograms) {
-        const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
-        if (!Number.isInteger(freq) || freq < 1 || freq > 52) {
-          return res.status(400).json({ error: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' });
-        }
-        // Finite, positive, cent-representable — 0.001 or Infinity would
-        // normalize to a dropped program and rewrite the authoritative
-        // totals to zero (pre-push codex P0).
-        const price = Number(program?.pricePerApplication ?? program?.perApplication);
-        if (!Number.isFinite(price) || price < 0.01
-          || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) {
-          return res.status(400).json({ error: 'Each program needs a per-application price of at least $0.01, in whole cents.' });
-        }
+        // Whole-number 1–52 frequency; finite, positive, cent-representable
+        // price — 0.001 or Infinity would normalize to a dropped program and
+        // rewrite the authoritative totals to zero (pre-push codex P0). The
+        // predicate is shared with the builder's costing card (GH codex P2
+        // r8 on #4270).
+        const programIssue = programRevenueIssue(program);
+        if (programIssue) return res.status(400).json({ error: programIssue });
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }
@@ -4109,6 +4107,7 @@ router.put('/:id/proposal', async (req, res, next) => {
     const revivingBid = expiredRecovery && (expiryUpdate > new Date() || (hadFixedValidity && !expiryUpdate));
     const nextData = {
       ...existingData,
+      ...(Object.hasOwn(req.body || {}, 'projectCosting') ? { proposalCosting: normalizeProjectCosting(req.body.projectCosting) } : {}),
       proposal: {
         ...normalized,
         updatedAt: new Date().toISOString(),
@@ -4123,7 +4122,21 @@ router.put('/:id/proposal', async (req, res, next) => {
     // drop it — the public copy falls back to "your account manager has the
     // proposal" until the next send re-stamps proposalDelivery against the new
     // PDF. Otherwise the link would keep saying the edited proposal was emailed.
-    clearStaleProposalDelivery(nextData);
+    // A private-cost-only save leaves the customer proposal and its PDF
+    // exactly as delivered, so the emailed marker stays true (GH codex P2 on
+    // #4270). Anything that changes the normalized proposal drops it.
+    // Customer-visible content only: line `id`s exist for the bid-form row
+    // mapping and are minted client-side for legacy lines on load, so they
+    // must not turn a cost-only save into a "changed proposal" (GH codex P2
+    // r12 on #4270).
+    const proposalContent = (value) => {
+      const { updatedAt, provenance, buildings, ...rest } = value || {};
+      const visibleLine = (line) => { const { id, ...visible } = line || {}; return visible; };
+      return JSON.stringify({ ...rest, buildings: (Array.isArray(buildings) ? buildings : []).map((b) => ({ ...b, lineItems: (Array.isArray(b?.lineItems) ? b.lineItems : []).map(visibleLine) })) });
+    };
+    if (!(Object.hasOwn(req.body || {}, 'projectCosting') && proposalContent(normalized) === proposalContent({ ...savedProposal, enabled: true, synthesized: false }))) {
+      clearStaleProposalDelivery(nextData);
+    }
     // Make the authored proposal sendable: clear the auto-quote-required
     // booleans the commercial estimate was created with, and resolve any
     // blocking lead/draft automation status. proposal.enabled (set above) is
@@ -4296,9 +4309,14 @@ router.put('/:id/proposal', async (req, res, next) => {
             .where((published) => published.whereNotNull('sent_at').orWhereNotNull('viewed_at'))
             .whereRaw("COALESCE(disposition, '') <> 'expired_unsent'")))
         .where('expires_at', '<', authoredExpiry)
-        // Same atomic belt as extendEstimate's group revive (GH codex P1 r5
-        // on #4309): while the rollout gate is on, a member the engine never
-        // verified is never revived onto the customer's group link.
+        // Same render/authority guards as the extension service's sibling
+        // revive: a linkage-invalidated or re-price-held sibling cannot
+        // render, and while the send gate is on a sibling that fails the
+        // pricing-authority verdict (a delivered CLIENT_FALLBACK row) must
+        // not become customer-viewable again (pre-push codex P1 on #4270).
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+        .whereRaw(REPRICE_PENDING_ABSENT_SQL)
         .modify((q) => { if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL); })
         .update({
           expires_at: authoredExpiry,
@@ -4356,6 +4374,34 @@ router.put('/:id/proposal', async (req, res, next) => {
 
     logger.info(`[estimates] Saved commercial proposal for estimate ${estimate.id} (${normalized.buildings.length} buildings, first-year ${totals.firstYearTotal})`);
     res.json({ success: true, proposal: normalized, totals, editVersion: committedEditVersion });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// POST /api/admin/estimates/:id/proposal/bid-form.pdf — fill a reviewed
+// original form using the latest saved proposal. Originals are not retained.
+const bidFormUpload = require('multer')({
+  storage: require('multer').memoryStorage(),
+  limits: { fileSize: 12 * 1024 * 1024, files: 1, fields: 1, fieldSize: 64 * 1024 },
+}).single('sourcePdf');
+router.post('/:id/proposal/bid-form.pdf', (req, res, next) => {
+  if (!gateEnvValue('GATE_COMMERCIAL_BID_BUILDER')) return res.status(404).json({ error: 'Not found' });
+  bidFormUpload(req, res, (err) => err ? res.status(400).json({ error: 'Upload one original PDF up to 12 MB, with the form options.' }) : next());
+}, async (req, res, next) => {
+  try {
+    let options;
+    try { options = JSON.parse(req.body.options); } catch { return res.status(400).json({ error: 'Invalid bid-form options.' }); }
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!options?.expectedEditVersion || options.expectedEditVersion !== estimateEditVersion(estimate)) return res.status(409).json({ error: 'The saved proposal changed. Reload and review the prices before exporting.' });
+    const { buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
+    const pdf = await buildProposalBidForm({ ...options, estimate, sourcePdf: req.file?.buffer });
+    const current = await db('estimates').where({ id: estimate.id }).first();
+    if (!current || estimateEditVersion(current) !== options.expectedEditVersion) return res.status(409).json({ error: 'The proposal changed while preparing the form. Review the latest prices and export again.' });
+    res.set({ 'Content-Type': 'application/pdf', 'Cache-Control': 'private, no-store', 'Content-Disposition': `attachment; filename="${options.template}-bid-form.pdf"` });
+    res.send(pdf);
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);

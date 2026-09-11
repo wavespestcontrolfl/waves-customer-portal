@@ -87,12 +87,9 @@ const sendgrid = require('../services/sendgrid-mail');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { computeProposalTotals, normalizeProposal } = require('../services/estimate-proposal');
-const { gateEnvValue } = require('../config/feature-gates');
-jest.mock('../services/pricing-authority-gate', () => {
-  const actual = jest.requireActual('../services/pricing-authority-gate');
-  return { ...actual, gatedSendAuthorityPredicateApplies: jest.fn(() => false) };
-});
-const pricingAuthorityGate = require('../services/pricing-authority-gate');
+const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+const { GATED_SEND_AUTHORITY_SQL } = require('../services/pricing-authority-gate');
+const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 let row;
 let mutations;
@@ -178,6 +175,7 @@ function scheduledAttempt({ key = 'synthetic-scheduled-attempt', startedAt, resu
 }
 
 beforeEach(() => {
+  isEnabled.mockImplementation(() => false);
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(false);
   row = savedEstimate();
@@ -195,19 +193,37 @@ beforeEach(() => {
 describe('commercial bid authoring', () => {
   beforeEach(() => gateEnvValue.mockImplementation((key) => key === 'GATE_COMMERCIAL_BID_BUILDER'));
   const proposal = () => ({ enabled: true, validThrough: '2099-12-21', buildings: [{ name: 'Synthetic field', lineItems: [{ id: 'application', description: 'Synthetic application', quantity: 25.8, unit: 'acre', unitPrice: 100, frequency: 'one_time' }] }] });
-  test('PUT stores fractional quote totals and fixed expiry atomically', async () => {
+  const costing = { revenueYears: 1, rows: [{ category: 'labor', phase: 'Phase A', description: 'PRIVATE CREW COST', quantity: 40, unit: 'hour', unitCost: 35, occurrences: 4 }] };
+  test.each([['costing only', false, false], ['a changed line', true, false], ['costing only, legacy lines given ids on load', false, true]])('re-saving a delivered proposal with %s keeps or drops the emailed-PDF marker (GH codex P2 on #4270)', async (name, changed, legacy) => {
+    const savedProposal = proposal();
+    // A legacy delivered proposal has no line ids; the editor mints them on
+    // load and the next cost-only save sends them (GH codex P2 r12 on #4270).
+    if (legacy) delete savedProposal.buildings[0].lineItems[0].id;
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_data: { proposal: savedProposal, proposalDelivery: { pdfEmailed: true } } });
+    const incoming = proposal();
+    if (legacy) incoming.buildings[0].lineItems[0].id = 'generated-on-load';
+    if (changed) incoming.buildings[0].lineItems[0].unitPrice = 101;
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: incoming, projectCosting: costing });
+    expect(res.statusCode).toBe(200);
+    expect(dataOf().proposalCosting).toEqual(costing);
+    if (changed) expect(dataOf().proposalDelivery).toBeUndefined();
+    else expect(dataOf().proposalDelivery).toEqual({ pdfEmailed: true });
+  });
+  test('PUT stores fractional quote totals, fixed expiry and private costing atomically', async () => {
     row.status = 'draft';
-    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal() });
+    const res = await invoke('/:id/proposal', 'put', { expectedEditVersion: persistence.estimateEditVersion(row), proposal: proposal(), projectCosting: costing });
     expect(res.statusCode).toBe(200);
     // The response carries the version this write committed (pre-push codex P1 r3).
     expect(res.body.editVersion).toBe(persistence.estimateEditVersion(row));
     expect(row.onetime_total).toBe(2580);
     expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf().proposalCosting).toEqual(costing);
+    expect(JSON.stringify(dataOf().proposal)).not.toContain('PRIVATE CREW COST');
     expect(dataOf().proposal.buildings[0].lineItems[0]).toMatchObject({ quantity: 25.8, unit: 'acre', amount: 2580 });
   });
   test('PUT rejects stale editing and invalid quantities without replacing saved prices', async () => {
     row.status = 'draft';
-    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal() });
+    const stale = await invoke('/:id/proposal', 'put', { expectedEditVersion: 'stale-version', proposal: proposal(), projectCosting: costing });
     expect(stale.statusCode).toBe(409);
     expect(mutations).toHaveLength(0);
     const invalid = proposal(); invalid.buildings[0].lineItems[0].quantity = 0.00001;
@@ -259,12 +275,20 @@ describe('commercial bid authoring', () => {
       expect(row).toEqual(before);
     }
   });
-  test('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309)', async () => {
+  test.each([[false], [true]])('saving a longer fixed hold pushes the group\'s published members forward so the entry link keeps assembling the group (pre-push codex P1 on #4309; send gate on: %s)', async (sendGateOn) => {
     Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
+    isEnabled.mockImplementation((flag) => flag === 'sendRequiresServerPricing' && sendGateOn);
     const whereRawSql = [];
     db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
     expect(whereRawSql.some((sql) => /expired_unsent/.test(sql))).toBe(true);
+    // The revive never reaches a sibling that cannot render, and under the
+    // send gate never one that fails the pricing-authority verdict
+    // (pre-push codex P1 on #4270).
+    expect(whereRawSql.some((sql) => /linkage_invalidated_at/.test(sql))).toBe(true);
+    expect(whereRawSql.some((sql) => /invalidation_pending_at/.test(sql))).toBe(true);
+    expect(whereRawSql).toContain(REPRICE_PENDING_ABSENT_SQL);
+    expect(whereRawSql.includes(GATED_SEND_AUTHORITY_SQL)).toBe(sendGateOn);
     expect(res.statusCode).toBe(200);
     const siblingExtension = mutations.find(({ patch }) => !patch.estimate_data && patch.expires_at);
     expect(new Date(siblingExtension.patch.expires_at).toISOString()).toBe('2100-01-01T04:59:59.999Z');
@@ -275,15 +299,15 @@ describe('commercial bid authoring', () => {
   });
   test('the push-forward revival carries the pricing-authority predicate while the rollout gate is on (GH codex P1 r5 on #4309)', async () => {
     Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
-    pricingAuthorityGate.gatedSendAuthorityPredicateApplies.mockReturnValue(true);
+    isEnabled.mockImplementation((flag) => flag === 'sendRequiresServerPricing');
     const whereRawSql = [];
     db.mockImplementation((table) => { const b = estimateDatabase(table); const raw = b.whereRaw; b.whereRaw = jest.fn((sql) => { whereRawSql.push(String(sql)); return raw(sql); }); return b; });
     try {
       const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
       expect(res.statusCode).toBe(200);
-      expect(whereRawSql).toContain(pricingAuthorityGate.GATED_SEND_AUTHORITY_SQL);
+      expect(whereRawSql).toContain(GATED_SEND_AUTHORITY_SQL);
     } finally {
-      pricingAuthorityGate.gatedSendAuthorityPredicateApplies.mockReturnValue(false);
+      isEnabled.mockImplementation(() => false);
     }
   });
   test('shortening a fixed hold pulls members back off the obsolete widened expiry (GH codex P1 r4 on #4309)', async () => {
@@ -323,7 +347,7 @@ describe('commercial bid authoring', () => {
   });
   test('a legacy editor cannot discard saved units by omitting line identifiers while the gate is off', async () => {
     gateEnvValue.mockReturnValue(false);
-    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+    row.status = 'draft'; row.estimate_data = { proposal: proposal(), proposalCosting: costing };
     const incoming = proposal();
     delete incoming.buildings[0].lineItems[0].id;
     delete incoming.buildings[0].lineItems[0].unit;
@@ -345,17 +369,28 @@ describe('commercial bid authoring', () => {
     expect(row.expires_at?.toISOString() ?? null).toBe(expected);
     if (!sentAt && !scheduledAt) expect(row.status).toBe('draft');
   });
-  test.each(['validity', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
-    row.status = 'draft'; row.estimate_data = { proposal: proposal() };
+  test.each(['validity', 'costing', 'unit'])('the disabled gate refuses new %s from a stale editor without changing the saved bid', async (field) => {
+    row.status = 'draft'; row.estimate_data = { proposal: proposal(), proposalCosting: costing };
     const body = { proposal: proposal() };
     if (field === 'validity') body.proposal.validThrough = null;
+    if (field === 'costing') body.projectCosting = { ...costing, rows: [] };
     if (field === 'unit') body.proposal.buildings[0].lineItems[0].unit = 'sqft';
     gateEnvValue.mockReturnValue(false);
     const res = await invoke('/:id/proposal', 'put', body);
     expect(res.statusCode).toBe(409);
     expect(res.body.error).toMatch(/Bid authoring is currently disabled/);
     expect(mutations).toHaveLength(0);
-    expect(dataOf()).toEqual({ proposal: proposal() });
+    expect(dataOf()).toEqual({ proposal: proposal(), proposalCosting: costing });
+  });
+  test('the disabled gate rejects original-form uploads before parsing files or reading estimates', async () => {
+    gateEnvValue.mockReturnValue(false);
+    const layer = router.stack.find((entry) => entry.route?.path === '/:id/proposal/bid-form.pdf');
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+    const next = jest.fn();
+    await layer.route.stack[0].handle({}, res, next);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(next).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
   });
   test('an expired fixed bid can be explicitly revised and its expiry disposition is cleared', async () => {
     row.status = 'expired'; row.sent_at = new Date('2026-01-01T12:00:00Z');

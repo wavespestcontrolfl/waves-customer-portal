@@ -895,7 +895,8 @@ limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
 Authored commercial proposals expose reviewed four-decimal quantities and unit
 rates, explicit unit labels, cent-rounded line amounts, and the fixed
-`validThrough` date in their normalized proposal and document output. A fixed
+`validThrough` date in their normalized proposal and document output. Internal
+`estimate_data.proposalCosting` stays outside that public allowlist. A fixed
 price hold governs expiry even after resends and cannot be changed by the
 generic extension or auto-renew paths; these additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
