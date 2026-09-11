@@ -36,7 +36,10 @@ const catalogServiceIdForProfile = async (conn, profile) => {
   const link = await catalogLinkForProfile(conn, profile);
   return link ? link.id : null;
 };
-const selectable = (read) => ({ modify: async () => read() });
+// The resolver awaits `.select(...)` directly (no `.modify` row-lock hook since
+// the services table SHARE lock replaced FOR SHARE); keep the legacy `modify`
+// shape for older call sites and make the builder thenable for the new one.
+const selectable = (read) => ({ modify: async () => read(), then: (resolve, reject) => Promise.resolve().then(read).then(resolve, reject) });
 
 // The 2026-08-25 coverage expansion seeds ride on top of the original four
 // rows; the alias appends (wasp, pre_slab_termidor) join their parent
