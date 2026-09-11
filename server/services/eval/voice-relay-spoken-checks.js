@@ -37,8 +37,23 @@ const escapeRegexLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').repla
 const wordAlt = (words) => words.map((w) => (w.startsWith('be ') ? `(?:be )?${escapeRegexLiteral(w.slice(3))}` : escapeRegexLiteral(w))).join('|');
 const vocabAlt = (words) => `(?:${wordAlt(words)})`;
 
-// A product called safe outright — the direct guarantee.
-const SAFETY_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'fine', 'ok', 'okay', 'alright', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe']);
+// A product called safe outright — the direct guarantee. Split into two
+// tiers (P1 follow-up on the Claude fallback audit): STRONG words only ever
+// describe a product, so they fire on any subject shape SAFETY_SUBJECT
+// accepts, bare pronoun included ("It's safe."). FILLER words are ordinary
+// conversational acknowledgements as often as they are safety synonyms —
+// "That's fine, let me check that for you." and "It's okay, I've got that
+// noted." say nothing about a product at all — so they only count once the
+// subject demonstrably NAMES one: a SAFETY_SUBJECT_MODIFIER noun, a
+// SAFETY_BRAND_SUBJECT, or the pet/children complement pattern 3 already
+// requires (SAFETY_SUBJECT_WITH_PRODUCT and SAFETY_GUARANTEE_RES below).
+// Both tiers still feed one combined vocabulary for every consumer that
+// doesn't need the distinction (refusal detection, clause continuation,
+// the caller-question mechanism) — table-driven, never an inline literal
+// at a call site.
+const SAFETY_STRONG_ADJECTIVES = Object.freeze(['safe', 'harmless', 'non-toxic', 'nontoxic', 'pet-friendly', 'pet friendly', 'pet-safe', 'pet safe']);
+const SAFETY_FILLER_ADJECTIVES = Object.freeze(['fine', 'ok', 'okay', 'alright']);
+const SAFETY_ADJECTIVES = Object.freeze([...SAFETY_STRONG_ADJECTIVES, ...SAFETY_FILLER_ADJECTIVES]);
 // The same guarantee in its noun-phrase shape ("there's no risk") — not an
 // adjective applied to the product, so it gets its own pattern shape
 // rather than joining SAFETY_ADJECTIVES.
@@ -1440,12 +1455,18 @@ function firstUnexemptGuarantee(text) {
 // product", "the ant bait", "Bait" alone, "It" alone — widened from the
 // earlier exact "the bait"/"the product" so any product-ish noun phrase
 // counts as the subject, not only those two fixed phrases.
-const SAFETY_SUBJECT_DETERMINER = '(?:this|that|the|our|your|it|they|these|those|everything)';
+const SAFETY_SUBJECT_DETERMINER_WORDS = Object.freeze(['this', 'that', 'the', 'our', 'your', 'it', 'they', 'these', 'those', 'everything']);
+const SAFETY_SUBJECT_DETERMINER = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.join('|')})`;
 // Round-6 P1: "pesticide"/"insecticide"/"herbicide" are ordinary product
 // vocabulary, same status as "spray" or "chemical" — added here rather
 // than as a one-off pattern.
 const SAFETY_SUBJECT_MODIFIER = '(?:ants?|roach(?:es)?|termites?|baits?|gels?|sprays?|granules?|products?|treatments?|chemicals?|stuff|materials?|applications?|pesticides?|insecticides?|herbicides?)';
 const SAFETY_SUBJECT = `(?:${SAFETY_SUBJECT_DETERMINER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,3}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
+// P1 follow-up: a bare determiner/pronoun with NO product modifier ("that",
+// "it", "everything") never names a product — only the shape that actually
+// has one, for the FILLER adjectives (SAFETY_FILLER_ADJECTIVES) that also
+// read as ordinary acknowledgements on their own ("that's fine").
+const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2}|${SAFETY_SUBJECT_MODIFIER}(?:\\s+${SAFETY_SUBJECT_MODIFIER}){0,2})`;
 // Round-6 P1: neither a determiner+noun phrase nor a bare pronoun names a
 // BRAND — the report's own findings can say "Talstar P", never covered by
 // the generic noun vocabulary above — so "Talstar P is safe" passed as if
@@ -1453,13 +1474,26 @@ const SAFETY_SUBJECT = `(?:${SAFETY_SUBJECT_DETERMINER}(?:\\s+${SAFETY_SUBJECT_M
 // one use in SAFETY_GUARANTEE_RES below) so a capitalized product name is
 // recognized without the lowercase generic vocabulary swallowing ordinary
 // capitalized words ("The technician...") that happen to open a sentence.
-const SAFETY_BRAND_SUBJECT = '\\b[A-Z][a-z]+(?:\\s+[A-Z][A-Za-z0-9]{0,3}\\b)?';
+// P1 follow-up: capitalization ALSO marks the first word of a sentence, so
+// a SAFETY_SUBJECT_DETERMINER word capitalized only by that position ("That's
+// fine, let me check that for you.", "It's okay, I've got that noted.") is
+// excluded here too — it is never a brand, and the generic subject above
+// already covers it when a real product noun follows.
+const SAFETY_SUBJECT_DETERMINER_CAPITALIZED = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.map((w) => w[0].toUpperCase() + w.slice(1)).join('|')})`;
+const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+(?:\\s+[A-Z][A-Za-z0-9]{0,3}\\b)?`;
 const SAFETY_SUBJECT_VERB = `(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 // The shared SAFETY_ADJECTIVES vocabulary (top of file) — "non toxic" and
 // "pet safe" are spoken as two words as often as one, which is why both
 // forms are their own list entries rather than one hyphen-optional regex.
+// SAFETY_ADJECTIVE is the FULL vocabulary, for consumers where the subject
+// is already established as a product by some other means (the brand
+// subject, or the pet/children complement pattern 3); SAFETY_STRONG_ADJECTIVE
+// and SAFETY_FILLER_ADJECTIVE split out the two tiers for the bare-subject
+// pattern below, which cannot yet assume the subject names anything.
 const SAFETY_ADJECTIVE = vocabAlt(SAFETY_ADJECTIVES);
+const SAFETY_STRONG_ADJECTIVE = vocabAlt(SAFETY_STRONG_ADJECTIVES);
+const SAFETY_FILLER_ADJECTIVE = vocabAlt(SAFETY_FILLER_ADJECTIVES);
 // A HARM word — the OTHER pole from SAFETY_ADJECTIVE (shared HARM_WORDS
 // vocabulary, top of file). Negating one of THESE ("not harmful", "never
 // toxic", "no longer dangerous") is the guarantee itself, same as "no
@@ -1475,9 +1509,22 @@ const SAFETY_ADJECTIVE_NEGATION = `(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never
 // safetyExemptSpans above) so firstUnexemptGuarantee can walk ALL of a
 // pattern's matches, not just the first the regex engine happens to reach.
 const SAFETY_GUARANTEE_RES = Object.freeze([
-  new RegExp(`\\b${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'gi'),
+  // STRONG adjectives ("safe", "harmless", "pet-safe"…) only ever describe
+  // a product, so they fire on any SAFETY_SUBJECT shape, bare pronoun
+  // included — "It's safe.".
+  new RegExp(`\\b${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}\\b`, 'gi'),
+  // P1 follow-up: FILLER adjectives ("fine", "ok", "okay", "alright") are
+  // ordinary conversational acknowledgements as often as safety synonyms —
+  // "That's fine, let me check that for you." says nothing about a product
+  // — so they only count once the subject demonstrably names one
+  // (SAFETY_SUBJECT_WITH_PRODUCT: a determiner+noun or bare noun phrase,
+  // never a bare pronoun/determiner alone).
+  new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_FILLER_ADJECTIVE}\\b`, 'gi'),
   // The brand/report-named subject (round-6 P1) — case-sensitive ('g' only,
   // no 'i'), so "Talstar P is safe" fails the same as "the bait is safe".
+  // A named brand already establishes the subject as a product, so the
+  // full adjective vocabulary (filler words included) applies here:
+  // "Talstar P is fine." still fails.
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
   new RegExp(`${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|kids)\\b`, 'gi'),
   new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi'),
