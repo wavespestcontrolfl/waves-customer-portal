@@ -30,69 +30,79 @@ function dateOnly(value) {
   return m ? m[1] : null;
 }
 
+// The visit this invoice names — directly (scheduled_service_id, the only
+// link the Invoices page writes at creation) or through its service record
+// (service_record_id → service_records.scheduled_service_id). A record-only
+// link means a completion already ran for that visit and the canonical
+// completion refuses a second one (service_already_completed), so there is
+// nothing to close — but the visit IS linked, so it is resolved and handed
+// back for the refusal audit (GitHub r11 P2 #4127). An unattached office
+// invoice is never paired by inference (owner ruling 2026-09-07).
+async function linkedVisitForInvoice(conn, invoice) {
+  if (invoice.scheduled_service_id) {
+    const svc = await conn('scheduled_services').where({ id: invoice.scheduled_service_id }).first();
+    return svc ? { svc } : { reason: 'no_visit' };
+  }
+  if (!invoice.service_record_id) return { reason: 'not_linked' };
+  const record = await conn('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id');
+  const visit = record?.scheduled_service_id
+    ? await conn('scheduled_services').where({ id: record.scheduled_service_id }).first()
+    : null;
+  return { reason: 'record_linked_only', ...(visit ? { visit } : {}) };
+}
+
+// The two refusals that need a read beyond the visit row. Only the verdict
+// itself is a refusal; a failed read inside either probe is an outage,
+// rethrown carrying the visit (`linkedVisit`) so it lands in the caller's
+// failure audit (code 'error') against this visit instead of being misfiled
+// as a refusal (GitHub r6 P2 #4127).
+//  - Packet ownership: a saved grouped closeout owns the visit's billing.
+//  - Project-backed profile (requiresProject / projectBacked: special
+//    projects, rodent exclusion, …): completes ONLY through the project's
+//    close route; the canonical completion refuses it outright, so it is
+//    excluded here with its own audited reason (GitHub r5 P2 #4127).
+//    Resolved STRICT — an unverifiable profile must surface as an error, never
+//    synthesize the generic profile and let a project-backed visit through.
+async function probeVisitRefusal(conn, svc) {
+  try {
+    const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');
+    await assertScheduledInvoiceNotPacketOwned(conn, svc.id);
+  } catch (err) {
+    if (err?.code === 'VISIT_PACKET_OWNS_BILLING') return 'packet_owned';
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
+  }
+  let profile;
+  try {
+    const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+    profile = await resolveCompletionProfileForScheduledService(svc, conn, { strict: true });
+  } catch (err) {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
+  }
+  return (profile?.requiresProject || profile?.projectBacked) ? 'project_backed' : null;
+}
+
 // The visit this invoice bills, or null with the reason it was left alone.
-// LINKED invoices only (owner ruling 2026-09-07): the invoice names its
-// visit through scheduled_service_id. An unattached office invoice is never
-// paired by inference here — the Invoices page links at creation instead.
-// A record-only link (service_record_id, no visit id) is left alone too: a
-// service record means a completion already ran for that visit, and the
-// canonical completion refuses a second one (service_already_completed) —
-// there is nothing for this lane to do there (pre-push P1). Every "no" keeps the visit
-// open: a future date, a visit already closed, a grouped stop (the whole
-// visit closes together), or a visit whose billing a saved grouped
-// closeout owns. Once the linked visit row is in hand, every refusal
-// carries it as `visit` so the caller can audit the refusal — and resume
-// its OWN partially committed closeout on a completed one (see
+// Every "no" keeps the visit open: a future date, a visit already closed, a
+// grouped stop (the whole visit closes together), or a visit whose billing a
+// saved grouped closeout owns. Once the linked visit row is in hand, every
+// refusal carries it as `visit` so the caller can audit the refusal — and
+// resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
 async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString() } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
-  if (!invoice.scheduled_service_id) {
-    return { svc: null, reason: invoice.service_record_id ? 'record_linked_only' : 'not_linked' };
-  }
-  const svc = await conn('scheduled_services').where({ id: invoice.scheduled_service_id }).first();
-  if (!svc) return { svc: null, reason: 'no_visit' };
+  const linked = await linkedVisitForInvoice(conn, invoice);
+  if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
+  const { svc } = linked;
   const leaveOpen = (reason) => ({ svc: null, reason, visit: svc });
   if (!OPEN_VISIT_STATUSES.includes(String(svc.status))) return leaveOpen(`visit_${svc.status}`);
   const day = dateOnly(svc.scheduled_date);
   if (!day || day > today) return leaveOpen('visit_in_future');
   if (svc.visit_id) {
     const { openMembers } = require('./visit-groups');
-    const members = await openMembers(conn, svc.visit_id);
-    if (members.length >= 2) return leaveOpen('grouped_visit');
+    if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
   }
-  // Only the ownership verdict itself is a refusal; a failed read inside the
-  // check is an outage, rethrown so it lands in the caller's failure audit
-  // (code 'error') instead of being misfiled as packet ownership (GitHub r6
-  // P2 #4127). The visit is already in hand here, so the throw carries it
-  // (`linkedVisit`) — the failure is audited against this visit.
-  try {
-    const { assertScheduledInvoiceNotPacketOwned } = require('./scheduled-invoice-mint');
-    await assertScheduledInvoiceNotPacketOwned(conn, svc.id);
-  } catch (err) {
-    if (err?.code === 'VISIT_PACKET_OWNS_BILLING') return leaveOpen('packet_owned');
-    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
-  }
-  // A project-backed visit (completion profile requiresProject /
-  // projectBacked: special projects, rodent exclusion, …) completes ONLY
-  // through its project's close route (completeProjectBackedService) — the
-  // canonical completion refuses it outright (project_required_completion)
-  // before the issued posture is even derived, and the project report's
-  // send-with-invoice delivery is not the project's close. Excluded here
-  // explicitly, with its own audited reason, rather than sending it into a
-  // refusal it can never pass (GitHub r5 P2 #4127); the visit stays open
-  // for the project close. Resolved STRICT: a failed table / identity probe
-  // must surface as an error outcome (audited by the caller), never
-  // synthesize the generic profile and let a project-backed visit through
-  // the generic lane (GitHub r6 P2 #4127).
-  const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-  let profile;
-  try {
-    profile = await resolveCompletionProfileForScheduledService(svc, conn, { strict: true });
-  } catch (err) {
-    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
-  }
-  if (profile?.requiresProject || profile?.projectBacked) return leaveOpen('project_backed');
-  return { svc, reason: null, visit: svc };
+  const refusal = await probeVisitRefusal(conn, svc);
+  return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc };
 }
 
 // The canonical completion commits status='completed' before its post-commit
@@ -233,144 +243,149 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
   return { candidates: rows.length, retried, closed };
 }
 
+// One audit row per linked-visit outcome — completed, refused with the
+// reason, or FAILED (a thrown resumability lookup / completion, including the
+// supported post-commit failure whose visit may already be completed and
+// back-linked) — so rollout diagnostics tell an intentional no-op from a
+// failure (GitHub r5 P2 #4127). The operator behind the send / payment is
+// the actor; an automated trigger (scheduled sends, collections, the Zelle
+// reconciler) is the system — never the visit's technician. The recorded
+// actor_type follows the AUTHENTICATED staff role (GitHub r7 P2): a
+// technician-triggered closeout (the prepaid route) is audited as
+// 'technician', never folded into 'admin' — callers that don't carry a role
+// (every admin-only route) keep the prior 'admin' default.
+async function auditCloseoutOutcome(run, { closed, visitId, resumed = false, status = null, code = null, error = null }) {
+  const actorType = run.actorTechnicianId ? (run.actorRole === 'technician' ? 'technician' : 'admin') : 'system';
+  try {
+    const { recordAuditEvent } = require('./audit-log');
+    await recordAuditEvent({
+      actor_type: actorType,
+      actor_id: run.actorTechnicianId || null,
+      action: closed ? 'visit.completed_on_invoice_issued' : 'visit.completion_on_invoice_issued_refused',
+      resource_type: 'scheduled_services',
+      resource_id: visitId,
+      metadata: { invoiceId: run.invoice?.id || run.invoiceId, trigger: run.trigger, resumed, status, code, ...(error ? { error } : {}) },
+    });
+  } catch (auditErr) {
+    logger.warn(`[invoice-issued-closeout] audit write failed for visit ${visitId}: ${auditErr.message}`);
+  }
+}
+
+// Phase 1 — a voided invoice closes nothing, UNLESS this closeout already
+// committed on it and still owes side effects (pre-push P1 r7): the canonical
+// completion lets that committed attempt resume past the void (its posture is
+// frozen, nothing can be minted), so the wrapper must reach the resume too
+// instead of stranding the tracker / snapshot work behind 'no_invoice' on
+// every later send or payment. A linked visit left open by the void is
+// audited like every other refusal (GitHub r7 P2 #4127). Returns the refusal
+// result, or null to continue.
+async function refuseVoidedInvoice(run) {
+  const { invoice, conn } = run;
+  if (String(invoice.status) !== 'void') return null;
+  if (invoice.scheduled_service_id
+    && await resumableIssuedCloseoutAttempt(conn, { serviceId: invoice.scheduled_service_id, idempotencyKey: run.idempotencyKey })) return null;
+  if (!invoice.scheduled_service_id) return { closed: false, reason: 'no_invoice' };
+  run.linkedVisitId = invoice.scheduled_service_id;
+  logger.info(`[invoice-issued-closeout] ${run.label} → visit ${run.linkedVisitId} left open (invoice_void)`);
+  await auditCloseoutOutcome(run, { closed: false, visitId: run.linkedVisitId, code: 'invoice_void' });
+  return { closed: false, reason: 'invoice_void', visitId: run.linkedVisitId };
+}
+
+// Phase 2 — which visit, if any: the linked open visit, or this closeout's
+// OWN resumable attempt on a completed one. A linked visit left open on
+// purpose (already closed, future, grouped, packet-owned, record-linked) is
+// recorded like a refused completion (GitHub r1 P2); an invoice with no visit
+// link has nothing to audit against — the send / payment itself is logged.
+// Sets run.svc / run.resuming and returns null to continue, else the refusal.
+async function resolveCloseoutTarget(run) {
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today });
+  run.linkedVisitId = resolved.visit?.id || null;
+  if (resolved.svc) {
+    run.svc = resolved.svc;
+    return null;
+  }
+  if (resolved.reason === 'visit_completed'
+    && await resumableIssuedCloseoutAttempt(run.conn, { serviceId: resolved.visit.id, idempotencyKey: run.idempotencyKey })) {
+    run.svc = resolved.visit;
+    run.resuming = true;
+    return null;
+  }
+  if (resolved.visit) {
+    logger.info(`[invoice-issued-closeout] ${run.label} → visit ${resolved.visit.id} left open (${resolved.reason})`);
+    await auditCloseoutOutcome(run, { closed: false, visitId: resolved.visit.id, code: resolved.reason });
+  }
+  return { closed: false, reason: resolved.reason, visitId: resolved.visit?.id || null };
+}
+
+// Phase 3 — the canonical completion in its quiet backfill posture: no
+// completion SMS, no report, no review ask, no charge; the linked invoice is
+// reused, none minted.
+//
+// The actor is the operator, or nobody: an automated trigger must not be
+// written up (job_status_history, tracker audit, activity_log) as the visit's
+// technician closing it out (GitHub r2 P2) — the service record takes its
+// technician from the visit regardless. techRole here is AUTHORIZATION
+// POSTURE, not audit identity (GitHub r7 P2 #4127): the quiet backfill
+// closeout must run the same way whichever staff role triggered it (a
+// technician reaches this via /api/admin/schedule/:id/prepaid), so it stays
+// 'admin' regardless of actorRole — the TRUE staff role is recorded in
+// auditCloseoutOutcome (actor_type), never here.
+async function runQuietCloseout(run) {
+  const { completeScheduledService } = require('./complete-scheduled-service');
+  const result = await completeScheduledService({
+    serviceId: run.svc.id,
+    body: {
+      visitOutcome: 'completed',
+      backfill: true,
+      sendCompletionSms: false,
+      requestReview: false,
+      invoiceAlreadySent: true,
+      idempotencyKey: run.idempotencyKey,
+    },
+    actor: { techRole: 'admin', technicianId: run.actorTechnicianId || null, technician: null },
+    idempotencyKey: run.idempotencyKey,
+    issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger },
+  });
+  const closed = result?.status === 200 && result?.body?.success === true;
+  const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${result?.status} ${result?.body?.code || result?.body?.error || ''})`}`;
+  if (closed) logger.info(line); else logger.warn(line);
+  await auditCloseoutOutcome(run, { closed, visitId: run.svc.id, resumed: run.resuming, status: result?.status || null, code: result?.body?.code || null });
+  return { closed, reason: closed ? null : (result?.body?.code || `status_${result?.status}`), visitId: run.svc.id, resumed: run.resuming };
+}
+
 // Entry point for the send and record-payment paths. Best-effort by
 // contract: the invoice was already delivered / the payment already
 // recorded, so a refused or failed closeout is logged and reported, never
 // thrown back into the send. `trigger` is 'sent' | 'paid'. `actorRole` is
 // the AUTHENTICATED staff role behind actorTechnicianId (req.techRole —
-// 'admin' | 'technician') and is used ONLY to record the true audit
-// identity below; it is deliberately kept separate from the completion's
-// authorization posture (see the `actor` object further down), which
-// stays 'admin' regardless — the quiet backfill closeout runs the same
-// way whichever staff role triggered it (GitHub r7 P2 #4127: technicians
-// reach this through /api/admin/schedule/:id/prepaid).
+// 'admin' | 'technician'), used ONLY for the audit identity — see
+// auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
+// `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
+// the quiet canonical completion; a throw anywhere after the linked visit
+// is in hand is audited as that visit's failed outcome (the completion may
+// have committed and back-linked before throwing — its attempt stays
+// resumable; the next send / payment of this invoice, the resend-receipt
+// route, or the settled-statement sweep retries it).
 async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  // One audit row per linked-visit outcome — completed, refused with the
-  // reason, or FAILED (a thrown resumability lookup / completion, including
-  // the supported post-commit failure whose visit may already be completed
-  // and back-linked) — so rollout diagnostics tell an intentional no-op from
-  // a failure (GitHub r5 P2 #4127). The operator behind the send / payment
-  // is the actor; an automated trigger (scheduled sends, collections, the
-  // Zelle reconciler) is the system — never the visit's technician. The
-  // recorded actor_type follows the AUTHENTICATED staff role (GitHub r7
-  // P2): a technician-triggered closeout (the prepaid route) is audited as
-  // 'technician', never folded into 'admin' — callers that don't carry a
-  // role (every admin-only route) keep the prior 'admin' default.
-  // Declared outside the try so the catch still knows which linked visit
-  // the failure belongs to.
-  let invoice = null;
-  let linkedVisitId = null;
-  let resuming = false;
-  const actorAuditType = actorTechnicianId ? (actorRole === 'technician' ? 'technician' : 'admin') : 'system';
-  const audit = async ({ closed, visitId, resumed = false, status = null, code = null, error = null }) => {
-    try {
-      const { recordAuditEvent } = require('./audit-log');
-      await recordAuditEvent({
-        actor_type: actorAuditType,
-        actor_id: actorTechnicianId || null,
-        action: closed ? 'visit.completed_on_invoice_issued' : 'visit.completion_on_invoice_issued_refused',
-        resource_type: 'scheduled_services',
-        resource_id: visitId,
-        metadata: { invoiceId: invoice?.id || invoiceId, trigger, resumed, status, code, ...(error ? { error } : {}) },
-      });
-    } catch (auditErr) {
-      logger.warn(`[invoice-issued-closeout] audit write failed for visit ${visitId}: ${auditErr.message}`);
-    }
-  };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
-    invoice = await conn('invoices').where({ id: invoiceId }).first();
-    if (!invoice) return { closed: false, reason: 'no_invoice' };
-    const label = `invoice ${invoice.invoice_number || invoice.id} ${trigger}`;
-    const idempotencyKey = `invoice-issued:${invoice.id}`;
-    // A voided invoice closes nothing — UNLESS this closeout already
-    // committed on it and still owes side effects (pre-push P1 r7): the
-    // canonical completion lets that committed attempt resume past the void
-    // (its posture is frozen, nothing can be minted), so the wrapper must
-    // reach the resume too instead of stranding the tracker / snapshot work
-    // behind 'no_invoice' on every later send or payment.
-    if (String(invoice.status) === 'void') {
-      const ownCommitted = invoice.scheduled_service_id
-        && await resumableIssuedCloseoutAttempt(conn, { serviceId: invoice.scheduled_service_id, idempotencyKey });
-      if (!ownCommitted) {
-        // A linked visit left open by the void is audited like every other
-        // refusal (GitHub r7 P2 #4127) — the invoice still names the visit,
-        // so the refusal row explains why it stayed open after the delivery.
-        if (invoice.scheduled_service_id) {
-          linkedVisitId = invoice.scheduled_service_id;
-          logger.info(`[invoice-issued-closeout] ${label} → visit ${linkedVisitId} left open (invoice_void)`);
-          await audit({ closed: false, visitId: linkedVisitId, code: 'invoice_void' });
-          return { closed: false, reason: 'invoice_void', visitId: linkedVisitId };
-        }
-        return { closed: false, reason: 'no_invoice' };
-      }
-    }
-    const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today });
-    linkedVisitId = resolved.visit?.id || null;
-    let svc = resolved.svc;
-    if (!svc) {
-      const own = resolved.reason === 'visit_completed'
-        && await resumableIssuedCloseoutAttempt(conn, { serviceId: resolved.visit.id, idempotencyKey });
-      if (!own) {
-        if (resolved.visit) {
-          // A linked visit left open on purpose (already closed, future,
-          // grouped, packet-owned) is recorded like a refused completion
-          // (GitHub r1 P2). An invoice with no visit link has nothing to
-          // audit against — the send / payment itself is already logged.
-          logger.info(`[invoice-issued-closeout] ${label} → visit ${resolved.visit.id} left open (${resolved.reason})`);
-          await audit({ closed: false, visitId: resolved.visit.id, code: resolved.reason });
-        }
-        return { closed: false, reason: resolved.reason, visitId: resolved.visit?.id || null };
-      }
-      svc = resolved.visit;
-      resuming = true;
-    }
-    const { completeScheduledService } = require('./complete-scheduled-service');
-    const result = await completeScheduledService({
-      serviceId: svc.id,
-      // Quiet posture by contract (backfill): no completion SMS, no report,
-      // no review ask, no charge; the linked invoice is reused, none minted.
-      body: {
-        visitOutcome: 'completed',
-        backfill: true,
-        sendCompletionSms: false,
-        requestReview: false,
-        invoiceAlreadySent: true,
-        idempotencyKey,
-      },
-      // The operator, or nobody: an automated trigger must not be written
-      // up (job_status_history, tracker audit, activity_log) as the visit's
-      // technician closing it out (GitHub r2 P2) — the service record takes
-      // its technician from the visit regardless.
-      //
-      // techRole here is AUTHORIZATION POSTURE, not audit identity (GitHub
-      // r7 P2 #4127): the quiet backfill closeout must run the same way
-      // whichever staff role triggered it (a technician reaches this via
-      // /api/admin/schedule/:id/prepaid), so it stays 'admin' regardless of
-      // actorRole — the TRUE staff role is recorded separately, in this
-      // helper's own audit() calls above (actor_type), never here.
-      actor: { techRole: 'admin', technicianId: actorTechnicianId || null, technician: null },
-      idempotencyKey,
-      issuedInvoiceCloseout: { invoiceId: invoice.id, trigger },
-    });
-    const closed = result?.status === 200 && result?.body?.success === true;
-    const line = `[invoice-issued-closeout] ${label} → visit ${svc.id} ${closed ? `completed${resuming ? ' (resumed)' : ''}` : `NOT completed (${result?.status} ${result?.body?.code || result?.body?.error || ''})`}`;
-    if (closed) logger.info(line); else logger.warn(line);
-    await audit({ closed, visitId: svc.id, resumed: resuming, status: result?.status || null, code: result?.body?.code || null });
-    return { closed, reason: closed ? null : (result?.body?.code || `status_${result?.status}`), visitId: svc.id, resumed: resuming };
+    run.invoice = await conn('invoices').where({ id: invoiceId }).first();
+    if (!run.invoice) return { closed: false, reason: 'no_invoice' };
+    run.label = `invoice ${run.invoice.invoice_number || run.invoice.id} ${trigger}`;
+    run.idempotencyKey = `invoice-issued:${run.invoice.id}`;
+    const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run));
+    if (refused) return refused;
+    return await runQuietCloseout(run);
   } catch (err) {
     // A probe that threw after the linked visit row was in hand carries it.
-    linkedVisitId = linkedVisitId || err?.linkedVisit?.id || null;
-    logger.error(`[invoice-issued-closeout] failed for invoice ${invoiceId}${linkedVisitId ? ` (visit ${linkedVisitId})` : ''}: ${err.message}`);
-    // A linked visit had resolved: its outcome is a failure, recorded like
-    // any other — the completion may have committed and back-linked before
-    // throwing (its attempt stays resumable; the next send / payment of
-    // this invoice, or the resend-receipt route, retries it).
-    if (linkedVisitId) {
-      await audit({ closed: false, visitId: linkedVisitId, resumed: resuming, code: 'error', error: String(err.message || err).slice(0, 500) });
+    run.linkedVisitId = run.linkedVisitId || err?.linkedVisit?.id || null;
+    logger.error(`[invoice-issued-closeout] failed for invoice ${invoiceId}${run.linkedVisitId ? ` (visit ${run.linkedVisitId})` : ''}: ${err.message}`);
+    if (run.linkedVisitId) {
+      await auditCloseoutOutcome(run, { closed: false, visitId: run.linkedVisitId, resumed: run.resuming, code: 'error', error: String(err.message || err).slice(0, 500) });
     }
-    return { closed: false, reason: 'error', error: err.message, visitId: linkedVisitId };
+    return { closed: false, reason: 'error', error: err.message, visitId: run.linkedVisitId };
   }
 }
 

@@ -11,6 +11,10 @@ const { stampedDivergesSql } = require('../services/stamped-address');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
+// The visit columns the issued-invoice closeout's record, service line and
+// attribution are derived from before the row lock; any of them moving under
+// the lock refuses the closeout (GitHub r11 P2 #4127).
+const ISSUED_CLOSEOUT_IDENTITY_FIELDS = ['service_type', 'service_catalog_id', 'service_id', 'technician_id'];
 const PropertyZones = require('../services/property-zones');
 const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -4934,6 +4938,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // "not in state" and left an eligible visit open until another
             // send or payment retried it.
             fromStatus = String(lockedSvcRow.status);
+            // Identity and assignment drift refuses too (GitHub r11 P2
+            // #4127): the record, service line and technician attribution
+            // below are built from the PRE-lock svc — an /update-details
+            // that reclassified the visit (service type / catalog id) or
+            // reassigned it while this closeout was in flight would commit
+            // a record for the old identity on a visit now marked completed.
+            // The next send / payment re-resolves the visit as it is now.
+            const driftedField = ISSUED_CLOSEOUT_IDENTITY_FIELDS.find((field) => field in lockedSvcRow && String(lockedSvcRow[field] ?? '') !== String(svc[field] ?? ''));
+            if (driftedField) {
+              throw Object.assign(new Error(`visit ${driftedField} changed during the issued-invoice closeout`), { code: 'issued_visit_identity_changed' });
+            }
             // Project ownership re-resolved from the LOCKED row (GitHub r9 P2
             // #4127): the wrapper's strict profile check and the unlocked
             // project_required_completion guard above read the identity
@@ -6671,6 +6686,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was started by its technician while its invoice was being issued — the technician completes it.',
             code: 'issued_visit_in_progress',
+          } });
+        }
+        if (err && err.code === 'issued_visit_identity_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit was reclassified or reassigned while its invoice was being issued — the visit stays open.',
+            code: 'issued_visit_identity_changed',
           } });
         }
         if (err && err.code === 'project_required_completion' && issuedInvoiceCloseout) {
@@ -11976,7 +11998,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       });
     }
 
-    if (!resumingCommittedCompletion || packetEffects) {
+    // A quiet issued-invoice closeout is the office's / the system's action,
+    // never the technician's (GitHub r11 P2 #4127): the "<tech> completed …"
+    // activity line and the tech-visible job_complete notification would
+    // both attribute it to the visit's assigned technician. The closeout's
+    // own audit rows (visit.completed_on_invoice_issued) are its record.
+    if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout) {
       try {
         const writeActivity = async (trx = null) => {
           const connection = trx || db;

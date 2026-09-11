@@ -214,7 +214,11 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const recordId = randomUUID();
     await trx('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: open.id, service_date: TODAY, service_type: open.service_type });
     const inv = await invoice({ service_record_id: recordId });
-    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY })).toMatchObject({ svc: null, reason: 'record_linked_only' });
+    // …but the visit IS linked, so the refusal is audited against it (GitHub r11 P2).
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY })).toMatchObject({ svc: null, reason: 'record_linked_only', visit: expect.objectContaining({ id: open.id }) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'record_linked_only', visitId: open.id });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'visit.completion_on_invoice_issued_refused', resource_id: open.id, metadata: expect.objectContaining({ code: 'record_linked_only' }) }));
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
   });
 
   test('an UNLINKED office invoice is never paired by inference — the visit stays open', async () => {
