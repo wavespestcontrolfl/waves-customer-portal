@@ -822,6 +822,16 @@ router.post('/:id/photos', (req, res, next) => {
   }
 });
 
+// Identity of the photo set a recovery reconciled: sorted service_photos ids
+// hashed. Stable across retries of the same recovery; changes when a later
+// recovery attaches more rows. Stored in the partial-photos alert payload so
+// a retried reconciliation cannot raise a second alert for a set dispatch
+// already reviewed (see the reconcile route, step 4).
+function photoRecoveryAlertKey(photoRows) {
+  const ids = (photoRows || []).map((row) => String(row.id)).sort();
+  return `${ids.length}-${require('crypto').createHash('sha1').update(ids.join(',')).digest('hex').slice(0, 16)}`;
+}
+
 // POST /api/tech/services/:id/photos/reconcile — completion-aware
 // reconciliation after a post-closeout photo recovery.
 //
@@ -946,23 +956,50 @@ router.post('/:id/photos/reconcile', async (req, res, next) => {
       if (!assessmentId && !scoringPending) {
         treeShrub = { assessmentId: null, rescored: false, flaggedForReview: false };
       } else {
-      await createAlertOnce({
-        type: 'tree_shrub_assessment_partial_photos',
-        severity: 'warn',
-        techId: svc.technician_id || null,
-        jobId: svc.id,
-        payload: {
-          source: 'photo_recovery',
-          serviceRecordId: record.id,
-          assessmentId,
-          scoringPending,
-          customerId: svc.customer_id,
-          message: assessmentId
-            ? 'Tree & Shrub assessment was scored before recovered photos were attached; review the diagnosis.'
-            : 'Tree & Shrub photos were recovered after closeout; any auto-scored assessment covers only the photos uploaded then. Review the diagnosis once scoring lands.',
-        },
-      });
-      treeShrub = { assessmentId, rescored: false, flaggedForReview: true };
+        // Durable identity for this once-per-visit alert: the set of photo
+        // rows the recovery reconciled. The panel keeps its recovery marker
+        // after an uncertain (lost 2xx) response and legitimately retries, and
+        // dispatch may have resolved the first alert by then — the partial
+        // unique index (migration 20260909000114) only dedupes UNRESOLVED
+        // rows, so the retry would insert and broadcast a second alert for
+        // the same unchanged recovery (Codex r-63b2098 P2). A resolved alert
+        // whose photo set matches means this recovery was already reviewed;
+        // a later recovery that attached MORE photos is a new set and does
+        // warrant a fresh alert.
+        const photoRows = await db('service_photos')
+          .where({ service_record_id: record.id })
+          .select('id');
+        const photoSetKey = photoRecoveryAlertKey(photoRows);
+        const priorAlerts = await db('dispatch_alerts')
+          .where({ type: 'tree_shrub_assessment_partial_photos', job_id: svc.id })
+          .select('id', 'payload', 'resolved_at');
+        const alreadyRaised = priorAlerts.find((row) => parseJsonColumn(row.payload)?.photoSetKey === photoSetKey);
+        if (alreadyRaised) {
+          treeShrub = {
+            assessmentId, rescored: false, flaggedForReview: true, alertId: alreadyRaised.id, alertDeduped: true,
+          };
+        } else {
+          const alert = await createAlertOnce({
+            type: 'tree_shrub_assessment_partial_photos',
+            severity: 'warn',
+            techId: svc.technician_id || null,
+            jobId: svc.id,
+            payload: {
+              source: 'photo_recovery',
+              serviceRecordId: record.id,
+              assessmentId,
+              scoringPending,
+              photoSetKey,
+              customerId: svc.customer_id,
+              message: assessmentId
+                ? 'Tree & Shrub assessment was scored before recovered photos were attached; review the diagnosis.'
+                : 'Tree & Shrub photos were recovered after closeout; any auto-scored assessment covers only the photos uploaded then. Review the diagnosis once scoring lands.',
+            },
+          });
+          treeShrub = {
+            assessmentId, rescored: false, flaggedForReview: true, alertId: alert?.row?.id || null, alertDeduped: false,
+          };
+        }
       }
     }
 

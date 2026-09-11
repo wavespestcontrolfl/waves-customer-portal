@@ -11898,7 +11898,9 @@ export function CompletionPanel({
     if (!completionFlagReady || !completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
     if (!products?.length) return;
     if (lawnDefaultsEnabled) {
-      if (!draftReadyRef.current || showDraftPrompt) return;
+      // Governed defaults must not seed a form whose draft lookup has not
+      // settled: a restored draft carries its own rows and suppressions.
+      if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
       const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
       const activeDefaults = lawnDefaultsSeedSuppressed
         ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
@@ -11924,7 +11926,7 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [completionFlagReady, completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts, lawnDefaultsEnabled, lawnCompletionDefaults, currentLawnPlanReady, showDraftPrompt, areasServiced, lawnRemovedDefaultIds, lawnDefaultsSeedSuppressed]);
+  }, [completionFlagReady, completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts, lawnDefaultsEnabled, lawnCompletionDefaults, currentLawnPlanReady, draftLoading, showDraftPrompt, areasServiced, lawnRemovedDefaultIds, lawnDefaultsSeedSuppressed]);
   useEffect(() => {
     if (lawnDefaultsEnabled && lawnAreaOverride === undefined && !LAWN_DEFAULT_AREAS.every(area => areasServiced.includes(area))) {
       // A subset of zones has no known square footage. Do not silently count
@@ -14482,9 +14484,22 @@ export function CompletionPanel({
     const photosOwed = completion.completionPhotoUpload?.failed > 0;
     if (photosOwed) {
       const photos = lastSubmitBodyRef.current?.completionPhotos || servicePhotos;
+      // Keep the autosaved photo revision when this is the same photo set.
+      // localStorage names the revision synchronously while the IndexedDB
+      // write is still in flight; a page killed in that window must find
+      // the still-valid stored photos under the SAME id, or the loader
+      // refuses them and the recovery has nothing to upload (Codex
+      // r-63b2098 P1). Only a photo set that differs from the autosave
+      // mints a new revision.
+      const prior = draftSnapshotRef.current;
+      const samePhotoSet = !!prior?.draftId
+        && prior.serviceId === service.id
+        && prior.servicePhotos === servicePhotos
+        && photos.length === servicePhotos.length
+        && photos.every((photo, index) => photo.data === servicePhotos[index]?.data);
       const draft = {
         serviceId: service.id,
-        draftId: crypto.randomUUID(),
+        draftId: samePhotoSet ? prior.draftId : crypto.randomUUID(),
         savedAt: new Date().toISOString(),
         servicePhotos: photos,
         generationPhotoCount: photos.length,
@@ -14561,16 +14576,20 @@ export function CompletionPanel({
     setPhotoRetryError("");
     const failedPhotos = [];
     try {
-      for (const photo of draft.servicePhotos || []) {
+      for (const [index, photo] of (draft.servicePhotos || []).entries()) {
         try {
           const [header, encoded] = photo.data.split(",");
           const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
           const form = new FormData();
           form.append("photo", new Blob([bytes], { type: header.slice(5, header.indexOf(";")) }), photo.name || "service-photo.jpg");
           form.append("photoType", photo.photoType || "after");
-          form.append("sortOrder", String(photo.sortOrder ?? 0));
+          // Photos recovered from the autosave revision (see
+          // finishCompletionSuccess) carry the panel's shape, not the
+          // completion body's: derive the body fields the same way.
+          form.append("sortOrder", String(photo.sortOrder ?? index));
           if (photo.caption) form.append("caption", photo.caption);
-          if (photo.aiTags) form.append("aiTags", JSON.stringify(photo.aiTags));
+          const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
+          if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
           await adminFetch(`/tech/services/${service.id}/photos`, {
@@ -16120,13 +16139,13 @@ export function CompletionPanel({
       </button>
     </div>
   );
-  if (draftLoading) return createPortal(
-    <div role="dialog" aria-label="Complete service" style={{ position: "fixed", inset: 0, zIndex: 10000,
-      padding: "calc(24px + env(safe-area-inset-top, 0px)) 24px", background: "#FAFAFA", color: "#111111" }}>
-      {draftStorageStatus}
-      <button type="button" onClick={() => onClose(false)} style={{ padding: 12, fontSize: 14 }}>Close</button>
-    </div>, document.body,
-  );
+  // The draft lookup is asynchronous (IndexedDB) but never gates the form:
+  // the panel renders once, with "Loading saved draft…" inline, and the
+  // Restore prompt / photo recovery appear when the lookup settles. Gating
+  // the whole panel double-mounted this component and delayed every fetch
+  // behind the lookup (lawn-closeout suite timeouts on CI). Effects that
+  // must not act on a draft-less form until the lookup settles key off
+  // draftLoading (autosave, governed lawn defaults seeding).
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md
   // Light mode only. Roboto body. No D.palette.

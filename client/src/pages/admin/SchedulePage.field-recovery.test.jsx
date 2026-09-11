@@ -15,6 +15,9 @@ const submitButton = () => screen.getByRole('button', { name: /^(Complete & Send
 async function mount(onSubmit = vi.fn().mockResolvedValue({})) {
   const view = render(<CompletionPanel service={service} products={[]} onClose={vi.fn()} onSubmit={onSubmit} />);
   await screen.findByPlaceholderText('Notes about this service...');
+  // The form renders before the IndexedDB draft lookup settles; the Restore
+  // prompt / photo recovery appear once it does.
+  await waitFor(() => expect(screen.queryByText('Loading saved draft…')).toBeNull());
   return view;
 }
 
@@ -214,6 +217,46 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(completionResumeOwed(service.id)).toBe(false);
     third.unmount();
     expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
+  it('keeps the autosaved photo revision when closeout reports failed uploads, so a lost IndexedDB write still reopens recovery (Codex r-63b2098 P1)', async () => {
+    const draft = { serviceId: service.id, draftId: 'draft-one', savedAt: '2020-01-01T12:00:00Z',
+      notes: 'Exterior inspected', generationPhotoCount: 1, servicePhotos: photos, sendSms: false };
+    const { servicePhotos: _photos, ...metadata } = draft;
+    localStorage.setItem(key, JSON.stringify(metadata));
+    await putCompletionDraft(service.id, draft);
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
+    const first = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    // The page dies while the recovery draft's IndexedDB write is in flight:
+    // localStorage already names the revision, IndexedDB still holds the
+    // autosave under its id.
+    vi.spyOn(completionStore, 'putCompletionDraft').mockResolvedValue(true);
+    await act(async () => fireEvent.click(submitButton()));
+    await screen.findByRole('button', { name: 'Retry photo uploads' });
+    expect(JSON.parse(localStorage.getItem(key))).toMatchObject({ draftId: 'draft-one', pendingPhotoCompletion: { serviceRecordId: 'record-1' } });
+    first.unmount();
+    vi.restoreAllMocks();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ draftId: 'draft-one', servicePhotos: photos });
+
+    const uploads = [];
+    const originalFetch = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) { uploads.push(options); return { ok: true, json: async () => ({ photo: { id: 'photo-1' } }) }; }
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) return { ok: true, json: async () => ({ ok: true }) };
+      return originalFetch(url, options);
+    });
+    const resubmit = vi.fn();
+    await mount(resubmit);
+    // Recovery reopens on the stored photos — never a Restore prompt for a
+    // visit whose closeout already succeeded.
+    const retry = await screen.findByRole('button', { name: 'Retry photo uploads' });
+    expect(screen.queryByRole('button', { name: 'Restore', exact: true })).toBeNull();
+    await act(async () => fireEvent.click(retry));
+    expect(resubmit).not.toHaveBeenCalled();
+    expect(uploads).toHaveLength(1);
+    expect(uploads[0].body.get('caption')).toBe(photos[0].caption);
+    expect(uploads[0].body.get('sortOrder')).toBe('0');
   });
 
   it('keeps the recovery marker when the uploads land but the report reconciliation fails', async () => {

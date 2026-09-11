@@ -94,6 +94,7 @@ describe('POST /:id/photos/reconcile', () => {
     tables.service_report_pdf_jobs = [];
     tables.tree_shrub_assessments = [];
     tables.service_photos = [];
+    tables.dispatch_alerts = [];
     mockEnqueue.mockResolvedValue({ ok: true, queued: true, job: { status: 'queued' } });
     mockAlert.mockResolvedValue({ created: true });
   });
@@ -152,7 +153,7 @@ describe('POST /:id/photos/reconcile', () => {
     await withServer(async (baseUrl) => {
       const res = await reconcile(baseUrl);
       expect(res.status).toBe(200);
-      expect((await res.json()).treeShrub).toEqual({ assessmentId: 'ta-1', rescored: false, flaggedForReview: true });
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: 'ta-1', rescored: false, flaggedForReview: true, alertId: null, alertDeduped: false });
       expect(mockAlert).toHaveBeenCalledTimes(1);
       expect(mockAlert.mock.calls[0][0]).toMatchObject({
         type: 'tree_shrub_assessment_partial_photos', severity: 'warn', jobId: 'svc-1', techId: 'tech-1',
@@ -169,7 +170,7 @@ describe('POST /:id/photos/reconcile', () => {
     await withServer(async (baseUrl) => {
       const res = await reconcile(baseUrl);
       expect(res.status).toBe(200);
-      expect((await res.json()).treeShrub).toEqual({ assessmentId: null, rescored: false, flaggedForReview: true });
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: null, rescored: false, flaggedForReview: true, alertId: null, alertDeduped: false });
       expect(mockAlert).toHaveBeenCalledTimes(1);
       expect(mockAlert.mock.calls[0][0]).toMatchObject({
         type: 'tree_shrub_assessment_partial_photos', severity: 'warn', jobId: 'svc-1', techId: 'tech-1',
@@ -194,8 +195,49 @@ describe('POST /:id/photos/reconcile', () => {
     tables.tree_shrub_assessments = [{ id: 'ta-9', service_record_id: 'rec-1' }];
     await withServer(async (baseUrl) => {
       const res = await reconcile(baseUrl);
-      expect((await res.json()).treeShrub).toEqual({ assessmentId: 'ta-9', rescored: false, flaggedForReview: true });
+      expect((await res.json()).treeShrub).toEqual({ assessmentId: 'ta-9', rescored: false, flaggedForReview: true, alertId: null, alertDeduped: false });
       expect(mockAlert.mock.calls[0][0].payload).toMatchObject({ assessmentId: 'ta-9', scoringPending: false });
+    });
+  });
+
+  test('a retry after dispatch resolved the alert does not raise a second alert for the same photo set (Codex r-63b2098 P2)', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'tree_shrub' }];
+    tables.tree_shrub_assessments = [{ id: 'ta-1', service_record_id: 'rec-1' }];
+    tables.service_photos = [{ id: 'ph-2', service_record_id: 'rec-1' }, { id: 'ph-1', service_record_id: 'rec-1' }];
+    mockAlert.mockResolvedValue({ created: true, row: { id: 'alert-1' } });
+    await withServer(async (baseUrl) => {
+      const first = await (await reconcile(baseUrl)).json();
+      expect(first.treeShrub).toEqual({ assessmentId: 'ta-1', rescored: false, flaggedForReview: true, alertId: 'alert-1', alertDeduped: false });
+      const { photoSetKey } = mockAlert.mock.calls[0][0].payload;
+      expect(photoSetKey).toMatch(/^2-[0-9a-f]{16}$/);
+      // Dispatch reviewed and resolved it; the partial unique index no longer
+      // covers the row. The panel's uncertain-response retry lands now.
+      tables.dispatch_alerts = [{
+        id: 'alert-1', type: 'tree_shrub_assessment_partial_photos', job_id: 'svc-1', resolved_at: '2026-09-10T00:00:00Z',
+        payload: JSON.stringify({ source: 'photo_recovery', photoSetKey }),
+      }];
+      const retry = await (await reconcile(baseUrl)).json();
+      expect(retry.treeShrub).toEqual({ assessmentId: 'ta-1', rescored: false, flaggedForReview: true, alertId: 'alert-1', alertDeduped: true });
+      expect(mockAlert).toHaveBeenCalledTimes(1);
+      // A later recovery that attached ANOTHER photo is a new set: fresh alert.
+      tables.service_photos.push({ id: 'ph-3', service_record_id: 'rec-1' });
+      const later = await (await reconcile(baseUrl)).json();
+      expect(later.treeShrub.alertDeduped).toBe(false);
+      expect(mockAlert).toHaveBeenCalledTimes(2);
+      expect(mockAlert.mock.calls[1][0].payload.photoSetKey).not.toBe(photoSetKey);
+      expect(mockAlert.mock.calls[1][0].payload.photoSetKey).toMatch(/^3-/);
+    });
+  });
+
+  test('the photo-set key ignores row order (same set, different SELECT order)', async () => {
+    tables.service_records = [{ id: 'rec-1', scheduled_service_id: 'svc-1', service_line: 'tree_shrub' }];
+    tables.tree_shrub_assessments = [{ id: 'ta-1', service_record_id: 'rec-1' }];
+    tables.service_photos = [{ id: 'ph-1', service_record_id: 'rec-1' }, { id: 'ph-2', service_record_id: 'rec-1' }];
+    await withServer(async (baseUrl) => {
+      await reconcile(baseUrl);
+      tables.service_photos.reverse();
+      await reconcile(baseUrl);
+      expect(mockAlert.mock.calls[0][0].payload.photoSetKey).toBe(mockAlert.mock.calls[1][0].payload.photoSetKey);
     });
   });
 
