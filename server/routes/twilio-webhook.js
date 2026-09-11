@@ -13,6 +13,7 @@ const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { phoneMatchDigits } = require('../utils/phone');
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
 // numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
@@ -47,6 +48,84 @@ function phoneLookupKey(phone) {
 function maskPhone(phone) {
   const digits = phoneDigits(phone);
   return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
+}
+
+// Has any Waves line ever texted this number? Evidence, any of:
+//   - a customer-facing sms_log outbound row the provider ACCEPTED
+//     (queued/sent/delivered — a 'scheduled' or 'blocked' row never reached
+//     them, codex #4211 P2); internal alerts, operator-phone sends, and the
+//     AI assistant's own auto-replies are not customer-facing evidence
+//     (codex #4211 P1/P2 — see the exclusions inside);
+//   - a unified outbound messages row on a conversation with this contact
+//     (a Twilio-accepted send whose legacy log write was lost, codex P1);
+//   - an ACTIVE suppression row: a recipient the provider bounced with
+//     21610 or a pre-portal opt-out has nothing in sms_log, yet their START
+//     must clear that row (codex P0).
+// Domestic formatting variants share an identity; international numbers keep
+// their full country code. Query errors preserve real consent handling.
+async function hasOutboundHistory(phone) {
+  const variants = phoneMatchDigits(phone);
+  if (!variants.length) return false;
+  const fullDigits = (col) => db.raw(`regexp_replace(coalesce(${col}, ''), '[^0-9]', '', 'g')`);
+  try {
+    // Reuse the outbound service's operator identity so an untyped/manual
+    // office alert cannot establish customer-facing SMS history. An existing
+    // suppression still counts below, allowing an operator's START to clear it.
+    // This CURRENT-phone check is a fast path only — it correctly excludes a
+    // number that is STILL the operator's, but it re-derives from live env
+    // vars, so it stops recognizing a number that WAS the operator's before
+    // ADAM_PHONE changed and the number was reassigned. The
+    // `to_owner_phone_at_send` metadata flag (stamped durably in
+    // TwilioService.sendSMS at the moment of send, codex #4211 P2) covers
+    // that case regardless of what the operator's phone is today.
+    const operator = TwilioService.isKnownOwnerPhone(phone)
+      || phoneMatchDigits(process.env.ADMIN_ALERT_PHONE).some((value) => variants.includes(value));
+    // Excludes internal/admin alerts (never customer-facing) AND the AI
+    // assistant's own auto-replies ('ai_assistant' on the direct send,
+    // 'ai_assistant_reply' on its provider-retry queue row). The toll-free
+    // AI number answers first-contact strangers by design (isAiNumber makes
+    // them compliance-eligible unconditionally above) — including ones whose
+    // "message" is actually an unrelated vendor robotext. Without this
+    // exclusion, that auto-reply becomes a real outbound sms_log/messages
+    // row, which then makes the robotexter's number look like a genuine
+    // Waves relationship to every OTHER line's compliance check too,
+    // legitimizing its next footer-bearing text there (codex #4211 P1).
+    const notInternal = (col) => function notInternalAlert() {
+      this.whereNotIn(col, ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']).orWhereNull(col);
+    };
+    const notStampedOwnerPhone = (metaCol) => `COALESCE(${metaCol}->>'to_owner_phone_at_send', 'false') <> 'true'`;
+    if (!operator) {
+      const sent = await db('sms_log')
+        .where({ direction: 'outbound' })
+        .whereIn('status', ['queued', 'sent', 'delivered'])
+        .whereIn(fullDigits('to_phone'), variants)
+        .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
+        .where(notInternal('message_type'))
+        .whereRaw(notStampedOwnerPhone('metadata'))
+        .first('id');
+      if (sent) return true;
+      // A push-only unified touchpoint is deliberately threaded as SMS but
+      // has no Twilio SID. Require actual provider evidence for this fallback.
+      const unified = await db('messages')
+        .join('conversations', 'conversations.id', 'messages.conversation_id')
+        .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
+        .whereIn(fullDigits('conversations.contact_phone'), variants)
+        .whereRaw("messages.twilio_sid ~ '^(SM|MM)[0-9a-fA-F]{32}$'")
+        .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
+        .where(notInternal('messages.message_type'))
+        .whereRaw(notStampedOwnerPhone('messages.metadata'))
+        .first('messages.id');
+      if (unified) return true;
+    }
+    const suppressed = await db('messaging_suppression')
+      .where({ active: true })
+      .whereIn(fullDigits('phone'), variants)
+      .first('id');
+    return Boolean(suppressed);
+  } catch (err) {
+    logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
+    return true;
+  }
 }
 
 async function findSingleCustomerByPhone(phone) {
@@ -309,8 +388,25 @@ router.post('/sms', async (req, res) => {
     } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
     const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
 
-    // ── STOP / UNSUBSCRIBE keyword handling ──
-    const optCommand = detectSmsOptCommand(Body);
+    // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
+    // Only a number Waves has actually messaged can be opting out of, asking
+    // about, or re-joining Waves texts: a matched customer, or any number
+    // with an outbound sms_log row. A first-contact stranger's body is NOT
+    // scanned. The opt-out detector matches phrases inside a message ("stop
+    // texting", "no more texts"), and lead-gen robotexts carry that phrasing
+    // in their own compliance footer — on 2026-07-23 a vendor pitch ending
+    // "Reply NO if you need me to stop texting" earned a "You've been
+    // unsubscribed" text back from a Waves line and a suppression row for
+    // the vendor's number (audit 2026-09-09). Fails OPEN to eligible on a
+    // query error so a real STOP is always honored. The AI assistant line
+    // texts strangers by design, so every sender on it stays eligible. A
+    // stored service contact (spouse / tenant / manager slot) is a known
+    // recipient whose sends may sit on the account's conversation with a
+    // null contact_phone — the relationship check covers them (codex r2).
+    const complianceEligible = isAiNumber
+      || Boolean(await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => true))
+      || await hasOutboundHistory(From);
+    const optCommand = complianceEligible ? detectSmsOptCommand(Body) : { action: null };
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
@@ -438,7 +534,7 @@ router.post('/sms', async (req, res) => {
     // HELP/INFO: the opt-in ask copy advertises "HELP for help" — answer it
     // (carrier compliance) instead of letting it fall into normal routing.
     const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
-    if (detectHelp(Body).help) {
+    if (complianceEligible && detectHelp(Body).help) {
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
@@ -1889,6 +1985,7 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 }
 
 router._internals = {
+  hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
 };

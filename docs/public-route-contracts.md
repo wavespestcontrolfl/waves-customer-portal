@@ -25,6 +25,13 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
+Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
+supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
+`/api/receipt/:token` and its PDF. Legacy rows retain their existing address
+fallback until an approved manual primary-property change freezes it. Contact
+recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
+are unchanged; snapshots remain authoritative when the rollout gate is off.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
@@ -125,11 +132,15 @@ allocation order at the certified anchor, using a nonblocking day fence for
 callers already holding rows. A busy reorder aborts allocation for recovery.
 Capacity stays off until the other booking/dispatch writers and parent traffic
 prerequisites integrate.
-Activation also requires the remaining booking writers: phone-booking primary
-and follow-up inserts retain the owner's lock-free book-and-flag contract.
-Existing-row locks do not fence those inserts, and their post-commit conflict
-check detects overlaps without preventing them. This stage does not close that
-race or authorize changing the phone-booking contract or enabling capacity.
+Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
+try the shared day fence — rung 1 date occupancy plus the tech-day or
+unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
+default 1500 ms) before each insert. A granted fence makes the phone row visible
+to a concurrent route certification or lands it after that certification commits.
+A missed fence books exactly as before (unfenced, post-commit conflict check
+flags overlaps, the card records which insert missed its fence); the booking
+never fails, waits past the cap, or blocks on a lock. This stage still does
+not authorize enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
@@ -223,7 +234,17 @@ is sent; no-answer outcomes remain eligible. The unknown-sender four-hour
 throttle counts only persisted successful bell/push receipts in SMS metadata.
 Reading an unlinked thread clears its SID-scoped bell too;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
-including replies that return early. Failure to persist that source returns
+including replies that return early. STOP/HELP/START handling (opt-out
+suppression + the `<Message>` confirmation TwiML) applies only to a sender
+Waves has messaged: a matched customer, the AI assistant line, a
+provider-accepted outbound `sms_log`/unified `messages` row (excluding
+operator alerts — by current phone AND by a durable `to_owner_phone_at_send`
+send-time stamp, so a later ADAM_PHONE change can't un-exclude a historical
+alert — the AI assistant's own auto-replies, and push-only touchpoints;
+unified fallback requires a Twilio message SID and phone identities preserve
+country codes), or an active
+`messaging_suppression` row; any other sender's text is ordinary inbound
+(empty TwiML, no reply, no suppression). The eligibility lookup fails open. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
