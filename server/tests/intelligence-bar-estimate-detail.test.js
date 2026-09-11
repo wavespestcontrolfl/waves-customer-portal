@@ -283,6 +283,20 @@ test('a ranged LOW-confidence cadence reports the range and NO exact per-applica
   ] });
   const [ranged, rangedQuote, zero, quoteOnly] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
   expect(ranged).toMatchObject({ per_application: null, low_confidence_range: { pct: 0.2, fraction: 1, monthly: [160, 240], annual: [1920, 2880] } });
+  // treatment rows on a ranged cadence: PriceCard hides them, so no exact amount rides here either (Codex r8 P1)
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2,
+      perServiceTreatments: [{ service: 'commercial_pest', label: 'Commercial Pest', perTreatment: 200, displayPrice: 200, monthly: 200, monthlyBase: 210, visitsPerYear: 12 }] },
+  ] });
+  const [withheld] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
+  expect(withheld.per_service_treatments).toEqual([{ service: 'commercial_pest', label: 'Commercial Pest', visits_per_year: 12, prices_withheld: 'low_confidence_range' }]);
+  expect(JSON.stringify(withheld.per_service_treatments)).not.toMatch(/200|210/);
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2 },
+    { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, quoteRequired: true },
+    { key: 'quarterly', monthly: 0, annual: 0, perTreatment: 0, visitsPerYear: 4, billedPerApplication: true, lowConfidenceRangePct: 0.2 },
+    { key: 'quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4, billedPerApplication: true, quoteRequired: true },
+  ] });
   expect(rangedQuote.per_application).toBeNull();
   expect(rangedQuote.low_confidence_range).toBeUndefined();
   expect(rangedQuote.quote_required).toBe(true);
@@ -371,16 +385,18 @@ test('an enabled, itemized proposal is the pricing authority: authored lines, pr
   expect(failed.offered_pricing_unavailable).toMatch(/authored proposal failed: billing lane down/);
 });
 
-test('a pending deposit intent collected nothing: total_paid null, the requested face amount kept (Codex r7 P2)', async () => {
+test('a pending or failed deposit intent collected nothing: total_paid null, the requested face amount kept (Codex r7 P2, r8 P2)', async () => {
   db.__rows = (q) => (q.sql.includes('"estimate_deposits"')
     ? [
       { estimate_id: 'est-1', amount: '100', card_surcharge: null, credited_amount: null, refunded_amount: null, refunded_surcharge: null, status: 'pending', received_at: null },
+      { estimate_id: 'est-1', amount: '100', card_surcharge: null, credited_amount: null, refunded_amount: null, refunded_surcharge: null, status: 'failed', received_at: null },
       { estimate_id: 'est-1', amount: '100', card_surcharge: '3.50', credited_amount: null, refunded_amount: '100', refunded_surcharge: '3.50', status: 'refunded', received_at: '2026-09-06T00:00:00Z' },
     ]
     : [estimateRow()]);
   const { estimates: [one] } = await getEstimateDetail({ estimate_id: 'est-1' });
   expect(one.deposits).toEqual([
     { amount: 100, card_surcharge: null, collected: false, total_paid: null, credited: null, refunded: null, refunded_surcharge: null, status: 'pending', received_at: null },
+    { amount: 100, card_surcharge: null, collected: false, total_paid: null, credited: null, refunded: null, refunded_surcharge: null, status: 'failed', received_at: null },
     { amount: 100, card_surcharge: 3.5, collected: true, total_paid: 103.5, credited: null, refunded: 100, refunded_surcharge: 3.5, status: 'refunded', received_at: '2026-09-06T00:00:00Z' },
   ]);
 });

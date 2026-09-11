@@ -113,7 +113,13 @@ function lowConfidenceRange(f) {
   return { pct, fraction, monthly: band(money(f.monthly)), annual: band(money(f.annual)) };
 }
 
-function treatmentRow(r) {
+// On a ranged LOW-confidence cadence PriceCard suppresses the treatment rows
+// entirely (only the range is shown), so their exact amounts are withheld
+// here too — the service identity stays, every dollar figure goes.
+function treatmentRow(r, { withholdPrices = false } = {}) {
+  if (withholdPrices) {
+    return { service: r.service || null, label: r.label || null, visits_per_year: Number(r.visitsPerYear) > 0 ? Number(r.visitsPerYear) : null, prices_withheld: 'low_confidence_range' };
+  }
   return {
     service: r.service || null,
     label: r.label || null,
@@ -140,7 +146,7 @@ function frequencyEntry(f) {
     // the RANGE and no exact per-application headline — the customer never
     // sees the midpoint, so the bar must not quote it either.
     per_application: range || f.quoteRequired === true ? null : perApplicationFor(f),
-    per_service_treatments: rows.map(treatmentRow),
+    per_service_treatments: rows.map((r) => treatmentRow(r, { withholdPrices: !!range })),
     // Row-level discount state: a program minimum can cap or suppress the
     // manual discount on SOME cadences only — the global manual_discount
     // never speaks for an individual cadence.
@@ -409,13 +415,15 @@ function totalsFor(row, pricing, reconciliation_error) {
 
 // Deposits: amount is the FACE value requested; card_surcharge is the extra
 // cash collected on top of it and refunded_surcharge how much of that fee went
-// back (null = no explicit record). A 'pending' row is an abandoned Stripe
-// intent (estimate_deposits keeps it for the deposit follow-up stage) —
-// nothing was collected, so collected is false and total_paid null; every
-// other status (received / credited / refunding / refunded) records cash that
-// was taken.
+// back (null = no explicit record). Only the statuses that follow a
+// successful capture record cash that was taken (estimate-deposits.js:
+// received → credited / refunding → refunded); a 'pending' row is an
+// abandoned Stripe intent kept for the deposit follow-up stage and 'failed'
+// is a canceled one — nothing was collected for either (or for any unknown
+// status), so collected is false and total_paid null.
+const COLLECTED_DEPOSIT_STATUSES = new Set(['received', 'credited', 'refunding', 'refunded']);
 function depositEntry(d) {
-  const collected = d.status !== 'pending';
+  const collected = COLLECTED_DEPOSIT_STATUSES.has(d.status);
   return {
     amount: money(d.amount), card_surcharge: money(d.card_surcharge), collected,
     total_paid: collected ? money(Number(d.amount || 0) + Number(d.card_surcharge || 0)) : null,
@@ -508,7 +516,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences with their monthly / annual prices and, on cadences billed per application, the per-application price the page shows (a monthly-billed plan reports billing_unit monthly and no per-application figure; a LOW-confidence commercial price reports its range), each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium) with any selectable additions the page offers beside it (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, one canonical upfront-fee list plus the remaining one-time breakdown (never the same fee twice), the page's one-time total, totals, deposits (face amount + card surcharge; a pending intent collected nothing), status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A formal commercial proposal (pricing_authority authored_proposal) is reported from its authored line items, programs, corrective work and computed totals instead — that is the billed quote. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced); when the live membership state cannot be verified, pricing and totals are withheld (offered_pricing_unavailable says so) rather than quoted from the stale snapshot. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
+  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences with their monthly / annual prices and, on cadences billed per application, the per-application price the page shows (a monthly-billed plan reports billing_unit monthly and no per-application figure; a LOW-confidence commercial price reports its range), each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium) with any selectable additions the page offers beside it (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, one canonical upfront-fee list plus the remaining one-time breakdown (never the same fee twice), the page's one-time total, totals, deposits (face amount + card surcharge; a pending or failed intent collected nothing), status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A formal commercial proposal (pricing_authority authored_proposal) is reported from its authored line items, programs, corrective work and computed totals instead — that is the billed quote. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced); when the live membership state cannot be verified, pricing and totals are withheld (offered_pricing_unavailable says so) rather than quoted from the stale snapshot. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. It does not itemize the internal engine rows behind those prices; offered_pricing_unavailable says when the pricing bundle could not be built.`,
   input_schema: {
     type: 'object',

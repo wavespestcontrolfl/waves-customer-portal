@@ -8147,7 +8147,13 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
       && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
     if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
-    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    // STRICT (codex #4345 r8 P1): the default probe reads a failed customers
+    // lookup as "no plan", indistinguishable from a lapsed member — the
+    // reconcile would then REPRICE an active member as a nonmember during an
+    // outage and report ok. A throw lands in the catch below: the row keeps
+    // its frozen snapshot and the result is { ok: false }, so readers that
+    // must not price from an unverified state can withhold.
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id, { strict: true });
     // The rodent setup waiver is re-validated INDEPENDENTLY of plan
     // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
     // family (e.g. pest) and rodent bait never self-waives, so a still-active

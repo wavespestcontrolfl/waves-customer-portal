@@ -87,7 +87,7 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     isActivePlanCustomer.mockResolvedValue(false);
     const estimate = estimateRow(frozenEstData());
 
-    await reconcileFrozenMembershipSnapshot(estimate);
+    expect(await reconcileFrozenMembershipSnapshot(estimate)).toEqual({ ok: true }); // a completed reprice reports ok
 
     const estData = JSON.parse(estimate.estimate_data);
     expect(estData.engineInputs.recurringCustomer).toBeUndefined();
@@ -144,6 +144,26 @@ describe('reconcileFrozenMembershipSnapshot — frozen recurring flags', () => {
     // gates accept/deposit through resolveEstimateQuoteRequirement.
     expect(estData.result.oneTime.total).toBe(127.5);
     expect(estimate.onetime_total).toBe(127.5);
+  });
+
+  test('a failed membership lookup is STRICT: the row keeps its frozen snapshot, no reprice, and the result reports { ok: false } (Codex #4345 r8 P1)', async () => {
+    isActivePlanCustomer.mockRejectedValue(new Error('customers lookup timed out'));
+    const estimate = estimateRow(frozenEstData());
+    const before = estimate.estimate_data;
+
+    const result = await reconcileFrozenMembershipSnapshot(estimate);
+
+    expect(isActivePlanCustomer).toHaveBeenCalledWith(expect.anything(), estimate.customer_id, { strict: true });
+    expect(result).toEqual({ ok: false, error: 'customers lookup timed out' });
+    expect(estimate.estimate_data).toBe(before);
+    expect(serverRecomputeFromEstimateData).not.toHaveBeenCalled();
+    expect(clearEstimatePricingCache).not.toHaveBeenCalled();
+  });
+
+  test('nothing to reconcile (active member, no customer) resolves undefined — never { ok: false }', async () => {
+    isActivePlanCustomer.mockResolvedValue(true);
+    expect(await reconcileFrozenMembershipSnapshot(estimateRow(frozenEstData()))).toBeUndefined();
+    expect(await reconcileFrozenMembershipSnapshot({ id: 'x', customer_id: null })).toBeUndefined();
   });
 
   test('an active member keeps the stamped flags untouched', async () => {
