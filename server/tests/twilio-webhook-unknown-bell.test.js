@@ -182,7 +182,8 @@ beforeAll(async () => {
   await mockPg.raw(`CREATE TEMP TABLE sms_log (
     id uuid DEFAULT gen_random_uuid(), customer_id uuid, direction text, from_phone text, to_phone text,
     message_body text, twilio_sid text, status text, message_type text, is_read boolean,
-    metadata jsonb, created_at timestamptz DEFAULT clock_timestamp()
+    metadata jsonb, created_at timestamptz DEFAULT clock_timestamp(),
+    updated_at timestamptz DEFAULT clock_timestamp()
   )`);
 });
 afterAll(async () => { await mockPg?.rollback(); await mockDatabase?.destroy(); });
@@ -283,7 +284,7 @@ test('a claim is released, not extended, when a prior receipt (rung outside the 
   // claims-table row — only the sms_log stamp windowHeld() reads.
   const priorReceiptAt = new Date(Date.now() - 3 * 60 * 60 * 1000); // 3h ago — still inside the 4h window
   const row = { direction: 'inbound', from_phone: sender, to_phone: numbers.locations.parrish.number,
-    message_type: 'inbound', created_at: priorReceiptAt, twilio_sid: 'SM-prior-reaction',
+    message_type: 'inbound', created_at: priorReceiptAt, updated_at: priorReceiptAt, twilio_sid: 'SM-prior-reaction',
     metadata: JSON.stringify({ sms_reply_alerted: true }) };
   if (mockPg) await mockPg('sms_log').insert(row);
   else mockState.sms.push(row);

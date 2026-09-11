@@ -2057,12 +2057,21 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
 // predicate requires sms_reply_alerted=true (stamped only on a delivered
 // bell) and excludes the current SID, so the same-window double-ring this
 // throttle damps is closed by the atomic claim, not by row ordering.
+// Anchored to `updated_at` (when delivery was actually confirmed), not
+// `created_at` (when that prior message itself arrived) — codex #4210
+// round-16 P1, matching sms-reply-alert-sweep.js's own round-14 fix: a
+// message recovered (by the sweep, say) more than 4h after its own
+// arrival still has a created_at older than 4h old even though it just
+// delivered. Anchoring on arrival time would make this guard blind to a
+// receipt that is, in reality, brand new — letting a message that lost a
+// fresh (unconfirmed-lease) claim race ring a redundant second alert for
+// a burst that's already covered.
 async function hasRecentUnknownSenderReceipt(From, excludeSid) {
   try {
     const prior = await db('sms_log')
       .where({ direction: 'inbound', from_phone: From })
       .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
-      .where('created_at', '>', new Date(Date.now() - UNKNOWN_SENDER_ALERT_WINDOW_MS))
+      .where('updated_at', '>', new Date(Date.now() - UNKNOWN_SENDER_ALERT_WINDOW_MS))
       .whereNot('twilio_sid', excludeSid)
       .first('id');
     return Boolean(prior);
