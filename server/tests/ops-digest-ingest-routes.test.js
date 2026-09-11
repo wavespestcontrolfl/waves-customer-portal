@@ -194,6 +194,9 @@ describe('bell write', () => {
       bell: true,
       dedupeKey: 'ops-crons:e22-schedule-integrity:overlaps-2026-09-11',
       dedupeWindowMs: 24 * 60 * 60 * 1000,
+      // a later run's recurrence refreshes the standing row (observedAt above all)
+      refreshOnDedupe: true,
+      dedupeVersion: expect.any(String),
       metadata: {
         check: { id: 'e22-schedule-integrity', title: 'Schedule integrity', cadence: 'daily' },
         opsKey: 'e22-schedule-integrity:overlaps-2026-09-11',
@@ -203,6 +206,14 @@ describe('bell write', () => {
         observedAt: expect.any(String),
       },
     });
+  });
+
+  test('dedupeVersion is the observation time, so a new run re-raising the key rewrites the row', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-v', deduped: true, refreshed: true });
+    await post({ ...good(), observedAt: '2026-09-11T11:10:00Z' });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.dedupeVersion).toBe('2026-09-11T11:10:00.000Z');
+    expect(opts.metadata.observedAt).toBe('2026-09-11T11:10:00.000Z');
   });
 
   test('201 with deduped:true when the keyed row already stands', async () => {
