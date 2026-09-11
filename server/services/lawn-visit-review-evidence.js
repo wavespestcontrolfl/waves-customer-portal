@@ -54,9 +54,23 @@ function causePartsOf(clause) {
   // than one governed cause is mentioned: SUMMARY_CAUSE_RE excludes generic
   // class words, so "No chinch bugs, weeds present" counted one mention, stayed
   // whole, and the negation swallowed the weed observation.
-  const segments = clause.split(/,|\b(?:and|or)\b/i).map((part) => part.trim()).filter(Boolean);
-  const parts = segments.filter((part) => namesCondition(part)).length > 1 ? segments : [clause];
+  const pieces = clause.split(/\s*(,|\band\b|\bor\b|\bnor\b)\s*/i);
+  const segments = pieces.filter((_, index) => index % 2 === 0).map((part) => part.trim());
+  const joiners = pieces.filter((_, index) => index % 2 === 1).map((part) => part.trim().toLowerCase());
+  const split = segments.filter(Boolean).length === segments.length && segments.filter((part) => namesCondition(part)).length > 1;
+  const parts = split ? segments : [clause];
   const entries = parts.map((part) => ({ clause: part, cause: namesCondition(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
+  // "No chinch bugs or weeds present" is one negative statement: a leading
+  // negation carries across or/nor, where "present" belongs to the negated
+  // predicate rather than asserting weeds. A comma or "and" introduces an
+  // independent observation ("No chinch bugs, weeds present"), so the scope
+  // stops there.
+  if (split) {
+    entries.forEach((entry, index) => {
+      if (index === 0 || !/^(?:or|nor)$/.test(joiners[index - 1] || '')) return;
+      if (entries[index - 1].negation && !entry.negation) entry.negation = true;
+    });
+  }
   entries.forEach((entry, index) => {
     if (!entry.cause || entry.negation || entry.positive) return;
     const marked = entries.slice(index + 1).find((other) => other.negation || other.positive) || [...entries.slice(0, index)].reverse().find((other) => other.negation || other.positive);
@@ -75,13 +89,15 @@ function causeClausesOf(text) {
     // the confirmed clause and negate it, while anything the answer is followed
     // by ("none found, weeds present") must stay a clause of its own rather
     // than ride along as part of the negated subject.
-    const [head, ...rest] = clause.split(',');
+    const boundary = /\s*(?:,|\band\b|\bor\b)\s*/i.exec(clause);
+    const head = boundary ? clause.slice(0, boundary.index) : clause;
+    const rest = boundary ? [clause.slice(boundary.index + boundary[0].length)] : [];
     // …and only when the answer segment names no condition of its own: "no
     // signs of drought" opens like an answer but rules out a second cause, so
     // attaching it would let that negation swallow the confirmed clause.
     if (clauses.length && NEGATIVE_ANSWER_RE.test(clause) && !namesCondition(head)) {
       clauses[clauses.length - 1] += ` ${head.trim()}`;
-      const remainder = rest.join(',').trim();
+      const remainder = rest.join('').trim();
       if (remainder) clauses.push(remainder);
     } else clauses.push(clause);
   }

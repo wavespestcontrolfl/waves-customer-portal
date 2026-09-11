@@ -46,6 +46,9 @@ describe('technician lawn evidence and reconciliation', () => {
     // An answer-shaped clause that rules out a SECOND cause is not an answer to
     // the first; it has to stay independently scoped.
     ['Chinch bugs confirmed by float test; no signs of drought', 'chinch bug activity'],
+    // A leading negation carries across or/nor but stops at a comma or "and".
+    ['No chinch bugs or weeds present', NO_STRESS_LABEL],
+    ['Checked for chinch bugs; none found and weeds present', 'weed pressure'],
   ])('resolves cause polarity: %s', (text, label) => {
     const built = review(run({ findings: [] }), { addedDetails: [{ text }] });
     expect(built.added_details[0]).toMatchObject({
