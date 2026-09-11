@@ -228,6 +228,21 @@ describe('annual plan — DB overlay and admin validation', () => {
 });
 
 describe('replay-stamp provenance (pre-push audit #4424)', () => {
+  test('the public v2 translator never forwards a caller-supplied replay stamp — gate off prices the quarterly program', () => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const v1Input = translateV2CallToV1Input(
+      { homeSqFt: 2000, lotSqFt: 8000, termitePricingKnobs: { plan: 'annual_protection' } },
+      ['TERMITE_BAIT'],
+      { termitePlan: 'annual_protection', termitePricingKnobs: { plan: 'annual_protection', setupPerStation: 1 } },
+    );
+    expect(v1Input).not.toHaveProperty('termitePricingKnobs');
+    expect(v1Input).not.toHaveProperty('treeShrubPricingKnobs');
+    expect(v1Input.services.termite.plan).toBe('annual_protection');
+    const line = termiteLine(generateEstimate(v1Input));
+    expect(line.plan).toBe('quarterly');
+    expect(line.setupFee).toBeUndefined();
+  });
+
   test('the admin pricing sandbox strips a posted termitePricingKnobs stamp — gate off prices the quarterly program', async () => {
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
     const handler = adminPricingConfigRouter.stack
