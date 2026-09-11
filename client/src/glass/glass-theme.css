@@ -133,13 +133,25 @@ html[data-glass-theme] [data-gt="eyebrow"] {
   color: var(--ts) !important;
   text-transform: uppercase;
 }
+/* Numbers read on the same scale as the headings they sit under (owner ruling
+   C4, DECISIONS 2026-09-11). Pages had authored 17, 19, 22, 24, 28, 34, 50 and
+   64px metrics against a role that set weight and figures but never a size.
+   The role now carries the size, and the sizes are the type scale already in
+   this sheet — h3 20, h2 26, h1 32/40 — so a metric never introduces a step
+   that no heading uses. `md` is the default because it matches h2, the card
+   heading most metrics sit beneath. */
 html[data-glass-theme] [data-gt="metric"] {
+  font-size: 26px !important;
   font-weight: 700 !important;
   letter-spacing: -0.035em !important;
   line-height: 1 !important;
   font-variant-numeric: tabular-nums !important;
   color: var(--brand) !important;
 }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="sm"] { font-size: 20px !important; }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="md"] { font-size: 26px !important; }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="lg"] { font-size: 32px !important; }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="xl"] { font-size: 40px !important; }
 html[data-glass-theme] [data-gt="fine"] {
   font-size: 14px !important; /* 14px floor (was 12; 11.5 before the 2026-07-06 pass) */
   line-height: 1.45 !important;
@@ -350,8 +362,11 @@ html[data-glass-theme] [data-glass="modal"] {
 html[data-glass-theme] [data-glass-scrim] {
   background: radial-gradient(circle at center, rgba(255, 255, 255, 0.08), transparent 45%),
     rgba(4, 57, 94, 0.38) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  /* The background above is `!important` and the blur was not, so a page that
+     authored its own scrim kept the sheet's colour and lost its material
+     (G-08). A scrim is one material or the other, never half of each. */
+  backdrop-filter: blur(8px) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
 }
 
 
@@ -458,14 +473,18 @@ html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
    circle 50%), tagged or inline: the multi-service selector on /book, the
    carousel arrows, switches and close buttons keep their geometry. */
 html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
-html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
-html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
-/* Pill pickers (PillSelector + the Watering Days loop) keep one 44px row
-   height in BOTH states — the generic 40px chip minimum would otherwise make
-   rows without a selected pill 4px shorter and jump when the selection moves
-   (codex #3983 r3). */
-html[data-glass-theme] .pill-chip[data-glass="chip"] { min-height: 44px !important; }
-html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
+/* r11 control floor (owner ruling C3, DECISIONS 2026-09-11): 48 is the
+   document primary, 44 is the floor for everything interactive. These are
+   floors, not clamps — `!important` here beat a page's own inline height, so
+   `BrandButton`'s authored 48 rendered at 44 on every glass surface (G-03).
+   Without it the authored height wins and an unstyled control still cannot
+   fall below 44. The separate 40px chip minimum is retired: it was the only
+   interactive surface allowed under the touch floor, and it forced the
+   `.pill-chip` special case below to exist at all (codex #3983 r3 — rows
+   without a selected pill sat 4px short and jumped when the selection moved).
+   One floor for chips and CTAs alike makes that exception unnecessary. */
+html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px; }
+html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 44px; }
 /* Placeholders read as hints, never as entered values (owner 2026-09-06,
    customer feedback): italic, slate-500 (#64748B, 4.8:1 on white — WCAG AA for
    14px text; a lighter grey fell to 2.6:1). This is the
@@ -608,7 +627,11 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass],
   html[data-glass-theme] [data-glass="soft"],
   html[data-glass-theme] [data-glass="chip"],
-  html[data-glass-theme] [data-glass-accent] {
+  html[data-glass-theme] [data-glass-accent],
+  /* The estimate page builds its cards from `.gc-*` classes rather than the
+     `data-glass` attributes, so forced colours left it rendering glass over
+     the user's own palette (G-10). */
+  html[data-glass-theme] [class*="gc-"] {
     background: Canvas !important;
     color: CanvasText !important;
     border: 1px solid CanvasText !important;

@@ -85,8 +85,13 @@ export function applyGlassScene() {
 
 /**
  * Cursor-follow specular + pointer/scroll parallax on the scene orbs.
- * No-ops (and returns a no-op cleanup) when there are no orbs (reduced
- * motion mounts none). The specular vars live on <html> so
+ * No-ops (and returns a no-op cleanup) when there are no orbs. Reduced motion
+ * does NOT mount none — `applyGlassScene` always mounts the five orbs and this
+ * function returns early on the `reduced` flag instead, so what stops is the
+ * parallax and the cursor-follow specular, not the scene. Static orbs are
+ * decoration, not motion, and `prefers-reduced-motion` asks for neither
+ * removed (owner ruling C7, DECISIONS 2026-09-11); the CSS disables the
+ * transitions alongside. The specular vars live on <html> so
  * per-frame pointer motion never feeds a consumer's MutationObserver
  * watching #root; var() resolution inherits from the root, and only the
  * :hover element renders its ::before, so a single global pair positions
