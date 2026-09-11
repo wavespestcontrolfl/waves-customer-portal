@@ -4618,7 +4618,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 // effects of every such row from the operation's own recorded result —
 // only for surfaces whose effects run through applySeriesMoveEffects (the
 // customer web page and Quick Move keep their own effect paths).
-const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];
+const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule'];
 // Surfaces whose series text is an authenticated staff action (quiet-hours
 // exempt); every customer-driven surface stays inside the send window.
 const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);
