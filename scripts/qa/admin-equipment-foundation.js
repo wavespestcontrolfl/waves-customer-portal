@@ -129,6 +129,17 @@ const system = {
   primary_equipment: equipment,
   component_assets: [],
 };
+const taxRegisterAsset = {
+  id: "tax-asset-example",
+  name: equipment.name,
+  asset_category: "vehicle",
+  active: true,
+  disposed: false,
+  purchase_cost: equipment.purchase_price,
+  current_book_value: equipment.book_value,
+  serial_number: equipment.serial_number,
+  make_model: `${equipment.make} ${equipment.model}`,
+};
 function fixtures(state) {
   return new Map([
     [
@@ -285,8 +296,10 @@ function fixtures(state) {
         ],
         fleet_totals: {
           total_miles: 100,
+          business_miles: 90,
           total_fuel_cost: 20,
           total_irs_deduction: 63,
+          total_jobs: 3,
         },
       }),
     ],
@@ -306,7 +319,7 @@ function fixtures(state) {
       "GET /api/admin/equipment-systems/reconciliation",
       () => ({
         systems: [system],
-        equipment: [equipment],
+        equipment: [{ ...equipment, tax_register: taxRegisterAsset }],
         issues: [],
         summary: {
           systems_with_any_equipment_link: 1,
@@ -388,18 +401,6 @@ async function install(page, server, state) {
       query: url.search,
       body,
     });
-    if (state.hold?.key === key) await state.hold.promise;
-    if (state.failures.has(key)) {
-      if (request.method() !== "GET") state.failures.delete(key);
-      state.expectedFailures.push(url.href);
-      return route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({
-          error: "Synthetic request failed. Try again.",
-        }),
-      });
-    }
     if (!handlers.has(key)) {
       state.unmatched.push(key);
       return route.fulfill({
@@ -689,6 +690,17 @@ async function views(page, server, state, report, device) {
   ]) {
     await section(page, group, leaf);
     await capture(page, state, report, device, key);
+    const rendered = await page.locator("main").innerText();
+    assert.ok(!/\bNaN\b/.test(rendered), `${key} view renders without NaN`);
+    if (key === "analytics") {
+      const fleetTotalsRow = page.getByRole("row", { name: /Fleet Totals/ });
+      assert.equal(await fleetTotalsRow.count(), 1, "Fleet totals row is rendered");
+      const cells = await fleetTotalsRow.locator("td").allInnerTexts();
+      assert.ok(
+        cells.every((cell) => cell.trim().length > 0),
+        "Fleet totals row has no blank cells",
+      );
+    }
     console.log(device + ": " + key);
   }
   const chart = page.getByRole("region", { name: "Monthly maintenance costs chart", exact: true });
@@ -785,9 +797,7 @@ async function main() {
         requests: [],
         pageErrors: [],
         consoleErrors: [],
-        expectedFailures: [],
         unmatched: [],
-        failures: new Set(),
         geometry: [],
         checks: [],
       };
@@ -805,23 +815,12 @@ async function main() {
         await views(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
-        assert.deepEqual(
-          state.consoleErrors.filter(
-            (e) =>
-              !(
-                e.text.includes("503") &&
-                (!e.url || state.expectedFailures.includes(e.url))
-              ),
-          ),
-          [],
-          "Unexpected console errors",
-        );
+        assert.deepEqual(state.consoleErrors, [], "Unexpected console errors");
       } catch (error) {
         report.error = error.stack;
         await shot(page, report, device + "-failure");
         throw error;
       } finally {
-        state.hold?.release?.();
         await page
           .evaluate(() => localStorage.removeItem("waves_admin_token"))
           .catch(() => {});
