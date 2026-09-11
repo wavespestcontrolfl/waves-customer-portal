@@ -30,6 +30,10 @@ const PRICE_TOKEN = hexToken(5, 32);      // price-change-public.js /^[a-f0-9]{3
 const PUBLISHABLE_KEY = 'pk_test_glassaudit000000000000000000';
 
 const json = (body, status = 200) => ({ status, body });
+// PayPageV2 flips an unpaid invoice / statement into its "overdue" banner once the due date has passed
+// (client/src/lib/invoiceDates.js), so open balances are due 14 ET calendar days after the run.
+const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const DUE_SOON = etDateString(addETDays(new Date(), 14));
 const serverError = () => json({ error: 'glass-audit: simulated 500' }, 500);
 
 // Hold the Stripe.js request open (never resolves, never errors) so the pay
@@ -63,7 +67,7 @@ const payInvoice = (overrides = {}) => ({
   total: 174,
   amountDue: 174,
   creditApplied: 0,
-  dueDate: '2026-09-24',
+  dueDate: DUE_SOON,
   paidAt: null,
   cardBrand: null,
   cardLastFour: null,
@@ -194,7 +198,7 @@ const statementPayload = (overrides = {}) => ({
     payable: true,
     period_start: '2026-08-01',
     period_end: '2026-08-31',
-    due_date: '2026-09-30',
+    due_date: DUE_SOON,
     terms: 'net30',
     subtotal: 645,
     tax_amount: 45.15,
