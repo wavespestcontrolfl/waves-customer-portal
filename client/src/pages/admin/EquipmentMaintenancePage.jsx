@@ -2138,7 +2138,7 @@ function AnalyticsTab({
                     </TD>
                     <TD>
                       {" "}
-                      <Badge tone="neutral">{s.priority}</Badge>{" "}
+                      <Badge tone={SEVERITY_TONES[s.priority] || "neutral"}>{s.priority}</Badge>{" "}
                     </TD>
                     <TD style={{
                 color: "#27272A",
@@ -2171,7 +2171,10 @@ function CostBarChart({
   const xStep = (w - labelWidth) / data.length;
   const barW = Math.min(60, xStep - 16);
   return <div role="region" aria-label="Monthly maintenance costs chart" tabIndex={0} className="overflow-x-auto u-focus-ring">
-      <svg viewBox={`0 0 ${w} ${h + 30}`} role="img" aria-label="Maintenance cost by month" style={{
+      <ul className="sr-only">
+        {data.map(d => <li key={d.month}>{d.month}: {fmt(d.cost)}</li>)}
+      </ul>
+      <svg viewBox={`0 0 ${w} ${h + 30}`} aria-hidden="true" style={{
       display: "block",
       width: w,
       maxWidth: "none",
