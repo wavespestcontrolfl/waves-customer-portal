@@ -655,6 +655,7 @@ describe('lawn diagnostic auto-release ladder', () => {
   test.each([
     'Large patch is not getting better', 'Chinch bug damage has not started to recover',
     'Dollar spot not spreading much', 'Large patch is not getting better; weeds absent',
+    'Large patch cannot be ruled out', 'Chinch bugs have not been ruled out', 'Dollar spot not excluded', 'Chinch bugs aren\u2019t unlikely',
   ])('an unrecognized negation %s never earns the clean label and never maps a cause', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('a lawn condition we are monitoring');
     expect(safeConditionLabel(name, 'low')).toBe('a lawn condition we are monitoring');

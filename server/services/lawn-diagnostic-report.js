@@ -665,6 +665,9 @@ function unrecognizedNegationRe() {
   }
   return unrecognizedNegation;
 }
+// A negated absence marker ("cannot be ruled out", "has not been excluded",
+// "not absent") is uncertainty, not absence.
+const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+\s+){0,2}?(?:ruled[\s‐‑‒–—-]+out|absent|excluded|unlikely|negative|unconfirmed|free)\b/;
 const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
 function positiveClauses(lower) {
   const positive = [];
@@ -684,6 +687,7 @@ function positiveClauses(lower) {
     }
     FREE_DIFFERENTIAL.lastIndex = 0;
     if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
+    if (NEGATED_ABSENCE.test(text)) { uncertain = true; continue; }
     if (!CLEAN_CLAUSE_LEAD.test(text) && !RECOGNIZED_MARKER.test(text) && unrecognizedNegationRe().test(text)) { uncertain = true; continue; }
     negated = true;
     const forward = FORWARD_NEGATION.exec(text);
