@@ -123,6 +123,16 @@ function builderFor(table) {
     }),
   }));
   b.then = (resolve, reject) => Promise.resolve(rows()).then(resolve, reject);
+  // Condition-honoring update over the seeded rows AND the rows this run
+  // inserted (the processed-cancel close targets the row it just created).
+  b.update = jest.fn(async (patch) => {
+    const pool = table === 'service_requests'
+      ? [...(mockState[table] || []), ...(mockState.service_requests_inserted || [])]
+      : (mockState[table] || []);
+    const hit = pool.filter((r) => conds.every((c) => c(r)));
+    hit.forEach((r) => Object.assign(r, patch));
+    return hit.length;
+  });
   return b;
 }
 
@@ -309,6 +319,65 @@ describe('POST /api/requests cancellation guard', () => {
     body = await res.json();
     expect(body.cancellation).toEqual(expect.objectContaining({ processed: true, confirmation: 'sms', confirmationChannels: ['sms', 'email'] }));
     expect(sendCancellationReceived).toHaveBeenCalledTimes(1);
+  }));
+
+  test('a cleanly processed cancel closes its own ticket; a partial one stays new for the office', () => withServer(async (baseUrl) => {
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+
+    processCancellationRequest.mockResolvedValueOnce({ ok: true, churned: true, cancelledCount: 2, recurrenceStopped: 1, errors: [] });
+    let res = await postCancellation(baseUrl, { subject: 'Cancel — clean' });
+    let body = await res.json();
+    expect(res.status).toBe(201);
+    expect(body.request.status).toBe('resolved');
+    const clean = mockState.service_requests_inserted.find((r) => r.subject === 'Cancel — clean');
+    expect(clean.status).toBe('resolved');
+    expect(clean.resolved_at).toBeInstanceOf(Date);
+
+    // ok with a recorded error, or not ok at all → the row is the office's repairable ticket.
+    processCancellationRequest.mockResolvedValueOnce({ ok: false, churned: true, cancelledCount: 0, recurrenceStopped: 0, errors: ['in_progress_visit:svc-1'] });
+    res = await postCancellation(baseUrl, { subject: 'Cancel — partial' });
+    body = await res.json();
+    expect(res.status).toBe(201);
+    expect(body.request.status).toBe('new');
+    const partial = mockState.service_requests_inserted.find((r) => r.subject === 'Cancel — partial');
+    expect(partial.status).toBe('new');
+    expect(partial.resolved_at).toBeUndefined();
+  }));
+
+  test('a clean SCOPED wind-down completed on retry closes the original row too — dedupe and inactive-account paths', () => withServer(async (baseUrl) => {
+    const scopedOk = { ok: true, churned: false, scopedWoundDown: true, scope: ['mosquito'], cancelledCount: 1, recurrenceStopped: 1, errors: [] };
+    mockState.scheduled_services = [{ id: 'svc-1', customer_id: 'cust-1', recurring_ongoing: true }];
+
+    // Short-window dedupe: the original row is 10s old, its committed scope recoverable.
+    mockState.service_requests = [{
+      id: 'req-portal', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 10 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    let res = await postCancellation(baseUrl);
+    let body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.request.status).toBe('resolved');
+    expect(mockState.service_requests[0].status).toBe('resolved');
+    expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
+
+    // Inactive-account repair: the row is hours old and the account is churned.
+    mockAuthInactive = true;
+    mockState.service_requests = [{
+      id: 'req-portal-2', customer_id: 'cust-1', category: 'cancellation', subject: 'Cancel my plan', status: 'new',
+      source: null, created_at: new Date(Date.now() - 3 * 60 * 60 * 1000),
+    }];
+    mockState.cancellation_cases = [{ service_request_id: 'req-portal-2', scope: ['mosquito'] }];
+    processCancellationRequest.mockResolvedValueOnce(scopedOk);
+    res = await postCancellation(baseUrl);
+    body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.deduped).toBe(true);
+    expect(body.request.status).toBe('resolved');
+    expect(mockState.service_requests[0].status).toBe('resolved');
+    expect(mockState.service_requests[0].resolved_at).toBeInstanceOf(Date);
   }));
 
   test('live membership dues alone → allowed', () => withServer(async (baseUrl) => {

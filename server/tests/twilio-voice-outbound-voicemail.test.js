@@ -22,6 +22,7 @@ jest.mock('../models/db', () => {
   return mockDb;
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../services/callback-cards', () => ({ enabled: jest.fn(() => false) }));
 jest.mock('../services/outbound-voicemail-sms', () => {
   const actual = jest.requireActual('../services/outbound-voicemail-sms');
   return {
@@ -49,6 +50,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const twilio = require('twilio');
 const { isEnabled } = require('../config/feature-gates');
+const callbackCards = require('../services/callback-cards');
 const { sendOutboundVoicemailText } = require('../services/outbound-voicemail-sms');
 const { resolveOutboundCallReason } = require('../services/outbound-call-reason');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
@@ -84,6 +86,7 @@ function installDb(rows = {}) {
   db.mockImplementation((table) => {
     const b = {};
     b.where = jest.fn(() => b);
+    b.whereRaw = jest.fn(() => b);
     b.first = jest.fn(async () => state.rows[table]);
     b.update = jest.fn(async (patch) => { state.updates.push({ table, patch }); return 1; });
     return b;
@@ -100,6 +103,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.SERVER_DOMAIN;
   isEnabled.mockImplementation(() => false);
+  callbackCards.enabled.mockReturnValue(false);
   sendOutboundVoicemailText.mockImplementation(async () => ({ sent: true, providerMessageId: 'SM_sent', templateKey: 'outbound_voicemail_missed_you' }));
   resolveOutboundCallReason.mockImplementation(async () => ({ reason: 'generic', evidence: {} }));
   installDb();
@@ -136,6 +140,59 @@ describe('POST /outbound-connect', () => {
   const req = () => ({
     query: { customerNumber: CUSTOMER, callerIdNumber: MAIN_LINE, callLogId: CALL_LOG_ID },
     body: { Digits: '1' },
+  });
+
+  test.each([false, true])('callback completion shares the action when voicemail is %s', async (voicemail) => {
+    callbackCards.enabled.mockReturnValue(true);
+    isEnabled.mockImplementation((g) => g === 'callCommitments' || (g === 'outboundVoicemailSms' && voicemail));
+    installDb({ call_log: { metadata: { relatedCommitmentId: 'callback-1' } } });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body.match(/ action=/g)).toHaveLength(1);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    expect(res.body.includes('machineDetection="Enable"')).toBe(voicemail);
+  });
+
+  test('an ordinary admin bridge gets no completion action even with the card gates on', async () => {
+    callbackCards.enabled.mockReturnValue(true);
+    isEnabled.mockImplementation((g) => g === 'callCommitments');
+    installDb({ call_log: { metadata: { relatedCallId: 'call-1' } } });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).not.toContain('outbound-dial-complete');
+  });
+
+  test('a persisted callback bridge keeps completion when both gates roll back before press 1', async () => {
+    installDb({ call_log: { metadata: { relatedCommitmentId: 'callback-1' } } });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body.match(/ action=/g)).toHaveLength(1);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    expect(res.body).not.toContain('machineDetection');
+  });
+
+  test('a Call Log callback placed under the card policy keeps completion after rollback; a pre-policy one does not', async () => {
+    installDb({ call_log: { metadata: { relatedCallId: 'call-1', callback_policy: 'card' } } });
+    let res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    installDb({ call_log: { metadata: { relatedCallId: 'call-1' } } });
+    res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).not.toContain('outbound-dial-complete');
+  });
+
+  test('a failed linkage lookup still dials with completion evidence enabled', async () => {
+    db.mockImplementation(() => {
+      const query = { where: () => query, update: async () => 1,
+        first: async () => { throw new Error('Synthetic database unavailable'); } };
+      return query;
+    });
+    const res = mockRes();
+    await connect()(req(), res);
+    expect(res.body).toContain(`<Number>${CUSTOMER}</Number>`);
+    expect(res.body).toContain(`/outbound-dial-complete?callLogId=${CALL_LOG_ID}`);
+    expect(res.body).not.toContain('unable to connect');
   });
 
   test('gate off → TwiML is the pre-lane shape: no machineDetection, no action', async () => {
@@ -333,6 +390,27 @@ describe('POST /outbound-amd', () => {
 
 describe('POST /outbound-dial-complete', () => {
   const complete = () => handlerFor('/outbound-dial-complete');
+
+  test('callback evidence is recorded while retaining the voicemail announcement', async () => {
+    installDb({ call_log: { metadata: { [AMD_MACHINE_DETECTED_KEY]: '2026-09-08T15:00:00.000Z' } } });
+    const res = mockRes();
+    const body = { CallSid: `CA${'1'.repeat(32)}`, DialCallSid: `CA${'2'.repeat(32)}`, DialCallStatus: 'completed', DialCallDuration: '90' };
+    await complete()({ query: { callLogId: CALL_LOG_ID }, body }, res);
+    expect(metadataPatches()).toEqual([expect.objectContaining({ status: 'completed', sid: body.DialCallSid, duration_seconds: 90 })]);
+    expect(state.updates.find((u) => u.patch.metadata).patch.twilio_call_sid).toBe(body.CallSid);
+    expect(res.body).toContain('Voicemail detected');
+    expect(res.body).toContain('<Hangup/>');
+  });
+
+  test('an evidence write failure asks Twilio to retry', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    const res = mockRes();
+    await complete()({ query: { callLogId: CALL_LOG_ID }, body: {
+      CallSid: `CA${'1'.repeat(32)}`, DialCallSid: `CA${'2'.repeat(32)}`, DialCallStatus: 'completed', DialCallDuration: '90',
+    } }, res);
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toContain('<Hangup/>');
+  });
 
   test('voicemail was detected → tells the admin, then hangs up', async () => {
     installDb({ call_log: { metadata: { [AMD_MACHINE_DETECTED_KEY]: '2026-09-08T15:00:00.000Z' } } });

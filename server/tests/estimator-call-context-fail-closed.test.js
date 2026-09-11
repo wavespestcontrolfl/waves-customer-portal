@@ -546,7 +546,18 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
   });
 });
 
-describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)', () => {
+describe('buildSmsThreadContext duplicate-row resolution (webhook-shell shortcut removed, #4206)', () => {
+  // PR #4206 stopped the Twilio webhook from minting a created_via
+  // 'twilio_tracking_shell' placeholder row for first-contact texts to
+  // tracking lines, which retired the special-case shortcut this suite used
+  // to cover in detail (loadCustomerByPhone no longer distinguishes a
+  // stamped row from any other candidate — every multi-row match now falls
+  // straight through to pickCustomerMatch, gate on or off, SMS or call
+  // path). This asserts the current fallthrough behavior for the exact row
+  // shape the old shortcut special-cased: a row still carrying the retired
+  // stamp (historical rows keep it — no migration clears it) sitting
+  // alongside a real customer is now an ordinary non-name-matching
+  // duplicate and stays ambiguous, same as any ungrounded shape.
   const SMS_ARGS = {
     phone: '+19415550123',
     triggerBody: 'can I get a quote for quarterly pest control at my home please?',
@@ -556,10 +567,7 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     waveguard_tier: 'Silver', member_since: '2025-01-01', lawn_type: null,
     property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family', company_name: null,
   };
-  // The webhook's first-contact shell, exactly as twilio-webhook.js writes
-  // it: PROVENANCE-STAMPED (created_via), non-customer stage, EMPTY
-  // address_line1, created seconds ago.
-  const SHELL = {
+  const STAMPED_BLANK = {
     ...BASE,
     id: 'shell-1',
     first_name: 'Unknown',
@@ -576,107 +584,11 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     created_at: new Date(Date.now() - 400 * 86400000).toISOString(),
   };
 
-  test('gate ON: TRUE shell + real contact-slot match resolves to the REAL customer', async () => {
+  test('gate ON: a stamped-but-blank row next to a real customer is ambiguous, not auto-resolved', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    mockCustomerRows = [SHELL, REAL];
-    const context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBeUndefined();
-    expect(context.customer).toMatchObject({ id: 'cust-1' });
-    expect(context.customerPhoneAmbiguous).toBe(false);
-    expect(context.isExistingCustomer).toBe(true);
-  });
-
-  test('gate ON: an established customer + a REAL separate lead stays ambiguous', async () => {
-    // pipeline_stage alone cannot tell the webhook shell from a genuine
-    // lead — resolving here would hand the lead's quote the established
-    // customer's id, saved property, and membership pricing.
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    // A real lead: has an address of its own.
-    const REAL_LEAD = { ...SHELL, id: 'lead-cust-1', address_line1: '900 Other Property Rd' };
-    let context = await buildSmsThreadContext(SMS_ARGS);
-    mockCustomerRows = [REAL_LEAD, REAL];
-    context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-
-    // A real lead: address-less but days old, so not this webhook's shell.
-    mockCustomerRows = [
-      { ...SHELL, id: 'lead-cust-2', created_at: new Date(Date.now() - 3 * 86400000).toISOString() },
-      REAL,
-    ];
-    context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-
-    // A row with no created_at at all cannot be proven fresh.
-    mockCustomerRows = [{ ...SHELL, id: 'lead-cust-3', created_at: null }, REAL];
-    context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-  });
-
-  test('gate ON: a recent blank-street lead with a POPULATED ZIP is not a shell', async () => {
-    // Belt-and-braces on top of the stamp: a row that has a locality but no
-    // street yet is not a bare placeholder.
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    mockCustomerRows = [{ ...SHELL, id: 'lead-cust-4', zip: '34205' }, REAL];
+    mockCustomerRows = [STAMPED_BLANK, REAL];
     const context = await buildSmsThreadContext(SMS_ARGS);
     expect(context.error).toBe('ambiguous_phone');
-  });
-
-  test('gate ON: an UNSTAMPED lead with the shell SHAPE stays ambiguous (provenance, not shape)', async () => {
-    // routes/lead-webhook.js creates an active new_lead with address_line1
-    // AND zip blank when a form arrives without an address. It satisfies
-    // every shape signal the old predicate used; only the webhook's own
-    // created_via stamp separates the two, and without it this must stay
-    // ambiguous rather than attaching the established customer's id,
-    // parcel, and membership pricing to the lead's quote.
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    const FORM_LEAD = { ...SHELL, id: 'lead-cust-5', created_via: null };
-    mockCustomerRows = [FORM_LEAD, REAL];
-    let context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-
-    // A stamp from some OTHER path is not this webhook's placeholder either.
-    mockCustomerRows = [{ ...FORM_LEAD, created_via: 'import' }, REAL];
-    context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-  });
-
-  test('gate ON: the true shell (street AND zip blank) still resolves', async () => {
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    // city IS populated on the real insert (numberConfig.area) — it must
-    // not be treated as a shell signal.
-    mockCustomerRows = [{ ...SHELL, city: 'Parrish' }, REAL];
-    const context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBeUndefined();
-    expect(context.customer).toMatchObject({ id: 'cust-1' });
-  });
-
-  test('gate ON: TWO real rows remain genuinely ambiguous (red-lane)', async () => {
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    mockCustomerRows = [REAL, { ...REAL, id: 'cust-2', first_name: 'Other', last_name: 'Member' }];
-    const context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-  });
-
-  test('gate ON: shells ONLY (no real row) stay on the normal ambiguous path', async () => {
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    mockCustomerRows = [SHELL, { ...SHELL, id: 'shell-2' }];
-    const context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-  });
-
-  test('gate OFF: no contact-slot lookup, so shell resolution never applies', async () => {
-    mockCustomerRows = [SHELL, REAL];
-    const context = await buildSmsThreadContext(SMS_ARGS);
-    expect(context.error).toBe('ambiguous_phone');
-  });
-
-  test('the CALL path never resolves shells (byte-identical)', async () => {
-    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    mockCallRow = CALL();
-    mockCustomerRows = [SHELL, REAL];
-    const context = await buildCallContext('call-1');
-    // buildCallContext keeps pickCustomerMatch's ambiguity verdict.
-    expect(context.customerPhoneAmbiguous).toBe(true);
   });
 });
 

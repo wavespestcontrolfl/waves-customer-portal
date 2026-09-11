@@ -758,16 +758,14 @@ router.post('/sms', async (req, res) => {
     }
 
     // DOMAIN / VAN TRACKING — first text from an unknown number to a
-    // domain-specific or van-wrap line. This branch used to mint a customer
-    // row for the sender (created_via twilio_tracking_shell) and guess a
-    // name from the body, turning ordinary message prose into a customer
-    // identity. Owner ruling
-    // 2026-09-08: a text is not an identified person. Nothing is created;
-    // the thread sits in the inbox under the sender's phone number (the
-    // "Unknown" chip) until staff link or create the record, like every
-    // other unknown-sender thread. The admin bell still fires — it replaces
-    // the owner SMS forward for tracking lines (isTrackingLeadInbound
-    // below) — and links to the inbox instead of a lead record.
+    // domain-specific or van-wrap line. Owner ruling 2026-09-08: a text is
+    // not an identified person, so nothing is created here — no customer
+    // row, no name guessed from the body. The thread sits in the inbox
+    // under the sender's phone number (the "Unknown" chip) until staff link
+    // or create the record, like every other unknown-sender thread. The
+    // admin bell still fires — it replaces the owner SMS forward for
+    // tracking lines (isTrackingLeadInbound below) — and links to the inbox
+    // instead of a lead record.
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !smsReaction && !courtesyOnly && (Body || inboundMedia.length)) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');

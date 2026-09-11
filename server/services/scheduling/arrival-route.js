@@ -424,6 +424,7 @@ async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, 
   return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
 }
 
+
 module.exports = {
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
