@@ -201,6 +201,26 @@ describe('finding 3 — address fragments and on-file restatements', () => {
     expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: onFile })).toBe(true);
   });
 
+  // codex P2: a raw locality phrase that ALSO carries the already-agreed
+  // state and/or ZIP (not just the bare city) must still read as a
+  // restatement — appending "FL" or the saved ZIP to the city name is not
+  // new street evidence.
+  test.each([
+    { city: 'Parrish', state: 'FL', raw_text: 'Parrish FL' },
+    { city: 'Parrish', state: 'FL', postal_code: '34219', raw_text: 'Parrish, FL 34219' },
+    { city: 'Parrish', raw_text: '34219 Parrish' },
+  ])('a locality phrase padded with the saved state/ZIP is still a restatement: %j', service_address => {
+    const ex = v2({ property: { service_address } });
+    expect(statesNewAddress(ex, onFile)).toBe(false);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: onFile })).toBe(true);
+  });
+
+  test('a locality phrase with an extra unmatched word is NOT treated as a restatement', () => {
+    const ex = v2({ property: { service_address: { raw_text: 'Parrish Heights FL' } } });
+    expect(statesNewAddress(ex, onFile)).toBe(true);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: onFile })).toBe(false);
+  });
+
   test('restating the on-file street books on the on-file address', () => {
     const ex = v2({ property: { service_address: { street_line_1: '1234 Sample Palm Drive', city: 'Parrish' } }, triage_flags: ['address_unverified'] });
     const r = canAutoRoute(ex, { contactPhone: ANI, failOpen: true, knownCustomer: onFile, addressValidation: { status: 'missing_component', inServiceArea: true } });

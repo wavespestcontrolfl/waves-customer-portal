@@ -405,6 +405,9 @@ describe('resolveCallBookingPropertyLinkage', () => {
     });
     expect(out.address.line1).toBe('123 Oak Street');
     expect(out.propertyId).toBe('prop-home');
+    // codex P2: state is a sibling of line1/city/zip on the proof snapshot —
+    // it must survive the stamp, not just the street/city/zip components.
+    expect(out.address.state).toBe('FL');
   });
 });
 
@@ -421,25 +424,73 @@ describe('resolveOnFileAddressAuthority — proof binds to the CANONICAL custome
   test('same customer both sides → authorized, snapshot carried', () => {
     expect(resolveOnFileAddressAuthority({
       usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-A',
-    })).toEqual({ useOnFileAddress: true, onFileAddressSnapshot: snapshot });
+    })).toEqual({ useOnFileAddress: true, onFileAddressSnapshot: snapshot, proofRejected: false });
   });
 
   test('canonical resolution reconciled to a DIFFERENT customer → rejected, never stamps the unmatched proof', () => {
     expect(resolveOnFileAddressAuthority({
       usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
-    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null });
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: true });
   });
 
   test('no known proof-customer id (unknown caller) → never authorized even when usesOnFileAddress is true', () => {
     expect(resolveOnFileAddressAuthority({
       usesOnFileAddress: true, proofCustomerId: null, proofAddress: snapshot, canonicalCustomerId: 'cust-B',
-    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null });
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: true });
   });
 
-  test('usesOnFileAddress false → rejected regardless of identity match', () => {
+  test('usesOnFileAddress false → rejected regardless of identity match, but not a proof mismatch', () => {
     expect(resolveOnFileAddressAuthority({
       usesOnFileAddress: false, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-A',
-    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null });
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: false });
+  });
+
+  // codex P1: a mismatched proof (usesOnFileAddress true, customer ids
+  // don't bind) must not silently fall back to a fresh customers-table
+  // read for the CANONICAL customer when the extraction carries no line1
+  // of its own — resolveCallBookingPropertyLinkage holds instead.
+  test('proofRejected + no extraction line1 → null address with a hold reason, no customers-table read', async () => {
+    const authority = resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    });
+    let customersRead = false;
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        first: () => {
+          if (table === 'customers') customersRead = true;
+          return Promise.resolve(null);
+        },
+        select: () => Promise.resolve([]),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-B', { city: 'Venice' }, trx, authority);
+    expect(out).toEqual({
+      propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
+    });
+    expect(customersRead).toBe(false);
+  });
+
+  // proofRejected but the extraction DOES carry its own line1 → not a
+  // fallback situation at all; the caller's own street is used as before.
+  test('proofRejected + extraction has its own line1 → uses the extraction address, not held', async () => {
+    const authority = resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    });
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        first: () => Promise.resolve(null),
+        select: () => Promise.resolve(table === 'customer_properties' ? [] : []),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-B', {
+      address_line1: '77 Palm Ave', city: 'Venice', state: 'FL', zip: '34285',
+    }, trx, authority);
+    expect(out.holdReason).toBeUndefined();
+    expect(out.address.line1).toBe('77 Palm Ave');
   });
 });
 

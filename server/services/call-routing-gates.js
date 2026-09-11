@@ -397,6 +397,10 @@ function buildTriageItem({
     // within a day of the discussed date) — a human picks which one the
     // call belongs to instead of the AI inserting a duplicate.
     ambiguous_existing_appointment: 'time_ambiguous',
+    // On-file proof was computed against a different customer than booking
+    // resolved to and the call carried no street of its own (codex P1) —
+    // nothing either side vouches for, so the office confirms WHERE.
+    on_file_proof_customer_mismatch: 'address_review',
     // The call was attached to a human's existing booking, so the promised
     // follow-up treatment was NOT auto-booked — the office books visit 2.
     attached_booking_followup_unbooked: 'time_ambiguous',

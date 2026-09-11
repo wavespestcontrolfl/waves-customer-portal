@@ -1567,6 +1567,40 @@ const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z ]/g, ' ').re
 // inside an identifier remains formatting (4-B = 4B), not a lost separator.
 const unitKey = value => unitLineValueKey(normalizeUnitLine(value)).replace(/-/g, '');
 const statedValues = values => values.map(value => String(value || '').trim()).filter(Boolean);
+
+// codex P2: "Parrish FL" / "Parrish, FL 34219" / "34219 Parrish" restate the
+// on-file locality just as plainly as a bare "Parrish" — appending the
+// already-agreed state and/or ZIP must not turn a locality restatement into
+// unrecognized street evidence. True only when EVERY word of the phrase
+// (after stripping the "in / I'm in" lead-in and punctuation) is consumed by
+// the saved city, "FL"/"Florida", or the saved ZIP (zip5 or ZIP+4) — any one
+// unmatched word (e.g. "Heights" in "Parrish Heights FL") still falls
+// through to street-evidence comparison below.
+function rawIsPureLocalityPhrase(raw, savedCity, savedZip) {
+  if (!raw || !savedCity) return false;
+  const stripped = String(raw).trim()
+    .replace(/^(?:i\s*'?m\s+|i\s+am\s+|we\s*'?re\s+|we\s+are\s+)?in\s+/i, '')
+    .replace(/[.,]/g, ' ')
+    .trim();
+  if (!stripped) return false;
+  const tokens = stripped.toLowerCase().split(/\s+/).filter(Boolean);
+  let consumedLocalityToken = false;
+  const cityWords = [];
+  for (const token of tokens) {
+    if (token === 'fl' || token === 'florida') {
+      consumedLocalityToken = true;
+      continue;
+    }
+    const zipHead = token.replace(/-\d{4}$/, '');
+    if (savedZip && zipHead === savedZip) {
+      consumedLocalityToken = true;
+      continue;
+    }
+    cityWords.push(token);
+  }
+  if (!cityWords.length) return consumedLocalityToken;
+  return cityKey(cityWords.join(' ')) === savedCity;
+}
 function restatementStreetParts(line) {
   const tokens = normalizeStreetLine(line).toLowerCase().split(/\s+/).filter(Boolean)
     .map(token => String(STREET_SUFFIX_ALIASES[token] || token).toLowerCase());
@@ -1604,7 +1638,7 @@ function restatesOnFileAddress(sa, knownCustomer) {
   // Every other raw phrase is compared as street evidence, including names
   // with no house number or suffix; unknown words cannot disappear behind a city.
   const localityPhrase = cityKey(raw).replace(/^(?:i m |i am |we re |we are )?in /, '');
-  const rawIsLocality = [raw === savedZip, localityPhrase === savedCity].some(Boolean);
+  const rawIsLocality = [raw === savedZip, localityPhrase === savedCity, rawIsPureLocalityPhrase(raw, savedCity, savedZip)].some(Boolean);
   const acknowledgment = /^(?:yes|(?:the )?same (?:place|address|as before|as always))\.?$/i.test(raw);
   const rawCity = cityKey(parsed.city);
   const cityIsUnit = Boolean(rawUnit) && unitKey(parsed.city) === unitKey(rawUnit);

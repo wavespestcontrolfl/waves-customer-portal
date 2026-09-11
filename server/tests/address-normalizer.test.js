@@ -208,6 +208,43 @@ describe('address normalizer', () => {
     });
   });
 
+  // codex P1: a trailing state token is only a plausible street-suffix
+  // reading (discarded) when it DIRECTLY terminates the street — an
+  // unparsed locality word ("Groton") sitting right before it is real
+  // geography, however many other suffix-shaped words came earlier.
+  test('a real out-of-state locality before the state token is not swallowed as a street suffix', () => {
+    const out = parseRawAddress('123 Route 12 Groton CT');
+    expect(out.state).toBe('CT');
+    expect(out.line1).not.toContain('Groton CT');
+  });
+
+  test('"123 Main Ct" still reads as a bare house-number + street, no state', () => {
+    expect(parseRawAddress('123 Main Ct')).toMatchObject({
+      line1: '123 Main Ct',
+      state: '',
+    });
+  });
+
+  test('"123 Main St NE" still reads NE as a post-directional, no state', () => {
+    expect(parseRawAddress('123 Main St NE')).toMatchObject({
+      line1: '123 Main St NE',
+      state: '',
+    });
+  });
+
+  test('a long street whose own last word is a suffix still keeps a trailing directional ("Gulf of Mexico Dr NE")', () => {
+    expect(parseRawAddress('1234 Gulf of Mexico Dr NE')).toMatchObject({
+      line1: '1234 Gulf Of Mexico Dr NE',
+      state: '',
+    });
+  });
+
+  test('a real locality before a directional-shaped state code keeps the state ("Lincoln NE")', () => {
+    expect(parseRawAddress('400 Elm Lincoln NE')).toMatchObject({
+      state: 'NE',
+    });
+  });
+
   test('normalizes full state names to DB-safe two-letter codes', () => {
     expect(normalizeLeadAddress({
       line1: '123 Main St',

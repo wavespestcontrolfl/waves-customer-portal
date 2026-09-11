@@ -1156,6 +1156,9 @@ function summarizeKnownCaller(customer) {
     addressLine1: String(customer.address_line1 || '').trim() || null,
     addressLine2: String(customer.address_line2 || '').trim() || null,
     addressCity: String(customer.city || '').trim() || null,
+    // codex P2: state sibling to city/zip — the on-file proof snapshot
+    // below stamps it into the booked visit alongside line1/line2/city/zip.
+    addressState: String(customer.state || '').trim() || null,
     addressZip: String(customer.zip || '').trim() || null,
   };
 }
@@ -1268,10 +1271,19 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
 // back to whatever address the caller's own extraction carries (never a
 // stamp neither side vouches for). Pure; no side effects.
 function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, proofAddress, canonicalCustomerId } = {}) {
-  if (!usesOnFileAddress || !proofCustomerId || proofCustomerId !== canonicalCustomerId) {
-    return { useOnFileAddress: false, onFileAddressSnapshot: null };
+  if (!usesOnFileAddress) {
+    return { useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: false };
   }
-  return { useOnFileAddress: true, onFileAddressSnapshot: proofAddress || null };
+  if (!proofCustomerId || proofCustomerId !== canonicalCustomerId) {
+    // codex P1: distinguish "the proof was computed but doesn't bind" from
+    // "there was never a proof" — resolveCallBookingPropertyLinkage needs
+    // this to refuse a customers-table fallback stamp for an extraction
+    // with no line1 of its own (a city-only / "yes same place" restatement
+    // proved against a DIFFERENT customer than booking finally resolved to
+    // must never silently dispatch to that other customer's address).
+    return { useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: true };
+  }
+  return { useOnFileAddress: true, onFileAddressSnapshot: proofAddress || null, proofRejected: false };
 }
 
 // Non-lead call-content classification — shared with the attribution retire
@@ -4047,9 +4059,22 @@ async function resolveOnFileAddressForBooking(customerId, trx, onFileAddressSnap
 // that property's id. Exact addressKey match only — a booking must never be
 // GUESSED onto a property. Approved on-file restatements use the complete
 // saved address before matching; partial extraction must not lose its key.
-async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db, { useOnFileAddress = false, onFileAddressSnapshot = null } = {}) {
+async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db, { useOnFileAddress = false, onFileAddressSnapshot = null, proofRejected = false } = {}) {
   let address = cleanBookingAddressFields(extracted);
   if (useOnFileAddress || !address.line1) {
+    // codex P1: proofRejected means the fail-open proof was computed
+    // against a DIFFERENT customer than the one booking resolved to
+    // (resolveOnFileAddressAuthority). With no line1 of the extraction's
+    // own to fall back on, there is nothing left that either side actually
+    // vouches for — falling through to a fresh customers-table read here
+    // would stamp the CANONICAL customer's on-file address from proof that
+    // was never compared against it. Hold instead of guessing; the caller
+    // holds the appointment for human review (holdReason).
+    if (proofRejected && !address.line1) {
+      return {
+        propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
+      };
+    }
     // The caller omitted or restated the saved address. Dispatch to their on-file,
     // Google-verified address instead of leaving the visit address blank —
     // never book a location-less appointment. Falls THROUGH to the exact
@@ -8518,7 +8543,7 @@ const CallRecordingProcessor = {
               v2OnFileAddressProofSnapshot = knownCaller
                 ? {
                   line1: knownCaller.addressLine1, line2: knownCaller.addressLine2,
-                  city: knownCaller.addressCity, zip: knownCaller.addressZip,
+                  city: knownCaller.addressCity, state: knownCaller.addressState, zip: knownCaller.addressZip,
                 }
                 : null;
             }
@@ -13406,6 +13431,16 @@ const CallRecordingProcessor = {
                       || v2CanonicalExtraction?.property?.service_address?.street_line_2
                       || null,
                   }, trx, onFileAuthority);
+                // codex P1: resolveCallBookingPropertyLinkage returns a null
+                // address with holdReason set when the on-file proof was
+                // rejected (computed against a different customer than
+                // booking resolved to) AND the extraction has no street of
+                // its own — never book a location-less appointment; hold
+                // for human review the same way an ambiguous-attach or
+                // same-day-duplicate does.
+                if (propertyLinkage.holdReason) {
+                  return { __held: { reason: propertyLinkage.holdReason } };
+                }
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
                 // portal mid-call, online self-booking) is invisible to it,
@@ -15189,7 +15224,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch']);
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
