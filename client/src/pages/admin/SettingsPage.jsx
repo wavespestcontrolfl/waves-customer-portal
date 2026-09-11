@@ -1546,7 +1546,7 @@ function ServiceCoverageAdminPreview({ title, intro, disclaimer, showMap, showLi
       <CardHeader><CardTitle>Preview</CardTitle></CardHeader>
       <CardBody>
       <div className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4">
-        <h2 className="text-22 leading-[1.3] font-medium text-zinc-900">{title || "Service Coverage"}</h2>
+        <h4 className="text-22 leading-[1.3] font-medium text-zinc-900">{title || "Service Coverage"}</h4>
         <p className="mt-1 text-ui-body text-ink-secondary">{intro}</p>
         <div className="mt-3 text-ui-caption text-ink-secondary u-nums">
           <div>12312 Cedar Pass Trl, Parrish, FL 34219</div>
@@ -1655,8 +1655,6 @@ function GbpConnectSection() {
       )}
       {loading ? (
         <ActionFeedback className="min-h-16">Loading…</ActionFeedback>
-      ) : locations.length === 0 ? (
-        <p className="py-4 text-center text-ink-secondary">No Google Business Profile locations available.</p>
       ) : (
         <div className="divide-y divide-zinc-200">
           {locations.map((loc) => (
