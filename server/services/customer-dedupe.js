@@ -1342,11 +1342,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw new Error('executeMerge: the duplicate belongs to a multi-property account with other live members — reconcile accounts first');
       }
     }
-    // Same-account primary handoff: shared notification/channel prefs
-    // resolve via (account_id, is_primary_profile=true) — retiring the
-    // account's primary without promoting the survivor would leave sibling
-    // properties falling back to their own/default prefs.
-    const promoteWinnerAsPrimary = promoteWinnerAsPrimaryRule(winner, loser);
+    // Same-account primary handoff (shared notification/channel prefs
+    // resolve via (account_id, is_primary_profile=true)) is decided by
+    // promoteWinnerAsPrimaryRule inside predictWinnerBackfills below.
     // The queue was computed OUTSIDE this transaction — re-verify under the
     // row lock that the pair still shares a phone (intake flows and admin
     // edits can change either side between detection and the merge click).
