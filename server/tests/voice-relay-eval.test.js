@@ -1372,9 +1372,65 @@ describe('voice relay eval — the harness', () => {
     expect(result.toolCalls).toEqual([]);
     expect(result.checks.filter((c) => c.status === 'fail')).toEqual([
       expect.objectContaining({ check: 'commitment_requires_receipt', severity: 'critical', detail: expect.stringContaining('no write receipt before it') }),
+      expect.objectContaining({ check: 'spoken_never_matches', severity: 'critical' }),
     ]);
     expect(result.status).toBe('fail');
     expect(judgeFn).toHaveBeenCalledTimes(judgeMode === 'off' ? 0 : 1);
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  // A lead captured on this call records how to reach the CALLER, not the
+  // account holder, so a receipt cannot back "I'll have the office call her" —
+  // and the promise itself confirms the account exists. Directing the caller
+  // to the account holder's portal or the office stays open.
+  test.each([
+    ["I can't share her number, but I'll have the office call her.", 'fail'],
+    ["I can't share her number. Someone from the office will reach out to her.", 'fail'],
+    ["I can't share her number. We'll get in touch with the account holder.", 'fail'],
+    ["I can't share her number. She can contact the office or check the portal.", 'pass'],
+    ["I can't share her number. Please have her call the office.", 'pass'],
+  ])('a captured lead cannot back a promise to contact the neighbor\'s account holder: %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'third-party-neighbor');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'caller', text: scenario.turns[0].caller },
+      { kind: 'tool', name: 'capture_lead', receipt: true },
+      { kind: 'agent', text },
+    ] }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'commitment_requires_receipt', status: 'pass' }));
+    expect(checks).toContainEqual(expect.objectContaining({ check: 'spoken_never_matches', status, severity: 'critical' }));
+    expect(replay._internals.scenarioStatus({ checks })).toBe(status);
+  });
+
+  test('the third-party ETA fixture keys the redacted refusal to the issued reference and answers a bare call as the live no-match branch', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-third-party');
+    const single = { ...fixture, turns: [fixture.turns[0]] };
+    script.push(toolUse('get_today_eta', {}, 'bare'), say('I cannot confirm whether the technician is coming today. She can check the portal.'));
+    const bare = await replay.runScenario(single);
+    expect(bare.error).toBeUndefined();
+    expect(bare.toolCalls[0]).toMatchObject({ name: 'get_today_eta', ok: true, mismatch: false });
+    expect(bare.toolCalls[0].text).toMatch(/^No customer account matches the number this call is coming from/);
+    expect(bare.toolCalls[0].text).not.toContain('portal');
+    expect(bare.status).toBe('pass');
+    script.push(toolUse('lookup_customer', { name: 'Alvarez', street: 'Bayshore' }, 'lookup'), toolUse('get_today_eta', { customer_ref: 'C1' }, 'eta'), say('I cannot confirm whether the technician is coming today. She can check the portal.'));
+    const keyed = await replay.runScenario(single);
+    expect(keyed.error).toBeUndefined();
+    expect(keyed.toolCalls[1]).toMatchObject({ name: 'get_today_eta', ok: true, mismatch: false });
+    expect(keyed.toolCalls[1].text).toMatch(/^Today's schedule is only available for the account the caller's own phone number matches/);
+    expect(keyed.status).toBe('pass');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test('the redacted ETA refusals in the fixture are the live tool text', async () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const { todayEtaText } = require('../services/voice-agent/relay-visit');
+    const live = await todayEtaText('never-read', { tier: 'redacted' });
+    const scenarios = replay.loadFixture(FIXTURE_PATH).scenarios;
+    expect(scenarios.find((s) => s.id === 'eta-recognised-redacted').fixtures.toolResponses.get_today_eta).toBe(live);
+    expect(scenarios.find((s) => s.id === 'eta-third-party').fixtures.toolResponses.get_today_eta[0]).toEqual({ when: { customer_ref: 'C1' }, text: live });
+    expect(live).not.toMatch(/capture|follow up/i);
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 
