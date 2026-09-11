@@ -167,9 +167,14 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
     matchedSends.add(pair.sendIndex);
     matchedRows.add(pair.rowIndex);
   }
-  const manual = candidates.find((row, index) => !matchedRows.has(index)
-    && effectiveAskAt(row) >= sinceAt);
-  const manualAt = manual ? effectiveAskAt(manual) : null;
+  // Rows are ordered by created_at, but a resolved reservation's effective
+  // time is its confirmation (updated_at) — so take the LATEST effective
+  // time across the unmatched candidates, not the first row in that order.
+  const manualAt = candidates.reduce((latest, row, index) => {
+    if (matchedRows.has(index)) return latest;
+    const at = effectiveAskAt(row);
+    return at >= sinceAt && (!latest || at > latest) ? at : latest;
+  }, null);
   return reservedAt && (!manualAt || reservedAt > manualAt) ? reservedAt : manualAt;
 }
 
