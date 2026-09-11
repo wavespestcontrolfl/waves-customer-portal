@@ -2488,11 +2488,16 @@ function calculateVisitFinancialsForAddons(pricing, addonLines) {
   // edit route passes primaryGross / primaryLineDiscount. Accept both, or a
   // child/booster recompute would restate the ADD-ON slots from gross while
   // treating the primary as pre-netted — a half-stacked visit.
-  const primaryLineDiscount = slot(pricing.primaryLineDiscount ?? pricing.primaryDiscount);
   const primaryGrossInput = pricing.primaryGross ?? pricing.primaryBase;
-  const primaryGross = primaryLineDiscount && primaryGrossInput != null
-    ? primaryGrossInput
-    : (pricing.primaryNet || 0);
+  // A line discount only rides a GROSS. Every caller derives primaryNet from
+  // the same gross (null gross ⇒ null/0 net), so the net fallback below is
+  // never an already-discounted number with a discount still attached — but
+  // make that structural: no gross, no primary line slot, so a future caller
+  // that passes a pre-netted price cannot get it discounted twice.
+  const primaryLineDiscount = primaryGrossInput != null
+    ? slot(pricing.primaryLineDiscount ?? pricing.primaryDiscount)
+    : null;
+  const primaryGross = primaryLineDiscount ? primaryGrossInput : (pricing.primaryNet || 0);
   const lines = [{
     gross: primaryGross,
     lineDiscount: primaryLineDiscount,

@@ -617,6 +617,31 @@ describe('admin schedule appointment discount eligibility', () => {
   });
 
   describe('discount stacking (owner ruling 2026-09-11)', () => {
+    test('calculateVisitFinancialsForAddons never discounts a pre-netted primary: no gross, no line slot', () => {
+      // A caller that passes only primaryNet (the legacy shape) with a stored
+      // line discount still attached must not get that discount replayed on
+      // the net — the slot is dropped when there is no gross to apply it to.
+      const financials = calculateVisitFinancialsForAddons({
+        primaryNet: 90,
+        primaryLineDiscount: { discountType: 'percentage', discountAmount: 10 },
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        appointmentDiscount: null,
+      }, []);
+      expect(financials.price).toBe(90);
+
+      // With the gross supplied the same slot applies once, against the gross.
+      const stacked = calculateVisitFinancialsForAddons({
+        primaryGross: 100,
+        primaryNet: 90,
+        primaryLineDiscount: { discountType: 'percentage', discountAmount: 10 },
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        appointmentDiscount: null,
+      }, []);
+      expect(stacked.price).toBe(90);
+    });
+
     const SILVER = { id: 'silver', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, stack_group: 'tier', is_stackable: false };
     const GOLD = { id: 'gold', name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, stack_group: 'tier', is_stackable: false };
     const MILITARY = { id: 'military', name: 'Military Discount', discount_type: 'percentage', amount: 5, is_stackable: true };
