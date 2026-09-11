@@ -423,6 +423,61 @@ describe('POST / — admin create', () => {
   // the first Fridays 08-07, 09-04; November booster → 11-03.
   const generatedDates = ['2099-08-07', '2099-09-04', '2099-11-03'];
 
+  describe('intentional separate recurring program', () => {
+    const seeder = require('../services/recurring-appointment-seeder');
+    const { gates } = require('../config/feature-gates');
+    const originalGate = gates.separateRecurringProgram;
+    const existing = [{ id: 'series-1', service_type: 'General Pest Control', scheduled_date: '2099-07-03' }];
+    const override = { reason: 'Additional exterior service area', existingSeriesIds: ['series-1'] };
+    beforeEach(() => {
+      gates.separateRecurringProgram = true;
+      jest.spyOn(seeder, 'findActiveRecurringSeries').mockResolvedValue(existing);
+      jest.spyOn(seeder, 'checkActiveSeriesLocked').mockResolvedValue({ matches: existing, guardError: null });
+    });
+    afterEach(() => { gates.separateRecurringProgram = originalGate; jest.restoreAllMocks(); });
+
+    test('gate off refuses before reading customer data', async () => {
+      gates.separateRecurringProgram = false;
+      expect((await post({ ...recurringBody, duplicateSeriesOverride: override })).status).toBe(409);
+      expect(db).not.toHaveBeenCalled();
+    });
+    test('requires a reason and reviewed series IDs', async () => {
+      for (const invalid of [{ ...override, reason: ' ' }, { ...override, existingSeriesIds: [] }, null]) {
+        expect((await post({ ...recurringBody, duplicateSeriesOverride: invalid })).status).toBe(400);
+      }
+      expect(db).not.toHaveBeenCalled();
+    });
+    test('a stale reviewed set stops before pricing or the write transaction', async () => {
+      const result = await post({ ...recurringBody, duplicateSeriesOverride: { ...override, existingSeriesIds: ['stale-series'] } });
+      expect(result.status).toBe(409);
+      expect(result.body).toMatchObject({ code: 'duplicate_recurring_series', canCreateSeparateProgram: true });
+      expect(db.transaction).not.toHaveBeenCalled();
+    });
+    test.each([false, true])('a concurrent new program is refused under the lock (legacy bypass supplied: %s)', async (legacyBypass) => {
+      seeder.checkActiveSeriesLocked.mockResolvedValue({ matches: [...existing, { ...existing[0], id: 'series-2' }], guardError: null });
+      const result = await post({ ...recurringBody, allowDuplicateSeries: legacyBypass, duplicateSeriesOverride: override });
+      expect(result.status).toBe(409);
+      expect(result.body.existingSeries.map((series) => series.id)).toEqual(['series-1', 'series-2']);
+      expect(seeder.checkActiveSeriesLocked).toHaveBeenCalledWith(trx, expect.objectContaining({ customerId: 'cust-1' }));
+    });
+    test('guard failure refuses the override instead of creating without verification', async () => {
+      seeder.checkActiveSeriesLocked.mockResolvedValue({ matches: [], guardError: new Error('guard unavailable') });
+      const result = await post({ ...recurringBody, duplicateSeriesOverride: override });
+      expect(result.status).toBe(500);
+      expect(result.body.error).toBe('guard unavailable');
+    });
+    test('an unchanged reviewed set records the admin and reason with the new parent', async () => {
+      const auditInsert = jest.fn().mockResolvedValue([]);
+      const originalTrx = trx.getMockImplementation();
+      trx.mockImplementation((table) => table === 'activity_log' ? { insert: auditInsert } : originalTrx(table));
+      await post({ ...recurringBody, duplicateSeriesOverride: override });
+      expect(auditInsert).toHaveBeenCalledWith(expect.objectContaining({
+        admin_user_id: 'staff-1', customer_id: 'cust-1', action: 'separate_recurring_program_created',
+        description: expect.stringContaining(override.reason),
+      }));
+    });
+  });
+
   test('recurring create locks the parent + every generated date, sorted, before any insert', async () => {
     const inserts = [];
     trx.mockImplementation((table) => {

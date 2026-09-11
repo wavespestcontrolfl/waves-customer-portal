@@ -285,3 +285,26 @@ test('capacity estimates keep late work within the shared shift and its last arr
     else process.env.GATE_SCHEDULING_CAPACITY = previous;
   }
 });
+
+
+test('capacity offers stay empty when estimate coordinates cannot be resolved', async () => {
+  const previous = process.env.GATE_SCHEDULING_CAPACITY;
+  process.env.GATE_SCHEDULING_CAPACITY = 'true';
+  estimateSlotAvailability._internals.clearCaches();
+  const noCoords = { ...ESTIMATE_ROW, id: 'estimate-without-coordinates', customer_id: null, address: null };
+  mockDb();
+  const regular = db.getMockImplementation();
+  db.mockImplementation(table => table === 'estimates'
+    ? { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(noCoords) } : regular(table));
+  const finder = require('../services/scheduling/find-time').findAvailableSlots;
+  finder.mockClear();
+  try {
+    const result = await getAvailableSlots(noCoords.id, RANGE);
+    expect(result.primary).toEqual([]);
+    expect(result.expander).toEqual([]);
+    expect(finder).not.toHaveBeenCalled();
+  } finally {
+    if (previous === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = previous;
+  }
+});

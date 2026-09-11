@@ -324,16 +324,16 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     expect(remaining).toEqual([]);
   });
 
-  test('the reserved-accept surfaces carry the tree & shrub promotion under the gate (source guard)', () => {
+  test('reserved acceptance promotes tree & shrub when programs must be separate (source guard)', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
     // Promotion filter and lock pre-pass both include tree_shrub only under
-    // the gate, and both resolve the T&S cadence→catalog map.
-    expect(src).toContain("...(process.env.GATE_SEPARATE_COMBO_VISITS === 'true' ? ['tree_shrub'] : [])");
+    // the separation decision, and both resolve the T&S cadence→catalog map.
+    expect(src).toContain("...(separateReservedPrograms ? ['tree_shrub'] : [])");
     // promotion, lock pre-pass, and the auto-path key derivation all consume the map
     expect(src.match(/TREE_SHRUB_CADENCE_CATALOG_KEYS\[pattern\]/g).length).toBeGreaterThanOrEqual(3);
-    expect(src).toContain("fam === 'tree_shrub'\n                && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'");
+    expect(src).toContain("fam === 'tree_shrub'\n                && separateReservedPrograms");
   });
 
   test('gate off: the two-program routes still combine exactly as before', () => {

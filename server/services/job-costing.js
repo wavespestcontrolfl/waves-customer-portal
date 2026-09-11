@@ -666,6 +666,7 @@ module.exports = {
   calculateJobCost,
   calcLaborCost,
   resolveServiceRecord,
+  parseJsonObject,
   backfillServiceRecordFinancials,
   deriveRevenue,
   computeServiceRecordFinancials,
