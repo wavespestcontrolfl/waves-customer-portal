@@ -10,7 +10,25 @@ const fx = (name) => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixt
 const first = (obj) => Object.values(obj)[0].body;
 // The tracker renders "Updated Ns ago" from Date.now() - vehicle.lastReportedAt, so a fixed fixture
 // timestamp goes stale on every rerun; the en-route payload is stamped relative to the run instead.
-const liveTrack = (body) => ({ ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } });
+// The rest of the payload is a same-day state as well: track-public gates the stops-ahead poll on
+// `isServiceDateToday(scheduled_date)` and the page renders an arrival window, so a fixture pinned
+// to its capture date shows a live tracker for a visit that already happened. Every remaining stamp
+// is shifted by whole days onto the run date with its time of day preserved.
+const trackStamps = ['arrivedAt'];
+const liveTrack = (body) => {
+  const anchor = body.window && body.window.start;
+  const dayMs = 86400000;
+  // Shift = whole ET calendar days between the fixture's visit date and the run's, so 9am stays 9am.
+  const offset = anchor
+    ? Date.parse(`${etDateString(new Date())}T00:00:00Z`) - Date.parse(`${String(anchor).slice(0, 10)}T00:00:00Z`)
+    : 0;
+  const shift = (iso) => (typeof iso === 'string' && iso ? new Date(Date.parse(iso) + Math.round(offset / dayMs) * dayMs).toISOString() : iso);
+  const out = { ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } };
+  if (body.window) out.window = { ...body.window, start: shift(body.window.start), end: shift(body.window.end) };
+  for (const k of trackStamps) if (body[k]) out[k] = shift(body[k]);
+  if (body.summary) out.summary = { ...body.summary, completedAt: shift(body.summary.completedAt) };
+  return out;
+};
 // The reschedule fixture is a one-off extraction whose availability window is literal dates; once they
 // are in the past the page still renders "Our best times for you" with slots production could never
 // return. Every date is re-based so `rangeFrom` = today (ET calendar days, see 40-diagnostics-booking).

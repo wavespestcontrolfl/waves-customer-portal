@@ -39,6 +39,68 @@ const heights = { 320: 568, 375: 667, 390: 844, 430: 932, 768: 1024, 1024: 768, 
 
 const collectSrc = `(${collectMetrics.toString()})`;
 
+// Contrast: sample a screenshot around small text (<=16px) and every control. Shared by the pristine
+// state capture and every interaction capture — an opened sheet / menu / dialog is otherwise counted
+// as inspected while any low-contrast text painted only inside it never reaches the digest.
+// `fullPage` says which coordinate space the PNG is in: a full-page shot is the document, so boxes
+// carry the scroll offset; a viewport-only shot (every interaction that does not opt into fullPage)
+// is the viewport, where adding scrollY would sample pixels the image does not contain.
+async function probeContrast(page, shotPath, fullPage) {
+  const png = decode(fs.readFileSync(shotPath));
+  const items = await page.evaluate((docSpace) => {
+    const out = [];
+    // Same-origin iframes (newsletter archive article) are walked too; their boxes are translated
+    // into page coordinates through the frame's rect so the screenshot samples land on the text.
+    const docs = [{ doc: document, dx: 0, dy: 0, tag: '' }];
+    for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument && f.contentDocument.body) { const fr = f.getBoundingClientRect(); docs.push({ doc: f.contentDocument, dx: fr.left + f.clientLeft, dy: fr.top + f.clientTop, tag: 'iframe>' }); } } catch (e) { /* cross-origin */ } }
+    const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; };
+    for (const d of docs) {
+      const walker = d.doc.createTreeWalker(d.doc.body, 4);
+      let n; const seen = new Set();
+      while ((n = walker.nextNode())) {
+        const el = n.parentElement; if (!el || seen.has(el) || !n.textContent.trim()) continue; if (el.closest('svg, script, style, [aria-hidden="true"], .glass-scene-orbs')) continue; if (!vis(el)) continue; seen.add(el);
+        const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); // large text (24px+, or 18.66px+ bold) is screened at 3:1 below, never skipped
+        const r = el.getBoundingClientRect();
+        out.push({ sel: d.tag + el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left + d.dx + (docSpace ? window.scrollX : 0), y: r.top + d.dy + (docSpace ? window.scrollY : 0), w: r.width, h: r.height } });
+      }
+      // Text painted by form controls is not a DOM text node: an input's current value and its
+      // ::placeholder (login, booking, quote, payment fields) are sampled explicitly.
+      for (const el of d.doc.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=range]):not([type=color]), textarea, select')) {
+        if (!vis(el) || el.closest('[aria-hidden="true"]')) continue;
+        const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize);
+        const r = el.getBoundingClientRect();
+        const box = { x: r.left + d.dx + (docSpace ? window.scrollX : 0), y: r.top + d.dy + (docSpace ? window.scrollY : 0), w: r.width, h: r.height };
+        const tag = d.tag + el.tagName.toLowerCase() + (el.type ? `[type=${el.type}]` : '');
+        const value = el.tagName === 'SELECT' ? (el.selectedOptions[0] ? el.selectedOptions[0].text : '') : (el.value || '');
+        if (value.trim()) out.push({ sel: tag + '[value]', text: value.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box });
+        else if (el.placeholder && el.placeholder.trim()) {
+          let ph = null; try { ph = getComputedStyle(el, '::placeholder'); } catch (e) { ph = null; }
+          out.push({ sel: tag + '::placeholder', text: el.placeholder.trim().slice(0, 40), size: ph ? parseFloat(ph.fontSize) || size : size, weight: parseInt((ph && ph.fontWeight) || cs.fontWeight, 10), color: (ph && ph.color) || cs.color, box });
+        }
+      }
+    }
+    return out;
+  }, fullPage);
+  const contrast = [];
+  let skipped = 0;
+  for (const it of items) {
+    if (it.box.w < 8 || it.box.h < 8) continue;
+    // `pixel()` clamps out-of-range coordinates to the image edge, so a box outside the capture
+    // (an off-screen skip link at y=-100, anything below a viewport-only shot) would be scored
+    // against edge pixels and reported as a ~1:1 "finding" that nothing on screen can show.
+    // Unsampleable is not the same as failing: those boxes are counted, not scored.
+    if (it.box.x < 0 || it.box.y < 0 || it.box.x + it.box.w > png.width || it.box.y + it.box.h > png.height) { skipped += 1; continue; }
+    const c = sampleContrast(png, 1, it.box, it.color);
+    if (!c) continue;
+    const large = it.size >= 24 || (it.size >= 18.66 && it.weight >= 700);
+    const threshold = large ? 3 : 4.5;
+    // Screen on the WORST sampled background (text over a gradient or variegated glass can be
+    // unreadable at one edge while the averaged background still passes); `avg` is kept for the digest.
+    if (c.min < threshold) contrast.push({ ...it, ...c, threshold });
+  }
+  return { contrast, contrastSampled: items.length, contrastOffscreen: skipped };
+}
+
 async function runState({ browser, baseUrl, scenario, state, width, report }) {
   const height = heights[width] || 900;
   const mobile = width <= 640;
@@ -111,60 +173,24 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
       return pending.length;
     }, scenario.hide || []);
     const shot = path.join(dir, `${state.name}-${width}.png`);
+    const jsonPath = path.join(dir, `${state.name}-${width}.json`);
+    // The JSON record is only written at the very end of this function, well after the screenshot below.
+    // A rerun that reuses this state/width overwrites the PNG first; if the process dies before the JSON
+    // rewrite, the OLD (successful) record would survive pointing at a now-incomplete screenshot and
+    // analyze.cjs/matrix.cjs would keep counting it as inspected. Delete the stale record BEFORE the
+    // screenshot so an interruption leaves no capture at all (NOT VERIFIED) instead of a fake success.
+    try { fs.unlinkSync(jsonPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     await page.screenshot({ path: shot, fullPage: !state.viewportOnly });
     rec.screenshot = path.relative(root, shot);
     rec.metrics = await page.evaluate(collectSrc + '(arguments[0])'.replace('arguments[0]', JSON.stringify(scenario.sheet || {})));
     // A measurement probe that throws is missing evidence, not "no violations": it fails the capture
     // (below) unless the scenario opted out of that probe. The error text is kept alongside.
     const probeFailures = [];
-    // Contrast: sample the full-page screenshot around small text (<=16px) and every control.
     try {
-      const png = decode(fs.readFileSync(shot));
-      const items = await page.evaluate(() => {
-        const out = [];
-        // Same-origin iframes (newsletter archive article) are walked too; their boxes are translated
-        // into page coordinates through the frame's rect so the screenshot samples land on the text.
-        const docs = [{ doc: document, dx: 0, dy: 0, tag: '' }];
-        for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument && f.contentDocument.body) { const fr = f.getBoundingClientRect(); docs.push({ doc: f.contentDocument, dx: fr.left + f.clientLeft, dy: fr.top + f.clientTop, tag: 'iframe>' }); } } catch (e) { /* cross-origin */ } }
-        const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden'; };
-        for (const d of docs) {
-          const walker = d.doc.createTreeWalker(d.doc.body, 4);
-          let n; const seen = new Set();
-          while ((n = walker.nextNode())) {
-            const el = n.parentElement; if (!el || seen.has(el) || !n.textContent.trim()) continue; if (el.closest('svg, script, style, [aria-hidden="true"], .glass-scene-orbs')) continue; if (!vis(el)) continue; seen.add(el);
-            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); // large text (24px+, or 18.66px+ bold) is screened at 3:1 below, never skipped
-            const r = el.getBoundingClientRect();
-            out.push({ sel: d.tag + el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height } });
-          }
-          // Text painted by form controls is not a DOM text node: an input's current value and its
-          // ::placeholder (login, booking, quote, payment fields) are sampled explicitly.
-          for (const el of d.doc.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=range]):not([type=color]), textarea, select')) {
-            if (!vis(el) || el.closest('[aria-hidden="true"]')) continue;
-            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize);
-            const r = el.getBoundingClientRect();
-            const box = { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height };
-            const tag = d.tag + el.tagName.toLowerCase() + (el.type ? `[type=${el.type}]` : '');
-            const value = el.tagName === 'SELECT' ? (el.selectedOptions[0] ? el.selectedOptions[0].text : '') : (el.value || '');
-            if (value.trim()) out.push({ sel: tag + '[value]', text: value.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box });
-            else if (el.placeholder && el.placeholder.trim()) {
-              let ph = null; try { ph = getComputedStyle(el, '::placeholder'); } catch (e) { ph = null; }
-              out.push({ sel: tag + '::placeholder', text: el.placeholder.trim().slice(0, 40), size: ph ? parseFloat(ph.fontSize) || size : size, weight: parseInt((ph && ph.fontWeight) || cs.fontWeight, 10), color: (ph && ph.color) || cs.color, box });
-            }
-          }
-        }
-        return out;
-      });
-      for (const it of items) {
-        if (it.box.w < 8 || it.box.h < 8) continue;
-        const c = sampleContrast(png, 1, it.box, it.color);
-        if (!c) continue;
-        const large = it.size >= 24 || (it.size >= 18.66 && it.weight >= 700);
-        const threshold = large ? 3 : 4.5;
-        // Screen on the WORST sampled background (text over a gradient or variegated glass can be
-        // unreadable at one edge while the averaged background still passes); `avg` is kept for the digest.
-        if (c.min < threshold) rec.contrast.push({ ...it, ...c, threshold });
-      }
-      rec.contrastSampled = items.length;
+      const { contrast, contrastSampled, contrastOffscreen } = await probeContrast(page, shot, !state.viewportOnly);
+      rec.contrast = contrast;
+      rec.contrastSampled = contrastSampled;
+      rec.contrastOffscreen = contrastOffscreen;
     } catch (e) { rec.contrastError = String(e.message); probeFailures.push(`contrast probe: ${String(e.message).slice(0, 120)}`); }
     // Keyboard focus ring probe on the PRISTINE page (before interactions open sheets / menus that trap or
     // drop focus): real Tab traversal (page.keyboard), so only elements actually in the
@@ -222,7 +248,7 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
     // Interactions (hover / focus / open overlay), each captured as its own shot.
     for (const ix of (state.interactions || scenario.interactions || [])) {
       if (ix.widths && !ix.widths.includes(width)) continue;
-      const ixRec = { name: ix.name, ok: false };
+      const ixRec = { name: ix.name, ok: false, contrast: [] };
       try {
         await ix.run(page, { width, mobile });
         await page.waitForTimeout(ix.settle || 500);
@@ -231,6 +257,10 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
         ixRec.screenshot = path.relative(root, s);
         if (ix.metrics !== false) ixRec.metrics = await page.evaluate(collectSrc + '(' + JSON.stringify(scenario.sheet || {}) + ')');
         if (ix.probe) ixRec.probe = await ix.probe(page);
+        // Same probe as the pristine-state shot, against the interaction's OWN screenshot: text painted
+        // only inside an opened sheet / menu / dialog is otherwise never checked for contrast. A throw
+        // here fails the interaction like any other probe throw (ixRec.ok stays false).
+        ixRec.contrast = (await probeContrast(page, s, !!ix.fullPage)).contrast;
         ixRec.ok = true;
       } catch (e) { ixRec.error = String(e.message).slice(0, 300); }
       rec.interactions.push(ixRec);
@@ -283,6 +313,10 @@ function existingRunEngine(dir) {
 }
 
 async function main() {
+  // A fixture whose literal date has slipped into the past renders a state the public route can no
+  // longer emit, so the capture would be filed as evidence of a screen that does not exist. Checked
+  // before anything launches: stale evidence is worse than no evidence.
+  require('node:child_process').execFileSync(process.execPath, [path.join(__dirname, 'check-fixture-dates.cjs')], { stdio: 'inherit' });
   const report = { ...evidence(root), engine: engineName, widths: widths.concat(extraWidths), started: new Date().toISOString(), results: [] };
   const registry = loadScenarios();
   // A misspelled or stale --only id must fail BEFORE anything launches: silently dropping it would
