@@ -5,6 +5,7 @@ const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { phoneMatchDigits } = require('../utils/phone');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
+const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
@@ -87,17 +88,36 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   ];
 }
 
+// Pure, exported for tests. Same caller-identity rule
+// call-reschedule-apply.js's applied-reschedule path uses — counterpartPhone
+// classifies outbound by PREFIX (Twilio's direction keeps 'outbound-api'/
+// 'outbound-dial' on some paths; an exact 'outbound' match read those as
+// inbound and compared the Waves number instead of the customer's), matched
+// against ALL five on-file identity columns (primary, secondary, the three
+// service-contact slots) via KNOWN_CALLER_PHONE_COLS, not customer.phone
+// alone. Reused here rather than copied, so recordAgreedWindow never drifts
+// from what the apply path already treats as an on-file caller (codex P1,
+// pre-push audit on e2e0e089c) — a caller the linker matched through a
+// secondary/service-contact number, or a call whose direction is one of
+// those Twilio variants, must not fail this and leave the old promise in
+// place for a move that actually succeeded.
+function callerIdentityMatches(call, customer) {
+  const counterpartPhoneKeys = phoneMatchDigits(require('./call-reschedule-apply').counterpartPhone(call));
+  const onFileKeys = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer?.[col])));
+  return counterpartPhoneKeys.some((key) => onFileKeys.has(key));
+}
+
 async function recordAgreedWindow(conn, { callId, visitId } = {}) {
   if (!enabled() || !callId || !visitId) return false;
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['promised-call-window', `${callId}:${visitId}`]);
     const call = await trx('call_log').where({ id: callId, v2_extraction_status: 'valid' }).first();
     const visit = await trx('scheduled_services').where({ id: visitId }).first('customer_id');
-    const customer = visit ? await trx('customers').where({ id: visit.customer_id }).first('phone') : null;
+    const customer = visit ? await trx('customers').where({ id: visit.customer_id }).first(...KNOWN_CALLER_PHONE_COLS) : null;
     const v2 = call?.ai_extraction_enriched;
     const target = v2?.scheduling?.confirmed_start_at;
     if (!call || call.processing_token || !visit || call.customer_id !== visit.customer_id
-      || !phoneMatchDigits(customer?.phone).some((key) => phoneMatchDigits(call.direction === 'outbound' ? call.to_phone : call.from_phone).includes(key))
+      || !callerIdentityMatches(call, customer)
       || v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.agent_committed_booking !== true || !Number.isFinite(instant(target))) return false;
     // Mirrors canAutoRoute's own trusted-speaker guard (call-triage-flags.js
     // ~L1162-1181): the Agent:/Caller: transcript labels hasAgentCommitted
@@ -337,4 +357,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert };
+module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches };

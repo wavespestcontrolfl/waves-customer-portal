@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
-const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert } = require('../services/no-show-detector');
+const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches } = require('../services/no-show-detector');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
@@ -259,5 +259,64 @@ describe('A -> B -> A reassignment lifecycle (trackingKey + alreadyHasOpenAlert 
     ];
     const blocking = await alreadyHasOpenAlert(trxOver(rows), { jobId: 'visit-1', type: 'tech_late', key: keyA });
     expect(blocking).toEqual(rows[0]);
+  });
+});
+
+
+describe('callerIdentityMatches (shared caller-identity rule with call-reschedule-apply.js)', () => {
+  // Same primitive call-reschedule-apply.js's applied-reschedule path uses
+  // (counterpartPhone + KNOWN_CALLER_PHONE_COLS) — reused, not copied, so
+  // recordAgreedWindow never rejects a caller the apply path would accept
+  // (codex P1, pre-push audit on e2e0e089c).
+  const customer = {
+    phone: '+19410000001',
+    secondary_phone: '+19410000002',
+    service_contact_phone: '+19410000003',
+    service_contact2_phone: null,
+    service_contact3_phone: null,
+  };
+
+  test('an inbound caller matched on the primary phone', () => {
+    const call = { direction: 'inbound', from_phone: '+19410000001', to_phone: '+19415551234' };
+    expect(callerIdentityMatches(call, customer)).toBe(true);
+  });
+
+  test('(a) an inbound caller matched only via a secondary/service-contact column still matches — not just customer.phone', () => {
+    const viaSecondary = { direction: 'inbound', from_phone: '+19410000002', to_phone: '+19415551234' };
+    expect(callerIdentityMatches(viaSecondary, customer)).toBe(true);
+    const viaServiceContact = { direction: 'inbound', from_phone: '+19410000003', to_phone: '+19415551234' };
+    expect(callerIdentityMatches(viaServiceContact, customer)).toBe(true);
+  });
+
+  test('an outbound (exact "outbound") call is matched on the DIALED party (to_phone), not from_phone', () => {
+    const call = { direction: 'outbound', from_phone: '+19415551234', to_phone: '+19410000001' };
+    expect(callerIdentityMatches(call, customer)).toBe(true);
+    // from_phone (the Waves line) is not on file — proves to_phone drove the match.
+    const flippedNotOnFile = { direction: 'outbound', from_phone: '+19410000001', to_phone: '+19415559999' };
+    expect(callerIdentityMatches(flippedNotOnFile, customer)).toBe(false);
+  });
+
+  test('(b) direction "outbound-api" is classified as outbound (matched on to_phone), same as the apply path\'s prefix rule', () => {
+    const call = { direction: 'outbound-api', from_phone: '+19415551234', to_phone: '+19410000002' };
+    expect(callerIdentityMatches(call, customer)).toBe(true);
+    // If this were misread as inbound (exact 'outbound' match), it would
+    // compare from_phone (the Waves line, not on file) and wrongly reject.
+    const wouldFailIfMisreadAsInbound = { direction: 'outbound-api', from_phone: '+19415551234', to_phone: '+19415559999' };
+    expect(callerIdentityMatches(wouldFailIfMisreadAsInbound, customer)).toBe(false);
+  });
+
+  test('direction "outbound-dial" is also classified as outbound', () => {
+    const call = { direction: 'outbound-dial', from_phone: '+19415551234', to_phone: '+19410000003' };
+    expect(callerIdentityMatches(call, customer)).toBe(true);
+  });
+
+  test('a phone matching nothing on file does not match', () => {
+    const call = { direction: 'inbound', from_phone: '+19415559999', to_phone: '+19415551234' };
+    expect(callerIdentityMatches(call, customer)).toBe(false);
+  });
+
+  test('null call or null customer is handled without throwing', () => {
+    expect(callerIdentityMatches(null, customer)).toBe(false);
+    expect(callerIdentityMatches({ direction: 'inbound', from_phone: '+19410000001' }, null)).toBe(false);
   });
 });
