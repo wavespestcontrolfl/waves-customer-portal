@@ -148,9 +148,14 @@ function archivedLawnRecipeMatches(protocol, items) {
     });
 }
 
-function completionItem(item, protocolProduct, amountsAllowed) {
-  const amountAvailable = amountsAllowed && item.product?.labelVerifiedAt
-    && Number(item.mix?.amount) > 0 && !String(item.mix?.amountUnit || '').includes('/');
+// The planned quantity is the tech's starting point whenever the planner
+// produced one (owner ruling 2026-09-11): an unverified label stamp or a plan
+// block (inventory, blackout, budget, approval) no longer withholds it —
+// those still show in the plan banner, and the amount stays the tech's
+// actual to confirm or edit. Only a missing quantity or a per-basis unit
+// ("fl oz/acre" is a concentration, not an applied amount) leaves it blank.
+function completionItem(item, protocolProduct) {
+  const amountAvailable = Number(item.mix?.amount) > 0 && !String(item.mix?.amountUnit || '').includes('/');
   return {
     ...item,
     applicationMethod: completionMethod(item, protocolProduct),
@@ -161,7 +166,7 @@ function completionItem(item, protocolProduct, amountsAllowed) {
       amount: null, amountUnit: String(item.mix?.amountUnit || '').split('/')[0] || null,
       ratePer1000: null, rateUnit: item.mix?.rateUnit || null,
     },
-    amountReason: amountAvailable ? null : 'Enter the actual amount; a verified suggestion is unavailable.',
+    amountReason: amountAvailable ? null : 'Enter the actual amount; a suggested quantity is unavailable.',
   };
 }
 
@@ -208,16 +213,14 @@ function buildLawnCompletionDefaults(plan, context) {
   const programApplies = lawnPlanProgramApplies(plan);
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
-  const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
   const products = protocol?.products || [];
   const protocolProductFor = (item) => products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
   const items = eligible ? plan.mixCalculator.items.filter((item) => {
     const product = protocolProductFor(item);
     // defaultInPlan distinguishes defaults from opt-in rows. Gates can also
-    // carry annual counters or safety metadata on a selected base product;
-    // the planner's blocks still withhold any unavailable suggested quantity.
+    // carry annual counters or safety metadata on a selected base product.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
-  }).map((item) => completionItem(item, protocolProductFor(item), amountsAllowed)) : [];
+  }).map((item) => completionItem(item, protocolProductFor(item))) : [];
   // The planner's recipe comes from the field reference (protocols.json);
   // the defaults list is the owner-edited operating layer. When a live
   // window registers none of the recipe's selected products as defaults,

@@ -24,6 +24,22 @@ const capShimAlias = capShim ? {
 
 export default defineConfig({
   plugins: [react(), {
+    // Every production build writes the list of hashed files it emitted. The
+    // service worker caches this beside that build's shell, so it can tell
+    // which chunks a retained generation actually owns. An /assets/ request
+    // cannot reveal that on its own — the worker has no way to know which
+    // tab asked — so without this list it has to guess, and a guess either
+    // keeps dead chunks or drops live ones.
+    name: 'waves-build-assets-manifest',
+    apply: 'build',
+    generateBundle(_options, bundle) {
+      const assets = Object.keys(bundle)
+        .filter(fileName => fileName.startsWith('assets/'))
+        .map(fileName => `/${fileName}`)
+        .sort();
+      this.emitFile({ type: 'asset', fileName: 'build-assets.json', source: JSON.stringify(assets) });
+    },
+  }, {
     name: 'waves-preview-checkout',
     apply: 'serve',
     configureServer(server) {

@@ -284,13 +284,21 @@ describe('sendOutboundVoicemailText', () => {
   test.each([
     undefined,
     { sent: true, providerMessageId: 'template-disabled' },
-    { sent: false, retryable: true, code: 'TWILIO_TIMEOUT' },
     { sent: true, providerMessageId: null },
   ])('an audit error without a real accepted provider send is not converted into success (%j)', async (providerOutcome) => {
     const err = Object.assign(new Error('Synthetic audit failure'), { code: 'XX000', providerOutcome });
     sendCustomerMessage.mockRejectedValueOnce(err);
     await expect(sendOutboundVoicemailText({ phone: PHONE })).rejects.toBe(err);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('an audit throw with a legacy ambiguous outcome keeps the claim', async () => {
+    const providerOutcome = { sent: false, retryable: true, code: 'TWILIO_TIMEOUT' };
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('Synthetic audit failure'), { providerOutcome }));
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toMatchObject({
+      sent: false, skipped: 'provider_failed', ambiguous: true,
+    });
+    expect(claimDel).not.toHaveBeenCalled();
   });
 
   test('every reason maps to a template key; unknown reasons render the generic one', async () => {
@@ -365,6 +373,16 @@ describe('sendOutboundVoicemailText', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, retryable: true, code: 'TWILIO_TIMEOUT' });
     await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toMatchObject({ sent: false, skipped: 'provider_failed', ambiguous: true });
     expect(claimDel).not.toHaveBeenCalled();
+  });
+
+  test('canonical uncertainty keeps the claim without retry flags; proven retryable non-delivery releases it', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNKNOWN' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toMatchObject({ ambiguous: true });
+    expect(claimDel).not.toHaveBeenCalled();
+
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: false, deliveryOutcome: 'not_sent', retryable: true, code: '20429' });
+    await expect(sendOutboundVoicemailText({ phone: PHONE })).resolves.toMatchObject({ ambiguous: false });
+    expect(claimDel).toHaveBeenCalledTimes(1);
   });
 
   test('the atomic per-phone claim is taken right before the send and lost claims skip (concurrent callbacks → one text)', async () => {

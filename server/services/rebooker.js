@@ -466,6 +466,27 @@ function replaySeriesMoveResult(prior, requestedDate) {
   return { ...base, seriesMoveId: prior.id, replayed: true, notifyRequested: prior.notify_requested === true };
 }
 
+// An operation-key replay returns before the live path's quality refresh,
+// so the vacated and destination tech-days of the durable prior move would
+// stay stale whenever the original process died between its commit and its
+// refresh — exactly the recovery these replays exist for (codex #4295 r4
+// P2). Derive both sides of every row from the prior move and hand them to
+// the caller's Set, or refresh inline when no batch owns the refresh.
+async function replaySeriesMoveWithQuality(prior, requestedDate, serviceId, options = {}) {
+  const result = replaySeriesMoveResult(prior, requestedDate);
+  const rows = Array.isArray(prior.rows) ? prior.rows : [];
+  const dates = [...new Set([
+    dateOnly(prior.original_date), dateOnly(prior.new_date),
+    ...rows.flatMap((r) => [dateOnly(r.before?.scheduled_date), dateOnly(r.after?.scheduled_date)]),
+  ].filter(Boolean))];
+  if (options.qualityDates) {
+    for (const date of dates) options.qualityDates.add(date);
+  } else if (dates.length) {
+    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ jobId: serviceId, dates });
+  }
+  return result;
+}
+
 // Telemetry + audit for a series shift that did NOT commit (written outside
 // the rolled-back transaction, best-effort): the un-gate review reads
 // rollback/failure counts from the same table as the successes.
@@ -1044,7 +1065,7 @@ class SmartRebooker {
       const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expect || null);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
-        return replaySeriesMoveResult(prior, newDate);
+        return replaySeriesMoveWithQuality(prior, newDate, serviceId, options);
       }
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
         const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
@@ -1250,6 +1271,14 @@ class SmartRebooker {
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
       }
+      // Caller-supplied pre-move guard (the call applier's customer/property/
+      // call row locks) — AFTER rung 1, BEFORE this transaction's first row
+      // lock. Running it at transaction entry inverted the ORDERING CONTRACT
+      // above: a staff create takes date-occupancy -> customer rows while this
+      // side held the customer row and waited on date-occupancy, a direct
+      // deadlock cycle that aborted the non-retried call application (GH codex
+      // #4204 r5 P1). Nothing here writes, so the later CAS is unaffected.
+      if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
       if (soloVisitRecheck) {
         // AFTER rung 1 / the tech lock and BEFORE every row lock (the
         // 'visit.stop' key is outside the occupancy ORDERING CONTRACT; the
@@ -1601,6 +1630,7 @@ class SmartRebooker {
 
     // Keep a call-created follow-up (visit 2) spaced from its parent —
     // shared with the admin schedule-edit path; best-effort outside the trx.
+    const followUpReport = {};
     try {
       const shifted = await shiftCallFollowUpsForParentMove({
         conn: db,
@@ -1610,6 +1640,9 @@ class SmartRebooker {
         // Same actor and suppression as the parent's own notice above.
         noticeActorId: options.actorId || initiatedBy || null,
         suppressTechNotice: options.suppressTechNotice === true,
+        // Reported so the route refresh below covers the child's own two
+        // days, not just the parent's (codex #4295 r1 P2).
+        report: followUpReport,
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -1663,6 +1696,21 @@ class SmartRebooker {
       } catch (vgErr) {
         logger.warn(`[rebooker] visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
       }
+    }
+
+    // A caller that mutates several visits in one pass (rain-out's per-job
+    // loop, a future batch) passes a shared Set here and flushes it once
+    // itself instead of every row awaiting its own repair/measurement pass
+    // (codex #4295 r2 P2) — a caller with no batch of its own keeps the
+    // inline refresh.
+    const changeDates = [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])];
+    if (options.qualityDates) {
+      for (const date of changeDates) if (date) options.qualityDates.add(date);
+    } else {
+      await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+        jobId: serviceId,
+        dates: changeDates,
+      });
     }
 
     if (overlapWarned) {
@@ -1832,7 +1880,7 @@ class SmartRebooker {
       const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expectAnchor || null, observedPrior);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
-        return replaySeriesMoveResult(prior, newDate);
+        return replaySeriesMoveWithQuality(prior, newDate, serviceId, options);
       }
     }
     const {
@@ -1865,6 +1913,9 @@ class SmartRebooker {
     let committedResult = null;
     let skippedCount = 0;
     const moveRows = [];
+    // Source/destination days of the call-booked follow-ups this move
+    // shifted — outside the cadence set, and outside this trx's scope.
+    const seriesFollowUpDates = [];
     const preservedOccurrences = [];
     const failedMoveFields = {
       operation_key: operationKey,
@@ -1889,6 +1940,17 @@ class SmartRebooker {
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
+      // Same ORDERING CONTRACT as the single path (GH codex #4204 r5 P1): the
+      // caller's guard takes customer/property/call locks, so it runs after
+      // rung 1 and before this transaction's first row lock. Idempotent — the
+      // rung-1 site fires it, and the no-projected-dates path falls through to
+      // the call below, whichever comes first.
+      let beforeMoveRan = false;
+      const runBeforeMove = async () => {
+        if (beforeMoveRan) return;
+        beforeMoveRan = true;
+        if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
+      };
       const preservedFutureIds = new Set();
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -2082,6 +2144,7 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          await runBeforeMove();
           // Visit stop locks for EVERY swept occurrence, right after
           // rung 1 — the same occupancy-then-stop order the single-row
           // writers take (codex #3609 r31 P1 + uncapped audit):
@@ -2324,6 +2387,12 @@ class SmartRebooker {
         }
       }
 
+      await runBeforeMove();
+      // The call/proposal guard runs on the locked series before its first write.
+      if (typeof options.moveGuard === 'function') {
+        const guardedService = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+        await options.moveGuard({ trx, technicianId: siblings[droppedIdx].technician_id, service: guardedService });
+      }
       const touched = [];
       for (let i = startIdx; i < siblings.length; i++) {
         const sib = siblings[i];
@@ -2421,7 +2490,7 @@ class SmartRebooker {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
-          status: isAnchor ? 'confirmed' : sib.status,
+          status: isAnchor && !(options.keepStatus === true && !sibRewound) ? 'confirmed' : sib.status,
           updated_at: trx.fn.now(),
           ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
@@ -2732,7 +2801,7 @@ class SmartRebooker {
           await AppointmentReminders.precloseWindowlessReminderInTx(trx, sib.id);
         }
 
-        if (isAnchor && sib.status !== 'confirmed') {
+        if (updateData.status !== sib.status) {
           // transitioned_by is a UUID FK to technicians; the route
           // currently passes the sentinel 'admin' string for
           // initiatedBy, which would violate the FK. Until we plumb
@@ -2742,7 +2811,7 @@ class SmartRebooker {
           await trx('job_status_history').insert({
             job_id: sib.id,
             from_status: sib.status,
-            to_status: 'confirmed',
+            to_status: updateData.status,
             transitioned_by: null,
           });
         }
@@ -2801,6 +2870,7 @@ class SmartRebooker {
       // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
       // the cadence set (counts, ack, close, text).
       const followUpOccurrences = (followUpReport.shifted || []).map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
+      seriesFollowUpDates.push(...(followUpReport.shifted || []).flatMap((k) => [k.previousDate, k.date]));
       const followUpWarnings = (followUpReport.skipped || []).map((k) => (
         `The call-booked follow-up visit on ${k.day} kept its date — its shifted slot on ${k.newDay} is already booked; set it from dispatch`
       ));
@@ -2901,7 +2971,7 @@ class SmartRebooker {
     });
     if (occurrencesRescheduled && occurrencesRescheduled.replayedFrom) {
       await replaySeriesMoveCleanup(occurrencesRescheduled.replayedFrom);
-      return replaySeriesMoveResult(occurrencesRescheduled.replayedFrom, newDate);
+      return replaySeriesMoveWithQuality(occurrencesRescheduled.replayedFrom, newDate, serviceId, options);
     }
 
     // Live-anchor post-commit cleanup — same pattern as the single-job
@@ -2998,6 +3068,23 @@ class SmartRebooker {
       }
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
+    }
+    // Same shared-Set convention as the single-visit path above: a caller
+    // batching several series moves (rain-out's collective-anchor branch)
+    // passes qualityDates and flushes it once itself (codex #4295 r2 P2).
+    const seriesChangeDates = [
+      ...moveRows.flatMap(row => [row.before?.scheduled_date, row.after?.scheduled_date]),
+      // Call-booked follow-ups shifted with the anchor move onto days no
+      // series occurrence names (codex #4295 r1 P2).
+      ...seriesFollowUpDates,
+    ];
+    if (options.qualityDates) {
+      for (const date of seriesChangeDates) if (date) options.qualityDates.add(date);
+    } else {
+      await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+        jobId: serviceId,
+        dates: seriesChangeDates,
+      });
     }
     return { ...committedResult, originalDate: service.scheduled_date, seriesMoveId };
   }
@@ -3166,6 +3253,7 @@ module.exports = new SmartRebooker();
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.replaySeriesMoveWithQuality = replaySeriesMoveWithQuality;
 module.exports.needsLifecycleRewind = needsLifecycleRewind;
 module.exports.applyTrackLifecycleCas = applyTrackLifecycleCas;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;

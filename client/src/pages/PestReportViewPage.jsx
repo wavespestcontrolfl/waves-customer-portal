@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
-import { DOC_COLUMN_MAX, DOC_EYEBROW } from '../theme-doc';
+import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
+import { CustomerColumn } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
@@ -58,7 +59,7 @@ function Page({ children }) {
         }
       `}</style>
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, width: '100%', maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
+      <CustomerColumn>{children}</CustomerColumn>
     </div>
   );
 }

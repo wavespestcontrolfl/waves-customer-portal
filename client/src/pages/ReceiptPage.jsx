@@ -41,6 +41,7 @@ import { useParams } from 'react-router-dom';
 import Icon from '../components/Icon';
 import {
   WavesShell,
+  CustomerColumn,
   BrandCard,
   SerifHeading,
   HelpPhoneLink,
@@ -329,7 +330,7 @@ export default function ReceiptPage() {
         }
       `}</style>
 
-      <div className="waves-print-root waves-receipt-page">
+      <CustomerColumn className="waves-print-root">
         {showFreshBadge && (
           <div
             className="waves-fresh-badge waves-no-print"
@@ -654,7 +655,7 @@ export default function ReceiptPage() {
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
         </div>
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }
