@@ -12,6 +12,9 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: async () => 
 jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
 jest.mock('../services/scheduling/blackout-dates', () => ({
   isBlackoutDate: async () => false, getBlackoutLayers: async () => ({ dates: new Set() }),
+  // Real advisory lock: capacity certification serializes closure reads
+  // against admin closure writes on the same PostgreSQL connection.
+  lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
 }));
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));
 jest.mock('../services/estimate-slot-availability', () => ({
@@ -26,7 +29,7 @@ const { capacityForServices } = require('../services/combined-visit-capacity');
 const converter = require('../services/estimate-converter');
 const { reserveSlot, commitReservation } = require('../services/slot-reservation');
 const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const AppointmentReminders = require('../services/appointment-reminders');
 const connection = process.env.COMBINED_VISIT_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -147,7 +150,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
         durationMinutes: profile.durationMinutes, serviceType: 'pest_control', includeWeekends: true, topN: 99 });
       expect(offers.slots.some(slot => slot.start_time === '09:00')).toBe(true);
       const offer = signSlotOffer({ surface: 'estimate', scopeId: f.estimateId, date: f.date,
-        startMinutes: 540, technicianId: f.anchor.technician_id, durationMinutes: profile.durationMinutes });
+        startMinutes: 540, technicianId: f.anchor.technician_id, durationMinutes: profile.durationMinutes, policy: CAPACITY_OFFER_POLICY });
       const held = await reserveSlot({ estimateId: f.estimateId,
         slotId: appendOfferToSlotId(`${f.date}_09-00_${f.anchor.technician_id}`, offer) });
       const preparedCapacity = await require('../services/slot-reservation').prepareReservationCommit(held.scheduledServiceId);
@@ -315,7 +318,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
         const offer = signSlotOffer({
           surface: 'estimate', scopeId: f.estimateId, date: f.date,
           startMinutes: 540, technicianId: f.anchor.technician_id,
-          durationMinutes: profile.durationMinutes,
+          durationMinutes: profile.durationMinutes, policy: CAPACITY_OFFER_POLICY,
         });
         const held = await reserveSlot({ estimateId: f.estimateId,
           slotId: appendOfferToSlotId(`${f.date}_09-00_${f.anchor.technician_id}`, offer) });
