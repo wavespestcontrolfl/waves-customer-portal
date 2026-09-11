@@ -656,7 +656,7 @@ function predicateSegments(text) {
 // governed cause ("is not getting better", "has not started to recover") does
 // not assert that the condition is absent. Such a clause is uncertain: it never
 // earns the clean label, and it never maps a cause either.
-const ABSENCE_OBJECT = '(?:present|observed|seen|noted|found|detected|visible|evident|apparent|active|confirmed|likely|suspected|there|any|much|significant|showing|involved|causing|responsible|to\\s+blame|the\\s+cause|an?\\s+(?:factor|issue|concern|problem|cause))';
+const ABSENCE_OBJECT = '(?:present|observed|seen|noted|found|detected|visible|evident|apparent|active|likely|suspected|there|any|much|significant|showing|involved|causing|responsible|to\\s+blame|the\\s+cause|an?\\s+(?:factor|issue|concern|problem|cause))';
 let unrecognizedNegation = null;
 function unrecognizedNegationRe() {
   if (!unrecognizedNegation) {
@@ -667,7 +667,9 @@ function unrecognizedNegationRe() {
 }
 // A negated absence marker ("cannot be ruled out", "has not been excluded",
 // "not absent") is uncertainty, not absence.
-const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+\s+){0,2}?(?:ruled[\s‐‑‒–—-]+out|absent|excluded|unlikely|negative|unconfirmed|free)\b/;
+// Lack of confirmation ("not confirmed", "unconfirmed", "cannot be verified")
+// is uncertainty as well: it establishes neither presence nor absence.
+const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+\s+){0,2}?(?:ruled[\s‐‑‒–—-]+out|absent|excluded|unlikely|negative|free|confirmed|verified|established|certain|definite)\b|\bunconfirmed\b/;
 const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
 function positiveClauses(lower) {
   const positive = [];
