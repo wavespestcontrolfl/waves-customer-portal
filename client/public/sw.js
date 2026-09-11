@@ -319,14 +319,15 @@ async function sweepStaleCaches() {
 
 // Free quota without taking the active worker's offline shell away: the
 // retry may still fail (connectivity), and the old worker then keeps
-// serving until a later install succeeds. Pre-prefix legacy buckets are
-// orphans and go entirely; an older app bucket keeps its shell and the
-// assets that shell references and loses everything else — the hundreds
-// of superseded builds that filled it.
+// serving until a later install succeeds. Every stale bucket keeps its
+// shell and the assets that shell references and loses everything else —
+// the hundreds of superseded builds that filled it. Pre-prefix legacy
+// buckets get the same trim, not a delete: a device that never ran a
+// v11 worker still serves from one (same '/' shell key), and the activate
+// sweep removes them whole once this worker has taken over.
 async function reclaimStaleCacheSpace() {
   const keys = await caches.keys();
   await Promise.all(keys.filter(isStaleCacheName).map(async k => {
-    if (!k.startsWith(APP_CACHE_PREFIX)) { await caches.delete(k); return; }
     const old = await caches.open(k);
     const shell = await old.match(OFFLINE_URL);
     const keep = new Set(shell ? shellAssetUrls(await shell.text()) : []);

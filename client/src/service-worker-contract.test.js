@@ -672,17 +672,24 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await v11.put('/assets/index-OLD.js', fakeResponse('old'));
     for (let i = 0; i < 50; i += 1) await v11.put(`/assets/Chunk-${i}.js`, fakeResponse('bloat'));
     await v11.put('/waves-logo.png', fakeResponse('png'));
+    // Codex #4335 r6 P1: a device that never ran a v11 worker still serves
+    // from the pre-prefix v10 bucket, so it gets the same trim, not a delete.
+    const v10 = fakeCache();
+    await v10.put('/', fakeResponse(shellHtml(['/assets/index-V10.js'])));
+    await v10.put('/assets/index-V10.js', fakeResponse('v10'));
+    for (let i = 0; i < 20; i += 1) await v10.put(`/assets/Old-${i}.js`, fakeResponse('bloat'));
     const { dispatchInstall, cacheNames, setFetch } = loadWorker(cache, {
-      cachesByName: { 'waves-customer-v11-shell-atomic': v11 },
-      cacheNames: ['waves-v10-admin-activation-stable', 'waves-badge-state'],
+      cachesByName: { 'waves-customer-v11-shell-atomic': v11, 'waves-v10-admin-activation-stable': v10 },
+      cacheNames: ['waves-badge-state'],
     });
     setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-AAA.js'])) : fakeResponse(`asset:${request.url}`)));
-    cache.failPut = () => v11.store.size > 3; // no room until the bloat is gone
+    cache.failPut = () => v11.store.size > 3 || v10.store.size > 2; // no room until both buckets lose their bloat
 
     await dispatchInstall();
 
-    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v12-shell-pruned']);
+    expect([...cacheNames].sort()).toEqual(['waves-badge-state', 'waves-customer-v11-shell-atomic', 'waves-customer-v12-shell-pruned', 'waves-v10-admin-activation-stable']);
     expect([...v11.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-OLD.js', '/waves-logo.png']);
+    expect([...v10.store.keys()].map(u => new URL(u).pathname).sort()).toEqual(['/', '/assets/index-V10.js']);
     expect(await cache.match('/')).toBeTruthy();
     expect(await cache.match('/assets/index-AAA.js')).toBeTruthy();
   });
