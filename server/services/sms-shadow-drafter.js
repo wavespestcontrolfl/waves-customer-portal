@@ -1118,7 +1118,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
         });
         if (result?.sent) {
           deliveredAs = 'auto_sent';
-        } else if (result?.reason !== 'guarded_or_claimed' && result?.reason !== 'ineligible_base') {
+        } else if (!result?.ambiguous
+            && result?.reason !== 'guarded_or_claimed'
+            && result?.reason !== 'ineligible_base') {
           // Fail closed to a HUMAN: a verified draft that couldn't auto-send —
           // needs a follow-up action, the intent is no longer eligible, the
           // readiness signal was unavailable, or the send was blocked/failed —
