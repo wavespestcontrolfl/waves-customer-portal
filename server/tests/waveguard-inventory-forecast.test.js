@@ -63,7 +63,7 @@ beforeEach(() => {
       item('ok', 1, 'lb', { unit: 'lb', onHand: 4 }),
       item('zero', 0, 'gal', stock),
     ];
-    return { mixCalculator: { items } };
+    return { propertyGate: { serviceTier: 'Silver' }, mixCalculator: { items } };
   });
 });
 afterEach(() => jest.useRealTimers());
@@ -109,11 +109,34 @@ test.each([
   visits = readQuery([{ id: 'visit-withheld', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
   buildPlanForService.mockResolvedValue({
     mixCalculator: { items: [] },
-    propertyGate: { blocks: [{ code, severity: 'block', message }] },
+    propertyGate: { serviceTier: 'Silver', blocks: [{ code, severity: 'block', message }] },
   });
   const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
   expect(result.errors).toEqual([{ serviceId: 'visit-withheld', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace', message }]);
   expect(result).toMatchObject({ serviceCount: 1, productCount: 0, products: [] });
+});
+
+test.each([
+  ['per_visit', {}, false],
+  ['one_time', {}, false],
+  ['per_application', {}, true],
+  ['one_time', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, true],
+])('forecast counts a lingering-tier visit on an explicit %s lane only when the program predicate applies (assignment %j → counted %s) (codex #4365 r7 P2)', async (billingMode, appointmentAssignment, counted) => {
+  visits = readQuery([{ id: 'visit-lane', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
+  buildPlanForService.mockResolvedValue({
+    propertyGate: { serviceTier: 'Silver', billingMode },
+    appointmentAssignment,
+    mixCalculator: { items: [item('short', 64, 'fl_oz', { unit: 'gal', onHand: 1, lowStockThreshold: 0.25 })] },
+  });
+  const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(result.errors).toEqual([]);
+  if (counted) {
+    expect(result.productCount).toBe(1);
+    expect(result.skippedNonProgram).toEqual([]);
+  } else {
+    expect(result.productCount).toBe(0);
+    expect(result.skippedNonProgram).toEqual([{ serviceId: 'visit-lane', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace', billingMode }]);
+  }
 });
 
 test('forecast HTTP handler returns computed demand and forwards query bounds', async () => {

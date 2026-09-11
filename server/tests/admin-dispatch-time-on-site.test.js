@@ -1107,7 +1107,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: billingModeColumnsExist,[^}]*\}\)/);
     // A failed handler-entry probe stays closed for the closeout (retryable 409) before any plan build (codex #4365 r6 P2).
-    expect(source).toMatch(/if \(customerColumnsProbeFailed\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_BILLING_LANE_UNVERIFIED';\s*throw err;\s*\}\s*waveguardPlan = await savepointScope\(db, \(database\) => buildPlanForService\(svc\.id, \{/);
+    expect(source).toMatch(/if \(billingModeProbeFailed\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_BILLING_LANE_UNVERIFIED';\s*throw err;\s*\}\s*waveguardPlan = await savepointScope\(db, \(database\) => buildPlanForService\(svc\.id, \{/);
+    // Only the billing-lane probe's own failure blocks the closeout; a failed provenance probe does not (codex #4365 r7 P2).
+    expect(source).toMatch(/\} catch \{ billingModeProbeFailed = true; customerColumnsProbeFailed = true;[^}]*\}\s*try \{\s*customerTierSourceColumnExists = await savepointRead\(db, \(k\) => k\.schema\.hasColumn\('customers', 'waveguard_tier_source'\)\);\s*\} catch \{ customerColumnsProbeFailed = true;/);
     // The legacy (gate-off) writer path shares the program predicate with the stamp (codex #4365 r6 P2).
     expect(source).toMatch(/plan: waveguardPlan && !\(lawnLedgerVisit \? lawnPlanAttributesVisit\(waveguardPlan\) : lawnPlanProgramApplies\(waveguardPlan\)\)\s*\? \{ \.\.\.waveguardPlan, protocol: null \} : waveguardPlan,/);
   });

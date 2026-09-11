@@ -2547,8 +2547,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // — or an auto-derived label could be frozen as a paid membership and
     // print "$0.00 billed" forever (codex r13 P1).
     let customerColumnsProbeFailed = false;
+    // The billing-lane probe is tracked on its own: only ITS failure blocks
+    // a plan-building lawn closeout (the lane cannot be verified), while a
+    // failed provenance-column probe keeps feeding provenanceUnknown alone
+    // (Codex #4365 r7 P2).
+    let billingModeProbeFailed = false;
     try {
       billingModeColumnsExist = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'billing_mode'));
+    } catch { billingModeProbeFailed = true; customerColumnsProbeFailed = true; /* legacy select shape */ }
+    try {
       customerTierSourceColumnExists = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'waveguard_tier_source'));
     } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', completionInput.serviceId)
@@ -4200,7 +4207,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // customer reread were both selected under that probe, so a planner
         // retry that succeeded would read a lane the recheck below cannot
         // compare (Codex #4365 r4 + r6 P2). Retryable: the retry re-probes.
-        if (customerColumnsProbeFailed) {
+        // Only the billing-lane probe counts here (r7 P2).
+        if (billingModeProbeFailed) {
           const err = new Error('This customer\'s billing lane could not be verified while completing — reload the job and complete it again.');
           err.statusCode = 409;
           err.isOperational = true;

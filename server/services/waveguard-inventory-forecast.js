@@ -3,6 +3,7 @@ const logger = require('./logger');
 const { buildPlanForService, customerBillingModeColumnExists } = require('./waveguard-plan-engine');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
+const { lawnPlanProgramApplies } = require('./lawn-completion-defaults');
 
 // Planner blocks under which waveguard-plan-engine plans NO products for the
 // appointment (see propertyGate in buildPlanForService).
@@ -69,6 +70,7 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
 
   const productMap = new Map();
   const errors = [];
+  const skippedNonProgram = [];
 
   function ensureRow(product, inventory, demandUnit) {
     const key = String(product.id);
@@ -113,6 +115,15 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
         .find((block) => WITHHELD_PLAN_BLOCK_CODES.includes(block.code));
       if (withheldBlock) {
         errors.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, message: withheldBlock.message });
+        continue;
+      }
+      // The visit was admitted by its customer's tier, but an explicit
+      // per_visit / one_time lane with no complete appointment assignment
+      // means the calendar protocol is not that customer's program — its
+      // products are not committed demand (Codex #4365 r7 P2; same predicate
+      // as closeout attribution and the lawn_protocol_* stamp).
+      if (!lawnPlanProgramApplies(plan)) {
+        skippedNonProgram.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, billingMode: plan?.propertyGate?.billingMode || null });
         continue;
       }
       for (const item of plan?.mixCalculator?.items || []) {
@@ -200,6 +211,7 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
     statusCounts,
     products,
     errors,
+    skippedNonProgram,
     generatedAt: new Date().toISOString(),
   };
 }
