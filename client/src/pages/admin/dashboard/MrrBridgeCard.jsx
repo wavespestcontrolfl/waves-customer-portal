@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, cn } from "../../../components/ui";
+import { Badge, Button, UiSurface, cn } from "../../../components/ui";
 import { EmptyState, fmtMoney } from "../../../components/dashboard/charts";
 import { mrrBridgeVerdict } from "./scorecard-metrics";
 import Verdict from "./Verdict";
@@ -64,7 +64,7 @@ export default function MrrBridgeCard({ bridge }) {
   );
 
   return (
-    <div>
+    <UiSurface>
       {/* Month strip */}
       <div className="flex items-center gap-1 overflow-x-auto pb-1 mb-2">
         {months.map((m) => (
@@ -143,6 +143,6 @@ export default function MrrBridgeCard({ bridge }) {
         Start + movements = end to the cent. Formula:
         server/services/mrr-bridge.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }

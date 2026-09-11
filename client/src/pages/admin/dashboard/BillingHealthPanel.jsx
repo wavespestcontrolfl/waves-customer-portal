@@ -4,6 +4,7 @@ import {
   CardBody,
   CardHeader,
   CardTitle,
+  UiSurface,
 } from "../../../components/ui";
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { CHART_SUCCESS } from "../../../components/dashboard/charts";
@@ -107,15 +108,15 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
   // billable count — render just the verdict + body (no duplicate Card/header/badge).
   if (embedded) {
     return (
-      <div>
+      <UiSurface>
         <div className="mb-3">{verdict}</div>
         {body}
-      </div>
+      </UiSurface>
     );
   }
 
   return (
-    <Card className="mb-5">
+    <UiSurface as={Card} className="mb-5">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <CardTitle>Billing health</CardTitle>
@@ -124,6 +125,6 @@ export default function BillingHealthPanel({ summary: h, embedded = false }) {
         <Badge>{billable} billable</Badge>
       </CardHeader>
       <CardBody>{body}</CardBody>
-    </Card>
+    </UiSurface>
   );
 }

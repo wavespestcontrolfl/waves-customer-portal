@@ -1,4 +1,4 @@
-import { cn } from "../../../components/ui";
+import { cn, UiSurface } from "../../../components/ui";
 import { EmptyState, fmtMoney } from "../../../components/dashboard/charts";
 import SampleBadge from "./SampleBadge";
 
@@ -16,7 +16,7 @@ export default function MarginByLineBars({ byServiceLine, targetPct = 55 }) {
   const scale = (v) => `${Math.min(100, (Math.max(v, 0) / max) * 100)}%`;
 
   return (
-    <div>
+    <UiSurface>
       <div className="space-y-2.5">
         {lines.map((l) => {
           const lowN = (l.services || 0) < 5;
@@ -63,6 +63,6 @@ export default function MarginByLineBars({ byServiceLine, targetPct = 55 }) {
         Fully-burdened margin per line (labor · materials · drive from job
         costing). Tick = {targetPct}% company target; under 45% is the floor.
       </div>
-    </div>
+    </UiSurface>
   );
 }

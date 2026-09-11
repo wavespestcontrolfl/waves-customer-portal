@@ -1,5 +1,5 @@
 import { EmptyState, fmtInt, fmtMoney } from "../../../components/dashboard/charts";
-import { Table, TBody, TD, TH, THead, TR } from "../../../components/ui";
+import { Table, TBody, TD, TH, THead, TR, UiSurface } from "../../../components/ui";
 import FormulaNote from "./FormulaNote";
 import SampleBadge from "./SampleBadge";
 
@@ -34,7 +34,7 @@ export default function ChannelROI({ data, loading, error }) {
   if (!sources.length) return <EmptyState>No channel spend or attributed revenue this period</EmptyState>;
 
   return (
-    <div>
+    <UiSurface>
       {/* Topline: total money in vs total all-in money out, blends visible */}
       <div className="flex items-baseline justify-between gap-3 mb-3">
         <div>
@@ -135,6 +135,6 @@ export default function ChannelROI({ data, loading, error }) {
         basis as the ad-dollars card above). "—" means spend that hasn't bought
         a win yet, not free. Shaping: server/services/channel-attribution.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }

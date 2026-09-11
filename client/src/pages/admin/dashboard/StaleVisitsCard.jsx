@@ -1,4 +1,4 @@
-import { Badge, Card, CardBody, CardHeader, CardTitle } from "../../../components/ui";
+import { Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
 import { ArrowRight } from "lucide-react";
 import { RowLink } from "./RowLink";
 
@@ -15,7 +15,7 @@ export default function StaleVisitsCard({ data }) {
   const total = Number(data?.total || visits.length);
 
   return (
-    <Card className="mb-4">
+    <UiSurface as={Card} className="mb-4">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <CardTitle>Stale visits</CardTitle>
@@ -57,6 +57,6 @@ export default function StaleVisitsCard({ data }) {
           </div>
         )}
       </CardBody>
-    </Card>
+    </UiSurface>
   );
 }

@@ -20,7 +20,7 @@ import {
 import { churnParetoVerdict } from "./scorecard-metrics";
 import Verdict from "./Verdict";
 import FormulaNote from "./FormulaNote";
-import { Badge } from "../../../components/ui";
+import { Badge, UiSurface } from "../../../components/ui";
 
 // Churn Pareto (/admin/dashboard/churn-reasons): WHY recurring customers
 // leave, as descending lost-MRR bars with a cumulative-% line — the classic
@@ -42,7 +42,7 @@ export default function ChurnParetoCard({ data }) {
   if (!total.customers) return <EmptyState>No churned customers in this window</EmptyState>;
 
   return (
-    <div>
+    <UiSurface>
       <div className="flex items-baseline justify-between gap-3 mb-2">
         <div>
           <span className="u-nums text-22 font-medium tracking-tight">{fmtMoney(total.mrr || 0)}</span>
@@ -58,7 +58,7 @@ export default function ChurnParetoCard({ data }) {
         )}
       </div>
 
-      <div style={{ width: "100%", height: 220 }}>
+      <div style={{ width: "100%", height: 244 }}>
         <ResponsiveContainer>
           <ComposedChart data={reasons} margin={{ top: 8, right: 4, left: 0, bottom: 4 }}>
             <CartesianGrid stroke={CHART_GRID} strokeWidth={0.5} vertical={false} />
@@ -68,7 +68,7 @@ export default function ChurnParetoCard({ data }) {
               interval={0}
               angle={-28}
               textAnchor="end"
-              height={54}
+              height={78}
               tickLine={false}
               axisLine={{ stroke: CHART_GRID }}
             />
@@ -125,6 +125,6 @@ export default function ChurnParetoCard({ data }) {
         AI backfill runs (owner-authorized, dry-run first). Shaping:
         server/services/churn-pareto.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }

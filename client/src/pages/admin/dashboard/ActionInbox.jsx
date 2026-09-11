@@ -1,4 +1,4 @@
-import { Badge, Card, CardBody, CardHeader, CardTitle, cn } from "../../../components/ui";
+import { Badge, Card, CardBody, CardHeader, CardTitle, UiSurface, cn } from "../../../components/ui";
 import { ArrowRight, CheckCircle2 } from "lucide-react";
 import { RowLink } from "./RowLink";
 import { fmtMoneyCompact } from "../../../components/dashboard/charts";
@@ -31,7 +31,7 @@ export default function ActionInbox({ alerts, stale = false }) {
 
   if (!loaded || (stale && items.length === 0)) {
     return (
-      <Card className="mb-4">
+      <UiSurface as={Card} className="mb-4">
         <CardHeader className="flex items-center gap-2.5">
           <CardTitle>Action inbox</CardTitle>
           <Badge tone="neutral">unavailable</Badge>
@@ -43,12 +43,12 @@ export default function ActionInbox({ alerts, stale = false }) {
               : "Alerts couldn't be loaded — refresh to retry."}
           </div>
         </CardBody>
-      </Card>
+      </UiSurface>
     );
   }
 
   return (
-    <Card className="mb-4">
+    <UiSurface as={Card} className="mb-4">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <CardTitle>Action inbox</CardTitle>
@@ -114,6 +114,6 @@ export default function ActionInbox({ alerts, stale = false }) {
           </div>
         )}
       </CardBody>
-    </Card>
+    </UiSurface>
   );
 }

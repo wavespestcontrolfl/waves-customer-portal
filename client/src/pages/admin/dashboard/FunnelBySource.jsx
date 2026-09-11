@@ -1,4 +1,4 @@
-import { Badge, cn } from "../../../components/ui";
+import { Badge, cn, UiSurface } from "../../../components/ui";
 import { EmptyState, fmtInt } from "../../../components/dashboard/charts";
 import Verdict from "./Verdict";
 import FormulaNote from "./FormulaNote";
@@ -65,7 +65,7 @@ export default function FunnelBySource({ data, loading, error }) {
   const stages = visibleStages(data.stagesPresent);
 
   return (
-    <div>
+    <UiSurface>
       {/* Topline: everything in-window, with the paid/organic split visible */}
       <div className="flex items-baseline justify-between gap-3 mb-3">
         <div>
@@ -126,6 +126,6 @@ export default function FunnelBySource({ data, loading, error }) {
         count only as leads + lost. Call↔lead linkage is call-SID based.
         Shaping: server/services/lead-funnel.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }

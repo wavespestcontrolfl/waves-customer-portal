@@ -1,4 +1,4 @@
-import { cn } from "../../../components/ui";
+import { cn, UiSurface } from "../../../components/ui";
 import { EmptyState, fmtMoney } from "../../../components/dashboard/charts";
 import { ebitdaVerdict } from "./scorecard-metrics";
 import Verdict from "./Verdict";
@@ -31,7 +31,7 @@ export default function EbitdaBridgeCard({ bridge }) {
   };
 
   return (
-    <div>
+    <UiSurface>
       <div className="space-y-2">
         {bridge.rows.map((r) => {
           const tone = rowTone(r);
@@ -107,6 +107,6 @@ export default function EbitdaBridgeCard({ bridge }) {
         ) = adjusted EBITDA. Adjusted: before owner pay, interest, taxes, and
         depreciation. Formula: server/services/ebitda-bridge.js.
       </FormulaNote>
-    </div>
+    </UiSurface>
   );
 }

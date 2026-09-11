@@ -1,4 +1,4 @@
-import { Card, CardBody, cn } from "../../../components/ui";
+import { Card, CardBody, UiSurface, cn } from "../../../components/ui";
 import {
   EmptyState,
   KpiBullet,
@@ -81,7 +81,7 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
   // sub beside it — no duplicate big number.
   if (chart?.kind === "gauge") {
     return (
-      <Card className={cn(lowConfidence && "opacity-70")}>
+      <UiSurface as={Card} className={cn(lowConfidence && "opacity-70")}>
         <CardBody>
         <div className="text-14 font-medium text-ink-secondary">{label}</div>
         <div className="flex items-center gap-2.5 md:gap-3 mt-1.5 md:mt-2">
@@ -102,12 +102,12 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
           </div>
         )}
         </CardBody>
-      </Card>
+      </UiSurface>
     );
   }
   // Bullet / diverging tiles keep the big number, with the bar beneath.
   return (
-    <Card className={cn(lowConfidence && "opacity-70")}>
+    <UiSurface as={Card} className={cn(lowConfidence && "opacity-70")}>
       <CardBody>
       <div className="text-14 font-medium text-ink-secondary">{label}</div>
       {/* Diverging/no-chart tiles have no ring or bar to carry the tone, so
@@ -151,6 +151,6 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
         </div>
       )}
       </CardBody>
-    </Card>
+    </UiSurface>
   );
 }
