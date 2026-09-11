@@ -223,6 +223,68 @@ function withinFreezeClock(dateStr, windowStart, now) {
   return appt.getTime() - now.getTime() < FREEZE_HOURS * 3600000;
 }
 
+/**
+ * Shared "never write an order that breaks a promise" decision — pulled out
+ * so the trusted admin buttons (POST /optimize, /optimize-route in
+ * admin-schedule.js) apply the EXACT SAME chronology + feasibility guards
+ * and window-fit fallback as this nightly pass, instead of writing Google's
+ * shortest loop unchecked. Motivating defect: a 2026-09-12/13/14 read-only
+ * preview of the admin buttons showed Google's order putting a 16:00-promised
+ * stop FIRST and a 10:00 stop SIXTH — 5-19 mi WORSE than window order — while
+ * the endpoint reported it as a "savings". This function is pure (no gates
+ * read beyond GATE_ROUTE_REORDER_WINDOW_FIT / GATE_DRIVE_TIME_CALIBRATION,
+ * no db, no writes) so both callers stay on one decision.
+ *
+ * `googleOrder` = the ordered stops to validate (Google's/optimizeRoute's
+ * result, or — for a multi-tech admin call — one technician's slice of it).
+ * `sourceStops` = that SAME tech-day's full stop rows (guard + fallback
+ * input: id, window_start, window_end, time_window,
+ * estimated_duration_minutes, route_order, created_at, lat, lng — the
+ * nightly pass's own day-load select). `legs` = Google's per-leg durations,
+ * ONLY when they align 1:1 with `googleOrder` (a multi-tech flat sequence's
+ * legs do NOT align to one tech's extracted slice — pass null there; see
+ * violatesWindowFeasibility's own alignment check for why a misaligned leg
+ * list must never be trusted).
+ *
+ * Returns one of:
+ *   { orderedStops, source }                                    — write it
+ *   { orderedStops: null, reason, conflict, beforeMeters }       — DO NOT WRITE
+ * `reason` is 'WINDOW_FIT_GATE_OFF' (either gate is off — no repair was even
+ * attempted) or 'NO_FEASIBLE_IMPROVEMENT' (gates on, the search ran, no legal
+ * order exists) — the actionable "why didn't this get fixed". `conflict` is
+ * 'WINDOW_ORDER_CONFLICT' or 'WINDOW_FIT_CONFLICT' — which guard Google's
+ * order actually failed, for the UI detail line.
+ */
+function chooseWindowSafeOrder({ RouteOptimizer, googleOrder, sourceStops, googleSource, legs = null }) {
+  const chronoConflict = violatesWindowChronology(googleOrder, sourceStops);
+  const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, sourceStops, legs);
+  if (!chronoConflict && !fitConflict) {
+    return { orderedStops: googleOrder, source: googleSource };
+  }
+  const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : 'WINDOW_FIT_CONFLICT';
+  // beforeMeters (current running order, same model as the nightly ledger's
+  // before_distance_meters) rides on every rejection too — the UI can show
+  // "here's what driving it as-is costs" even when nothing gets written.
+  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
+  const windowFitEnabled = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT') && gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
+  if (!windowFitEnabled) {
+    return { orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters };
+  }
+  const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(sourceStops), {
+    effectiveWindowStart, effectiveWindowRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
+  });
+  if (!fallback) {
+    return { orderedStops: null, reason: 'NO_FEASIBLE_IMPROVEMENT', conflict, beforeMeters };
+  }
+  return {
+    orderedStops: fallback.orderedStops,
+    source: 'window_constrained',
+    beforeMeters,
+    afterMeters: fallback.afterMeters,
+    afterSeconds: fallback.afterSeconds,
+  };
+}
+
 async function runRouteReorder(opts = {}, conn = db) {
   const config = getRouteReorderConfig(opts);
   const now = opts.now || new Date();
@@ -855,5 +917,10 @@ module.exports = {
   runScheduleQualityAlertsOnly,
   recordSkippedTick,
   getRouteReorderConfig,
+  chooseWindowSafeOrder,
+  // A real production caller (admin-schedule.js, alongside chooseWindowSafeOrder)
+  // needs the SAME-MODEL distance comparison — a named export rather than
+  // reaching into the test-only _internals bag below.
+  modelDistanceMeters,
   _internals: { currentOrder, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };

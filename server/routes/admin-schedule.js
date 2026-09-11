@@ -14,6 +14,8 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
+const { chooseWindowSafeOrder, modelDistanceMeters } = require('../services/route-reorder');
+const { currentOrder } = require('../services/route-reorder-window-fit');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -13402,6 +13404,14 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
+        // Window-guard inputs (route-reorder.js's own day-load select) — the
+        // 2026-09-12/13/14 preview showed this endpoint writing Google's
+        // shortest loop even when it put a 16:00-promised stop first and a
+        // 10:00 stop sixth. These four plus route_order/created_at are what
+        // the chronology/feasibility guards and the window-fit fallback read.
+        'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.route_order', 'scheduled_services.created_at',
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13428,6 +13438,63 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       techId: technicianId || null,
     });
 
+    // ── Window-safety guard chain, PER TECH-DAY (a promised arrival window
+    // is a promise to whichever tech's truck drives it — Google's flat
+    // multi-tech sequence has to be sliced back into tech-days before the
+    // chronology/feasibility guards mean anything; see chooseWindowSafeOrder
+    // in route-reorder.js, the same guards the nightly pass runs). Stops
+    // with no technician_id have no tech-day to validate against and pass
+    // through unchecked/untouched, same as the nightly pass's treatment of
+    // unassigned stops.
+    const byTech = new Map();
+    for (const s of services) {
+      if (!s.technician_id) continue;
+      if (!byTech.has(s.technician_id)) byTech.set(s.technician_id, []);
+      byTech.get(s.technician_id).push(s);
+    }
+    // Google's legs describe the FLAT sequence — they only line up with a
+    // technician's extracted slice when that tech is the only one on the
+    // call (the common case: this business runs one field technician).
+    // Misaligned legs are never trusted (see violatesWindowFeasibility) —
+    // pass null and let the guard use the shared fallback leg model instead.
+    const legsAlignToTech = byTech.size <= 1 ? result.legs : null;
+    let rejection = null;
+    const resolvedByTech = new Map();
+    for (const [techId, techStops] of byTech) {
+      const ids = new Set(techStops.map((s) => s.id));
+      const googleSlice = result.orderedStops.filter((s) => ids.has(s.id));
+      const outcome = chooseWindowSafeOrder({
+        RouteOptimizer, googleOrder: googleSlice, sourceStops: techStops, googleSource: result.source, legs: legsAlignToTech,
+      });
+      if (!outcome.orderedStops) {
+        rejection = { technicianId: techId, ...outcome };
+        break;
+      }
+      resolvedByTech.set(techId, outcome);
+    }
+    if (rejection) {
+      return res.status(409).json({
+        success: false,
+        reason: rejection.reason,
+        conflict: rejection.conflict,
+        technicianId: rejection.technicianId,
+        error: rejection.reason === 'WINDOW_FIT_GATE_OFF'
+          ? 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.'
+          : 'No legal stop order keeps every promised arrival window — nothing was changed.',
+        unoptimizedDistanceMeters: rejection.beforeMeters,
+      });
+    }
+    // Reassemble: substitute each technician's slice of the flat Google
+    // order, in place, with that tech's resolved (possibly window-fit)
+    // order — a 1:1 replacement within each tech's own slots, so untouched
+    // techs (and unassigned stops) keep their exact original positions.
+    const queues = new Map([...resolvedByTech].map(([id, o]) => [id, [...o.orderedStops]]));
+    const anyWindowConstrained = [...resolvedByTech.values()].some((o) => o.source === 'window_constrained');
+    const finalOrdered = result.orderedStops.map((s) => {
+      const q = s.technician_id && queues.get(s.technician_id);
+      return q ? q.shift() : s;
+    });
+
     // Update route_order on each service — fenced + transactional: an
     // unfenced per-row loop racing the nightly reorder could interleave and
     // leave a mixed sequence. Same 'slot-reserve' tech-day lock as every
@@ -13444,8 +13511,8 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         // the tech-day the stop was optimized FOR; any miss aborts the whole
         // rewrite untouched (operator reloads and retries).
         const techById = new Map(services.map((s) => [s.id, s.technician_id || null]));
-        for (let i = 0; i < result.orderedStops.length; i++) {
-          const stopId = result.orderedStops[i].id;
+        for (let i = 0; i < finalOrdered.length; i++) {
+          const stopId = finalOrdered[i].id;
           const expectTech = techById.get(stopId) || null;
           const updated = await trx('scheduled_services')
             .where({ id: stopId })
@@ -13467,15 +13534,34 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       logger.error(`[schedule/optimize] route quality refresh failed: ${e.message}`);
     }
 
-    const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
-    const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
-    const savedPercent = result.unoptimizedDistanceMeters > 0
-      ? Math.round((savedDistanceMeters / result.unoptimizedDistanceMeters) * 100)
+    // When every tech-day passed the guards unchanged, the response stays
+    // byte-identical to before (Google's own reported numbers). Only when a
+    // tech-day was window-fit-repaired do the distance/duration figures need
+    // recomputing — under the SAME shared model the repair itself scored
+    // against (route-reorder.js's modelDistanceMeters), since Google's own
+    // numbers describe an order that was never written.
+    let totalDurationMinutes;
+    let totalDistanceMeters;
+    let unoptimizedDistanceMeters;
+    if (anyWindowConstrained) {
+      totalDistanceMeters = modelDistanceMeters(RouteOptimizer, finalOrdered);
+      unoptimizedDistanceMeters = modelDistanceMeters(RouteOptimizer, currentOrder(services));
+      totalDurationMinutes = Math.round(
+        [...resolvedByTech.values()].reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60,
+      );
+    } else {
+      totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
+      totalDistanceMeters = result.totalDistanceMeters;
+      unoptimizedDistanceMeters = result.unoptimizedDistanceMeters;
+    }
+    const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
+    const savedPercent = unoptimizedDistanceMeters > 0
+      ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100)
       : 0;
 
     const response = {
       success: true,
-      order: result.orderedStops.map((s, i) => ({
+      order: finalOrdered.map((s, i) => ({
         id: s.id,
         routeOrder: i + 1,
         zone: s.zone,
@@ -13483,13 +13569,17 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         city: s.city,
         customerName: (s.customer_name || '').trim(),
       })),
-      totalDistanceMeters: result.totalDistanceMeters,
+      totalDistanceMeters,
       totalDurationMinutes,
-      unoptimizedDistanceMeters: result.unoptimizedDistanceMeters,
+      unoptimizedDistanceMeters,
       savedDistanceMeters,
       savedPercent,
-      legs: result.legs,
-      source: result.source,
+      // Model-path legs are a same-truck-consecutive-stop breakdown Google
+      // never computed for a repaired order (computeWindowFitOrder scores
+      // candidates, it doesn't fetch turn-by-turn legs — see its own "legs =
+      // null is DELIBERATE" note) — empty rather than Google's now-stale list.
+      legs: anyWindowConstrained ? [] : result.legs,
+      source: anyWindowConstrained ? 'window_constrained' : result.source,
       // Backwards-compat field
       estimatedDriveMinutes: totalDurationMinutes,
     };
@@ -13524,6 +13614,9 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     const dateStr = date || etDateString();
 
     // Shared day-stops scaffold — same rows as the inline query it replaced.
+    // Plus route-reorder.js's own window-guard select (window_start/end,
+    // estimated_duration_minutes, route_order, created_at) — see /optimize
+    // above for the motivating 2026-09-12/13/14 preview defect.
     const services = await dayStopsQuery(db, {
       dateStr,
       technicianId,
@@ -13532,6 +13625,9 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.time_window',
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
+        'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.route_order', 'scheduled_services.created_at',
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13557,6 +13653,26 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       techId: technicianId,
     });
 
+    // Window-safety guard chain (single tech-day — no slicing needed here;
+    // Google's legs align 1:1 with `services`, unlike the multi-tech
+    // /optimize call, so they ride straight into the feasibility guard).
+    const outcome = chooseWindowSafeOrder({
+      RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs,
+    });
+    if (!outcome.orderedStops) {
+      return res.status(409).json({
+        success: false,
+        reason: outcome.reason,
+        conflict: outcome.conflict,
+        error: outcome.reason === 'WINDOW_FIT_GATE_OFF'
+          ? 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.'
+          : 'No legal stop order keeps every promised arrival window — nothing was changed.',
+        unoptimizedDistanceMeters: outcome.beforeMeters,
+      });
+    }
+    const finalOrdered = outcome.orderedStops;
+    const windowConstrained = outcome.source === 'window_constrained';
+
     // Update route_order — fenced + transactional, same contract as
     // /optimize above (single tech-day here).
     {
@@ -13565,9 +13681,9 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
         // Stale-snapshot guard — same contract as /optimize above: the stop
         // must still be on THIS tech-day or the whole rewrite aborts.
-        for (let i = 0; i < result.orderedStops.length; i++) {
+        for (let i = 0; i < finalOrdered.length; i++) {
           const updated = await trx('scheduled_services')
-            .where({ id: result.orderedStops[i].id })
+            .where({ id: finalOrdered[i].id })
             .where('scheduled_date', dateStr)
             .where('technician_id', technicianId)
             .update({ route_order: i + 1 });
@@ -13584,15 +13700,29 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       logger.error(`[schedule/optimize-route] route quality refresh failed: ${e.message}`);
     }
 
-    const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
-    const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
-    const savedPercent = result.unoptimizedDistanceMeters > 0
-      ? Math.round((savedDistanceMeters / result.unoptimizedDistanceMeters) * 100)
+    // See /optimize above: an unrepaired order keeps Google's own reported
+    // numbers byte-identical; a window-fit repair reports the SAME-MODEL
+    // before/after the fallback itself scored against.
+    let totalDurationMinutes;
+    let totalDistanceMeters;
+    let unoptimizedDistanceMeters;
+    if (windowConstrained) {
+      totalDistanceMeters = outcome.afterMeters;
+      unoptimizedDistanceMeters = outcome.beforeMeters;
+      totalDurationMinutes = Math.round((outcome.afterSeconds || 0) / 60);
+    } else {
+      totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
+      totalDistanceMeters = result.totalDistanceMeters;
+      unoptimizedDistanceMeters = result.unoptimizedDistanceMeters;
+    }
+    const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
+    const savedPercent = unoptimizedDistanceMeters > 0
+      ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100)
       : 0;
 
     const response = {
       success: true,
-      order: result.orderedStops.map((s, i) => ({
+      order: finalOrdered.map((s, i) => ({
         id: s.id,
         routeOrder: i + 1,
         zone: s.zone,
@@ -13600,13 +13730,16 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         city: s.city,
         customerName: (s.customer_name || '').trim(),
       })),
-      totalDistanceMeters: result.totalDistanceMeters,
+      totalDistanceMeters,
       totalDurationMinutes,
-      unoptimizedDistanceMeters: result.unoptimizedDistanceMeters,
+      unoptimizedDistanceMeters,
       savedDistanceMeters,
       savedPercent,
-      legs: result.legs,
-      source: result.source,
+      // computeWindowFitOrder scores candidates, it doesn't fetch turn-by-turn
+      // legs (see its own "legs = null is DELIBERATE" note) — Google's leg
+      // list describes an order that was never written, so it's stale here.
+      legs: windowConstrained ? [] : result.legs,
+      source: windowConstrained ? 'window_constrained' : result.source,
     };
 
     if (result.apiWarning) {
