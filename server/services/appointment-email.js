@@ -238,8 +238,13 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
   // rendered_slot_ms is the communicated window at send time — persisted so
   // no-show-detector.js's loadPromiseEvents can prove what was promised
-  // without re-deriving it from the (mutable) current schedule.
-  if (Number.isFinite(renderedSlotMs) && moveHoldServiceId) metadata = { ...metadata, rendered_slot_ms: renderedSlotMs };
+  // without re-deriving it from the (mutable) current schedule. Gated on
+  // scheduledServiceId (the visit this email is actually about), not
+  // moveHoldServiceId — that param controls the unrelated move-hold
+  // re-check below and is not always the same id a future caller might
+  // pass; messaging/audit.js gates the identical field the same way, off
+  // appointmentId (codex P1).
+  if (Number.isFinite(renderedSlotMs) && scheduledServiceId) metadata = { ...metadata, rendered_slot_ms: renderedSlotMs };
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 
