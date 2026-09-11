@@ -2473,66 +2473,21 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
 // visits, not the year-old series parent); the parent template is the
 // fallback when no sibling carries a value. Returns undefined when nothing
 // carries a value so the insert keeps the column default.
-// Annual-prepay coverage for a completion-time auto-extend row.
-//
-// The auto-extend built its next visit without any prepay field, so a
-// customer on an annual prepay got an extension visit that read as
-// UNCOVERED and billed again for service the prepay had already bought
-// (one prod term on 2026-09-11 had an extension spawn with no term link
-// while its fourth paid slot sat on a duplicate row). Coverage is a
-// three-field invariant — annualPrepayCoversVisit needs the term id, the
-// method AND a positive amount — so all three are resolved together or
-// none are.
-//
-// This deliberately does NOT call applyPrepaidCoverageForTerm: that
-// function re-slices the whole prepay budget and rewrites prepaid_amount on
-// every row already stamped for the term, so running it on each completion
-// would rewrite settled stamps and file coverage-exception bells. We take
-// ONE unused slot with read-only queries instead.
-//
-// Scope: the coverage link is read from the PARENT row. A series whose
-// parent was never linked stays uncovered here, same as today.
-async function resolveExtensionPrepayCoverage(conn, parent, cols, childServiceType) {
-  if (!cols.annual_prepay_term_id || !cols.prepaid_method || !cols.prepaid_amount) return null;
+// Re-apply the parent term's coverage after a series row is inserted, so the
+// new visit is stamped if — and only if — the term still has a slot for it.
+// Failing soft leaves the visit uncovered, which is a billing question
+// someone can correct; blocking the extension is a service failure the
+// customer feels.
+async function applyExtensionPrepayCoverage(conn, parent) {
   const termId = parent?.annual_prepay_term_id;
-  if (!termId) return null;
+  if (!termId) return;
   try {
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
     const term = await conn('annual_prepay_terms').where({ id: termId }).first();
-    if (!term) return null;
-    const visitCount = Number(term.coverage_visit_count);
-    // Legacy no-config terms have no budget to divide — leave them to the
-    // coverage backfills rather than inventing a slice here.
-    if (!(visitCount > 0) || !(Number(term.prepay_amount) > 0)) return null;
-    // A stamp the coverage gate would reject is worse than no stamp: it
-    // makes the CHARGING guard treat the visit as unverifiable instead of
-    // simply uncovered. Same matcher that gates suppression.
-    if (term.coverage_service_type
-      && childServiceType
-      && !AnnualPrepayRenewals.serviceMatchesCoverage({ service_type: childServiceType }, term.coverage_service_type)) {
-      return null;
-    }
-    // Budget check: the term buys exactly coverage_visit_count visits.
-    // remainingCoverageSlices counts consumption with NO date bound — a
-    // window-bounded count would treat an extension past term_end as unspent
-    // and hand out a free slot on every renewal — and returns the unspent
-    // slices in order, so the remainder cents stay on the final one.
-    // Cancelled/no-show/skipped/rescheduled rows are excluded, so a
-    // written-off slot is free to be reissued.
-    const [amount] = await AnnualPrepayRenewals.remainingCoverageSlices(term, conn);
-    // undefined = plan exhausted; this visit bills, correctly.
-    if (!(Number(amount) > 0)) return null;
-    return {
-      annual_prepay_term_id: termId,
-      prepaid_method: AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD,
-      prepaid_amount: amount,
-    };
+    if (!term) return;
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, conn, { quietExceptions: true });
   } catch (e) {
-    // Fail to TODAY's behavior (uncovered), never block the extension: an
-    // unstamped visit is a billing question someone can correct, a missing
-    // visit is a service failure the customer feels.
-    logger.warn(`[recurring] prepay coverage lookup failed for parent=${parent?.id}: ${e.message}`);
-    return null;
+    logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
   }
 }
 
@@ -12603,17 +12558,26 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             const seriesCioc = await resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent);
             if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
           }
-          // Annual-prepay coverage rides along when the term still has an
-          // unused slot. Applied AFTER the cioc resolution on purpose:
-          // create_invoice_on_complete stays the office's billing intent
-          // (coverage rows carry it too, as the fallback for a voided
-          // prepay), and the prepaid stamp is what actually suppresses the
-          // invoice while coverage is intact.
-          const extensionCoverage = await resolveExtensionPrepayCoverage(
-            conn, parent, cols, nextData.service_type,
-          );
-          if (extensionCoverage) Object.assign(nextData, extensionCoverage);
           const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
+          // Annual-prepay coverage for the row we just inserted.
+          //
+          // The auto-extend used to build its next visit with no prepay
+          // field at all, so a prepay customer's extension read as UNCOVERED
+          // and billed again for service the prepay had already bought.
+          // Deliberately delegated rather than computed here: the coverage
+          // budget has ONE authority. applyPrepaidCoverageForTerm selects
+          // through coverageRowsForTerm, which caps the set at
+          // coverage_visit_count (committed rows first, date-ordered), skips
+          // completed rows for reconcilePendingWindowCompletions to settle,
+          // skips rows a different term or an out-of-band cash/check/Zelle
+          // payment already covers, and slices by position so the remainder
+          // cents land on the final visit. A second allocator here could
+          // only disagree with it.
+          //
+          // Runs on `conn`, so it commits or rolls back with the extension.
+          // Bells are quiet: this fires per generated visit, and the daily
+          // sweep files the durable exceptions.
+          await applyExtensionPrepayCoverage(conn, parent);
           // Post-insert re-check closes the remaining race: a
           // cancellation can stop the series between the pre-insert
           // read above and this insert. The row hasn't been mirrored,
@@ -17966,7 +17930,7 @@ router._test = {
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
   resolveSeriesCreateInvoiceOnComplete,
-  resolveExtensionPrepayCoverage,
+  applyExtensionPrepayCoverage,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,

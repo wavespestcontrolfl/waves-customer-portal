@@ -1629,60 +1629,14 @@ async function attachScheduledServices(term, conn = db) {
   }
 }
 
-// How many coverage slots a term has NOT yet spent — the budget every
-// series generator must respect before stamping a visit as prepaid.
-//
-// Counts live stamped rows REGARDLESS OF DATE on purpose. coverageRowsForTerm
-// is bounded to term_start..term_end, but annualPrepayCoversVisit honors a
-// stamp with no date restriction, so a window-bounded count would treat a
-// visit scheduled past term_end as unspent and hand out a "free" slot on
-// every extension, indefinitely.
-//
-// Only this module's own stamp counts against the budget: an independently
-// prepaid visit (cash/check/Zelle through the regular schedule) is a
-// per-visit fact that never consumed annual-prepay money.
-async function remainingCoverageSlots(term, conn = db) {
-  const visitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
-  if (!term?.id || !(visitCount > 0)) return 0;
-  const row = await conn('scheduled_services')
-    .where({ annual_prepay_term_id: term.id })
-    // status is nullable and the coverage logic treats NULL as live; a plain
-    // NOT IN drops those rows (NULL NOT IN (…) is NULL, never true), which
-    // would free an already-covered slot for reuse. Same shape the stamping
-    // update uses.
-    .where((q) => q.whereNull('status').orWhereNotIn('status', [...COVERAGE_EXCLUDED_STATUSES]))
-    .where((q) => q
-      // Stamped while scheduled.
-      .where((s) => s
-        .where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD)
-        .where('prepaid_amount', '>', 0))
-      // OR consumed at completion. reconcilePendingWindowCompletions settles
-      // a completed visit's invoice — or returns its slice as credit —
-      // WITHOUT stamping the row, so counting stamps alone reports the slot
-      // as free and hands out an extra covered visit. Counting every
-      // completed visit on the term is deliberately conservative: the
-      // failure it prevents (a silently suppressed invoice) is invisible,
-      // while the one it risks (a visit billing that someone must credit) is
-      // visible and correctable.
-      .orWhere('status', 'completed'))
-    .count({ n: '*' })
-    .first();
-  const spent = Number(row?.n ?? row?.count) || 0;
-  return Math.max(0, visitCount - spent);
-}
-
-// The slices a term has not yet handed out, in order, remainder cents last.
-// splitCoverageAmount puts the odd cents on the FINAL slice, so always taking
-// slices[0] loses them ($100 over 3 visits stamps 33.33 three times = 99.99).
-async function remainingCoverageSlices(term, conn = db) {
-  const visitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
-  const slots = await remainingCoverageSlots(term, conn);
-  if (!(slots > 0)) return [];
-  const slices = splitCoverageAmount(term.prepay_amount, visitCount);
-  return slices.slice(Math.max(0, slices.length - slots));
-}
-
-async function applyPrepaidCoverageForTerm(term, conn = db) {
+// `quietExceptions` suppresses the operator bells ONLY. It exists for the
+// series generators (booking/estimate seeding and the completion-time
+// auto-extend), which call this to stamp the row they just inserted: those
+// runs legitimately find rows mid-flight, and a bell per generated visit
+// would bury the real coverage exceptions the daily sweep files. The
+// warn-level log still records every race; nothing about the STAMPING
+// changes.
+async function applyPrepaidCoverageForTerm(term, conn = db, { quietExceptions = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const totalAmount = Number(term?.prepay_amount);
@@ -1765,7 +1719,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   }
   if (completedRaceIds.length > 0) {
     logger.warn(`[annual-prepay] term ${term.id}: ${completedRaceIds.length} covered visit(s) completed while the prepaid stamp ran (${completedRaceIds.join(', ')}) — left unstamped for pending-window reconciliation`);
-    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_completion',
+    if (!quietExceptions) await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_completion',
       `${completedRaceIds.length} paid visit(s) completed while the annual prepay was being applied and are not yet marked as covered. If a completion invoice was issued for that visit, it bills the customer separately until the coverage sweep settles it — check the invoice and settle it as covered or void it.`);
   }
   if (racedRowIds.length > 0) {
@@ -1776,7 +1730,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     // Filed after the caller's transaction commits (hook P1): a rollback must
     // not leave a false alert that also dedupes the retry's real one for 7d.
     logger.warn(`[annual-prepay] term ${term.id}: ${racedRowIds.length} covered visit(s) were cancelled while the prepaid stamp ran (${racedRowIds.join(', ')}) — ${stampedCount} of ${coverageVisitCount} sold visits stamped; needs replacement scheduling`);
-    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_cancel',
+    if (!quietExceptions) await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_cancel',
       `${racedRowIds.length} paid visit(s) were cancelled while the annual prepay was being applied, so only ${stampedCount} of ${coverageVisitCount} sold visits are covered on the calendar. Schedule the replacement visit(s) or adjust the term.`);
   }
 
@@ -5649,8 +5603,6 @@ module.exports = {
   checkAndSendPaymentReminders,
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
-  remainingCoverageSlots,
-  remainingCoverageSlices,
   reconcilePendingWindowCompletions,
   reconcileDisputeWindowMonthlyDues,
   finishDisputeRecoveryForTerm,

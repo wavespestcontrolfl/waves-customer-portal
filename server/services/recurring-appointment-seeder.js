@@ -23,11 +23,6 @@ const MONTH_RECURRENCE_INTERVALS = {
 };
 
 const DEFAULT_WEEKEND_SHIFT = 'forward';
-// Mirrors ANNUAL_PREPAY_PREPAID_METHOD in services/annual-prepay-renewals.
-// Held as a literal rather than imported: that module requires this one, and
-// a top-level require here would close the cycle. A test pins the two
-// together so the mirror cannot drift.
-const ANNUAL_PREPAY_PREPAID_METHOD = 'annual_prepay_invoice';
 
 // Seasonal mosquito: 9 visits at monthly gaps that NEVER land Nov-Jan (owner
 // 2026-07-27). Nine in-season months (Feb-Oct) means a February start runs
@@ -399,10 +394,6 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
   });
   const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
-  // Annual-prepay slices this seed may still spend, in order (see the
-  // allocation below). Ordered because splitCoverageAmount puts the odd
-  // remainder cents on the final slice.
-  const prepaidSlicesLeft = Array.isArray(opts.prepaidSlices) ? [...opts.prepaidSlices] : [];
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
   const targetNewRows = Math.max(0, plannedCount - existingDates.size);
@@ -486,26 +477,13 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'zip',
     ]);
     Object.assign(row, require('./booking/visit-financial-stamps').recurringServiceAddress(parent));
-    // Annual-prepay coverage, allocated against the term's REMAINING budget.
-    //
-    // The term link alone does not make a visit covered — annualPrepayCoversVisit
-    // needs the term id, the method AND a positive amount — so children that
-    // inherited only the link read as UNCOVERED and billed again for service
-    // the prepay had bought (43 such rows in prod, 2026-09-11). But the stamp
-    // cannot simply be copied either: plannedCount is independent of
-    // coverage_visit_count, so a blind copy would mark more visits prepaid
-    // than the customer paid for and suppress those invoices.
-    //
-    // The caller (seedFollowUpsForParent) resolves how many slots are left and
-    // what each is worth; rows past the budget stay uncovered and bill, which
-    // is correct for a visit beyond the plan. With no allocation supplied
-    // nothing is stamped — the safe default for the direct callers of this
-    // exported builder.
-    if (row.annual_prepay_term_id && prepaidSlicesLeft.length
-      && Number(prepaidSlicesLeft[0]) > 0) {
-      row.prepaid_method = ANNUAL_PREPAY_PREPAID_METHOD;
-      row.prepaid_amount = Number(prepaidSlicesLeft.shift());
-    }
+    // No prepaid stamp is written here. The term link is copied above, and
+    // seedFollowUpsForParent re-applies the term's coverage AFTER the rows
+    // are inserted — applyPrepaidCoverageForTerm is the single authority on
+    // how many slots the term has left and what each is worth. Stamping a
+    // row here could only be a second opinion, and plannedCount is
+    // independent of coverage_visit_count, so it would be wrong whenever a
+    // series is longer than the plan the customer bought.
 
     // Resolved identity outranks the parent's copied link AND snapshot (the
     // parent may be unlinked, linked to a row since renamed, or carry a
@@ -1172,34 +1150,19 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
   )];
 }
 
-// How much annual-prepay coverage this seed may spend, and what one slot is
-// worth. Read-only: it counts the term's unspent slots rather than calling
-// applyPrepaidCoverageForTerm, which re-slices the whole budget and rewrites
-// prepaid_amount on rows already settled.
-//
-// Returns {} — stamp nothing — for a parent on no term, a legacy term with no
-// coverage config, a spent plan, a service the term does not cover, or any
-// query failure. Leaving a visit uncovered is a billing question someone can
-// correct; over-stamping silently suppresses invoices the customer owes.
-async function resolvePrepaidSeedAllocation(conn, parent, columns) {
-  if (!columns?.annual_prepay_term_id || !columns?.prepaid_method || !columns?.prepaid_amount) return {};
+// Re-apply the parent term's coverage across the series after seeding, so
+// the new rows are stamped if — and only if — the term has slots for them.
+async function applySeededPrepayCoverage(conn, parent, columns) {
+  if (!columns?.annual_prepay_term_id) return;
   const termId = parent?.annual_prepay_term_id;
-  if (!conn || !termId) return {};
+  if (!conn || !termId) return;
   try {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     const term = await conn('annual_prepay_terms').where({ id: termId }).first();
-    if (!term) return {};
-    if (term.coverage_service_type
-      && parent.service_type
-      && !AnnualPrepayRenewals.serviceMatchesCoverage({ service_type: parent.service_type }, term.coverage_service_type)) {
-      return {};
-    }
-    const slices = await AnnualPrepayRenewals.remainingCoverageSlices(term, conn);
-    if (!slices.length || !(Number(slices[0]) > 0)) return {};
-    return { prepaidSlices: slices.map(Number) };
+    if (!term) return;
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, conn, { quietExceptions: true });
   } catch (e) {
-    require('./logger').warn(`[recurring-seeder] prepay allocation lookup failed for parent=${parent?.id}: ${e.message}`);
-    return {};
+    require('./logger').warn(`[recurring-seeder] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
   }
 }
 
@@ -1242,7 +1205,6 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // estimate-backed series is left to the estimate linkage.
   const anchoredParent = { ...parent, ...(opts.sourceEstimateId ? { source_estimate_id: opts.sourceEstimateId } : {}) };
   await require('./customer-properties').anchorSoleProperty(anchoredParent, columns, conn);
-  const prepaidAllocation = await resolvePrepaidSeedAllocation(conn, anchoredParent, columns);
   const builtRows = buildRecurringFollowUpRows(anchoredParent, {
     ...opts,
     childIdentity,
@@ -1251,7 +1213,6 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     stampSkipWeekends,
     existingDates,
     blackoutDates,
-    ...prepaidAllocation,
   });
   const seedShortfall = builtRows.seedShortfall || null;
   // Ring the shortfall bell only once the seed is DURABLE: inside a caller
@@ -1316,6 +1277,20 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     ? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn('scheduled_services').insert(rows).returning('*'); })()
     : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx('scheduled_services').insert(rows).returning('*'));
   const insertedRows = Array.isArray(inserted) ? inserted : [];
+  // Annual-prepay coverage for the rows just seeded.
+  //
+  // Children inherit the parent's annual_prepay_term_id, but the LINK alone
+  // does not make a visit covered — annualPrepayCoversVisit also needs
+  // prepaid_method and a positive prepaid_amount — so link-only children
+  // read as UNCOVERED and billed again for service the prepay had bought
+  // (43 such rows in prod, 2026-09-11). Rather than stamp them in the
+  // builder, hand the whole set to the ONE coverage authority: it caps the
+  // covered set at coverage_visit_count, skips rows another term or an
+  // out-of-band payment already covers, and slices by position so the
+  // remainder cents land on the final visit. Best-effort by design — an
+  // uncovered visit is a billing question someone can correct, a failed
+  // seed is a missing visit the customer feels.
+  await applySeededPrepayCoverage(conn, parent, columns);
   // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
   // every caller (estimate converter, admin-schedule, customer booking)
   // gets grouping for follow-ups landing on an existing groupable stop.
@@ -1381,9 +1356,9 @@ module.exports = {
   serviceKeyFor,
   shiftPastWeekend,
   _internals: {
+    applySeededPrepayCoverage,
     dateOnly,
     nextRecurringDate,
-    resolvePrepaidSeedAllocation,
     recurrenceOrdinalOptions,
     recurringCandidateTooCloseToAnchor,
   },
