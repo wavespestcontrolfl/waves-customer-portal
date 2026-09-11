@@ -1696,9 +1696,7 @@ function EstimatePipelineViewV2({
       try {
         await adminFetch(`/admin/estimates/${estimate.id}`, {
           method: "PATCH",
-          body: JSON.stringify({
-            [field]: value,
-          }),
+          body: JSON.stringify({ [field]: value }),
         });
         setEstimates((prev) =>
           prev.map((est) =>
@@ -1777,15 +1775,10 @@ function EstimatePipelineViewV2({
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
       if (!window.confirm(confirmMsg)) return;
       try {
-        const result = await adminFetch(
-          `/admin/estimates/${e.id}/mark-accepted`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              source: "verbal_yes",
-            }),
-          },
-        );
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({ source: "verbal_yes" }),
+        });
         refreshEstimates();
         const notes = [];
         if (result?.createdCustomer?.id) {
@@ -1815,16 +1808,13 @@ function EstimatePipelineViewV2({
       )
         return;
       try {
-        const result = await adminFetch(
-          `/admin/estimates/${e.id}/mark-accepted`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              source: "verbal_annual_prepay",
-              billingTerm: "prepay_annual",
-            }),
-          },
-        );
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({
+            source: "verbal_annual_prepay",
+            billingTerm: "prepay_annual",
+          }),
+        });
         refreshEstimates();
         if (result?.warnings?.length) {
           window.alert(
@@ -2708,9 +2698,10 @@ function EstimatePipelineViewV2({
                                 )
                                   return;
                                 try {
-                                  await adminFetch(`/admin/estimates/${e.id}`, {
-                                    method: "DELETE",
-                                  });
+                                  await adminFetch(
+                                    `/admin/estimates/${e.id}`,
+                                    { method: "DELETE" },
+                                  );
                                   refreshEstimates();
                                 } catch (err) {
                                   alert("Delete failed: " + err.message);
@@ -3477,15 +3468,10 @@ function EstimatesMobileListView({
           : `Mark ${e.customerName || "this customer"} as accepted from a verbal yes?\n\nThis stamps the estimate as won for the funnel and activates the customer. The customer is NOT texted, NOT auto-scheduled, and NO setup or annual prepay invoice is created — use the customer link for annual prepay, or schedule the visit on the calendar and draft any invoice manually.`;
       if (!window.confirm(confirmMsg)) return;
       try {
-        const result = await adminFetch(
-          `/admin/estimates/${e.id}/mark-accepted`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              source: "verbal_yes",
-            }),
-          },
-        );
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({ source: "verbal_yes" }),
+        });
         refreshEstimates();
         const notes = [];
         if (result?.createdCustomer?.id) {
@@ -3515,16 +3501,13 @@ function EstimatesMobileListView({
       )
         return;
       try {
-        const result = await adminFetch(
-          `/admin/estimates/${e.id}/mark-accepted`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              source: "verbal_annual_prepay",
-              billingTerm: "prepay_annual",
-            }),
-          },
-        );
+        const result = await adminFetch(`/admin/estimates/${e.id}/mark-accepted`, {
+          method: "POST",
+          body: JSON.stringify({
+            source: "verbal_annual_prepay",
+            billingTerm: "prepay_annual",
+          }),
+        });
         refreshEstimates();
         if (result?.warnings?.length) {
           window.alert(
@@ -3571,9 +3554,7 @@ function EstimatesMobileListView({
       )
         return;
       try {
-        await adminFetch(`/admin/estimates/${e.id}/archive`, {
-          method: "POST",
-        });
+        await adminFetch(`/admin/estimates/${e.id}/archive`, { method: "POST" });
         refreshEstimates();
       } catch (err) {
         window.alert("Archive failed: " + err.message);
@@ -3603,9 +3584,7 @@ function EstimatesMobileListView({
       )
         return;
       try {
-        await adminFetch(`/admin/estimates/${e.id}`, {
-          method: "DELETE",
-        });
+        await adminFetch(`/admin/estimates/${e.id}`, { method: "DELETE" });
         refreshEstimates();
       } catch (err) {
         window.alert("Delete failed: " + err.message);

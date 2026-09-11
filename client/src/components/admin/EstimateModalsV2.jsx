@@ -107,9 +107,7 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
     try {
       await adminFetch(`/admin/estimates/${estimate.id}`, {
         method: "PATCH",
-        body: JSON.stringify(
-          declinePayload({ reason, competitorName, competitorPrice, note }),
-        ),
+        body: JSON.stringify(declinePayload({ reason, competitorName, competitorPrice, note })),
       });
       onSaved();
     } catch (err) {
