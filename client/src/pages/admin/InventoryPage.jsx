@@ -1279,7 +1279,8 @@ function PriceSyncTab({ showToast }) {
           <Button
             key={tab.key}
             onClick={() => setView(tab.key)}
-            variant="secondary"
+            variant={view === tab.key ? "primary" : "secondary"}
+            aria-pressed={view === tab.key}
           >
             {tab.label}
           </Button>
@@ -4036,8 +4037,8 @@ function RegistryTab({ showToast }) {
           <Button
             key={f.key}
             onClick={() => setFilter(f.key)}
-            variant="secondary"
-            className="min-h-[40px]"
+            variant={filter === f.key ? "primary" : "secondary"}
+            aria-pressed={filter === f.key}
           >
             {f.label}
           </Button>

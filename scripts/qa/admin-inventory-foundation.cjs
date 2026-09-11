@@ -430,6 +430,17 @@ async function main() {
             .first()
             .click();
           await page.waitForTimeout(75);
+          if (leaf === "Price Sync" || leaf === "Registry") {
+            const initial = leaf === "Price Sync" ? "Vendor Sync Status" : "All Products";
+            const next = leaf === "Price Sync" ? "Needs Mapping" : "Public";
+            const initialButton = page.getByRole("button", { name: initial, exact: true });
+            const nextButton = page.getByRole("button", { name: next, exact: true });
+            await initialButton.waitFor();
+            assert.equal(await initialButton.getAttribute("aria-pressed"), "true");
+            await nextButton.click();
+            assert.equal(await nextButton.getAttribute("aria-pressed"), "true");
+            assert.equal(await initialButton.getAttribute("aria-pressed"), "false");
+          }
           if (leaf === "Unit Review") {
             await page.getByRole("button", { name: "fl_oz · suggested", exact: true }).waitFor();
             await page.getByText("Apply unit: fl_oz", { exact: true }).waitFor();
