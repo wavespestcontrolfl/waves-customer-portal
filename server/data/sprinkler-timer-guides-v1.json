@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "set": "sprinkler-timer-guides-v1",
+  "owner": "adam",
+  "notes": "Sprinkler timer guide series (owner GO 2026-09-05; scope in docs/irrigation-controller-guide-scope.md). Hub-only informational posts that teach a lawn customer to run the irrigation controller on their own wall, one brand per post. GLOBAL RULES, all briefs: (1) informational lane only — no near-me or transactional phrasing anywhere; (2) MANUAL-FIRST: the primary how-to is running the controller BY HAND once a week with the minutes from the customer's weekly Waves watering plan — OFF is the resting position between runs (nothing waters unless the customer starts it, so a builder's leftover schedule cannot fire); a programmed schedule is the optional section at the END of the post; (3) every controller mechanic (dial positions, button names, manual-run steps, rain delay, sensor bypass) must match the cited manufacturer manual — if the manual does not support a step, OMIT it; never invent a button; (4) NEVER state a number of allowed watering days per week, an assigned weekday, or allowed hours — watering-day rules come from the customer's county and the current water-shortage order and change; say 'your assigned day and your county's allowed hours' and point to the county; (5) a hand run counts the same as a scheduled one for those rules — say so; (6) Waves does NOT repair irrigation: if a zone will not run, a head is broken, or the box faults, the reader is referred to an irrigation contractor — never imply Waves services, installs, or repairs sprinklers; (7) never describe any product or application as 'safe'; never state prices or dollar amounts — for controller pricing say 'check current pricing'; (8) no manufacturer imagery or scraped photos: hero and body images are generated or Waves-owned, and no manual text is reproduced — link the official manual instead; (9) the weekly Waves watering plan may be mentioned only as 'the weekly watering plan Waves lawn customers receive' — never promise it names the day; (10) internal links: the lawn treatment prep page and the overwatering-vs-underwatering post at minimum. (11) every post links one lawn care city service page (/lawn-care-{city}-fl/) in the body — the quality gate's hub-link hard check requires it.",
+  "cta_codes": {
+    "QUOTE": "quote form /pest-control-quote/ (relative on-site link)",
+    "CONTACT": "contact page /contact/ (relative on-site link) — lawn has no calculator flow"
+  },
+  "briefs": [
+    {
+      "id": "ST01",
+      "cta": [
+        "CONTACT"
+      ],
+      "slug": "/lawn-care/rain-bird-sprinkler-timer-guide/",
+      "action": "new_supporting_blog",
+      "byline": "adam-augusta",
+      "intent": "informational",
+      "thesis": "Rain Bird's dial controllers (ESP-TM2, ESP-Me/Me3) are the most common sprinkler timers on Southwest Florida homes and the easiest of the big brands to run by hand — which is all most homeowners need: one weekly manual run with the minutes from their watering plan, the dial back on OFF between runs, and the programmed schedule left for the few who want it.",
+      "window": "immediate",
+      "outline": [
+        "Quick answer: which Rain Bird you have (where the model name is printed) and the one weekly move — OFF between runs, one hand run with your plan's minutes, back to OFF",
+        "A short history of Rain Bird: founded 1933 in Glendora, California, around Orton Englehart's horizontal-action impact sprinkler; still family-owned; headquartered in Azusa — verified against rainbird.com/about, dates omitted if the page does not state them",
+        "The models you will actually find on a Southwest Florida wall: ESP-TM2 (builder-grade dial box on most new construction), ESP-Me and ESP-Me3 (expandable, up to 22 zones, LNK2 Wi-Fi option on the Me3), ESP-RZXe (button faceplate, no dial), SST (simple push-button unit) — one paragraph each, what the faceplate looks like, who it suits",
+        "Honest review — pros: dial programming is the simplest of the major brands; manual watering is one dial position; Seasonal Adjust is one knob; parts and manuals are everywhere; cons: four start-time slots per program hide an inherited builder schedule; the OFF position is the only sure resting state; the Wi-Fi module costs extra; the SST has no per-zone flexibility beyond its buttons. Include a ComparisonTable of the four models (dial or buttons, max zones, manual-run control, Wi-Fi option, best for) with NO prices, and an HonestRejection: who should not bother upgrading or programming a schedule at all",
+        "How to run it by hand, per model (HowTo, visible numbered steps): ESP-TM2 — dial to MANUAL STATION, set minutes with – and +, press and hold the start button or turn the dial to AUTO RUN, all stations run in turn; ESP-Me/Me3 — dial to Manual Watering, set minutes, press Hold to Start until STARTED, turn the dial to AUTO; RZXe — MANUAL WATERING button; SST — store each zone's minutes at its dial position, dial to AUTO RUN, press WATER ALL NOW. Mixed yards (grass plus bed or drip zones): store per-zone minutes once and start the program by hand, or run grass zones one at a time. After every run, the dial goes back to OFF the same day",
+        "Why OFF is the resting position, and the one-time check: with the dial on OFF nothing waters (Rain Bird's own manual says so); before the first hand run, turn to START TIMES and step through ALL FOUR start-time slots on programs A, B and C, setting each to OFF, so a builder's leftover schedule cannot fire while the dial sits on AUTO RUN during a run",
+        "Watering rules: a hand run counts the same as a scheduled one — run it only on your assigned day and inside your county's allowed hours; those come from the county and the current water-shortage order and change, so check the county page; Waves lawn customers get a weekly watering plan with the minutes per zone and whether to skip the week",
+        "Want it to run itself? The optional schedule (dial models): DATE/TIME with AM/PM checked twice, one program (A), one start time inside allowed hours with the other slots OFF, RUN TIMES per zone, RUN DAYS = the assigned day only, dial back to AUTO RUN; rain delay = dial on AUTO RUN, hold the + button, set days remaining (up to 14); leave SEASONAL ADJUST at 100% because a percentage set once scales every later run-time entry; SENSOR position obeys or ignores a wired rain sensor — leave it obeying, and note a hand-started run ignores the sensor",
+        "When the sprinklers will not run: Waves does not repair irrigation — a zone that will not come on, a broken head, or a box fault goes to an irrigation contractor; Waves still tells you what to water and when",
+        "FAQ (4–6 questions): where is the model name; does OFF erase my programs (no); why did my sprinklers come on at noon (AM/PM); can I run one zone only; what does Seasonal Adjust do; do I need the Wi-Fi module"
+      ],
+      "sources": [
+        "https://www.rainbird.com/support",
+        "https://www.rainbird.com/sites/default/files/media/documents/2017-06/man_ESP-TM2_en.pdf",
+        "https://www.rainbird.com/sites/default/files/media/documents/2020-03/d41274_15ja20_esp-me3-user-manual-advanced-dom_en-en.pdf",
+        "https://www.rainbird.com/about",
+        "Rain Bird's own About / History page for founding facts (founder, year, city, headquarters, family ownership) — cite it in-post; omit any date or fact the page does not state.",
+        "The ESP-TM2 and ESP-Me3 user manuals (linked above) for every dial position, button name and manual-watering step; the RZXe and SST sections stay short and point to the Rain Bird support center for their own manuals rather than guessing buttons."
+      ],
+      "primary_kw": "rain bird sprinkler timer",
+      "schema_types": [
+        "Article",
+        "HowTo",
+        "FAQPage"
+      ],
+      "verify_notes": [
+        "Every controller mechanic must match the linked ESP-TM2 or ESP-Me3 manual: MANUAL STATION is a dial position on the TM2 (there is no 'Manual Watering button' on the TM2); the Me3 uses the Manual Watering dial position plus the Hold to Start button; rain delay is entered from AUTO RUN by holding the + button (holding the start button from AUTO RUN starts a program instead); the SENSOR dial position sets obey/ignore. If unsure, omit the step and point to the manual.",
+        "Do not state how many watering days per week are allowed, which weekday, or which hours — anywhere, including the FAQ. Say 'your assigned day and your county's allowed hours'.",
+        "Do not claim Waves installs, services, adjusts or repairs irrigation. The referral to an irrigation contractor is mandatory.",
+        "History facts (1933, Glendora, Orton Englehart, impact sprinkler, Azusa headquarters, family-owned) must be verified against rainbird.com/about at draft time; any fact the page does not state is omitted, not paraphrased from memory.",
+        "No prices for any controller or module; no 'safe' language; no manufacturer photos or reproduced manual text — link the manuals.",
+        "Seasonal Adjust must be described as persistent (it scales every later run-time entry) and the advice must be to leave it at 100% when following weekly minutes.",
+        "REQUIRED HUB LINK: the post must link the lawn care service page /lawn-care-sarasota-fl/ as a natural in-body anchor (the content quality gate's hub_link_present hard check accepts a /lawn-care-{city}-fl/ page for lawn posts; /contact/ and blog posts do not count)."
+      ],
+      "secondary_kws": [
+        "rain bird esp-tm2 manual watering",
+        "rain bird esp-me3 how to use",
+        "how to run rain bird sprinkler manually"
+      ],
+      "working_title": "Rain Bird Sprinkler Timers: History, the Models on Southwest Florida Walls, an Honest Review, and How to Run One by Hand",
+      "internal_links": [
+        "/lawn-care-sarasota-fl/",
+        "/lawn-treatment-prep/",
+        "/lawn-care/overwatering-lawn-vs-underwatering/"
+      ]
+    },
+    {
+      "id": "ST02",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/hunter-sprinkler-timer-guide/",
+      "working_title": "Hunter Sprinkler Timers: The Models on Southwest Florida Walls, an Honest Review, and How to Run One by Hand",
+      "primary_kw": "hunter sprinkler timer",
+      "secondary_kws": [
+        "hunter x-core manual watering",
+        "hunter pro-c how to use",
+        "how to run hunter sprinkler manually"
+      ],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam-augusta",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "HowTo",
+        "FAQPage"
+      ],
+      "thesis": "Hunter's dial controllers (X-Core, X2, Pro-C) are the other box Southwest Florida homeowners find in the garage, and the one fact that explains most \"my sprinklers stopped\" calls is that nothing waters unless the dial sits on RUN — so the weekly routine is a stored program A started by hand with the minutes from the watering plan, the dial back on SYSTEM OFF between runs when every zone is manual, and the programmed schedule left for the few who want it.",
+      "outline": [
+        "Quick answer: which Hunter you have (the model name is on the faceplate) and the one weekly move — dial to RUN, hold the right arrow about two seconds to start program A, dial back to SYSTEM OFF when it finishes",
+        "The models you will actually find on a Southwest Florida wall: X-Core and X2 (the common builder dial box, rain-sensor slide switch under the dial), Pro-C (larger, expandable with zone modules), Hydrawise HC / Pro-HC / HPC faceplate (no dial — touchscreen plus the Hydrawise app) — one paragraph each, what the faceplate looks like, who it suits",
+        "The one thing to know about a Hunter dial: nothing waters unless the dial is on RUN, which is why a box left on SYSTEM OFF looks broken and is not",
+        "Honest review — pros: the one-touch manual start is the simplest weekly move of any major brand; the rain-sensor bypass is a labeled slide switch rather than a menu; Pro-C expands with modules; Hydrawise puts real scheduling in an app. Cons: four start-time slots per program and three programs (A/B/C) hide an inherited builder schedule; the Manual dial position runs only ONE zone, so the whole-lawn run has to come from a stored program; Hydrawise needs Wi-Fi and an account. Include a ComparisonTable of the models (dial or app, expandable, manual-run control, rain-sensor control, best for) with NO prices, and an HonestRejection: who should not bother programming a schedule at all",
+        "How to run it by hand (HowTo, visible numbered steps), taken from the Waves Hunter guide: the one-time setup (store the plan's minutes in program A under Run Times; clear all four start-time slots in programs A, B and C under Start Times; dial to SYSTEM OFF) and then the weekly run (dial to RUN, hold the right arrow about two seconds for the one-touch start, dial back to SYSTEM OFF the same day). Mixed yards: if beds or drip still need automatic watering, keep those programs, zero the grass zones inside them, leave the dial on RUN, and use Manual One Station for grass instead",
+        "Hydrawise owners: run grass zones from the app or touchscreen for the plan's minutes, give beds and drip their own shorter runs, and remove grass zones from automatic programs rather than deleting programs other zones still need",
+        "Watering rules: a hand run counts the same as a scheduled one — run it only on your assigned day and inside your county's allowed hours; those come from the county and the current water-shortage order and change; Waves lawn customers get a weekly watering plan with the minutes per zone and whether to skip the week",
+        "Want it to run itself? The optional schedule (dial models): set the date and time and check AM/PM twice, use ONE grass-only program, a single start time inside allowed hours with the other three slots OFF, minutes per zone under Run Times, Water Days set to the assigned day only, dial back to RUN; controller-wide rain delay from SYSTEM OFF; leave Seasonal Adjust at 100% because a percentage set once scales every later run-time entry; leave the rain-sensor switch on Active",
+        "When the sprinklers will not run: Waves does not repair irrigation — a zone that will not come on, a broken head, or a box fault goes to an irrigation contractor; Waves still tells you what to water and when",
+        "FAQ (4–6 questions): where is the model name; does SYSTEM OFF erase my programs; why did my sprinklers come on at noon (AM/PM); can I run one zone only; what does Seasonal Adjust do; what is the slide switch under the dial"
+      ],
+      "sources": [
+        "https://www.wavespestcontrol.com/sprinkler-timers/hunter/",
+        "https://www.wavespestcontrol.com/sprinkler-timers/",
+        "https://www.hunterirrigation.com/",
+        "MECHANICS SOURCE, binding: every dial position, button name and manual-run step in this post must match the Waves Hunter guide at /sprinkler-timers/hunter/ (owner-reviewed and live). Hunter's own site returns 403 to automated requests, so the manuals CANNOT be fetched to verify against — therefore do not introduce any control, button, menu or step that the Waves guide does not already describe, and do not paraphrase a manual from memory. Link hunterirrigation.com as the manufacturer's authority and tell the reader to search their model name there; do not deep-link a manual page you cannot open.",
+        "NO HISTORY SECTION unless it can be sourced: the Rain Bird companion post carries a founding-history section because rainbird.com/about is fetchable. hunterindustries.com is not. If the About page still cannot be opened at draft time, OMIT the history section entirely rather than writing founding facts from memory."
+      ],
+      "internal_links": [
+        "/lawn-care-sarasota-fl/",
+        "/lawn-treatment-prep/",
+        "/lawn-care/overwatering-lawn-vs-underwatering/",
+        "/lawn-care/rain-bird-sprinkler-timer-guide/"
+      ],
+      "verify_notes": [
+        "Every controller mechanic must match /sprinkler-timers/hunter/ exactly: the Manual dial position runs ONE station (the whole-lawn run comes from stored program A started with the one-touch right-arrow hold from RUN); Start Times has FOUR slots per program across programs A, B and C; the rain-sensor control is a slide switch reading Active / Bypass; a controller-wide rain delay is set from SYSTEM OFF. If a step is not in that guide, OMIT it — Hunter's site cannot be fetched to check, so an invented button ships uncorrected.",
+        "Do not state how many watering days per week are allowed, which weekday, or which hours — anywhere, including the FAQ. Say 'your assigned day and your county's allowed hours'.",
+        "Do not claim Waves installs, services, adjusts or repairs irrigation. The referral to an irrigation contractor is mandatory.",
+        "No prices for any controller or module; no 'safe' language; no manufacturer imagery or reproduced manual text — link the manufacturer site instead.",
+        "Seasonal Adjust must be described as persistent (it scales every later run-time entry) and the advice must be to leave it at 100% when following weekly minutes.",
+        "SYSTEM OFF is the resting position ONLY when every zone is manual. Wherever the post tells the reader to leave the dial on SYSTEM OFF, it must carry the mixed-yard caveat that beds and drip on their own schedules need the dial left on RUN — this is the single easiest way for this post to cost a reader their landscaping.",
+        "No promise that any of this prevents a problem, fixes a dry spot, or that the lawn will improve — describe what the control does, conditionally (writer-agent-config PREVENTION_PROMISE).",
+        "REQUIRED HUB LINK: the post must link the lawn care service page /lawn-care-sarasota-fl/ as a natural in-body anchor (the content quality gate's hub_link_present hard check accepts a /lawn-care-{city}-fl/ page for lawn posts; /contact/ and blog posts do not count)."
+      ]
+    }
+  ]
+}
