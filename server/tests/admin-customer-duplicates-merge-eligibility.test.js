@@ -135,4 +135,26 @@ describe('dismiss', () => {
     expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id_a: WINNER, customer_id_b: LOSER, reason: 'two tenants' }));
     expect(mockAcquirePairLock.mock.invocationCallOrder[0]).toBeLessThan(chain.insert.mock.invocationCallOrder[0]);
   });
+
+  test('folds UUID case before ordering, locking and inserting — an uppercase id sorts ahead of a lowercase one, so the raw pair stored the reverse of the canonical key findDuplicateGroups looks for and the dismissal silently never took effect (Codex r15 P2)', async () => {
+    const db = require('../models/db');
+    const chain = {};
+    for (const m of ['insert', 'onConflict']) chain[m] = jest.fn(() => chain);
+    chain.ignore = jest.fn(async () => 1);
+    const trx = jest.fn(() => chain);
+    db.transaction = jest.fn(async (cb) => cb(trx));
+    // 'B' (0x42) sorts BEFORE 'a' (0x61), so the raw ordering was reversed.
+    const UPPER_B = 'B0000000-0000-4000-8000-00000000000A';
+    const LOWER_A = 'a0000000-0000-4000-8000-00000000000b';
+    const res = await post('/dismiss', { customerIdA: UPPER_B, customerIdB: LOWER_A, reason: 'separate households' });
+    expect(res.status).toBe(200);
+    expect(mockAcquirePairLock).toHaveBeenCalledWith(trx, LOWER_A, UPPER_B.toLowerCase());
+    expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ customer_id_a: LOWER_A, customer_id_b: UPPER_B.toLowerCase() }));
+  });
+
+  test('the same customer in two cases is not a distinct pair', async () => {
+    const id = 'a0000000-0000-4000-8000-00000000000b';
+    const res = await post('/dismiss', { customerIdA: id.toUpperCase(), customerIdB: id });
+    expect(res.status).toBe(400);
+  });
 });

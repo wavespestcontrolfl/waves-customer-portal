@@ -2340,6 +2340,25 @@ describe('predictLoserStateDiscarded (the loser state the merge never copies —
   });
 });
 
+describe('stableStringify / normalizeDisclosedTimestamps (Codex r15 P1)', () => {
+  const { stableStringify, normalizeDisclosedTimestamps } = dedupe._test;
+  const d = new Date('2026-03-04T05:06:07.000Z');
+
+  it('serializes a Date as its ISO string instead of {}, at any depth', () => {
+    expect(stableStringify(d)).toBe('"2026-03-04T05:06:07.000Z"');
+    expect(stableStringify({ a: d })).toBe('{"a":"2026-03-04T05:06:07.000Z"}');
+    expect(stableStringify([{ a: d }])).toBe('[{"a":"2026-03-04T05:06:07.000Z"}]');
+  });
+
+  it('normalizes Dates through nested objects and arrays and leaves everything else identical', () => {
+    expect(normalizeDisclosedTimestamps({ a: [{ b: d }], c: 1, e: null })).toEqual({ a: [{ b: '2026-03-04T05:06:07.000Z' }], c: 1, e: null });
+    // Non-plain objects other than Date are returned as-is, never rebuilt
+    // into an index map.
+    const buf = Buffer.from('x');
+    expect(normalizeDisclosedTimestamps({ buf }).buf).toBe(buf);
+  });
+});
+
 describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-owned)', () => {
   const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
   const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', billing_mode: null, per_application_fee: null, account_credits: '0', address_line1: '100 Test St', email: null };
@@ -2384,6 +2403,26 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
     install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
+  });
+
+  it('renders and pins transferred timestamps as ISO strings — Postgres returns a Date, a Date has no own keys, so it used to serialize as {} in both the card and the fingerprint (Codex r15 P1)', async () => {
+    const loserWithConsent = (iso) => ({
+      ...loser,
+      service_contact_name: 'Tenant',
+      service_contacts_consent_at: new Date(iso),
+      service_contacts_consent_source: 'portal',
+      service_contacts_consent_text_version: 'v3',
+    });
+    install({});
+    const out = await dedupe.describeMergeEffects(db, winner, loserWithConsent('2026-03-04T05:06:07.000Z'));
+    expect(out.financial_effects.winner_backfills.service_contacts_consent_at).toBe('2026-03-04T05:06:07.000Z');
+    expect(JSON.parse(out.fingerprint).financial_effects.winner_backfills.service_contacts_consent_at).toBe('2026-03-04T05:06:07.000Z');
+    // And it MOVES the fingerprint: the bug pinned EVERY Date as the same
+    // `{}`, so an edited consent stamp during the pending window read as no
+    // change at all.
+    install({});
+    const later = await dedupe.describeMergeEffects(db, winner, loserWithConsent('2026-03-04T05:06:08.000Z'));
+    expect(later.fingerprint).not.toBe(out.fingerprint);
   });
 
   it('discloses and pins the loser state the merge never copies (Codex r14 P1)', async () => {

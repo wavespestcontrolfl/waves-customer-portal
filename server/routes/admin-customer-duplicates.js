@@ -609,10 +609,20 @@ router.post('/merges/:journalId/revert', async (req, res) => {
 
 router.post('/dismiss', async (req, res) => {
   const { customerIdA, customerIdB, reason } = req.body || {};
-  if (!UUID_RE.test(String(customerIdA)) || !UUID_RE.test(String(customerIdB)) || customerIdA === customerIdB) {
+  // UUID_RE accepts either case and Postgres canonicalizes what it stores, so
+  // the raw strings are folded to lowercase BEFORE the distinctness check, the
+  // ordering, the lock key and the insert (codex #4348 r14 P2 — the same class
+  // as the r10 advisory-lock P1). Ordering raw strings put an uppercase
+  // `B...` ahead of a lowercase `a...`; the row then stored canonically as
+  // `b...:a...` while findDuplicateGroups looks for `a...:b...`, so the
+  // endpoint returned 200 and the dismissal silently never took effect. The
+  // same fold makes `A...` and `a...` the same customer for the 400.
+  const idA = customerIdA == null ? '' : String(customerIdA).trim().toLowerCase();
+  const idB = customerIdB == null ? '' : String(customerIdB).trim().toLowerCase();
+  if (!UUID_RE.test(idA) || !UUID_RE.test(idB) || idA === idB) {
     return res.status(400).json({ error: 'customerIdA and customerIdB must be distinct customer UUIDs' });
   }
-  const [a, b] = customerIdA < customerIdB ? [customerIdA, customerIdB] : [customerIdB, customerIdA];
+  const [a, b] = idA < idB ? [idA, idB] : [idB, idA];
   try {
     // Under the pair's adjudication lock: a confirmed-card merge of this
     // pair re-decides eligibility under the same lock, so a verdict here

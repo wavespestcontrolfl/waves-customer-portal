@@ -4886,11 +4886,37 @@ async function previewCollectionCaseReconciliation(database, winnerId, loserId) 
 // their (meaning-bearing, source-pinned) order. Used for the effects
 // fingerprint the executor re-derives under its locks and compares exactly.
 function stableStringify(value) {
+  // A Date has no own enumerable keys, so the object branch below used to
+  // serialize EVERY timestamp as `{}` (codex #4348 r14 P1). Handled here as
+  // well as in normalizeDisclosedTimestamps so a Date introduced by a future
+  // reader can never silently collapse out of the fingerprint again.
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value && typeof value === 'object') {
     return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
   }
   return JSON.stringify(value === undefined ? null : value);
+}
+
+// Postgres returns every timestamp column as a Date object. A Date has no
+// own enumerable keys, so it serialized as `{}` in the fingerprint AND the
+// authorization contract's object renderer treated it as empty — the loser's
+// service_contacts_consent_at transferred onto the winner without appearing
+// on the card and without being pinned (codex #4348 r14 P1). This is true of
+// EVERY timestamp the effect set discloses, not just the consent stamp, so it
+// is normalized once over the whole set rather than at each reader: the card
+// renders the ISO string the operator approves, and that same string is what
+// the executor's locked recheck compares. Non-plain objects other than Date
+// are left exactly as they are rather than rebuilt into index maps.
+function normalizeDisclosedTimestamps(value) {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(normalizeDisclosedTimestamps);
+  if (value && typeof value === 'object' && (value.constructor === Object || value.constructor === undefined)) {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = normalizeDisclosedTimestamps(value[k]);
+    return out;
+  }
+  return value;
 }
 
 // EVERYTHING a merge of (winner, loser) would do beyond the row retire,
@@ -5043,8 +5069,12 @@ async function describeMergeEffects(database, winner, loser) {
   // pinned at the source instead: stamped sessions sort by
   // (payment_intent_id, invoice_id) and live collection cases by
   // (approved_at desc, id) — both unique — so equal reads serialize equal.
-  const fingerprint = stableStringify({ moving, financial_effects });
-  return { moving, financial_effects, fingerprint };
+  // ISO-normalized BEFORE the fingerprint and before the card sees them, so
+  // the operator approves the same string the locked recheck compares.
+  const disclosedMoving = normalizeDisclosedTimestamps(moving);
+  const disclosedEffects = normalizeDisclosedTimestamps(financial_effects);
+  const fingerprint = stableStringify({ moving: disclosedMoving, financial_effects: disclosedEffects });
+  return { moving: disclosedMoving, financial_effects: disclosedEffects, fingerprint };
 }
 
 module.exports = {
@@ -5104,6 +5134,8 @@ module.exports = {
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,
+    stableStringify,
+    normalizeDisclosedTimestamps,
     resetFkCache: () => { fkColumnsCache = null; },
   },
 };
