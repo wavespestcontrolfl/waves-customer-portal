@@ -550,8 +550,11 @@ function ConversationViewV2({
   const canOpenProfile = !!(thread.customerName && thread.customerId);
   // Only a thread with no customer behind it can be spam. customerId is
   // the authoritative link (a linked customer can lack a display name);
-  // a customer's or open lead's number is refused server-side anyway.
-  const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && typeof onMarkSpam === "function";
+  // a customer's or open lead's number is refused server-side anyway. The
+  // action is about a SENDER, so a thread the office started by texting an
+  // unlinked number (outbound only, nothing ever received) does not offer it.
+  const hasInbound = Array.isArray(thread.messages) && thread.messages.some((m) => m.direction === "inbound");
+  const canMarkSpam = !thread.customerId && !thread.customerName && !!contactPhone && hasInbound && typeof onMarkSpam === "function";
   return (
     <div className="flex flex-col h-full">
       {" "}
@@ -2036,7 +2039,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       : "";
     const recentNewestMessages = customer
       ? customerMessages.filter((message) => message.channel === "sms"
-          && phoneKey(message.contactPhone) === requestRecipientKey
+          && smsThreadKey(message.contactPhone) === requestRecipientKey
           && phoneKey(message.ourEndpointId) === requestFromNumberKey).slice(0, 8)
       : activeThreadMatchesRecipient && Array.isArray(activeThread?.messages)
         ? activeThread.messages
