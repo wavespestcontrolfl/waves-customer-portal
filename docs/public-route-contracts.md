@@ -222,7 +222,17 @@ create customer/account rows or guess a customer name from message prose.
 Substantive messages ring a per-message `new_lead` bell/push linking to the
 inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
-including replies that return early. Failure to persist that source returns
+including replies that return early. STOP/HELP/START handling (opt-out
+suppression + the `<Message>` confirmation TwiML) applies only to a sender
+Waves has messaged: a matched customer, the AI assistant line, a
+provider-accepted outbound `sms_log`/unified `messages` row (excluding
+operator alerts — by current phone AND by a durable `to_owner_phone_at_send`
+send-time stamp, so a later ADAM_PHONE change can't un-exclude a historical
+alert — the AI assistant's own auto-replies, and push-only touchpoints;
+unified fallback requires a Twilio message SID and phone identities preserve
+country codes), or an active
+`messaging_suppression` row; any other sender's text is ordinary inbound
+(empty TwiML, no reply, no suppression). The eligibility lookup fails open. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
