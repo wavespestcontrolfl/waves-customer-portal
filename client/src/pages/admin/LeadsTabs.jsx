@@ -2571,7 +2571,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                       {stageLeads.length}
                     </span>{" "}
                   </div>{" "}
-                  <div className="overflow-y-auto flex flex-col gap-[8px]">
+                  <div className="max-h-[70vh] overflow-y-auto flex flex-col gap-[8px]">
                     {stageLeads.map((lead) => (
                       <div
                         key={lead.id}
