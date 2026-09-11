@@ -1321,22 +1321,60 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(out.deferred).toBeUndefined();
     });
 
-    test('a non-ask uncertain shared send never expects an ask reservation', async () => {
+    test('a non-ask send whose pre-send fence cannot be stored is refused before the provider', async () => {
       const mock = makeMock({
         customers: [{ id: 'uq-checkin', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
         review_requests: [{ id: 'rr-uq-checkin', customer_id: 'uq-checkin', status: 'pending', channel: 'sms', template_key: 'resolution_check', token: 'tuqc', location_id: 'venice', created_at: new Date() }],
       }, { throwUpdateFor: ['review_requests'] });
       db.mockImplementation(mock);
-      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_ERROR' });
 
       const out = await ReviewService.sendSMS('rr-uq-checkin');
 
-      // codex #4338 P1 round 3: the non-ask uncertain guard's own
-      // deferred-status write is wrapped in its own try/catch so a
-      // bookkeeping failure (review_requests update throws here) never
-      // escapes to the outer catch's generic 5-minute retry — the outcome
-      // is already known ambiguous, so it still reports held, not queued.
+      // Pre-push codex P1 on #4331: a non-ask template has no sms_log
+      // reservation, so the pending row itself must be fenced BEFORE the
+      // provider call. If that fence cannot be stored, nothing is sent — a
+      // due row simply retries on its own, with no duplicate risk.
+      expect(out).toEqual({ refused: 'send_fence_unstored' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a non-ask uncertain send whose deferred write fails stays fenced, not due (pre-push codex P1 on #4331)', async () => {
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-checkin2', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-checkin2', customer_id: 'uq-checkin2', status: 'pending', channel: 'sms', template_key: 'resolution_check', token: 'tuqc2', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      }, { onUpdate: (table, patch) => { if (table === 'review_requests' && patch.status === 'deferred') throw new Error('pg blip on deferred write'); } });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', retryable: true, code: 'PROVIDER_ERROR' });
+
+      const out = await ReviewService.sendSMS('rr-uq-checkin2');
+
+      // codex #4338 P1 round 3: the deferred write's failure never escapes
+      // to the outer catch's 5-minute retry — the outcome is known ambiguous.
       expect(out).toEqual({ deferred: 'provider_uncertain', nextAllowedAt: null });
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      // And the row is NOT left due: the pre-send fence pushed scheduled_for
+      // past the spacing window, so processScheduled cannot resend a text the
+      // customer may already hold.
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending');
+      expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 71 * 3600000);
+    });
+
+    test('an accepted non-ask send clears its pre-send fence with the sent stamp', async () => {
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'uq-checkin3', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-checkin3', customer_id: 'uq-checkin3', status: 'pending', channel: 'sms', template_key: 'resolution_check', token: 'tuqc3', location_id: 'venice', created_at: new Date(), scheduled_for: due }],
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-ok' });
+
+      await ReviewService.sendSMS('rr-uq-checkin3');
+
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('sent');
+      expect(row.scheduled_for).toEqual(due);
     });
 
     test('processScheduled counts only delivered sends — a held row is reported held (codex #4156 r1 P2)', async () => {
@@ -4001,11 +4039,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       await ReviewService.sendSMS('rr-th4');
 
       const row = mock.__state.rows.review_requests[0];
-      // The write failed, so status could not flip to 'deferred' — but it
-      // must ALSO never gain a scheduled_for: processScheduled only ever
-      // picks whereNotNull('scheduled_for'), so an unset scheduled_for is
-      // what actually keeps this row out of an automatic resend.
-      expect(row.scheduled_for).toBeUndefined();
+      // The write failed, so status could not flip to 'deferred' — but the
+      // row must never become DUE: the non-ask pre-send fence (pre-push
+      // codex P1 on #4331) already pushed scheduled_for past the spacing
+      // window before the provider call, so processScheduled (which picks
+      // scheduled_for <= now) keeps this row out of an automatic resend.
+      expect(row.status).toBe('pending');
+      expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 71 * 3600000);
     });
 
     test('sendSMS on an ordinary pre-handoff throw (no providerOutcome) still retries exactly as before', async () => {

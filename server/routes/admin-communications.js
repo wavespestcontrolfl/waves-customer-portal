@@ -1021,6 +1021,13 @@ router.post('/sms', async (req, res, next) => {
       if (claimedReviewRequestId && !reviewSettlementAttempted && !ambiguousProviderOutcome) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
+      // A refusal BEFORE provider entry (dispatchReviewAsk's spacing / busy /
+      // history-unavailable refusals, a prep-link recheck refusal) never ran
+      // sendAndSettle, so nothing settled the reservation the claimed-link
+      // seam took under the lock — hand it back, or it holds the 72-hour
+      // window with no provider attempt behind it (pre-push codex P1 on
+      // #4331). Once the provider was entered, sendAndSettle owns it.
+      if (!reviewProviderStarted) await releaseLockedReviewReservation();
       if (!ambiguousProviderOutcome) {
         await reopenScheduledSuggestions({
           decisionIds: [claimedDecisionId, ...parkedThreadIds],
@@ -1205,6 +1212,9 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
     }
+    // Same rule as the refused-result branch: a throw before provider entry
+    // (dispatch itself failing) leaves the lock-held reservation unsettled.
+    if (!reviewProviderStarted) await releaseLockedReviewReservation();
     // A throw carrying an explicit uncertain provider outcome holds the
     // bearer state exactly as the
     // resolved-result branch does (GH Codex #3851 r5 P1): the provider may
