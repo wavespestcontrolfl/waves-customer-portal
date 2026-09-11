@@ -1078,6 +1078,13 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
   // flag decides `owned_by` for stations mapped later (termite-stations.js).
   if (loser.termite_stations_rented === true && winner.termite_stations_rented !== true) {
     backfills.termite_stations_rented = true;
+    // The column is NOT NULL (migration 20260726000003). Every backfill
+    // without a journaled prior is VACATED TO NULL by revertMerge, which
+    // would throw and roll back the entire undo — so the winner's own
+    // pre-merge `false` is recorded explicitly here (pre-push audit P1 on
+    // the r15 fix). The restore pass keeps a literal `false`; only null and
+    // undefined priors are skipped.
+    winnerPriorValues.termite_stations_rented = false;
   }
   return { backfills, winnerPriorValues };
 }

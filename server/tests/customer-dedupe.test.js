@@ -2297,7 +2297,12 @@ describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by th
   it('carries a loser-side rented-termite-station flag onto the winner with OR semantics — the flag is the only ownership evidence when no stations were ever mapped, and clearing it makes a later cancellation report no_rented_stations (Codex r15 P1)', () => {
     const winner = { id: 'W', termite_stations_rented: false };
     const loser = { id: 'L', termite_stations_rented: true };
-    expect(dedupe.predictWinnerBackfills(winner, loser).backfills.termite_stations_rented).toBe(true);
+    const carried = dedupe.predictWinnerBackfills(winner, loser);
+    expect(carried.backfills.termite_stations_rented).toBe(true);
+    // The column is NOT NULL, and revertMerge vacates any backfill without a
+    // journaled prior to null — so the winner's own `false` must be recorded
+    // or the undo throws and rolls back entirely.
+    expect(carried.winnerPriorValues.termite_stations_rented).toBe(false);
     // Nothing to carry when the survivor already rents, or when neither does —
     // the backfill must not churn the row or the fingerprint.
     expect(dedupe.predictWinnerBackfills({ id: 'W', termite_stations_rented: true }, loser).backfills.termite_stations_rented).toBeUndefined();

@@ -1033,6 +1033,27 @@ describe('revertMerge', () => {
     id: LOSER, active: false, deleted_at: '2026-07-30T04:40:00Z', phone: `merged-${LOSER.slice(0, 8)}`,
   });
 
+  it("restores the winner's own termite_stations_rented=false instead of vacating a NOT NULL column to null — a backfill with no journaled prior is cleared to null, which would throw and roll back the WHOLE undo (pre-push audit P1 on the r15 fix)", async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = { termite_stations_rented: true };
+    // The priors live INSIDE repointed_ids (that is what revertMerge parses).
+    journal.repointed_ids.winner_prior_values = { termite_stations_rented: false };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), termite_stations_rented: true },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+
+    expect(state.winnerPatch.termite_stations_rented).toBe(false);
+  });
+
   it('restores the irrigation weekly delivery identity (trigger_event_id) for exactly the journaled rows (hook P1 on 47b0a3146)', async () => {
     const journal = baseJournal();
     journal.repointed_ids.irrigation_trigger_ids = ['em1', 'em2'];
