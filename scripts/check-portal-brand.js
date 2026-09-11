@@ -290,18 +290,45 @@ function checkFile(filePath) {
 // =========================================================================
 // Main
 // =========================================================================
+function reportRegressions(regressions) {
+  const total = regressions.reduce((a, e) => a + e.violations.length, 0);
+  console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} across ${regressions.length} file${regressions.length === 1 ? '' : 's'} over baseline:\n`);
+  for (const { file, violations, allowed } of regressions) {
+    console.error(`  ${file}  (${violations.length} found, ${allowed} allowed)`);
+    for (const v of violations) {
+      console.error(`    ${file}:${v.line}  [${v.rule}]  ${v.msg}`);
+      console.error(`      > ${v.snippet}`);
+    }
+    console.error('');
+  }
+  console.error('Fix the violations above. Do not raise a LEGACY_BASELINE number to make this pass —');
+  console.error('the list exists to shrink, and a customer surface has no floor under 14px or weight over 700.');
+}
+
+function reportSlack(slack) {
+  console.error(`\n[check-portal-brand] baseline is behind the code — ${slack.length} entr${slack.length === 1 ? 'y has' : 'ies have'} fewer violations than allowed. Lower the allowance to what is actually left, or delete the line at zero:`);
+  for (const { file, found, allowed } of slack) {
+    console.error(found === 0
+      ? `  delete  '${file}',            (was ${allowed}, now clean)`
+      : `  lower   '${file}': ${found},   (was ${allowed})`);
+  }
+}
+
 function main() {
   let files = [];
   for (const d of SCAN_DIRS) files = files.concat(walk(d));
 
+  const counts = new Map();
   const perFile = [];
   for (const f of files) {
     const v = checkFile(f);
-    if (v.length) perFile.push({ file: path.relative(ROOT, f), violations: v });
+    const rel = path.relative(ROOT, f);
+    counts.set(rel, v.length);
+    if (v.length) perFile.push({ file: rel, violations: v });
   }
 
-  // A file's allowance is its baseline entry, or zero if it has none. Anything
-  // at or under its allowance is known debt; anything over it is new and fails.
+  // A file's allowance is its baseline entry, or zero if it has none. Over the
+  // allowance is a regression and fails.
   const regressions = [];
   let carried = 0;
   for (const entry of perFile) {
@@ -310,39 +337,29 @@ function main() {
     else carried += entry.violations.length;
   }
 
-  // A baseline entry for a file that is now clean (or gone) is stale. Failing
-  // on it is what makes the list shrink instead of ossifying.
-  const seen = new Set(perFile.map((e) => e.file));
-  const stale = Object.keys(LEGACY_BASELINE).filter((f) => !seen.has(f));
+  // Under the allowance fails too. An allowance left above what the file
+  // actually carries is headroom for the cleaned-up violations to come back
+  // silently — drop NotificationBell from 11 to 1 and the entry would still
+  // wave ten through. The number has to follow the code down, and the line has
+  // to go at zero, which is what keeps this list a ratchet rather than a
+  // permanent exemption list.
+  const slack = [];
+  for (const [file, allowed] of Object.entries(LEGACY_BASELINE)) {
+    const found = counts.has(file) ? counts.get(file) : 0;
+    if (found < allowed) slack.push({ file, found, allowed });
+  }
 
-  if (!regressions.length && !stale.length) {
+  if (!regressions.length && !slack.length) {
+    const files_n = Object.keys(LEGACY_BASELINE).length;
     const debt = carried
-      ? ` — ${carried} baselined violation${carried === 1 ? '' : 's'} in ${Object.keys(LEGACY_BASELINE).length} legacy file${Object.keys(LEGACY_BASELINE).length === 1 ? '' : 's'} still to clear`
+      ? ` — ${carried} baselined violation${carried === 1 ? '' : 's'} in ${files_n} legacy file${files_n === 1 ? '' : 's'} still to clear`
       : '';
     console.log(`[check-portal-brand] clean — scanned ${files.length} files, no new violations${debt}.`);
     process.exit(0);
   }
 
-  if (regressions.length) {
-    const total = regressions.reduce((a, e) => a + e.violations.length, 0);
-    console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} across ${regressions.length} file${regressions.length === 1 ? '' : 's'} over baseline:\n`);
-    for (const { file, violations, allowed } of regressions) {
-      console.error(`  ${file}  (${violations.length} found, ${allowed} allowed)`);
-      for (const v of violations) {
-        console.error(`    ${file}:${v.line}  [${v.rule}]  ${v.msg}`);
-        console.error(`      > ${v.snippet}`);
-      }
-      console.error('');
-    }
-    console.error('Fix the violations above. Do not raise a LEGACY_BASELINE number to make this pass —');
-    console.error('the list exists to shrink, and a customer surface has no floor under 14px or weight over 700.');
-  }
-
-  if (stale.length) {
-    console.error(`\n[check-portal-brand] stale baseline — ${stale.length} entr${stale.length === 1 ? 'y is' : 'ies are'} clean now. Delete ${stale.length === 1 ? 'this line' : 'these lines'} from LEGACY_BASELINE:`);
-    for (const f of stale) console.error(`  '${f}',`);
-  }
-
+  if (regressions.length) reportRegressions(regressions);
+  if (slack.length) reportSlack(slack);
   process.exit(1);
 }
 
