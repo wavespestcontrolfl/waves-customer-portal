@@ -186,7 +186,9 @@ router.post('/resolve', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const key = typeof body.key === 'string' ? body.key.trim() : '';
   if (!KEY_RE.test(key)) return res.status(400).json({ ok: false, reason: 'invalid_payload', error: 'key: 1-120 chars of letters, digits, . _ : -' });
   const successes = Number.isInteger(body.successes) && body.successes > 0 ? body.successes : null;
-  const resolved = await resolveOpsDigest({ key, source: SOURCE, resolvedBy: successes ? `${SOURCE}:${successes}-clean-runs` : SOURCE });
+  // lockKey = the dedupeKey the ingest writes for this key, so resolve and a
+  // concurrent recurrence serialize under one advisory lock.
+  const resolved = await resolveOpsDigest({ key, source: SOURCE, lockKey: `${SOURCE}:${key}`, resolvedBy: successes ? `${SOURCE}:${successes}-clean-runs` : SOURCE });
   logger.info(`[ops-digest-ingest] ${key}: resolve → ${resolved} row(s)`);
   return res.status(200).json({ ok: true, resolved });
 });

@@ -826,6 +826,12 @@ function pushTagFor(triggerKey, payload = {}) {
     // push-only attempt. Different caller windows still have distinct tags.
     return `waves-repeat_caller-${payload.repeatCallerDeliveryId || payload.callLogId || 'unknown-call'}`;
   }
+  if (triggerKey === 'payment_failed' && (payload.attemptId || payload.paymentIntentId)) {
+    // Per-attempt tag: the service worker replaces same-tag pushes with
+    // renotify:false, so two customers' failures before the first is
+    // dismissed must not collapse into one banner (codex P2 on #4392).
+    return `waves-payment_failed-${payload.attemptId || payload.paymentIntentId}`;
+  }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,
     // so two customer emails must not collapse into one banner (hook P1).

@@ -264,13 +264,13 @@ describe('POST /resolve (fall-off rule)', () => {
     const { status, json } = await resolve({ key: 'e22-schedule-integrity:overlaps', successes: 3 });
     expect(status).toBe(200);
     expect(json).toEqual({ ok: true, resolved: 2 });
-    expect(mockResolve).toHaveBeenCalledWith({ key: 'e22-schedule-integrity:overlaps', source: 'ops-crons', resolvedBy: 'ops-crons:3-clean-runs' });
+    expect(mockResolve).toHaveBeenCalledWith({ key: 'e22-schedule-integrity:overlaps', source: 'ops-crons', lockKey: 'ops-crons:e22-schedule-integrity:overlaps', resolvedBy: 'ops-crons:3-clean-runs' });
   });
 
   test('nothing standing is still a 200 with resolved 0; bad key is 400', async () => {
     mockResolve.mockResolvedValue(0);
     expect((await resolve({ key: 'never-rang' })).json).toEqual({ ok: true, resolved: 0 });
-    expect(mockResolve).toHaveBeenCalledWith({ key: 'never-rang', source: 'ops-crons', resolvedBy: 'ops-crons' });
+    expect(mockResolve).toHaveBeenCalledWith({ key: 'never-rang', source: 'ops-crons', lockKey: 'ops-crons:never-rang', resolvedBy: 'ops-crons' });
     expect((await resolve({ key: 'has spaces' })).status).toBe(400);
     expect((await resolve({})).status).toBe(400);
   });

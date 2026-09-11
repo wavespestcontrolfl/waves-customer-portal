@@ -2910,6 +2910,10 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
     // ledger row — no-show-fee intents) falls back to the
     // waves_customer_id every PI is minted with (services/stripe.js).
     customerId: customer?.id || paymentIntent.metadata?.waves_customer_id || null,
+    // Per-attempt push identity (notification-triggers pushTagFor): two
+    // failures must not replace each other on the phone.
+    paymentIntentId: piId,
+    attemptId,
   });
 }
 

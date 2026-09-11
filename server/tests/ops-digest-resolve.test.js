@@ -8,6 +8,13 @@
 const mockDb = jest.fn();
 mockDb.fn = { now: jest.fn(() => 'NOW()') };
 mockDb.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+// transaction: a trx that is the same builder factory; its raw records the advisory lock
+const mockTrxRaw = jest.fn(async () => undefined);
+mockDb.transaction = jest.fn(async (fn) => {
+  const trx = (table) => mockDb(table);
+  trx.raw = (sql, bindings) => (/pg_advisory/.test(String(sql)) ? mockTrxRaw(sql, bindings) : { sql, bindings });
+  return fn(trx);
+});
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -22,7 +29,7 @@ function chain(updateResult) {
   return q;
 }
 
-beforeEach(() => { mockDb.mockReset(); mockDb.raw.mockClear(); });
+beforeEach(() => { mockDb.mockReset(); mockDb.raw.mockClear(); mockDb.transaction.mockClear(); mockTrxRaw.mockClear(); });
 
 test('retires not-yet-resolved rows (read or unread) by opsKey + source and stamps resolved metadata', async () => {
   const q = chain(2);
@@ -69,3 +76,22 @@ test('a DB failure reads as 0, never throws', async () => {
   mockDb.mockReturnValue(q);
   await expect(resolveOpsDigest({ key: 'k2', source: 'ops-crons' })).resolves.toBe(0);
 });
+
+test('lockKey: the retire runs in a transaction under the same advisory lock notifyAdmin dedupe takes', async () => {
+  const q = chain(1);
+  mockDb.mockReturnValue(q);
+  const n = await resolveOpsDigest({ key: 'e22:overlaps', source: 'ops-crons', lockKey: 'ops-crons:e22:overlaps' });
+  expect(n).toBe(1);
+  expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+  expect(mockTrxRaw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['admin:ops-crons:e22:overlaps']);
+  expect(q.update).toHaveBeenCalledTimes(1);
+});
+
+test('no lockKey: no transaction, no lock', async () => {
+  const q = chain(1);
+  mockDb.mockReturnValue(q);
+  await resolveOpsDigest({ key: 'k' });
+  expect(mockDb.transaction).not.toHaveBeenCalled();
+  expect(mockTrxRaw).not.toHaveBeenCalled();
+});
+
