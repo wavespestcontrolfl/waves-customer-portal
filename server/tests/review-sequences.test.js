@@ -288,6 +288,21 @@ describe('review sequences — cadence engine', () => {
     expect(Object.keys(await ReviewService.getActiveSequencesForCustomers(['p1', 'p2', 'p3']))).toEqual(['p2']);
   });
 
+  test('getActiveSequencesForCustomers promises no tick for an active row the runner will retire as stale (codex #4140 r24 P2)', async () => {
+    const mock = makeMock({
+      review_sequences: [
+        { id: 'seqStale', customer_id: 's1', status: 'active', next_run_at: new Date(Date.now() - 8 * 86400000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+        { id: 'seqLate', customer_id: 's2', status: 'active', next_run_at: new Date(Date.now() - 60 * 60000), plan: JSON.stringify([{ channel: 'sms' }]), current_step: 0 },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const map = await ReviewService.getActiveSequencesForCustomers(['s1', 's2']);
+    expect(map.s1).toMatchObject({ staleRetire: true, nextSendTickAt: null });
+    expect(map.s2.staleRetire).toBe(false);
+    expect(map.s2.nextSendTickAt).toBeTruthy();
+  });
+
   test('a cadence stops on a non-promoter draft score tap (no submit)', async () => {
     const mock = makeMock({
       customers: [{ id: 'lo1', first_name: 'Lo', last_name: 'W', phone: '+19410000031', nearest_location_id: 'parrish' }],
@@ -4692,6 +4707,7 @@ describe('shared ask history foundation', () => {
     'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
     'We discussed your Google review yesterday.',
+    'Thanks so much for the Google review you left us!',
   ])('unrelated acknowledgment/support text is not an ask: %s', async body => {
     installHistory({ sms: [{ at: base, body }] });
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
@@ -4725,6 +4741,9 @@ describe('shared ask history foundation', () => {
     'https://www.yelp.com/writeareview/biz/example',
     'https://facebook.com/example/reviews',
     'Please leave a review: https://maps.app.goo.gl/abc123',
+    'We’d appreciate it if you left us a Google review.',
+    'It would mean a lot if you left us a review.',
+    'If you could leave us a quick Google review, that would help.',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
   });

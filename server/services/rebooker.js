@@ -1482,6 +1482,9 @@ class SmartRebooker {
         .update({
           ...updates,
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
+          // The move's own change time (same stamp the series path writes):
+          // SMS follow-up proves a move by the row changing after the request.
+          updated_at: new Date(),
         })
         // The technician on the COMMITTED row: a same-tech move's notice goes
         // to whoever actually holds the visit now, not the unlocked pre-read.

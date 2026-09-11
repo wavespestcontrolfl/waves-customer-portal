@@ -10,6 +10,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { excludeUnresolvedReviewAskReservations } = require('../messaging/review-ask-reservation');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -321,8 +322,10 @@ async function getUnansweredThreads(input) {
     if (seenPhones.has(digits)) continue;
     seenPhones.add(digits);
 
-    // Check for a reply after this message
-    const reply = await db('sms_log')
+    // Check for a reply after this message. An unresolved review-ask
+    // reservation (Codex #4331 P2) is excluded — its unconfirmed placeholder
+    // must not read as a real reply and mask a genuinely unanswered thread.
+    const reply = await excludeUnresolvedReviewAskReservations(db('sms_log'))
       .where('direction', 'outbound')
       .where('created_at', '>', msg.created_at)
       .where(function () {
@@ -383,6 +386,10 @@ async function getConversationThread(input) {
     .modify(qb => {
       if (input.customer_id) qb.where(scope => scope.where('sms_log.customer_id', input.customer_id).orWhereNull('sms_log.customer_id'));
     })
+    // Unresolved review-ask reservations excluded BEFORE the limit (Codex
+    // #4331 P2): the in-flight placeholder must not displace a real message
+    // out of this bounded conversation window — a resolved row still shows.
+    .modify(excludeUnresolvedReviewAskReservations)
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
@@ -429,7 +436,10 @@ async function searchMessages(input) {
   const offset = Math.max(0, Math.trunc(input.offset || 0));
   const since = new Date(Date.now() - days_back * 86400000).toISOString();
 
-  let query = db('sms_log')
+  // Unresolved review-ask reservations excluded BEFORE the limit (Codex
+  // #4331 P2): a still in-flight placeholder must not surface here as a
+  // real sent message — a resolved row still shows.
+  let query = excludeUnresolvedReviewAskReservations(db('sms_log'))
     .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(
@@ -484,14 +494,17 @@ async function searchMessages(input) {
 async function getSmsStats(days) {
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
+  // Unresolved review-ask reservations excluded from every stat (Codex
+  // #4331 P2): an in-flight, unconfirmed placeholder must not inflate the
+  // outbound-count signal — a resolved row still counts normally.
   const [byDirection, byType, byDay] = await Promise.all([
-    db('sms_log').where('created_at', '>=', since)
+    excludeUnresolvedReviewAskReservations(db('sms_log')).where('created_at', '>=', since)
       .select('direction', db.raw('COUNT(*) as count'))
       .groupBy('direction'),
-    db('sms_log').where('created_at', '>=', since)
+    excludeUnresolvedReviewAskReservations(db('sms_log')).where('created_at', '>=', since)
       .select('message_type', db.raw('COUNT(*) as count'))
       .groupBy('message_type').orderByRaw('COUNT(*) DESC'),
-    db('sms_log').where('created_at', '>=', since)
+    excludeUnresolvedReviewAskReservations(db('sms_log')).where('created_at', '>=', since)
       .select(db.raw("DATE(created_at) as day"), db.raw('COUNT(*) as count'), 'direction')
       .groupBy('day', 'direction').orderBy('day'),
   ]);
@@ -513,7 +526,8 @@ async function getSmsStats(days) {
 // Communications → Owed tab and the overdue watchdog use, so the answer
 // here is exactly what the office sees there.
 async function getOpenCommitments(input) {
-  const { listOpenCommitments, selectOverdue, implicitDueAt, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../call-commitments');
+  const { listOpenCommitments, selectOverdue, overdueAt, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../call-commitments');
+  const etMoment = (value) => (value ? etDateString(new Date(value)) + ' ' + new Date(value).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null);
   const { isEnabled } = require('../../config/feature-gates');
   const party = input.party === 'customer' ? 'customer' : input.party === 'all' ? null : 'waves';
   let customerId = input.customer_id || null;
@@ -533,12 +547,14 @@ async function getOpenCommitments(input) {
     party: party || 'all',
     customer: customerLabel,
     // The implicit-deadline rules the queue applies when no time was stated
-    // (Codex #3733 P2): an estimate is due 24 h after the call, a callback by
-    // the end of the call's ET day, other prompts after OVERDUE_IMPLICIT_DAYS.
+    // (Codex #3733 P2): estimates use elapsed hours, callbacks use the active
+    // callback policy, and other prompts use OVERDUE_IMPLICIT_DAYS.
     // Each row also carries its own effective_due_at below.
     implicit_due_rules: {
       send_estimate: `${OVERDUE_IMPLICIT_ESTIMATE_HOURS} hours after the call`,
-      callback: "the end of the call's day (Eastern)",
+      callback: require('../callback-cards').enabled()
+        ? 'four staffed hours after the call, using office hours and blackout dates'
+        : "the end of the call's day (Eastern)",
       other_prompts: `${OVERDUE_IMPLICIT_DAYS} days after the call`,
     },
     total_open: rows.length,
@@ -548,13 +564,12 @@ async function getOpenCommitments(input) {
       party: r.party,
       kind: r.kind,
       description: r.description,
-      due_at: r.due_at ? etDateString(new Date(r.due_at)) + ' ' + new Date(r.due_at).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null,
+      due_at: etMoment(r.due_at),
       // The deadline the queue actually judges: the stated time, else the
-      // kind's implicit one (null for kinds that wait for the office).
-      effective_due_at: (() => {
-        const eff = r.due_at ? new Date(r.due_at) : implicitDueAt(r);
-        return eff ? etDateString(eff) + ' ' + eff.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ET' : null;
-      })(),
+      // kind's implicit one (null for kinds that wait for the office), pushed
+      // out to the end of an active callback snooze.
+      effective_due_at: etMoment(overdueAt(r)),
+      snoozed_until: etMoment(r.snoozed_until),
       overdue: !!r.overdue,
       call_at: r.call_started_at ? new Date(r.call_started_at).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ET' : null,
       customer: [r.customer_first_name, r.customer_last_name].filter(Boolean).join(' ') || null,
@@ -948,9 +963,13 @@ async function getTodaysActivity() {
   const todayStart = parseETDateTime(`${etDateString()}T00:00:00`);
   const since = todayStart.toISOString();
 
+  // Unresolved review-ask reservations excluded (Codex #4331 P2): an
+  // in-flight, unconfirmed placeholder must not inflate today's outbound
+  // count or count as the reply that closes out an unanswered thread — a
+  // resolved row still counts/replies normally.
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
     db('sms_log').where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
-    db('sms_log').where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
+    excludeUnresolvedReviewAskReservations(db('sms_log')).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
     db('call_log').where('created_at', '>=', since)
       .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not today's activity
       .select(
@@ -961,9 +980,12 @@ async function getTodaysActivity() {
     // Count unanswered inbound messages from today
     db('sms_log').where('direction', 'inbound').where('created_at', '>=', since)
       .whereNotExists(function () {
-        this.select(db.raw(1)).from(db.raw('sms_log as reply'))
-          .whereRaw('reply.direction = ?', ['outbound'])
-          .whereRaw('reply.created_at > sms_log.created_at')
+        excludeUnresolvedReviewAskReservations(
+          this.select(db.raw(1)).from(db.raw('sms_log as reply'))
+            .whereRaw('reply.direction = ?', ['outbound'])
+            .whereRaw('reply.created_at > sms_log.created_at'),
+          'reply',
+        )
           .whereRaw("RIGHT(REPLACE(reply.to_phone, '+', ''), 10) = RIGHT(REPLACE(sms_log.from_phone, '+', ''), 10)");
       })
       .count('* as c').first(),

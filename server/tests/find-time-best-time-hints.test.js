@@ -123,7 +123,7 @@ test('hint with the gate off answers gated:true and never touches the engine', a
 test('hint with the gate on runs a single-day search with the new params passed through', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   const res = await post({
-    ...BASE, hint: true, excludeServiceIds: ['svc-1'], slotStepMinutes: 60, topN: 3,
+    ...BASE, hint: true, serviceType: 'Lawn Care', excludeServiceIds: ['svc-1'], slotStepMinutes: 60, topN: 3,
   });
   expect(res.status).toBe(200);
   const body = await res.json();
@@ -135,6 +135,7 @@ test('hint with the gate on runs a single-day search with the new params passed 
   expect(opts.dateTo).toBe('2026-09-01');
   expect(opts.excludeServiceIds).toEqual(['svc-1']);
   expect(opts.slotStepMinutes).toBe(60);
+  expect(opts.serviceType).toBe('Lawn Care');
   // Hint mode takes the engine's ENTIRE list (the occupancy guard can veto
   // whole gaps, and no fixed cap is safe on a busy multi-tech range); the
   // response is sliced back to topN.

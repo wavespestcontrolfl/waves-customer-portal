@@ -40,7 +40,7 @@ suite('IB target validation against isolated PostgreSQL', () => {
     for (const request of requests) {
       const result = await Context.resolve(request);
       expect(result.target).toMatchObject({ customer_id: customerId, version });
-      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase() }, result)).toBeNull();
+      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase() }, result, { toolName: 'update_customer' })).toBeNull();
     }
   });
 
@@ -63,7 +63,7 @@ suite('IB target validation against isolated PostgreSQL', () => {
 
   test('UUID suffixes are rejected before PostgreSQL identifier reads', async () => {
     expect(Context.pageIds({ customer_id: `${customerId}-extra` })).toMatchObject({ code: 'invalid_page_context' });
-    expect(await Context.validateRecordTarget({ customer_id: `${customerId}-extra` }, { targets: [] })).toMatchObject({ code: 'invalid_target' });
+    expect(await Context.validateRecordTarget({ customer_id: `${customerId}-extra` }, { targets: [] }, { toolName: 'update_customer' })).toMatchObject({ code: 'invalid_target' });
     expect(await mockDb('customers').where('id', customerId).first('id')).toEqual({ id: customerId });
   });
 
@@ -73,16 +73,16 @@ suite('IB target validation against isolated PostgreSQL', () => {
       label: `Synthetic ${i}`, address_line1: `${100 + i} Test Street` })));
     for (const word of ['this', 'that', 'selected']) {
       const task = await Context.resolve({ prompt: `Update ${word} property label`, pageData: { property_id: ids[0] } });
-      expect(await Context.validateRecordTarget({ property_id: ids[0] }, task)).toBeNull();
-      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase(), property_id: ids[0].toUpperCase() }, task)).toBeNull();
-      expect((await Context.validateRecordTarget({ property_id: ids[1] }, task)).code).toBe('target_clarification_required');
+      expect(await Context.validateRecordTarget({ property_id: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
+      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase(), property_id: ids[0].toUpperCase() }, task, { toolName: 'update_customer' })).toBeNull();
+      expect((await Context.validateRecordTarget({ property_id: ids[1] }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     }
     const missing = await Context.resolve({ prompt: 'Update this property label', pageData: { customer_id: customerId } });
-    expect((await Context.validateRecordTarget({ property_id: ids[1] }, missing)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ property_id: ids[1] }, missing, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     const explicit = await Context.resolve({ prompt: 'Update Synthetic Targetfixture property label', pageData: { property_id: ids[0] } });
-    expect(await Context.validateRecordTarget({ property_id: ids[1] }, explicit)).toBeNull();
+    expect(await Context.validateRecordTarget({ property_id: ids[1] }, explicit, { toolName: 'update_customer' })).toBeNull();
     const uppercase = await Context.resolve({ prompt: 'Update this property label', pageData: { property_id: ids[0].toUpperCase() } });
-    expect(await Context.validateRecordTarget({ property_id: ids[0] }, uppercase)).toBeNull();
+    expect(await Context.validateRecordTarget({ property_id: ids[0] }, uppercase, { toolName: 'update_customer' })).toBeNull();
   });
 
   test('SMS name-only proposals refuse while canonical recipients use fresh phone data', async () => {
@@ -105,9 +105,9 @@ suite('IB target validation against isolated PostgreSQL', () => {
     ]);
     const task = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: customerId } });
     for (const params of [{ appointment_id: hold }, { service_ids: [owned, hold] }]) {
-      expect(await Context.validateRecordTarget(params, task, { forApproval: true })).toMatchObject({ code: 'target_clarification_required' });
+      expect(await Context.validateRecordTarget(params, task, { toolName: 'update_customer', forApproval: true })).toMatchObject({ code: 'target_clarification_required' });
     }
-    expect(await Context.validateRecordTarget({ appointment_id: owned }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ appointment_id: owned }, task, { toolName: 'update_customer' })).toBeNull();
     expect((await mockDb('scheduled_services').where('id', hold).first()).customer_id).toBeNull();
   });
 
@@ -116,10 +116,10 @@ suite('IB target validation against isolated PostgreSQL', () => {
     await mockDb('call_log').insert({ id, customer_id: null, twilio_call_sid: `fixture-${id}`,
       direction: 'inbound', from_phone: '+15550101234', to_phone: '+15550104321' });
     const unrelated = await Context.resolve({ prompt: 'Look up inventory', pageData: { call_id: id } });
-    expect(await Context.validateRecordTarget({ call_id: id }, unrelated)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ call_id: id }, unrelated, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
     for (const prompt of ['Read this call', `Read call ${id}`]) {
       const task = await Context.resolve({ prompt, pageData: { call_id: id } });
-      expect(await Context.validateRecordTarget({ call_id: id }, task)).toBeNull();
+      expect(await Context.validateRecordTarget({ call_id: id }, task, { toolName: 'update_customer' })).toBeNull();
     }
   });
 
@@ -212,7 +212,7 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect(task.candidates).toEqual([]);
     expect(task.targets).toEqual([]);
     expect(task.ambiguous).toBe(true);
-    expect(await Context.validateRecordTarget({ customer_ids: customers.slice(0, 10).map(c => c.id) }, task)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ customer_ids: customers.slice(0, 10).map(c => c.id) }, task, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
     expect(await Context.resolve({ prompt: 'Update Synthetic', pageData: {}, selectedTarget: { customer_id: customers[0].id } })).toMatchObject({ code: 'context_mismatch' });
     const incidental = await Context.resolve({ prompt: `Update both ${customers.map(c => `${c.first_name} ${c.last_name}`).join(' and ')} after checking with Synthetic Targetfixture`, pageData: {} });
     expect(incidental.targets).toEqual([]);
@@ -223,17 +223,17 @@ suite('IB target validation against isolated PostgreSQL', () => {
     const ids = [randomUUID(), randomUUID()];
     await mockDb('estimates').insert(ids.map(id => ({ id, customer_id: customerId })));
     const task = await Context.resolve({ prompt: `Send a message to Synthetic Targetfixture and revise estimate ${ids[0]}`, pageData: { estimate_id: ids[1] } });
-    expect(await Context.validateRecordTarget({ estimate_id: ids[0] }, task)).toBeNull();
-    expect(await Context.validateRecordTarget({ estimate_id: ids[1] }, task)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ estimate_id: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
+    expect(await Context.validateRecordTarget({ estimate_id: ids[1] }, task, { toolName: 'update_customer' })).toMatchObject({ code: 'target_clarification_required' });
   });
 
   test('child-only validation rechecks a deleted parent customer', async () => {
     const id = randomUUID();
     await mockDb('customer_properties').insert({ id, customer_id: customerId, address_line1: '100 Test Street' });
     const task = await Context.resolve({ prompt: 'Update this property', pageData: { property_id: id } });
-    expect(await Context.validateRecordTarget({ property_id: id }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ property_id: id }, task, { toolName: 'update_customer' })).toBeNull();
     await mockDb('customers').where('id', customerId).update({ deleted_at: mockDb.fn.now() });
-    expect(await Context.validateRecordTarget({ property_id: id }, task)).toMatchObject({ code: 'record_unavailable' });
+    expect(await Context.validateRecordTarget({ property_id: id }, task, { toolName: 'update_customer' })).toMatchObject({ code: 'record_unavailable' });
   });
 
   test('an address-only reply requires a unique current Gmail thread', async () => {
@@ -259,15 +259,15 @@ suite('IB target validation against isolated PostgreSQL', () => {
       subject: 'Synthetic converted inquiry', received_at: new Date() });
     const task = await Context.resolve({ prompt: 'Text this customer', pageData: { email_id: email } });
     expect(task.target).toMatchObject({ customer_id: customerId });
-    expect(await Context.validateRecordTarget({ email_id: email }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ email_id: email }, task, { toolName: 'update_customer' })).toBeNull();
     await mockDb('leads').where('id', lead).update({ deleted_at: mockDb.fn.now() });
-    expect(await Context.validateRecordTarget({ email_id: email }, task)).toMatchObject({ code: 'record_unavailable' });
+    expect(await Context.validateRecordTarget({ email_id: email }, task, { toolName: 'update_customer' })).toMatchObject({ code: 'record_unavailable' });
   });
 
   test('an unavailable unrelated page hint does not block the explicitly viewed customer', async () => {
     const task = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: customerId, appointment_id: randomUUID() } });
     expect(task.target).toMatchObject({ customer_id: customerId });
-    expect(await Context.validateRecordTarget({ customer_id: customerId }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ customer_id: customerId }, task, { toolName: 'update_customer' })).toBeNull();
   });
 
   test('stored customer names use the same punctuation and whitespace normalization as the request', async () => {
@@ -283,12 +283,12 @@ suite('IB target validation against isolated PostgreSQL', () => {
     for (const word of ['this', 'that', 'selected']) {
       const task = await Context.resolve({ prompt: `Update ${word} call`, pageData: { call_id: ids[0] } });
       expect(task.target.customer_id).toBe(customerId);
-      expect(await Context.validateRecordTarget({ call_id: ids[0] }, task)).toBeNull();
-      expect((await Context.validateRecordTarget({ call_id: ids[1] }, task)).code).toBe('target_clarification_required');
+      expect(await Context.validateRecordTarget({ call_id: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
+      expect((await Context.validateRecordTarget({ call_id: ids[1] }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     }
     const content = await Context.resolve({ prompt: 'Add a note saying this call needs attention', pageData: { call_id: ids[0] } });
     expect(content.targets).toEqual([]);
-    expect((await Context.validateRecordTarget({ call_id: ids[0] }, content)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ call_id: ids[0] }, content, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     await mockDb('customers').where('id', customerId).update({ deleted_at: mockDb.fn.now() });
     expect((await Context.resolve({ prompt: 'Update this call', pageData: { call_id: ids[0] } })).code).toBe('record_unavailable');
   });
@@ -299,19 +299,19 @@ suite('IB target validation against isolated PostgreSQL', () => {
       : { customer_name: 'Synthetic Duplicatefixture' };
     await mockDb(table).insert({ id: ids[0], ...name, customer_id: null });
     const task = await Context.resolve({ prompt: 'Update Synthetic Duplicatefixture', pageData: {} });
-    expect(await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
     await mockDb(table).insert({ id: ids[1], ...name, customer_id: null });
     // Validation must re-read after resolution instead of retaining a unique-name claim.
-    for (const id of ids) expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).code).toBe('target_clarification_required');
+    for (const id of ids) expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     const selected = await Context.resolve({ prompt: `Update this ${noun}`, pageData: { [`${noun}_id`]: ids[0] } });
-    expect(await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, selected)).toBeNull();
-    expect((await Context.validateRecordTarget({ [`${noun}_id`]: ids[1] }, selected)).code).toBe('target_clarification_required');
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, selected, { toolName: 'update_customer' })).toBeNull();
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: ids[1] }, selected, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
     if (table === 'leads') {
       await mockDb(table).where('id', ids[1]).update({ deleted_at: mockDb.fn.now() });
-      expect(await Context.validateRecordTarget({ lead_id: ids[0] }, task)).toBeNull();
+      expect(await Context.validateRecordTarget({ lead_id: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
       await mockDb(table).where('id', ids[1]).update({ deleted_at: null, customer_id: customerId });
     } else await mockDb(table).where('id', ids[1]).update({ status: 'accepted', customer_id: customerId });
-    expect((await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, task)).code).toBe('target_clarification_required');
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   });
 
   test.each([
@@ -325,9 +325,9 @@ suite('IB target validation against isolated PostgreSQL', () => {
     const ids = [randomUUID(), randomUUID()];
     await mockDb('estimates').insert({ id: ids[0], customer_name: first });
     const task = await Context.resolve({ prompt: `Update ${first}`, pageData: {} });
-    expect(await Context.validateRecordTarget({ estimate_id: ids[0] }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ estimate_id: ids[0] }, task, { toolName: 'update_customer' })).toBeNull();
     await mockDb('estimates').insert({ id: ids[1], customer_name: second });
-    for (const id of ids) expect((await Context.validateRecordTarget({ estimate_id: id }, task)).code).toBe('target_clarification_required');
+    for (const id of ids) expect((await Context.validateRecordTarget({ estimate_id: id }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
   });
 
 });

@@ -200,9 +200,17 @@ async function sendCustomerMessage(input) {
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
   if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
-  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms'
-    || input.audience !== 'lead' || input.purpose !== 'conversational' || input.entryPoint !== 'lead_response_auto_reply')) {
-    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies' };
+  // The locked handoff holds a caller's authority rows through the actual
+  // provider request. Immediate lead replies and the visit-summary bearer
+  // link (its immediate send and its scheduled replay) are the callers whose
+  // recipient may change between validation and the handoff.
+  const smsHandoffAllowed = (input.audience === 'lead' && input.purpose === 'conversational'
+      && input.entryPoint === 'lead_response_auto_reply')
+    || (input.audience === 'customer' && input.purpose === 'service_completion'
+      && input.metadata?.original_message_type === 'visit_summary'
+      && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint));
+  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -404,6 +412,7 @@ async function sendCustomerMessage(input) {
         deliveryOutcome: 'not_sent',
         code: blocked.code,
         reason: blocked.reason,
+        ...(verdict?.retryable === true ? { retryable: true } : {}),
         auditLogId: audit.id,
         segmentCount: segmentMeta.segmentCount,
         encoding: segmentMeta.encoding,
@@ -425,7 +434,10 @@ async function sendCustomerMessage(input) {
   // handoff boundary but has no definitive acceptance/rejection result.
   providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
   providerOutcome = await dispatchToProvider(sendInput, {
-    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async trx => {
+    // The caller's handoff receives (trx, onProviderStart): the callback fires
+    // immediately before the provider request, after the rechecks below, so a
+    // caller can tell a failed recheck (nothing sent) from a failed request.
+    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async (trx, onProviderStart) => {
       // Lock acquisition may wait past an opt-out commit. Reuse the canonical
       // validators with fresh state on that same connection, before the SDK.
       const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
@@ -437,6 +449,14 @@ async function sendCustomerMessage(input) {
       if (!suppression.ok) return suppression;
       const consent = await checkConsentForPurpose(sendInput, policy, currentState);
       if (!consent.ok) return consent;
+      // Acquiring the handoff's locks can straddle the send-window cutoff:
+      // re-judge the window on the fresh state immediately before the
+      // provider request so a wait across it returns the ordinary hold.
+      const windowVerdict = checkSendWindow(sendInput, policy, currentState);
+      if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
+      // Awaited: the caller's durable pre-provider transition must commit
+      // before the SDK request.
+      if (typeof onProviderStart === 'function') await onProviderStart();
       await dispatch();
       return { ok: true };
     })),

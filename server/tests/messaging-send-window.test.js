@@ -275,6 +275,15 @@ describe('sendCustomerMessage send-window integration', () => {
     expect(sendViaTwilio).toHaveBeenCalledTimes(1);
   });
 
+  test('an explicitly retryable final recheck refuses the provider and preserves retryability', async () => {
+    jest.useFakeTimers({ now: MIDDAY_ET, doNotFake: ['nextTick', 'setImmediate'] });
+    const res = await sendCustomerMessage({ ...INPUT,
+      preDispatchCheck: async () => ({ ok: false, code: 'DEFERRED_RECHECK_FAILED', retryable: true }),
+    });
+    expect(res).toMatchObject({ sent: false, blocked: true, code: 'DEFERRED_RECHECK_FAILED', retryable: true });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  });
+
   test('provider receives a preSendCheck hook that flips when the clock crosses the 20:00 cutoff', async () => {
     // The 19:59→20:01 boundary race: validators pass at 19:59, but the
     // provider's internal awaits (template lookup, customer query) can carry

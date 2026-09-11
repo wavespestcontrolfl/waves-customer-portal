@@ -203,6 +203,10 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
             // MAPPED residential rows also expose costs.total — inventory
             // COGS stays live for them, never the frozen engine figure.
             { service: 'tree_shrub', name: 'Tree & Shrub Program', monthly: 45, annual: 540, costs: { total: 200 } },
+            // Residential termite bait is the one mapped service whose engine
+            // line carries a per-station cost model the registry cannot
+            // express — costs.annualTotal is its honest annual COGS.
+            { service: 'termite_bait', name: 'Termite Bait', monthly: 24, annual: 288, visitsPerYear: 4, perApp: 72, stations: 15, costs: { annualTotal: 303.14, total: 999 } },
             // Termite specialties keep their raw id (honest unmapped beats
             // a bait-COGS mislabel), and adjustment rows skip COGS.
             { service: 'termite_foam', name: 'Termite Foam Treatment', price: 300, monthly: null },
@@ -216,7 +220,7 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
         },
       },
     });
-    expect(audit.lines).toHaveLength(11); // quote-required + witness-less rows excluded
+    expect(audit.lines).toHaveLength(12); // quote-required + witness-less rows excluded
     expect(audit.lines.find((l) => l.serviceKey === 'stinging')).toMatchObject({ cadence: 'recurring', price: 285, visitsPerYear: 3 });
     expect(audit.lines.some((l) => /commercial_pest|ghost/.test(l.serviceKey))).toBe(false);
     expect(audit.lines.find((l) => l.serviceKey === 'termite_foam')).toBeTruthy(); // raw id kept
@@ -228,6 +232,9 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(cl.cogs.estimatedCost).toBe(1900); // persisted commercial COGS, not unmapped-zero
     const tsRow = audit.lines.find((l) => /Program/.test(l.label) && l.serviceKey === 'tree_shrub');
     expect(tsRow.cogs.status).not.toBe('explicit'); // mapped services keep live inventory COGS
+    const tb = audit.lines.find((l) => l.serviceKey === 'termite_bait');
+    expect(tb.cogs.status).toBe('explicit'); // …except termite bait, whose per-station cost model rides costs.annualTotal
+    expect(tb.cogs.estimatedCost).toBe(303.14);
     const mq = audit.lines.find((l) => l.serviceKey === 'mosquito');
     // Net wins the price; gross survives as priceBeforeDiscount.
     expect(mq).toMatchObject({ price: 864, monthly: 72, priceBeforeDiscount: 960, discount: 0.1 });
@@ -292,6 +299,22 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.lines.find((l) => /exterior pest/i.test(l.label))).toMatchObject({ cadence: 'recurring', price: 800, visitsPerYear: 4 });
     expect(audit.lines.find((l) => /door sweep/i.test(l.label))).toMatchObject({ cadence: 'one_time', price: 450 });
     expect(audit.quote.proposal).toEqual(proposal);
+  });
+
+  test('a mapped / CLIENT_FALLBACK termite row derives its per-station COGS from results.tmBait.sta', async () => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-termite-fallback', status: 'sent', monthly_total: '24.00', annual_total: '288.00', onetime_total: '653.00',
+      estimate_data: {
+        result: {
+          recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 24, perTreatment: 72, visitsPerYear: 4 }] },
+          results: { tmBait: { selectedSystem: 'trelona', sta: 15, ti: 653 } },
+        },
+      },
+    });
+    const tb = audit.lines.find((l) => l.serviceKey === 'termite_bait');
+    expect(tb.cogs.status).toBe('explicit');
+    // 15 stations on the live basis: 4 × $55.42 labor + $67.62 cartridges + $13.85 reserve.
+    expect(tb.cogs.estimatedCost).toBeCloseTo(303.14, 1);
   });
 
   test('an enabled-but-empty proposal falls through to the engine lines', async () => {
@@ -466,6 +489,38 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(roach.cogs.visitsPerYear).toBe(3);
   });
 
+  test.each([
+    // Measured quantities are a pricing basis: a quarterly 14,768 sq ft line
+    // is four visits, not 59,072 (GH codex P1 on #4305).
+    ['sqft', 14768, 'quarterly', 4, 4459.92],
+    ['acre', 25.8, 'monthly', 12, 30960],
+    ['hour', 6, 'quarterly', 4, 240],
+    // Count units still multiply the visits performed.
+    ['each', 3, 'quarterly', 12, 120],
+    [undefined, 3, 'quarterly', 12, 120],
+  ])('a recurring %s line with quantity %s scales COGS visits only by service counts', async (unit, quantity, frequency, visits, annual) => {
+    const unitPrice = { sqft: 0.0755, acre: 100, hour: 10, each: 10, undefined: 10 }[unit];
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-unit', status: 'sent', monthly_total: '0', annual_total: String(annual), onetime_total: '0',
+      estimate_data: {
+        proposal: { enabled: true, buildings: [{ name: 'Slab', lineItems: [{ description: 'Perimeter treatment', frequency, unitPrice, quantity, ...(unit ? { unit } : {}), taxable: false }] }] },
+      },
+    });
+    const line = audit.lines.find((l) => /perimeter/i.test(l.label));
+    expect(line).toMatchObject({ cadence: 'recurring', price: annual, visitsPerYear: visits });
+    expect(line.cogs.visitsPerYear).toBe(visits);
+    expect(line.quoted.quantity).toBe(quantity);
+    if (unit) expect(line.quoted.unit).toBe(unit);
+  });
+  test.each([['sqft', 1200, 1], ['lb', 2.5, 1], ['each', 40, 40], [undefined, 40, 40]])('a one-time %s line with quantity %s performs %s service units', async (unit, quantity, visits) => {
+    const audit = await buildEstimatePricingAudit({
+      id: 'est-unit-once', status: 'sent', monthly_total: '0', annual_total: '0', onetime_total: '100',
+      estimate_data: {
+        proposal: { enabled: true, buildings: [{ name: 'Grove', lineItems: [{ description: 'Soil treatment', frequency: 'one_time', unitPrice: 1, quantity, ...(unit ? { unit } : {}), taxable: false }] }] },
+      },
+    });
+    expect(audit.lines.find((l) => /soil/i.test(l.label)).cogs.visitsPerYear).toBe(visits);
+  });
   test('authored one-time quantity scales COGS units (revenue already folds it in)', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-qty', status: 'sent', monthly_total: null, annual_total: null, onetime_total: '2000.00',

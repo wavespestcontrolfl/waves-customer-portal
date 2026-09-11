@@ -27,7 +27,7 @@ describe('TechPhotoMarksModal click containment', () => {
     })));
 
     const backdropClick = vi.fn();
-    const { container, findByText } = render(
+    const { baseElement: container, findByText } = render(
       // Mirrors TechServicePhotosModal's backdrop, whose onClick is onClose.
       <div onClick={backdropClick}>
         <TechPhotoMarksModal serviceId="svc-1" photo={PHOTO} onClose={() => {}} />
@@ -62,7 +62,7 @@ describe('TechPhotoMarksModal click containment', () => {
         marksByS3Key: {},
       }),
     })));
-    const { container, findByText, getByText } = render(
+    const { baseElement: container, findByText, getByText } = render(
       <TechPhotoMarksModal serviceId="svc-1" photo={PHOTO} onClose={() => {}} />,
     );
     await findByText('Drilled & foamed');
