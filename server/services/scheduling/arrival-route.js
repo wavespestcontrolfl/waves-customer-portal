@@ -20,6 +20,7 @@ const COLUMNS = [
   'estimated_duration_minutes', 'status', 'route_order', 'created_at', 'visit_id',
   'reservation_expires_at', 'actual_end_time', 'check_out_time', 'completed_at', 'time_window',
   'service_type', 'service_id', 'source_estimate_id', 'updated_at',
+  'service_address_line1',
   'reservation_service_mix', 'reservation_policy_version',
 ];
 

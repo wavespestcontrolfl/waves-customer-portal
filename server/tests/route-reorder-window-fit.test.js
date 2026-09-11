@@ -372,77 +372,108 @@ test('unit: fewer than 2 stops is not a reorder problem', () => {
   expect(computeWindowFitOrder(FAKE_RO, [stop('only')], GUARDS)).toBeNull();
 });
 
-// ── PHANTOM-HOUR FIX (Sat 2026-09-12: customers A + B,
-// each with a same-slot pest+lawn pair, visit_id NULL): one customer's two
-// same-slot rows must be charged as ONE stop (the LONGER of the two
-// durations), never the sum. Zero-travel model (RouteOptimizer mock above)
-// isolates the effect to windows + durations: a pair that fits the day
-// under the fix but blows a downstream 120-minute arrival deadline under the
-// old sum-of-durations model. ──
+// ── PHANTOM-HOUR FIX (Sat 2026-09-12: customers A + B, each with a
+// same-slot pest+lawn pair, visit_id NULL). The rows the prod defect was
+// made of carry NO real estimate, so each one's workDuration falls back to
+// its promised WINDOW SPAN — one hour EACH for a single one-hour promise.
+// A chain of them is charged the sum of its REAL estimates, floored by the
+// longest member's window-derived duration: the phantom hour disappears,
+// but two rows that really do carry additive estimates still cost both
+// (Codex #4435 r1 P1). Zero-travel model (RouteOptimizer mock above)
+// isolates the effect to windows + durations. ──
 describe('co-visit pair collapse', () => {
-  // Both rows promised 13:00 (deadline 15:00 = startMin + 120). Merged
-  // duration = max(45, 40) = 45 → departs 825, comfortably under an 830
-  // cutoff. Summed (the pre-fix behavior) = 85 → departs 865, past it.
-  const pair = (customerId2) => [
-    stop('pest', { customer_id: 'cust_b', window_start: '13:00', estimated_duration_minutes: 45, lat: 1, lng: 1 }),
-    stop('lawn', { customer_id: customerId2, window_start: '13:00', estimated_duration_minutes: 40, lat: 1, lng: 1 }),
+  // The prod shape: both rows promised 13:00-14:00, neither with a real
+  // estimate, so workDuration = the 60-minute span for each. Merged = 60
+  // → departs 840. Pre-fix (summed spans) = 120 → 900, past an 845 cutoff.
+  const spanPair = (over = {}) => [
+    stop('pest', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1 }),
+    stop('lawn', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1, ...over }),
   ];
 
-  test('(a) same-customer same-slot pair: infeasible under sum-of-durations, feasible under the co-visit max', () => {
-    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, pair('cust_b'), { dayEndMin: 830 });
+  test('(a) same-customer same-slot pair, no real estimates: one hour on site, not two', () => {
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, spanPair(), { dayEndMin: 845 });
     expect(sim).not.toBeNull();
     expect(sim.arrivals).toEqual([
-      { id: 'pest', arrivalMin: 780, departureMin: 825 },
-      { id: 'lawn', arrivalMin: 780, departureMin: 825 }, // pinned to the sibling's arrival — same stop
+      { id: 'pest', arrivalMin: 780, departureMin: 840 },
+      { id: 'lawn', arrivalMin: 780, departureMin: 840 }, // pinned to the sibling's arrival — same stop
     ]);
   });
 
-  test('(b) different customers in the identical slot are still charged BOTH durations (no merge)', () => {
-    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, pair('someone_else'), { dayEndMin: 830 });
-    expect(sim).toBeNull(); // 780 + 45 + 40 = 865 > the 830 cutoff
+  test('(b) different customers in the identical slot are still charged BOTH spans (no merge)', () => {
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, spanPair({ customer_id: 'someone_else' }), { dayEndMin: 845 });
+    expect(sim).toBeNull(); // 780 + 60 + 60 = 900 > the 845 cutoff
   });
 
   test('(d) a stop missing customer_id never merges — same numbers, behavior unchanged', () => {
-    const stops = pair('cust_b').map(({ customer_id, ...s }) => s);
-    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 830 });
+    const stops = spanPair().map(({ customer_id, ...s }) => s);
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 845 });
     expect(sim).toBeNull(); // identical to the different-customer case above
   });
 
   test('(e) a visit_id on either row never merges — a real service_visits group keeps its SUM contract', () => {
     for (const idx of [0, 1]) {
-      const stops = pair('cust_b');
+      const stops = spanPair();
       stops[idx] = { ...stops[idx], visit_id: 'sv_1' };
-      const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 830 });
-      expect(sim).toBeNull(); // 780 + 45 + 40 = 865 > 830, exactly as pre-fix
+      const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 845 });
+      expect(sim).toBeNull(); // 900 > 845, exactly as pre-fix
     }
   });
 
-  test('(f) a coordless side never merges — a multi-property customer is two addresses, not one stop', () => {
+  test('(f) a coordless side never merges — an ungeocoded row is not provably the same property', () => {
     for (const idx of [0, 1]) {
-      const stops = pair('cust_b');
+      const stops = spanPair();
       stops[idx] = { ...stops[idx], lat: null, lng: null };
-      const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 830 });
-      expect(sim).toBeNull(); // 780 + 45 + 40 = 865 > 830, exactly as pre-fix
+      const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 845 });
+      expect(sim).toBeNull();
     }
   });
 
-  test('(g) the extra minutes a co-visit adds past its sibling still respect blockedIntervals', () => {
-    // pest departs 825; lawn (60 min) adds 15 extra minutes 825→840, but a
-    // block covers 830–850, so the extra work starts after it: clock 865.
+  test('(h) two units at one parcel centroid never merge — identical coordinates are not one stop', () => {
+    // Same customer, same slot, same pin (one building), DIFFERENT stamped
+    // street lines: two physical stops that each need their own hour.
+    const stops = spanPair({ service_address_line1: '100 Main St Apt 2' });
+    stops[0] = { ...stops[0], service_address_line1: '100 Main St Apt 1' };
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 845 });
+    expect(sim).toBeNull();
+    // Both stamped the SAME unit ⇒ one stop again.
+    stops[0] = { ...stops[0], service_address_line1: '100 Main St Apt 2' };
+    expect(simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 845 })).not.toBeNull();
+  });
+
+  test('(i) rows carrying REAL estimates are additive — the merge never under-counts genuine work', () => {
+    // 45 + 40 minutes of actual work sharing one promise is 85 minutes on
+    // site, not 45: the span floor (45) loses to the summed estimates.
     const stops = [
-      stop('pest', { customer_id: 'cust_b', window_start: '13:00', estimated_duration_minutes: 45, lat: 1, lng: 1 }),
-      stop('lawn', { customer_id: 'cust_b', window_start: '13:00', estimated_duration_minutes: 60, lat: 1, lng: 1 }),
+      stop('pest', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 45, lat: 1, lng: 1 }),
+      stop('lawn', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 40, lat: 1, lng: 1 }),
     ];
-    const blockedIntervals = [{ startMin: 830, endMin: 850 }];
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, {});
+    expect(sim.arrivals).toEqual([
+      { id: 'pest', arrivalMin: 780, departureMin: 840 }, // the 60-minute span floor
+      { id: 'lawn', arrivalMin: 780, departureMin: 865 }, // 780 + max(60, 45 + 40)
+    ]);
+    expect(simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 860 })).toBeNull();
+  });
+
+  test('(g) the extra minutes a co-visit adds past its sibling respect blockedIntervals and count as waiting', () => {
+    // pest departs 840 (its 60-minute span); lawn's real 75-minute estimate
+    // adds 15 more, 840→855, but a block covers 845-865, so the extra work
+    // starts after it: clock 880, with 5 minutes of that postponement
+    // recorded as on-site waiting.
+    const stops = [
+      stop('pest', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1 }),
+      stop('lawn', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 75, lat: 1, lng: 1 }),
+    ];
+    const blockedIntervals = [{ startMin: 845, endMin: 865 }];
     const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { blockedIntervals });
     expect(sim).not.toBeNull();
     expect(sim.arrivals).toEqual([
-      { id: 'pest', arrivalMin: 780, departureMin: 825 },
-      { id: 'lawn', arrivalMin: 780, departureMin: 865 },
+      { id: 'pest', arrivalMin: 780, departureMin: 840 },
+      { id: 'lawn', arrivalMin: 780, departureMin: 880 },
     ]);
-    // Without the block the same pair departs at 840 — the block costs exactly its 20 minutes plus the 5 already elapsed before it.
     const free = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, {});
-    expect(free.arrivals[1].departureMin).toBe(840);
+    expect(free.arrivals[1].departureMin).toBe(855); // 780 + max(60, 75)
+    expect(sim.waitingMin - free.waitingMin).toBe(25); // the block's own postponement
   });
 
   // (c) Saturday shape: backbone 10:00 (ro=3) + 11:00 (ro=7); additions =
@@ -450,23 +481,26 @@ describe('co-visit pair collapse', () => {
   // 13:00 pest+lawn pair (customer B, both additions) SEPARATED in the natural
   // id/window-start ordering by a third customer's own 13:00 addition
   // (proving the adjacency fix — without it the pair is split and the
-  // merge never fires), a 15:00 single, and a 16:00–18:00 120-minute job.
-  // Every number below needs BOTH fixes to pass: the co-visit duration
-  // merge (A: 90 vs 80, B: 70 vs 65) AND the sibling-adjacency
-  // insertion (b_x_other sorts between b_pest/b_z_lawn by id).
+  // merge never fires), a 15:00 single, and a 16:00-18:00 120-minute job.
+  // Both pairs are span-only rows (the prod shape), so each pair costs its
+  // one promised hour rather than two.
   test('(c) repair keeps every co-visit pair adjacent and returns an order for the Saturday shape', () => {
+    const spanStop = (id, over) => stop(id, { estimated_duration_minutes: null, ...over });
     const stops = [
-      stop('b10', { customer_id: 'c_other', route_order: 3, window_start: '10:00', estimated_duration_minutes: 60, lat: 1, lng: 1 }),
-      stop('a_pest', { customer_id: 'cust_a', route_order: 7, window_start: '11:00', estimated_duration_minutes: 90, lat: 2, lng: 2 }),
-      stop('a_lawn', { customer_id: 'cust_a', route_order: null, window_start: '11:00', estimated_duration_minutes: 80, lat: 2, lng: 2 }),
-      stop('b_pest', { customer_id: 'cust_b', route_order: null, window_start: '13:00', estimated_duration_minutes: 70, lat: 3, lng: 3 }),
+      spanStop('b10', { customer_id: 'c_other', route_order: 3, window_start: '10:00', window_end: '11:00', lat: 1, lng: 1 }),
+      spanStop('a_pest', { customer_id: 'cust_a', route_order: 7, window_start: '11:00', window_end: '12:00', lat: 2, lng: 2 }),
+      spanStop('a_lawn', { customer_id: 'cust_a', route_order: null, window_start: '11:00', window_end: '12:00', lat: 2, lng: 2 }),
+      spanStop('b_pest', { customer_id: 'cust_b', route_order: null, window_start: '13:00', window_end: '14:00', lat: 3, lng: 3 }),
       // Sorts between b_pest and b_z_lawn by id alone (no route_order,
       // no created_at — currentOrder's final tiebreak) unless the sibling
       // adjacency fix pulls b_z_lawn ahead of it.
-      stop('b_x_other', { customer_id: 'c_other2', route_order: null, window_start: '13:00', estimated_duration_minutes: 100, lat: 4, lng: 4 }),
-      stop('b_z_lawn', { customer_id: 'cust_b', route_order: null, window_start: '13:00', estimated_duration_minutes: 65, lat: 3, lng: 3 }),
-      stop('sam_15', { customer_id: 'sam', route_order: null, window_start: '15:00', estimated_duration_minutes: 30, lat: 5, lng: 5 }),
-      stop('pat_16', { customer_id: 'pat', route_order: null, window_start: '16:00', window_end: '18:00', lat: 6, lng: 6 }),
+      // 100 real minutes: wedged between the pair (its natural id-tiebreak
+      // position) it pushes b_z_lawn past its 15:00 deadline, so the
+      // baseline is genuinely infeasible and a repair is required.
+      stop('b_x_other', { customer_id: 'c_other2', route_order: null, window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 100, lat: 4, lng: 4 }),
+      spanStop('b_z_lawn', { customer_id: 'cust_b', route_order: null, window_start: '13:00', window_end: '14:00', lat: 3, lng: 3 }),
+      spanStop('sam_15', { customer_id: 'sam', route_order: null, window_start: '15:00', window_end: '16:00', lat: 5, lng: 5 }),
+      spanStop('pat_16', { customer_id: 'pat', route_order: null, window_start: '16:00', window_end: '18:00', lat: 6, lng: 6 }),
     ];
     const repair = computeChronologicalRepair(RouteOptimizer, stops);
     expect(repair).not.toBeNull();

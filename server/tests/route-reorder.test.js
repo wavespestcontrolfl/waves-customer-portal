@@ -539,14 +539,17 @@ test('feasibility guard: a same-customer same-slot pair merges into one stop (ph
   // Mirrors advanceSim's co-visit branch (route-reorder-window-fit.js) but
   // exercises violatesWindowFeasibility's OWN inline simulation loop
   // directly — it does not call simulateArrivalRoute, so it needed its own
-  // co-visit check. a+b share the 09:00 promise (deadline 11:00); b's huge
-  // duration (200) would blow c's own 10:30 deadline (12:30) if summed —
-  // merged (same customer_id), it fits; unmerged (different customer_id,
-  // i.e. two genuinely different visits), it doesn't.
+  // co-visit check. a+b share the 09:00-11:00 promise (arrival deadline
+  // 11:00) and carry no real estimate, so each falls back to its 120-minute
+  // window span: summed, the pair's four phantom hours blow c's own 10:30
+  // deadline (12:30); merged (same customer_id) it is the one promised
+  // block and fits. Unmerged (different customer_id, i.e. two genuinely different
+  // visits) it does not — and a chain that really does carry additive
+  // estimates is charged both (see route-reorder-window-fit's (i)).
   const { violatesWindowFeasibility } = require('../services/route-reorder')._internals;
   const RO = require('../services/route-optimizer');
-  const a = stop('a', { customer_id: 'cust_b', window_start: '09:00', estimated_duration_minutes: 90, lat: 1, lng: 1 });
-  const b = stop('b', { customer_id: 'cust_b', window_start: '09:00', estimated_duration_minutes: 200, lat: 1, lng: 1 });
+  const a = stop('a', { customer_id: 'cust_b', window_start: '09:00', window_end: '11:00', estimated_duration_minutes: null, lat: 1, lng: 1 });
+  const b = stop('b', { customer_id: 'cust_b', window_start: '09:00', window_end: '11:00', estimated_duration_minutes: null, lat: 1, lng: 1 });
   const c = stop('c', { window_start: '10:30' });
   expect(violatesWindowFeasibility(RO, [a, b, c], [a, b, c])).toBe(false);
   const bOtherCustomer = { ...b, customer_id: 'someone_else' };

@@ -145,6 +145,8 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
   let prev = RouteOptimizer.HQ;
   let prevStop = null; // for the co-visit check below (route-reorder-window-fit.js)
   let prevArrivalMin = null;
+  let coFloor = 0; // longest window-derived duration in the current co-visit chain
+  let coEstimates = 0; // sum of that chain's real estimates — see coVisitWork
   let geoIdx = 0;
   for (const stop of orderedStops) {
     const s = byId.get(stop.id) || stop;
@@ -168,7 +170,11 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
     // mirrors advanceSim's co-visit branch in route-reorder-window-fit.js.
     // No new leg is consumed for TIMING (travelMin above is computed only
     // to keep geoIdx aligned); arrival stays pinned to the sibling's
-    // already-proven arrival, and the clock takes the LONGER duration.
+    // already-proven arrival, and the chain's on-site time is the sum of its
+    // real estimates floored by the longest window-derived duration — see
+    // coVisitWork in route-reorder-window-fit.js for why neither the plain
+    // sum (the phantom hour) nor the plain max (under-counted real work) is
+    // the honest number.
     const coVisit = prevStop && isCoVisitPair(effectiveWindowRange, prevStop, s);
     let startMin;
     if (coVisit) {
@@ -181,7 +187,9 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
         startMin = Math.max(startMin, range.startMin); // waiting for open is fine
       }
     }
-    const dur = workDuration(s);
+    coFloor = Math.max(coVisit ? coFloor : 0, workDuration(s));
+    coEstimates = (coVisit ? coEstimates : 0) + (Number(s.estimated_duration_minutes) || 0);
+    const dur = Math.max(coFloor, coEstimates);
     clock = coVisit ? Math.max(clock, startMin + dur) : startMin + dur;
     prevStop = s;
     prevArrivalMin = startMin;
@@ -283,6 +291,10 @@ async function runRouteReorder(opts = {}, conn = db) {
           select: [
             'scheduled_services.id', 'scheduled_services.technician_id',
             'scheduled_services.customer_id',
+            // Stamped street line: two units in one building share a parcel
+            // centroid, so coordinates alone must not collapse them into one
+            // physical stop (Codex #4435 r1 P1 — see isCoVisitPair).
+            'scheduled_services.service_address_line1',
             'scheduled_services.route_order', 'scheduled_services.window_start',
             'scheduled_services.window_end', 'scheduled_services.visit_id',
             'scheduled_services.time_window',
