@@ -1730,7 +1730,7 @@ async function readsAndNavigation(page, server, state, report, device) {
       "page",
     );
   }
-  await section(page, "Maintenance");
+  await section(page, "Maintenance", null, "maintenance");
   const historyLength = await page.evaluate(() => history.length);
   const maintenanceTab = page.getByRole("tab", {
     name: "Maintenance",
@@ -1788,7 +1788,7 @@ async function readsAndNavigation(page, server, state, report, device) {
       false,
       role + " does not fetch owner-only panels",
     );
-    await section(page, "Maintenance", "Calibrations");
+    await section(page, "Maintenance", "Calibrations", "calibrations");
     await page.getByLabel("Equipment system", { exact: true }).waitFor();
     state.checks.push(
       role + " uses verified role despite cached admin identity",
