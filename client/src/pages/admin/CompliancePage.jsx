@@ -50,12 +50,21 @@ function ErrorState({ children, onRetry, className = "" }) {
   </div>;
 }
 
-function StatCard({ label, value, sub, alert = false }) {
-  return <Card className={alert ? "border-alert-fg" : undefined}>
+// tone follows main's accent: amber for the nonblocking warning counts, red only
+// where main used D.red. A boolean "alert" flag collapsed both into reserved red.
+const STAT_TONES = {
+  alert: { border: "border-alert-fg", value: "text-alert-fg", sub: "text-alert-fg" },
+  warn: { border: "border-warn-fg", value: "text-warn-fg", sub: "text-warn-fg" },
+  neutral: { border: undefined, value: "text-zinc-900", sub: "text-ink-secondary" },
+};
+
+function StatCard({ label, value, sub, tone = "neutral" }) {
+  const { border, value: valueTone, sub: subTone } = STAT_TONES[tone] || STAT_TONES.neutral;
+  return <Card className={border}>
     <CardBody>
       <div className="text-ui-caption font-medium text-ink-secondary">{label}</div>
-      <div className={alert ? "mt-1 text-28 font-medium text-alert-fg u-nums" : "mt-1 text-28 font-medium text-zinc-900 u-nums"}>{value ?? "—"}</div>
-      {sub && <div className={alert ? "mt-1 text-ui-caption text-alert-fg" : "mt-1 text-ui-caption text-ink-secondary"}>{sub}</div>}
+      <div className={`mt-1 text-28 font-medium u-nums ${valueTone}`}>{value ?? "—"}</div>
+      {sub && <div className={`mt-1 text-ui-caption ${subTone}`}>{sub}</div>}
     </CardBody>
   </Card>;
 }
@@ -70,10 +79,10 @@ function DashboardTab({ token }) {
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       <StatCard label="YTD Applications" value={data.ytdApplications} />
       <StatCard label="Unique Products" value={data.uniqueProducts} />
-      <StatCard label="Warnings" value={data.warningCount} alert={data.warningCount > 0} />
+      <StatCard label="Warnings" value={data.warningCount} tone={data.warningCount > 0 ? "warn" : "neutral"} />
       <StatCard label="Licensed Techs" value={data.licensedTechs}
         sub={data.expiringLicenses > 0 ? `${data.expiringLicenses} expiring soon` : "All current"}
-        alert={data.expiringLicenses > 0} />
+        tone={data.expiringLicenses > 0 ? "warn" : "neutral"} />
       <StatCard label="Restricted Use Apps" value={data.restrictedUseApps} />
     </div>
     <Card className={blackoutActive ? "border-alert-fg" : undefined}>
