@@ -35,6 +35,7 @@ function chain({ first, returning } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
   q.whereIn = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
   q.select = jest.fn(() => q);
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -58,14 +59,16 @@ function scheduledInvoice(overrides = {}) {
 
 // Mocks the db() call sequence inside sendViaSMSAndEmail:
 //   1. payer_statement_id accrual pre-check   2. claimInvoiceForSend read
-//   3. claim update→returning   4. (review block) invoice read
-//   5. success-path update
+//   3. the claim's queued completion pay-link text check (none)
+//   4. claim update→returning   5. (review block) invoice read
+//   6. success-path update
 // The chains are permissive, so the same sequence also covers runs where
-// the review block is skipped (call 4 becomes the success update).
+// the review block is skipped (call 5 becomes the success update).
 function mockSendSequence(invoice, reviewRead = {}) {
   db
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(chain({ first: invoice }))
+    .mockReturnValueOnce(chain({ first: undefined }))
     .mockReturnValueOnce(chain({ returning: [{ ...invoice, status: 'sending' }] }))
     .mockReturnValueOnce(
       chain({

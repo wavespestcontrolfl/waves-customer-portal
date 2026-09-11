@@ -317,6 +317,7 @@ describe('processScheduledSends send-window handling', () => {
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+        .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
@@ -368,6 +369,7 @@ describe('processScheduledSends send-window handling', () => {
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+        .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(failingInsert) // held-SMS scheduled-rail insert THROWS

@@ -10923,7 +10923,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Third-party Bill-To: never text the homeowner the pay link for a
           // payer-billed invoice — AR routes to the payer's AP inbox. The
           // homeowner still gets the report-only completion SMS (no pay_url).
-          && !invoice?.payer_id;
+          && !invoice?.payer_id
+          // The decline notice (sent before this block) carries the pay link
+          // as its own text — once it ACTUALLY delivered, this completion is
+          // report-only, so it must not claim a delivery it will never
+          // perform (GitHub r6 P1 #4131): an admin send holding the claim, or
+          // a transient claim read failure, would otherwise turn a
+          // guaranteed report-only closeout into the resumable 503.
+          && !paymentFailedNoticeSent;
         // A REUSED pre-minted invoice is delivered under the ONE send claim
         // (Codex P1 #4131 r4): the completion takes claimInvoiceForSend — the
         // same atomic draft/scheduled/… → 'sending' flip sendViaSMSAndEmail
@@ -10967,11 +10974,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reusedInvoiceClaimedElsewhere = true;
           }
         }
-        const allowCompletionInvoiceLinkBase = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;
-        // The decline notice (sent before this block) carries the pay link
-        // as its own text — the completion SMS goes report-only only once
-        // that notice has ACTUALLY delivered.
-        const allowCompletionInvoiceLink = allowCompletionInvoiceLinkBase && !paymentFailedNoticeSent;
+        const allowCompletionInvoiceLink = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;
         const usePaidCompletionTemplate = alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
@@ -11322,6 +11325,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
             sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           completionSmsProviderAccepted = smsResult.sent === true;
+          // The pay link is DELIVERED the moment the provider accepted a body
+          // that carried it (GitHub r5 P1 #4131) — recorded here, before the
+          // invoice bookkeeping below, so a markDeliverySent that throws
+          // cannot let the outer finally hand the send claim back on an
+          // invoice the customer already holds the link for (an operator
+          // retry would text it again). The row then stays under its
+          // 'sending' claim, which processScheduledSends parks for operator
+          // review — the same rule as every delivered-but-unfinalized send.
+          if (completionSmsProviderAccepted && invoice?.id && invoiceCreated && payUrl && allowCompletionInvoiceLink) {
+            completionInvoiceLinkDelivered = true;
+          }
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no
           // worker retries a 'blocked' status — so the held text is requeued
@@ -11537,9 +11551,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   source: sentSmsType || 'completion_sms_with_invoice',
                   payUrl,
                 });
-                completionInvoiceLinkDelivered = true;
               } catch (statusErr) {
-                logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id}: ${statusErr.message}`);
+                logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id} — the link was delivered, the row stays under its send claim for review: ${statusErr.message}`);
               }
             }
             if (!bundledReviewUrl || sentSmsBody.includes(bundledReviewUrl)) {
@@ -11596,6 +11609,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // are idempotent (markDeliverySent is a status sync; the claim is
           // whereNull) and best-effort like their success-path twins.
           if (invoice?.id && invoiceCreated && payUrl && snap.invoiceLinkAllowed) {
+            // Delivered at acceptance — before the sync, same as the success
+            // branch: the send claim must never be handed back on a texted link.
+            completionInvoiceLinkDelivered = true;
             try {
               const InvoiceService = require('../services/invoice');
               invoice = await InvoiceService.markDeliverySent(invoice.id, {
@@ -11603,7 +11619,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 source: snap.type || 'completion_sms_with_invoice',
                 payUrl,
               });
-              completionInvoiceLinkDelivered = true;
             } catch (statusErr) {
               logger.warn(`[dispatch] Invoice delivery status sync failed for ${invoice.id} after an accepted send: ${statusErr.message}`);
             }
@@ -12139,7 +12154,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // resume returns (exitForCompletionSmsResume), a throw — so the invoice
     // returns to the status it had and stays sendable by the office (pre-push
     // P1 r4). markDeliverySent already finalized 'sending' → 'sent' when the
-    // link did go out.
+    // link did go out; a link the provider accepted but whose sync failed
+    // keeps the claim (delivered at acceptance, above). A send-window HOLD
+    // releases here too: the queued dispatch_completion_deferred row then
+    // owns the delivery — claimInvoiceForSend refuses every other sender
+    // while that row is live (GitHub r5 P1 #4131), and its replay finalizes
+    // through markDeliverySent at actual delivery.
     if (completionInvoiceSendClaim?.claimed && !completionInvoiceLinkDelivered) {
       await require('../services/invoice').restoreSendClaim(completionInvoiceSendClaim.invoiceId, completionInvoiceSendClaim.previousStatus, true);
       completionInvoiceSendClaim = null;

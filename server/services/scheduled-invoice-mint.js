@@ -339,10 +339,25 @@ async function mintScheduledServiceInvoiceWithDeposit({
         } catch (notifyErr) {
           logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
         }
+        // An operator-previewed create never takes the uncredited fallback
+        // (GitHub r6 P1 #4131): the third attempt reads no ledger, so a
+        // deposit paid after a successful zero preview would be compared
+        // against a synthesized zero — the stale preview accepted and a
+        // full-balance invoice sent over the new deposit. The ledger could
+        // not be verified twice: refuse terminally, nothing created; the
+        // door-collection callers (no preview) keep the fallback.
+        if (expectedDepositCredit != null) throw depositLedgerUnverifiableError(err);
       }
     }
   }
   throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
+}
+
+function depositLedgerUnverifiableError(cause) {
+  const e = new Error(`The estimate deposit could not be verified while this invoice was being created (${cause?.message || cause}) — nothing was created. Reload the visit and try again.`);
+  e.status = 409;
+  e.code = 'DEPOSIT_CREDIT_UNVERIFIABLE';
+  return e;
 }
 
 module.exports = {

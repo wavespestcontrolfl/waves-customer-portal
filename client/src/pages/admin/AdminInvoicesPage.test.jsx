@@ -121,7 +121,7 @@ describe("AdminInvoicesPage open-visit link: no review ask before completion (Co
 
 describe("AdminInvoicesPage open-visit link: picker refresh after a create conflict (Codex P2 r2)", () => {
   it("reloads the picker for every visit-state conflict code, not only deposit drift", () => {
-    for (const code of ["DEPOSIT_CREDIT_CHANGED", "BALANCE_CHANGED", "visit_not_open", "visit_link_moved", "visit_invoice_refunded", "visit_prepaid", "visit_billing_unverifiable", "visit_already_invoiced", "SCHEDULED_PRICE_MOVED"]) {
+    for (const code of ["DEPOSIT_CREDIT_CHANGED", "DEPOSIT_CREDIT_UNVERIFIABLE", "BALANCE_CHANGED", "visit_not_open", "visit_link_moved", "visit_invoice_refunded", "visit_billing_changing", "visit_prepaid", "visit_billing_unverifiable", "visit_already_invoiced", "SCHEDULED_PRICE_MOVED"]) {
       expect(VISIT_STATE_CONFLICT_CODES).toContain(code);
       expect(reloadsVisitPickerAfterCreateError(code)).toBe(true);
     }
@@ -416,6 +416,19 @@ describe("AdminInvoicesPage create-path toast edge cases", () => {
       }),
     ).toBe(
       "Invoice created: WPC-2026-0001 — fully covered by account credit, nothing to send",
+    );
+  });
+
+  it("reports a first delivery the completion already made as a no-op, never as a failed send", () => {
+    expect(
+      invoiceCreatedSendToast("WPC-2026-0001", {
+        ok: true,
+        already_delivered: true,
+        sms: { ok: false, code: "already_delivered" },
+        email: { ok: false, code: "already_delivered" },
+      }),
+    ).toBe(
+      "Invoice created: WPC-2026-0001 — already delivered by the visit's completion, not sent again",
     );
   });
 

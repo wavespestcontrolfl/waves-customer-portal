@@ -219,6 +219,23 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
       expect(mockConsume).not.toHaveBeenCalled();
     });
 
+    it('a previewed create never takes the uncredited fallback: two failed ledger reads refuse (409 DEPOSIT_CREDIT_UNVERIFIABLE) after the reconcile alert — a deposit paid after a zero preview is never billed over', async () => {
+      programTransactions(makeTrx(), makeTrx(), makeTrx());
+      // The preview read zero; the customer then paid a deposit and BOTH
+      // credited ledger reads fail — the uncredited third attempt would read
+      // nothing, compare zero to the stale zero and mint the full balance.
+      mockPending
+        .mockRejectedValueOnce(new Error('ledger read failed'))
+        .mockRejectedValueOnce(new Error('ledger read failed'));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 0 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_UNVERIFIABLE' });
+      expect(mockPending).toHaveBeenCalledTimes(2);
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(mockTrigger).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+    });
+
     it('a payer assigned after a non-zero preview is refused — create would apply no credit the operator saw', async () => {
       programTransactions(makeTrx());
       mockPending.mockResolvedValueOnce({ amount: 50 });
@@ -266,7 +283,7 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
       expect(mockConsume).not.toHaveBeenCalled();
     });
 
-    it('the uncredited fallback after repeated allocation failures is refused when a credit was previewed', async () => {
+    it('the uncredited fallback after repeated allocation failures is never entered when a credit was previewed — the second failure refuses (DEPOSIT_CREDIT_UNVERIFIABLE) right after the reconcile alert', async () => {
       programTransactions(makeTrx(), makeTrx(), makeTrx());
       mockPending.mockResolvedValue({ amount: 49 });
       mockCreate
@@ -276,8 +293,9 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
 
       await expect(
         mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 }),
-      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', pendingDepositCredit: 0 });
-      expect(mockCreate).toHaveBeenCalledTimes(2); // the uncredited third attempt is refused before create
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_UNVERIFIABLE' });
+      expect(mockCreate).toHaveBeenCalledTimes(2); // no third, uncredited transaction is opened
+      expect(db.transaction).toHaveBeenCalledTimes(2);
       expect(mockTrigger).toHaveBeenCalledTimes(1); // the reconcile alert still goes out
     });
   });

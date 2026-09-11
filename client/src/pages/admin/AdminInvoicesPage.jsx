@@ -354,10 +354,12 @@ export function invoiceListRowDate(inv = {}) {
 // stale row staying selected with Create enabled for a 409 on every retry.
 export const VISIT_STATE_CONFLICT_CODES = [
   "DEPOSIT_CREDIT_CHANGED",
+  "DEPOSIT_CREDIT_UNVERIFIABLE",
   "BALANCE_CHANGED",
   "visit_not_open",
   "visit_link_moved",
   "visit_invoice_refunded",
+  "visit_billing_changing",
   "visit_prepaid",
   "visit_billing_unverifiable",
   "visit_already_invoiced",
@@ -492,6 +494,10 @@ export function invoiceCreatedSendToast(invoiceNumber, res) {
   // a success (the invoice is prepaid, nothing to deliver), not a failed send.
   if (res?.covered_by_credit) {
     return `Invoice created: ${invoiceNumber} — fully covered by account credit, nothing to send`;
+  }
+  // The linked visit's completion delivered it first: a no-op, not a failure.
+  if (res?.already_delivered) {
+    return `Invoice created: ${invoiceNumber} — already delivered by the visit's completion, not sent again`;
   }
   const sent = [
     res?.sms?.ok && "SMS",
@@ -6270,6 +6276,10 @@ function CreateInvoice({
           sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
             method: "POST",
             body: JSON.stringify({
+              // A FIRST delivery, never a resend: a linked invoice the
+              // visit's completion already texted between the create and
+              // this request is reported already_delivered, not sent again.
+              firstDelivery: true,
               requestReview: openVisitReviewRequestBlocked(selectedOpenVisit) ? false : requestReview,
               reviewDelayMinutes: reviewDelay,
               reviewTiming,

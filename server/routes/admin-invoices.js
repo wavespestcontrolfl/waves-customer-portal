@@ -1133,6 +1133,27 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
     if (String(still.source_estimate_id || '') !== String(visit.source_estimate_id || '')) {
       throw conflict('visit_link_moved', 'That visit\'s estimate link changed while this invoice was being created — nothing was created; reload and try again');
     }
+    // The visit's invoice rows are LOCKED before the refunded check and the
+    // mint's adoption query (GitHub r6 P1 #4131): the refund writers (the
+    // Stripe charge.refunded / refund.failed handlers, the deposit and
+    // annual-prepay refund flows) take no mint advisory lock, so a full
+    // refund committing between those two statements would let the adoption
+    // filter the now-refunded row out and mint a replacement that a later
+    // refund.failed restore leaves next to. Held here, a refund transition
+    // on these rows waits behind this create (adoption then sees the still-
+    // paid row and refuses visit_already_invoiced), or committed first and
+    // is seen (refused below). NOWAIT, never a wait: the refund paths lock
+    // invoice → customer while the mint chain already holds the customer
+    // KEY SHARE, so waiting here could form a cycle — a row a refund holds
+    // right now refuses instead, and the operator retries in a moment.
+    try {
+      await trx.raw('SELECT id FROM invoices WHERE scheduled_service_id = ? FOR UPDATE NOWAIT', [still.id]);
+    } catch (err) {
+      if (err?.code === '55P03') {
+        throw conflict('visit_billing_changing', 'That visit\'s previous invoice is being settled or refunded right now — nothing was created; try again in a moment');
+      }
+      throw err;
+    }
     if (await linkedVisitRefundedInvoice(trx, still.id)) {
       throw conflict('visit_invoice_refunded', 'That visit\'s previous invoice was refunded while this invoice was being created — nothing was created');
     }
@@ -1149,8 +1170,8 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
 }
 
 // Step 4 — a mint refusal as the HTTP response, or null for a real error.
-// visit_not_open | visit_link_moved | visit_invoice_refunded | visit_prepaid | visit_billing_unverifiable | SCHEDULED_PRICE_MOVED |
-// DEPOSIT_CREDIT_CHANGED | BALANCE_CHANGED. The drift figures ride along so
+// visit_not_open | visit_link_moved | visit_invoice_refunded | visit_billing_changing | visit_prepaid | visit_billing_unverifiable | SCHEDULED_PRICE_MOVED |
+// DEPOSIT_CREDIT_CHANGED | DEPOSIT_CREDIT_UNVERIFIABLE | BALANCE_CHANGED. The drift figures ride along so
 // the form can show the balance the server would actually bill.
 const DRIFT_FIELDS = ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit'];
 function mintRefusalResponse(err) {
@@ -1721,8 +1742,17 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       invoiceRecipientEmail,
       invoiceRecipientName,
       saveBillingRecipient,
+      firstDelivery,
     } = req.body || {};
     const reviewDelayMinutes = parseReviewDelayMinutes(req.body || {});
+    // The Invoices-page create flow's immediate send is a FIRST delivery
+    // (GitHub r6 P1 #4131): a linked invoice the visit's completion claimed
+    // and texted between the create's commit and this request is already
+    // delivered, and the claim must not be re-taken from 'sent' as a resend.
+    // The claim itself refuses (already_delivered) and this route reports it
+    // as a no-op success — the operator's own Send / Resend buttons never
+    // send the flag and keep resending deliberately.
+    const firstDeliveryOnly = firstDelivery === true;
     const overrideEmail = cleanEmail(invoiceRecipientEmail);
     const overrideName = cleanOptionalText(invoiceRecipientName);
     const shouldSaveBillingRecipient = saveBillingRecipient === true;
@@ -1776,12 +1806,25 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     if (preCompletionLinked && requestReview) {
       logger.info(`[admin-invoices] review ask dropped for invoice ${id}: linked to open visit ${linkage.scheduled_service_id}, sent before completion`);
     }
-    const result = await InvoiceService.sendViaSMSAndEmail(id, {
-      requestReview: preCompletionLinked ? false : requestReview,
-      reviewDelayMinutes,
-      emailRecipientOverride,
-      operatorInitiated: true,
-    });
+    let result;
+    try {
+      result = await InvoiceService.sendViaSMSAndEmail(id, {
+        requestReview: preCompletionLinked ? false : requestReview,
+        reviewDelayMinutes,
+        emailRecipientOverride,
+        operatorInitiated: true,
+        firstDeliveryOnly,
+      });
+    } catch (err) {
+      if (err?.code !== 'already_delivered') throw err;
+      logger.info(`[admin-invoices] first delivery of invoice ${id} skipped: ${err.message}`);
+      return res.json({
+        ok: true,
+        already_delivered: true,
+        sms: { ok: false, code: 'already_delivered' },
+        email: { ok: false, code: 'already_delivered' },
+      });
+    }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a
       // top-level error the operator sees a bare "HTTP 400" instead of the

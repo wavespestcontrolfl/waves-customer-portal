@@ -132,6 +132,7 @@ describe('POST /admin/invoices with an open visit link', () => {
       // The chain calls the hook on its transaction after the advisory lock.
       const lockedRow = { id: VISIT, customer_id: CUSTOMER, status: 'cancelled' };
       const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       await assertEligibleInTrx(trx);
       throw new Error('hook should have refused');
     });
@@ -256,6 +257,7 @@ describe('POST /admin/invoices with an open visit link', () => {
     annualPrepayCoversVisit.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('annual_prepay_terms read failed'));
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
       const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => ({ ...visitRow })) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       await assertEligibleInTrx(trx);
       throw new Error('hook should have refused');
     });
@@ -295,6 +297,7 @@ describe('POST /admin/invoices with an open visit link', () => {
     completionTerminalInvoiceLookup.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'inv-r', invoice_number: 'WPC-REF-1', status: 'refunded' });
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
       const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => ({ ...visitRow })) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       await assertEligibleInTrx(trx);
       throw new Error('hook should have refused');
     });
@@ -303,6 +306,28 @@ describe('POST /admin/invoices with an open visit link', () => {
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ code: 'visit_invoice_refunded' });
     });
+  });
+
+  test("the visit's invoice rows are locked NOWAIT before the refunded check — a row a refund holds right now refuses (409 visit_billing_changing), never waits", async () => {
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed' };
+    const rawCalls = [];
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
+      const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => ({ ...visitRow })) })) });
+      trx.raw = jest.fn(async (sql, bindings) => {
+        rawCalls.push([sql, bindings]);
+        throw Object.assign(new Error('could not obtain lock on row in relation "invoices"'), { code: '55P03' });
+      });
+      await assertEligibleInTrx(trx);
+      throw new Error('hook should have refused');
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'visit_billing_changing' });
+    });
+    expect(rawCalls).toEqual([[expect.stringMatching(/FROM invoices WHERE scheduled_service_id = \? FOR UPDATE NOWAIT/), [VISIT]]]);
+    // The refunded re-check runs only once the rows are held.
+    expect(completionTerminalInvoiceLookup).toHaveBeenCalledTimes(1);
   });
 
   test('a payer-billed visit is never covered by the homeowner prepayment, however large', async () => {
@@ -317,6 +342,7 @@ describe('POST /admin/invoices with an open visit link', () => {
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
       const lockedRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 117 };
       const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       await assertEligibleInTrx(trx);
       throw new Error('hook should have refused');
     });
@@ -335,6 +361,7 @@ describe('POST /admin/invoices with an open visit link', () => {
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
       const lockedRow = { ...visitRow, source_estimate_id: 'est-attached-later' };
       const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       await assertEligibleInTrx(trx);
       throw new Error('hook should have refused');
     });
@@ -403,6 +430,7 @@ describe('POST /admin/invoices with an open visit link', () => {
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ svc, assertEligibleInTrx, buildCreateParams }) => {
       const lockedRow = { id: VISIT, customer_id: CUSTOMER, status: null, prepaid_amount: null };
       const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       await assertEligibleInTrx(trx); // must not refuse
       const params = buildCreateParams();
       return { invoice: { id: 'inv-new', token: 'tok', customer_id: params.customerId, invoice_number: 'WPC-TEST-1', scheduled_service_id: svc.id }, reused: false };
@@ -681,6 +709,21 @@ describe('POST /admin/invoices/:id/send on a pre-completion linked invoice (Code
       const res = await send(baseUrl, { requestReview: true, reviewDelayMinutes: 120 });
       expect(res.status).toBe(200);
       expect(sendSpy).toHaveBeenCalledWith(INVOICE, expect.objectContaining({ requestReview: false }));
+    });
+  });
+
+  test('the create flow\'s immediate send is a FIRST delivery: the claim\'s already_delivered refusal is a no-op success, the operator\'s own send never passes the flag (GitHub r6 P1)', async () => {
+    linkage = { scheduled_service_id: VISIT, service_record_id: null };
+    sendSpy.mockRejectedValueOnce(Object.assign(new Error('Invoice WPC-1 was already delivered (status: sent) — not sent again'), { code: 'already_delivered' }));
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { firstDelivery: true, requestReview: false });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, already_delivered: true, sms: { ok: false, code: 'already_delivered' } });
+      expect(sendSpy).toHaveBeenCalledWith(INVOICE, expect.objectContaining({ firstDeliveryOnly: true }));
+    });
+    await withServer(async (baseUrl) => {
+      await send(baseUrl, { requestReview: false });
+      expect(sendSpy).toHaveBeenLastCalledWith(INVOICE, expect.objectContaining({ firstDeliveryOnly: false }));
     });
   });
 
