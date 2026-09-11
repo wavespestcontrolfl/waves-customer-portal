@@ -718,16 +718,8 @@ export default function ReviewVelocityEngine() {
             customerId: customer.id,
             serviceType: svcType,
             techName: customer.lastTech,
-            ...(opts.templateId
-              ? {
-                  templateId: opts.templateId,
-                }
-              : {}),
-            ...(opts.body
-              ? {
-                  body: opts.body,
-                }
-              : {}),
+            ...(opts.templateId ? { templateId: opts.templateId } : {}),
+            ...(opts.body ? { body: opts.body } : {}),
           }),
         });
         // Only mark the customer asked on an ACTUAL delivery. Deferred (quiet
@@ -782,9 +774,7 @@ export default function ReviewVelocityEngine() {
       try {
         const res = await adminFetch("/admin/reviews/outreach/start-sequence", {
           method: "POST",
-          body: JSON.stringify({
-            customerId: customer.id,
-          }),
+          body: JSON.stringify({ customerId: customer.id }),
         });
         const r = (res?.results || [])[0] || {};
         loadCandidates();
@@ -1012,7 +1002,7 @@ export default function ReviewVelocityEngine() {
       {toast && (
         <Card
           role="status"
-          className="fixed bottom-5 right-5 z-[130] flex items-center gap-2 p-3 text-ui-body font-medium shadow-lg"
+          className="fixed bottom-5 right-5 z-[130] flex items-center gap-2 p-3 text-ui-body font-medium shadow-lg pointer-events-none"
         >
           <span className="h-2 w-2 rounded-full bg-positive-fg" />
           <span>{toast}</span>
@@ -1627,9 +1617,7 @@ function Pipeline({
                                 "/admin/communications/call",
                                 {
                                   method: "POST",
-                                  body: JSON.stringify({
-                                    to: c.phone,
-                                  }),
+                                  body: JSON.stringify({ to: c.phone }),
                                 },
                               );
                               if (!r?.success)
@@ -2100,9 +2088,7 @@ function CustomerDrawer({
                     // client-side GBP number would 400.
                     const r = await adminFetch("/admin/communications/call", {
                       method: "POST",
-                      body: JSON.stringify({
-                        to: c.phone,
-                      }),
+                      body: JSON.stringify({ to: c.phone }),
                     });
                     if (!r?.success) {
                       showToast(
@@ -2207,7 +2193,9 @@ function BatchModal({
   return (
     <Dialog
       open
-      onClose={onClose}
+      onClose={() => {
+        if (!sending) onClose();
+      }}
       size="sm"
       className="admin-shell-v2 font-sans"
     >

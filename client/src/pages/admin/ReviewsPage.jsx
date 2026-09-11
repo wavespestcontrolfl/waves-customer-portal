@@ -927,13 +927,9 @@ function ReviewIncentivesPanel() {
     try {
       const d = await adminFetch("/admin/reviews/incentives/sync", {
         method: "POST",
-        body: JSON.stringify({
-          days: Number(days) || 30,
-        }),
+        body: JSON.stringify({ days: Number(days) || 30 }),
       });
-      const q = await adminFetch(
-        `/admin/reviews/incentives/attribution-queue?days=${days}`,
-      );
+      const q = await adminFetch(`/admin/reviews/incentives/attribution-queue?days=${days}`);
       setData(d);
       setQueue(q.items || []);
     } catch (e) {
@@ -952,9 +948,7 @@ function ReviewIncentivesPanel() {
     try {
       await adminFetch("/admin/reviews/incentives/mark-paid", {
         method: "POST",
-        body: JSON.stringify({
-          ids,
-        }),
+        body: JSON.stringify({ ids }),
       });
       load();
     } catch (e) {
@@ -1019,9 +1013,7 @@ function ReviewIncentivesPanel() {
             ? ""
             : candidateSearch),
       });
-      const result = await adminFetch(
-        `/admin/reviews/incentives/attribution-candidates?${params.toString()}`,
-      );
+      const result = await adminFetch(`/admin/reviews/incentives/attribution-candidates?${params.toString()}`);
       if (candidateReqRef.current !== reqId) return; // superseded — drop stale response
       setCandidateResults(result.candidates || []);
       setLikelyReviewers(result.likelyReviewers || []);
@@ -1664,17 +1656,7 @@ export default function ReviewsPage() {
       action === "retract"
         ? `/admin/reviews/${reviewId}/retract-reply`
         : `/admin/reviews/${reviewId}/auto-reply/${action}`;
-    const result = await adminFetch(
-      path,
-      body
-        ? {
-            method: "POST",
-            body: JSON.stringify(body),
-          }
-        : {
-            method: "POST",
-          },
-    );
+    const result = await adminFetch(path, body ? { method: "POST", body: JSON.stringify(body) } : { method: "POST" });
     // Post now on a 1-3★ / unrated review with no surfaced draft: the server
     // drafted + parked instead of posting; reload so the draft is rendered.
     if (result && result.message) alert(result.message);
@@ -1697,21 +1679,9 @@ export default function ReviewsPage() {
         replyText,
         expectedReply,
         expectedDraft,
-        ...(expectedReview
-          ? {
-              expectedReview,
-            }
-          : {}),
-        ...(draftToken
-          ? {
-              draftToken,
-            }
-          : {}),
-        ...(groundingToken
-          ? {
-              groundingToken,
-            }
-          : {}),
+        ...(expectedReview ? { expectedReview } : {}),
+        ...(draftToken ? { draftToken } : {}),
+        ...(groundingToken ? { groundingToken } : {}),
       }),
     });
     // A reply removes the row from the server-side "needs reply" result set.
@@ -1754,9 +1724,7 @@ export default function ReviewsPage() {
     }));
   };
   const handleDismiss = async (reviewId) => {
-    await adminFetch(`/admin/reviews/${reviewId}/dismiss`, {
-      method: "POST",
-    });
+    await adminFetch(`/admin/reviews/${reviewId}/dismiss`, { method: "POST" });
     // Dismissed rows are excluded from every view except Removed, so the same
     // shrinking-result-set offset skew as handleReply applies here.
     if (filterResponded !== "removed" && hasMore) {

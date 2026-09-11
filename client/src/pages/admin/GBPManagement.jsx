@@ -195,9 +195,7 @@ export default function GBPManagement() {
     try {
       await adminFetch("/admin/gbp/updates/bulk-reject", {
         method: "POST",
-        body: JSON.stringify({
-          ids,
-        }),
+        body: JSON.stringify({ ids }),
       });
       showToast(`${ids.length} update(s) rejected`);
       await loadUpdates();
@@ -267,7 +265,7 @@ export default function GBPManagement() {
               setSubTab("overview");
             }}
             variant={selectedLoc?.id === l.id ? "primary" : "secondary"}
-            className="min-w-[170px] text-left"
+            className="min-w-[170px] text-left flex-col items-start"
           >
             {" "}
             <div className="text-ui-body font-medium">{l.name}</div>{" "}
@@ -410,7 +408,7 @@ export default function GBPManagement() {
       {toast && (
         <Card
           role="status"
-          className="fixed bottom-5 right-5 z-[130] p-3 text-ui-body font-medium shadow-lg"
+          className="fixed bottom-5 right-5 z-[130] p-3 text-ui-body font-medium shadow-lg pointer-events-none"
         >
           {toast}
         </Card>
@@ -830,16 +828,12 @@ function HoursTab({ loc, gbp, onSave, showToast }) {
     try {
       await adminFetch(`/admin/gbp/locations/${loc.id}/hours`, {
         method: "PUT",
-        body: JSON.stringify({
-          hours,
-        }),
+        body: JSON.stringify({ hours }),
       });
       if (specialHours.length > 0) {
         await adminFetch(`/admin/gbp/locations/${loc.id}/special-hours`, {
           method: "PUT",
-          body: JSON.stringify({
-            specialHours,
-          }),
+          body: JSON.stringify({ specialHours }),
         });
       }
       showToast("Hours updated");
@@ -1000,9 +994,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
     try {
       await adminFetch(`/admin/gbp/locations/${loc.id}/services`, {
         method: "PUT",
-        body: JSON.stringify({
-          services,
-        }),
+        body: JSON.stringify({ services }),
       });
       showToast("Services updated");
       onSave();
@@ -1147,7 +1139,7 @@ function PhotosTab({ loc, gbp }) {
                 onError={(e) => {
                   e.target.style.display = "none";
                 }}
-                className="w-full h-[180px] block"
+                className="w-full h-[180px] block object-cover"
               />{" "}
               <div className="text-ui-body text-ink-secondary">
                 {photo.widthPx || photo.width}x{photo.heightPx || photo.height}
@@ -1247,7 +1239,7 @@ function UpdateQueueTab({
                     <div className="text-ui-body text-ink-secondary font-medium mb-[4px]">
                       OLD VALUE
                     </div>{" "}
-                    <div className="text-ink-secondary max-h-[60px] overflow-hidden">
+                    <div className="text-ink-secondary max-h-[60px] overflow-hidden break-all">
                       {u.old_value || "(empty)"}
                     </div>{" "}
                   </div>{" "}
@@ -1256,7 +1248,7 @@ function UpdateQueueTab({
                     <div className="text-ui-body text-zinc-900 font-medium mb-[4px]">
                       NEW VALUE
                     </div>{" "}
-                    <div className="text-zinc-900 max-h-[60px] overflow-hidden">
+                    <div className="text-zinc-900 max-h-[60px] overflow-hidden break-all">
                       {u.new_value || "(empty)"}
                     </div>{" "}
                   </div>{" "}
@@ -1310,7 +1302,11 @@ function ChangeHistoryTab({
               onClick={() => {
                 setFilter(f === "all" ? "" : f);
               }}
-              variant="secondary"
+              variant={
+                (filter || "") === (f === "all" ? "" : f)
+                  ? "primary"
+                  : "secondary"
+              }
             >
               {f}
             </Button>
