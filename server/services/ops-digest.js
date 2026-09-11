@@ -161,7 +161,12 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons' } = {}) 
     else if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
     const count = await q.update({
       read_at: db.raw('COALESCE(read_at, NOW())'),
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
+      // Drop the dedupeKey with the resolve stamp: a resolved row must never
+      // be the "standing" row notifyAdmin's rolling-window dedupe finds, or a
+      // finding that clears and recurs inside the window would be swallowed
+      // as deduped with no live bell (codex P1 on #4392). opsKey stays for
+      // history and the Activity feed.
+      metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
     });
     logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s) (${resolvedBy})`);
     return Number(count) || 0;

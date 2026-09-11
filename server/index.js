@@ -348,6 +348,18 @@ app.use('/api/public/a2a', (req, res, next) => {
   }
   next();
 });
+// Ops-digest ingest (routes/ops-digest-ingest.js): same unobservable-when-
+// dark contract as the public funnels above — while OPS_DIGEST_INGEST_TOKEN
+// is unset the path must read 404 even for an IP that already exhausted the
+// global /api/ limiter, and before the JSON parser can answer 400/413
+// (codex P0 on #4392). The router's own darkUnlessConfigured stays as the
+// in-router layer; this is the one that runs first.
+app.use('/api/ops/digest', (req, res, next) => {
+  if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
+    return res.status(404).json({ ok: false, reason: 'not_configured' });
+  }
+  next();
+});
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
