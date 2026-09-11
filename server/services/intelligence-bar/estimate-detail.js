@@ -140,6 +140,13 @@ async function offeredPricing(row) {
       setup_fee: bundle.setupFee ? feeEntry(bundle.setupFee) : null,
       rodent_bait_setup_fee: bundle.rodentBaitSetupFee ? feeEntry(bundle.rodentBaitSetupFee) : null,
       manual_discount: bundle.manualDiscount || null,
+      // The composer's own quote-required verdict (resolveEstimateQuoteRequirement:
+      // lapsed-member reprice impossible, unverified setup waiver, retired
+      // lawn pricing, commercial review, quote-required items…) — the state
+      // the public page fails closed on instead of self-serve accepting.
+      quote_required: bundle.quoteRequired === true,
+      quote_required_reason: bundle.quoteRequiredReason || null,
+      quote_required_items: list(bundle.quoteRequiredItems),
       source: bundle.source || null,
     },
   };
@@ -185,8 +192,8 @@ async function reconcileMembership(row) {
 
 async function shapeEstimate(row, deposits = []) {
   const reconciliation_error = await reconcileMembership(row);
-  const data = parseStoredJson(row.estimate_data);
   const pricing = await offeredPricing(row);
+  const data = parseStoredJson(row.estimate_data);
   const oneTimeFallback = pricing.offered_pricing?.one_time_breakdown?.total ?? null;
   return {
     id: row.id,
@@ -202,7 +209,10 @@ async function shapeEstimate(row, deposits = []) {
     tier: row.waveguard_tier,
     pricing_version: row.pricing_version || null,
     bill_by_invoice: row.bill_by_invoice === true,
-    requote_required: data.requoteRequired === true || row.requote_required === true,
+    // Derived from the bundle's verdict, never from a stored flag: null when
+    // the bundle could not be built (unknown, not "no").
+    requote_required: pricing.offered_pricing ? pricing.offered_pricing.quote_required : null,
+    requote_reason: pricing.offered_pricing?.quote_required_reason ?? null,
     // The stored totals the send path wrote (after reconciliation); the
     // bundle's one-time breakdown total when the column is empty.
     totals: {
@@ -265,7 +275,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences and their monthly / annual / per-visit (per-application) prices, each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, the one-time breakdown, first-visit and setup fees, totals, deposits, status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first, so the amounts match the live page (requote_required says when the page would ask for a requote instead). Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
+  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences and their monthly / annual / per-visit (per-application) prices, each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, the one-time breakdown, first-visit and setup fees, totals, deposits, status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced). Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. It does not itemize the internal engine rows behind those prices; offered_pricing_unavailable says when the pricing bundle could not be built.`,
   input_schema: {
     type: 'object',

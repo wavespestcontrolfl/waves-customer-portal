@@ -134,8 +134,12 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
     setup_fee: { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waived_with_prepay: true },
     rodent_bait_setup_fee: { service: 'rodent_bait_setup', label: 'Bait Station Setup', amount: 250, waived_with_prepay: false },
     manual_discount: { amountAnnual: 40 },
+    quote_required: false,
+    quote_required_reason: null,
+    quote_required_items: [],
     source: 'engine_invocation',
   });
+  expect(shaped.requote_required).toBe(false);
   expect(shaped.offered_pricing_unavailable).toBeUndefined();
   // No hand-itemized reading of estimate_data rides on the response.
   expect(shaped.recurring_services).toBeUndefined();
@@ -150,16 +154,25 @@ test('a lapsed membership is reconciled BEFORE totals and the bundle, on the sam
     // The reconciler reprices in memory: stored totals and the requote flag change on the row it was handed.
     estimate.monthly_total = '61.00';
     estimate.annual_total = '732.00';
-    estimate.estimate_data = JSON.stringify({ ...JSON.parse(estimate.estimate_data), membershipSnapshot: null, requoteRequired: true });
+    // The real reconciler's marker when no replayable engine input exists; the composer turns it into quoteRequired.
+    estimate.estimate_data = JSON.stringify({ ...JSON.parse(estimate.estimate_data), membershipSnapshot: null, membershipLapsedRequote: true });
   });
-  mockBuildPricingBundle.mockImplementation(async (estimate) => ({ frequencies: [{ key: 'quarterly', monthly: Number(estimate.monthly_total) }] }));
+  mockBuildPricingBundle.mockImplementation(async (estimate) => ({
+    frequencies: [{ key: 'quarterly', monthly: Number(estimate.monthly_total) }],
+    quoteRequired: JSON.parse(estimate.estimate_data).membershipLapsedRequote === true,
+    quoteRequiredReason: 'membership_lapsed_requote',
+    quoteRequiredItems: [],
+  }));
   const row = estimateRow();
   const shaped = await shapeEstimate(row);
   expect(calls).toEqual(['reconcile', 'bundle']);
   expect(mockReconcile).toHaveBeenCalledWith(row);
   expect(shaped.totals).toEqual({ monthly: 61, annual: 732, one_time: 125 });
   expect(shaped.offered_pricing.plan_frequencies[0].monthly).toBe(61);
+  // Quote-required state is the bundle's verdict, surfaced twice: on offered_pricing and as the top-level flag + reason.
+  expect(shaped.offered_pricing).toMatchObject({ quote_required: true, quote_required_reason: 'membership_lapsed_requote', quote_required_items: [] });
   expect(shaped.requote_required).toBe(true);
+  expect(shaped.requote_reason).toBe('membership_lapsed_requote');
   expect(shaped.reconciliation_error).toBeUndefined();
 });
 
@@ -170,6 +183,8 @@ test('a reconciler or bundle failure is reported on the response, never thrown a
   expect(shaped.reconciliation_error).toMatch(/plan lookup down/);
   expect(shaped.offered_pricing).toBeNull();
   expect(shaped.offered_pricing_unavailable).toMatch(/no customer row/);
+  expect(shaped.requote_required).toBeNull(); // unknown without the bundle — never a confident "no"
+  expect(shaped.requote_reason).toBeNull();
   mockReconcile.mockResolvedValue(undefined);
   mockBuildPricingBundle.mockResolvedValue(null);
   expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no pricing bundle/);
@@ -181,7 +196,7 @@ test('totals come from the stored columns; the one-time total falls back to the 
   expect(fromBundle.totals).toEqual({ monthly: null, annual: null, one_time: 300 });
   const broken = await shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: '0' }));
   expect(broken.totals).toEqual({ monthly: 12.5, annual: null, one_time: 0 });
-  expect(broken.requote_required).toBe(false);
+  expect(broken.requote_required).toBe(false); // the bundle answered and did not require a quote
 });
 
 test('links follow the public route: call-side block, viewable, staff preview, expired, archived (Codex r1/r3 P2)', async () => {
