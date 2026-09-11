@@ -35,6 +35,17 @@ function mockDb(table) {
     };
     return q;
   }
+  if (mockState.failSmsLogInsert && table === 'sms_log') {
+    // Seam for a failed legacy-row insert (claude audit, post-merge round):
+    // the real .catch rethrows, so the failing chain must reject — every
+    // downstream stamp keyed on this row is then never attempted.
+    const q = {};
+    q.insert = () => q;
+    q.returning = async () => { throw Object.assign(new Error('synthetic sms_log insert failure'), { code: 'synthetic' }); };
+    q.catch = (onRejected) => q.returning().catch(onRejected);
+    q.then = (resolve, reject) => q.returning().then(resolve, reject);
+    return q;
+  }
   if (mockPg && table === 'sms_log') {
     const q = mockPg(table);
     const insert = q.insert.bind(q);
@@ -195,7 +206,7 @@ beforeEach(async () => {
   if (mockPg) await mockPg.raw('TRUNCATE sms_log');
   jest.clearAllMocks();
   mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false; mockState.claims = new Map(); mockState.omitSmsLogCreatedAt = false;
-  mockClaim.calls = []; mockClaim.fail = false;
+  mockClaim.calls = []; mockClaim.fail = false; mockState.failSmsLogInsert = false;
   processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
   sendCustomerMessage.mockResolvedValue({ sent: true });
   triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
@@ -360,6 +371,29 @@ test('an unknown sender still throttles through dispatchUnknownSenderAlert when 
   expect(triggerNotification).toHaveBeenCalledTimes(1);
   await receive('Second message, same sender.', numbers.locations.parrish.number);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('a failed sms_log insert is a failed webhook (503, inbound claim released), never a silently unstamped message the sweep cannot see (claude audit, post-merge round)', async () => {
+  mockState.ai = false;
+  mockState.failSmsLogInsert = true;
+  const { releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
+  const res = new EventEmitter();
+  res.status = (code) => { res.statusCode = code; return res; };
+  res.type = () => res;
+  res.send = (value) => { res.body = value; return res; };
+  await handler({ body: { From: sender, To: numbers.locations.parrish.number, Body: 'Please quote pest control.', MessageSid: 'SM-synthetic-insert-failure' } }, res);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Twilio is told the message was NOT recorded, and the dedupe claim is
+  // handed back so the provider retry re-runs the whole handler — the
+  // retry, not the recovery sweep, is what makes this message whole.
+  expect(res.statusCode).toBe(503);
+  expect(releaseInboundWebhook).toHaveBeenCalledWith('SM-synthetic-insert-failure');
+  // Nothing downstream of the row ever ran: no alert, no window claim, no
+  // eligibility stamp — so there is no half-processed message for the sweep
+  // to be blind to.
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(mockClaim.calls).toEqual([]);
+  expect(mockState.sms).toEqual([]);
 });
 
 test('a delivered alert confirms the claim to the full 4h window, not left on the short claim lease (codex #4210 round-2 P1)', async () => {

@@ -1390,12 +1390,20 @@ router.post('/sms', async (req, res) => {
       } else {
         // Unknown sender — ALWAYS through the throttled claim/dispatch path,
         // shared with the loud-reaction path above, regardless of whether
-        // smsLogEntry itself carries a created_at (its insert is
-        // best-effort/.catch()-guarded — claude pre-push audit P1, round 2:
-        // a failed or malformed sms_log insert must not fall through to an
+        // smsLogEntry itself carries a created_at (claude pre-push audit P1,
+        // round 2: a malformed returned row must not fall through to an
         // unthrottled ringSmsReplyBell call; hasRecentUnknownSenderReceipt no
         // longer reads smsLogEntry at all since the ordering cutoff it once
-        // needed was removed, so this gate was never load-bearing).
+        // needed was removed, so this gate was never load-bearing). Note the
+        // insert itself is NOT best-effort: its .catch rethrows
+        // inbound_sms_source_unavailable, which aborts the handler before
+        // this deferred block is ever scheduled — the webhook answers 503,
+        // releases its inbound claim, and Twilio retries the whole message.
+        // So by the time anything here runs, the sms_log row exists and every
+        // stamp dispatchUnknownSenderAlert / ringSmsReplyBell writes on it
+        // (eligible / alerted / suppressed) has a row to land on — which is
+        // what lets the recovery sweep INNER JOIN on it (claude audit,
+        // post-merge round).
         await dispatchUnknownSenderAlert({ From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
       }
     }

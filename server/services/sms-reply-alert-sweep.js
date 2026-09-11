@@ -86,7 +86,14 @@ async function findCandidatePhones() {
     // dispatchUnknownSenderAlert, is NOT a recovery candidate — it means
     // the webhook itself decided no sms_reply alert was owed (an AI reply
     // that answered it, a tracking-line first-contact routed to new_lead
-    // instead, a quiet reaction, ...), not that one was lost. This is a
+    // instead, a quiet reaction, ...), not that one was lost. The "no
+    // sms_log row at all" case is not a gap (claude audit, post-merge
+    // round): the webhook's sms_log insert is not best-effort — a failed
+    // insert rethrows inbound_sms_source_unavailable, the handler answers
+    // 503 with its inbound claim released, and Twilio retries the whole
+    // message; the deferred alert block (and every stamp this sweep reads)
+    // never runs without the row. Tested in
+    // twilio-webhook-unknown-bell.test.js. This is a
     // coarse pre-filter only — the precise per-message decision is
     // findOrphanMessage below. Scoped by the eligibility stamp alone, NOT
     // conversations.customer_id (codex #4210 round-14 P1): a still-unread,
