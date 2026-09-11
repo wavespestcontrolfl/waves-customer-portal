@@ -474,17 +474,21 @@ html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
    carousel arrows, switches and close buttons keep their geometry. */
 html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
 /* r11 control floor (owner ruling C3, DECISIONS 2026-09-11): 48 is the
-   document primary, 44 is the floor for everything interactive. These are
-   floors, not clamps — `!important` here beat a page's own inline height, so
-   `BrandButton`'s authored 48 rendered at 44 on every glass surface (G-03).
-   Without it the authored height wins and an unstyled control still cannot
-   fall below 44. The separate 40px chip minimum is retired: it was the only
-   interactive surface allowed under the touch floor, and it forced the
-   `.pill-chip` special case below to exist at all (codex #3983 r3 — rows
+   document primary, 44 is the floor for everything interactive.
+   The floors keep `!important`, because a floor a page can undercut is not a
+   floor — `PayPageV2`'s gold Zelle and Copy chips author an inline 40 and are
+   held at 44 by exactly this rule. What went wrong before (G-03) was that 44
+   was the ONLY tier, so `BrandButton`'s authored 48 lost to it and every
+   primary CTA on glass rendered 44. The document primary now has its own tier
+   in the sheet rather than being authored inline and overridden here.
+   The separate 40px chip minimum is retired: it was the only interactive
+   surface allowed under the touch floor, and it forced the `.pill-chip`
+   special case that used to sit below to exist at all (codex #3983 r3 — rows
    without a selected pill sat 4px short and jumped when the selection moved).
    One floor for chips and CTAs alike makes that exception unnecessary. */
-html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px; }
-html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 44px; }
+html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
+html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 44px !important; }
+html[data-glass-theme] :is(button, a)[data-glass-size="primary"] { min-height: 48px !important; }
 /* Placeholders read as hints, never as entered values (owner 2026-09-06,
    customer feedback): italic, slate-500 (#64748B, 4.8:1 on white — WCAG AA for
    14px text; a lighter grey fell to 2.6:1). This is the
