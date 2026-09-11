@@ -1141,11 +1141,25 @@ const SAFETY_SUBJECT = '(?:it|that|they|these|those|everything|the (?:bait|produ
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 // "non toxic" and "pet safe" are spoken as two words as often as one.
 const SAFETY_ADJECTIVE = '(?:safe|harmless|non[- ]?toxic|pet[- ]?safe)';
+// A HARM word — the OTHER pole from SAFETY_ADJECTIVE. Negating one of THESE
+// ("not harmful", "never toxic", "no longer dangerous") is the guarantee
+// itself, same as "no risk"/"no danger" below — it is denying the harm, not
+// warning about it.
+const HARM_ADJECTIVE = '(?:harmful|toxic|dangerous|risky|poisonous|hazardous)';
+// Direct negation of the SAFETY_ADJECTIVE itself — "not safe", "isn't
+// harmless", "is not entirely safe", "no longer pet safe" — is a WARNING,
+// exactly what Sandy is supposed to say, not a guarantee softened by a
+// nearby negative word. This is the mirror image of HARM_ADJECTIVE above:
+// negating the SAFE word is caution, negating the HARM word is the claim.
+const SAFETY_ADJECTIVE_NEGATION = `(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 const SAFETY_GUARANTEE_RES = Object.freeze([
-  new RegExp(`${SAFETY_REFUSAL}\\b${SAFETY_SUBJECT}\\s*(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were))\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'i'),
-  new RegExp(`${SAFETY_REFUSAL}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|kids)\\b`, 'i'),
+  new RegExp(`${SAFETY_REFUSAL}\\b${SAFETY_SUBJECT}\\s*(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were))\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'i'),
+  new RegExp(`${SAFETY_REFUSAL}${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|kids)\\b`, 'i'),
   new RegExp(`${SAFETY_REFUSAL}\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b`, 'i'),
   new RegExp(`${SAFETY_REFUSAL}\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'i'),
+  // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
+  // the HARM word is itself the safety claim.
+  new RegExp(`${SAFETY_REFUSAL}\\b(?:not|never|no longer)\\s+${SAFETY_INTENSIFIER}${HARM_ADJECTIVE}\\b`, 'i'),
 ]);
 
 // A caller yes/no safety question, in the TWO polarities it comes in — read
