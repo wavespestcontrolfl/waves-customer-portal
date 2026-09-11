@@ -34,9 +34,16 @@ function replay(input) {
       // start_at (the unknown-window case latestPromises models for a legacy
       // move notice) is exactly as unusable to evaluateNoShow as no promise
       // at all, and silently reported complete coverage before this fix
-      // (codex P1 af4925f71).
+      // (codex P1 af4925f71). null must be rejected explicitly, BEFORE the
+      // Date conversion below: new Date(null).getTime() is 0 (a finite,
+      // valid instant — the epoch), not NaN, so `!Number.isFinite(...)`
+      // alone lets a null start_at slip through as "covered" and understate
+      // missing evidence in the backtest (codex P1, pre-push audit on PR
+      // #4403's head). Same null-before-Date idiom as no-show-detector.js's
+      // own `instant` helper (`value == null ? NaN : new Date(value).getTime()`).
       const finalPromise = latestPromises(promises, to).get(String(item.id));
-      if (!finalPromise || !Number.isFinite(new Date(finalPromise.start_at).getTime())) missingPromise += 1;
+      if (!finalPromise || finalPromise.start_at == null
+        || !Number.isFinite(new Date(finalPromise.start_at).getTime())) missingPromise += 1;
       const state = { id: item.id, ...item.initial };
       let eventIndex = 0;
       const emitted = new Set();

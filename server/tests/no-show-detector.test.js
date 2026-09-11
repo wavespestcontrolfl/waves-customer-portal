@@ -41,6 +41,19 @@ describe('missing tracking stages', () => {
     }] });
     for (const result of report.thresholds) expect(result.alerts).toMatchObject([{ stage: 1, at: '2026-09-10T14:10:00.000Z' }]);
   });
+  test('replay counts a null latest promised window as missing coverage, not covered', () => {
+    // new Date(null).getTime() is 0 — a finite, valid instant (the epoch) —
+    // not NaN, so a naive `!Number.isFinite(new Date(start_at).getTime())`
+    // guard lets an unknown latest window (start_at: null, the legacy-move
+    // case latestPromises models) slip through as "covered" and understate
+    // missing evidence in the backtest (codex P1).
+    const report = replay({ synthetic: true, from: '2026-09-09T00:00:00-04:00', to: '2026-09-10T00:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, events: [],
+      promises: [{ start_at: null, communicated_at: '2026-09-09T12:00:00-04:00', source: 'call' }],
+      outcome: 'unknown',
+    }] });
+    for (const result of report.thresholds) expect(result.missing_promise_visits).toBe(1);
+  });
 
 });
 
