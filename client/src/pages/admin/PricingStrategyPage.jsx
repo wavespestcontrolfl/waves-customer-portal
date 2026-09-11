@@ -129,28 +129,35 @@ function MetricCard({ label, value }) {
 
 function MoneyModelTab({ dashboard, loading }) {
   if (loading) return <ActionFeedback className="min-h-20">Loading money model...</ActionFeedback>;
+  // GET /admin/pricing/dashboard returns overview / stages / funnel
+  // (server/services/pricing-intelligence.js:397-435). The flat totalCustomers,
+  // mrr and revenueByStage fields this tab used to read are not in that
+  // response, so every KPI rendered as 0 and every stage as $0.00.
   const data = dashboard || {};
+  const overview = data.overview || {};
   const funnel = data.funnel || {};
-  const stages = data.revenueByStage || {};
+  const stages = data.stages || {};
   const metrics = [
-    { label: "Total customers", value: data.totalCustomers || 0 },
-    { label: "Avg LTV", value: formatMoney(data.avgLTV) },
-    { label: "Avg CAC", value: formatMoney(data.avgCAC) },
-    { label: "LTV:CAC ratio", value: data.ltvCacRatio ? `${data.ltvCacRatio.toFixed(1)}x` : "—" },
-    { label: "Monthly recurring", value: formatMoney(data.mrr) },
+    { label: "Total customers", value: overview.totalCustomers || 0 },
+    { label: "Avg LTV", value: formatMoney(overview.avgLTV) },
+    { label: "Avg CAC", value: formatMoney(overview.avgCAC) },
+    { label: "LTV:CAC ratio", value: overview.ltvToCacRatio ? `${overview.ltvToCacRatio.toFixed(1)}x` : "—" },
+    { label: "Monthly recurring", value: formatMoney(overview.monthlyRecurringRevenue) },
   ];
+  // Only Core carries a money figure in the contract; the other three stages
+  // report counts, so each card shows the number its stage actually has.
   const stageRows = [
-    { stage: "Stage I: Attraction", desc: "First service / one-time", value: stages.attraction },
-    { stage: "Stage II: Core", desc: "WaveGuard recurring", value: stages.core },
-    { stage: "Stage III: Upsell", desc: "Add-ons & upgrades", value: stages.upsell },
-    { stage: "Stage IV: Continuity", desc: "Retention & renewals", value: stages.continuity },
+    { stage: "Stage I: Attraction", desc: "First service / one-time", value: stages.attraction?.acceptedEstimates ?? 0 },
+    { stage: "Stage II: Core", desc: "WaveGuard recurring", value: formatMoney(stages.core?.monthlyRecurring), money: true },
+    { stage: "Stage III: Upsell", desc: "Add-ons & upgrades", value: stages.upsell?.totalCompletedServices ?? 0 },
+    { stage: "Stage IV: Continuity", desc: "Retention & renewals", value: stages.continuity?.totalRetained ?? 0 },
   ];
   const funnelRows = [
     { label: "Leads", value: funnel.leads },
     { label: "Estimates", value: funnel.estimates },
     { label: "Accepted", value: funnel.accepted },
     { label: "Active", value: funnel.active },
-    { label: "Retained 6mo+", value: funnel.retained },
+    { label: "Retained 6mo+", value: stages.continuity?.totalRetained },
   ];
 
   return (
@@ -165,7 +172,7 @@ function MoneyModelTab({ dashboard, loading }) {
             <div key={stage.stage} className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4 text-center">
               <div className="font-medium text-zinc-900">{stage.stage}</div>
               <div className="mt-1 text-ui-caption text-ink-secondary">{stage.desc}</div>
-              <div className="mt-3 text-22 font-medium text-zinc-900 u-nums">{formatMoney(stage.value)}</div>
+              <div className="mt-3 text-22 font-medium text-zinc-900 u-nums">{stage.value}</div>
             </div>
           ))}
         </CardBody>

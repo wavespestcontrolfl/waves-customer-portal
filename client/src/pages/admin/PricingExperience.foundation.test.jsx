@@ -27,7 +27,7 @@ function fixtureFor(url, options = {}) {
   if (path.startsWith("/admin/pricing-config/pest-calibration?")) return { summary: { count: 1, avgDelta: 2, avgAbsDelta: 2, outlierCount: 0, byPoolCageSize: [], byLotBand: [], reviewQueue: [] }, sampleHealth: {}, records: [] };
   if (path === "/admin/pricing-config") return { configs: pricingConfig };
   if (path === "/admin/pricing-config/audit-log?limit=30") return { logs: [] };
-  if (path === "/admin/pricing/dashboard") return { totalCustomers: 8, avgLTV: 900, avgCAC: 90, ltvCacRatio: 10, mrr: 1200, funnel: { leads: 10, estimates: 8, accepted: 6, active: 5, retained: 4 }, revenueByStage: {} };
+  if (path === "/admin/pricing/dashboard") return { overview: { totalCustomers: 8, avgLTV: 900, avgCAC: 90, ltvToCacRatio: 10, monthlyRecurringRevenue: 1200, annualizedRecurring: 14400 }, stages: { attraction: { totalLeads: 10, totalEstimates: 8, acceptedEstimates: 6, conversionRate: 75 }, core: { recurringCustomers: 5, monthlyRecurring: 1200, tierBreakdown: {} }, upsell: { avgServicesPerCustomer: 2, totalCompletedServices: 14 }, continuity: { retentionBuckets: {}, totalRetained: 4 } }, funnel: { leads: 10, estimates: 8, accepted: 6, active: 5 } };
   if (path === "/admin/pricing/calculate-value") return { valueScore: 54, priceRecommendation: "Market rate", positioning: "Synthetic positioning" };
   if (path === "/admin/pricing/upsell-rules") return { rules: [{ id: "rule-1", name: "Synthetic rule", trigger_event: "renewal", offer_service: "mosquito", enabled: true, times_triggered: 2, times_converted: 1 }] };
   // { customer, upsell } pairs and the summary/channel/retention LTV response
