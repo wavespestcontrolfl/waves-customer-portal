@@ -450,6 +450,11 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     copyIfPresent(row, parent, [
       'create_invoice_on_complete',
       'annual_prepay_term_id',
+      // NOTE: prepaid_method / prepaid_amount are deliberately NOT copied
+      // here — see the budgeted allocation below. Blindly inheriting a stamp
+      // would mark more visits prepaid than the term bought, and would copy
+      // an independent cash/check/Zelle stamp (a per-visit fact) onto a
+      // whole series.
       // Catalog link: follow-ups must resolve the same completion profile
       // as their parent (combined services especially — name matching alone
       // breaks if the catalog row is ever renamed).
@@ -472,6 +477,14 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'zip',
     ]);
     Object.assign(row, require('./booking/visit-financial-stamps').recurringServiceAddress(parent));
+    // No prepaid stamp is written here. The term link is copied above, and
+    // seedFollowUpsForParent re-applies the term's coverage AFTER the rows
+    // are inserted — applyPrepaidCoverageForTerm is the single authority on
+    // how many slots the term has left and what each is worth. Stamping a
+    // row here could only be a second opinion, and plannedCount is
+    // independent of coverage_visit_count, so it would be wrong whenever a
+    // series is longer than the plan the customer bought.
+
     // Resolved identity outranks the parent's copied link AND snapshot (the
     // parent may be unlinked, linked to a row since renamed, or carry a
     // stale snapshot that must not ride into the child — codex #3604 r5
@@ -1137,6 +1150,107 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
   )];
 }
 
+// Re-apply the parent term's coverage across the series after seeding, so
+// the new rows are stamped if — and only if — the term has slots for them.
+async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = []) {
+  if (!columns?.annual_prepay_term_id) return;
+  if (!conn || !parent?.id) return;
+  const dates = [...new Set((coverageDates || []).filter(Boolean))].sort();
+  let resolvedTerm = null;
+  const run = async (c) => {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    // The term link can sit on any visit in the series, not the root: prepay
+    // activated partway through an ongoing series links only visits inside
+    // the term window, so a root predating term_start is never linked.
+    const ids = new Set([parent.annual_prepay_term_id].filter(Boolean).map(String));
+    const linked = await c('scheduled_services')
+      .where(function inSeries() {
+        this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
+      })
+      .whereNotNull('annual_prepay_term_id')
+      // NO status filter, deliberately. This is term DISCOVERY, not slot
+      // counting: any linked visit — live, NULL-status, or terminal — is
+      // valid evidence that this series belongs to that term. Filtering
+      // terminal rows out destroyed the only link when the historical parent
+      // was unlinked and the one linked sibling was later cancelled, leaving
+      // a replacement extension unable to resolve a still-paid term and
+      // billable again — precisely when the cancellation had FREED a slot for
+      // it. Whether the term is real is coveredTermsAsOf's job (it rejects
+      // unpaid and revoked), and whether a slot is free is
+      // coverageRowsForTerm's (it still excludes terminal rows from the
+      // covered set). Discovery only has to find candidates.
+      .distinct('annual_prepay_term_id')
+      .pluck('annual_prepay_term_id');
+    for (const id of linked || []) if (id) ids.add(String(id));
+    if (!ids.size) return;
+
+    // EVERY term covering ANY seeded date, not just the earliest one's.
+    // A batch can span a renewal boundary: picking a single term left the
+    // later visits unstamped despite a linked, paid renewal, and an earliest
+    // date that predated coverage skipped the whole batch.
+    //
+    // coveredTermsAsOf is the same live/paid authority annualPrepayCoversVisit
+    // consults. A plain terms lookup would also find a refunded or revoked
+    // term — those keep their visit links for audit, and
+    // applyPrepaidCoverageForTerm checks coverage CONFIG, not payment — so
+    // re-stamping one would restore coverage revocation deliberately cleared,
+    // and findBillingCoveredVisits reads a positive prepaid_amount as money
+    // held and blocks cancelling the visit.
+    const seen = new Set();
+    for (const date of (dates.length ? dates : [null])) {
+       
+      const terms = await AnnualPrepayRenewals.coveredTermsAsOf(c, date)
+        .whereIn('t.id', [...ids])
+        .orderBy('t.term_start', 'desc')
+        .select('t.*');
+      for (const term of terms || []) {
+        if (!term?.id || seen.has(String(term.id))) continue;
+        seen.add(String(term.id));
+        resolvedTerm = term;
+        // A callback stamped by the older text-matching behavior is excluded
+        // from coverageRowsForTerm but keeps its annual-prepay amount, so
+        // allocating a replacement slot without clearing it leaves the term
+        // with MORE positive allocations than coverage_visit_count. The other
+        // direct-stamping paths detach first; so does this one.
+        await AnnualPrepayRenewals._private.detachCallbacksFromTerm(term, c);
+         
+        await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
+          quietTransientExceptions: true,
+          // Queries on the savepoint; alerts wait on the OUTER transaction —
+          // a savepoint's executionPromise resolves on RELEASE, so filing
+          // against it would let a rollback leave a false alert that dedupes
+          // the real retry for seven days.
+          notifyConn: conn,
+        });
+      }
+    }
+  };
+  try {
+    // Inside a caller transaction the work must run on that trx (the rows we
+    // just inserted are invisible elsewhere), but a coverage failure must not
+    // abort the caller — in PostgreSQL a failed statement poisons every later
+    // one with 25P02, so catching in JS is NOT enough to keep this
+    // best-effort. The WHOLE attempt, every read included, runs inside a
+    // SAVEPOINT (knex nested transaction) and the catch swallows the
+    // rolled-back savepoint. Same shape as visit-groups.maybeGroupRow.
+    if (conn.isTransaction) await conn.transaction(run);
+    else await run(conn);
+  } catch (e) {
+    // Fail soft on the transaction, but never silently: the savepoint rolls
+    // back and the seeded rows commit uncovered, and no sweep re-runs
+    // ordinary coverage allocation, so without a durable trail those visits
+    // stay billable and charge the customer for prepaid work. Filed on the
+    // OUTER transaction so a caller rollback does not mint a false alert.
+    require('./logger').warn(`[recurring-seeder] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
+    if (resolvedTerm) {
+      await require('./annual-prepay-renewals')._private.fileCoverageExceptionAfterCommit(
+        conn, resolvedTerm, 'generator_coverage_failed',
+        'Newly scheduled visits on this annual prepay could not be marked as covered, so completing them will invoice the customer for prepaid work. Re-apply the prepay coverage to those visits, or void the invoices if they have already been issued.',
+      ).catch(() => {});
+    }
+  }
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -1248,6 +1362,23 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     ? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn('scheduled_services').insert(rows).returning('*'); })()
     : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx('scheduled_services').insert(rows).returning('*'));
   const insertedRows = Array.isArray(inserted) ? inserted : [];
+  // Annual-prepay coverage for the rows just seeded.
+  //
+  // Children inherit the parent's annual_prepay_term_id, but the LINK alone
+  // does not make a visit covered — annualPrepayCoversVisit also needs
+  // prepaid_method and a positive prepaid_amount — so link-only children
+  // read as UNCOVERED and billed again for service the prepay had bought
+  // (43 such rows in prod, 2026-09-11). Rather than stamp them in the
+  // builder, hand the whole set to the ONE coverage authority: it caps the
+  // covered set at coverage_visit_count, skips rows another term or an
+  // out-of-band payment already covers, and slices by position so the
+  // remainder cents land on the final visit. Best-effort by design — an
+  // uncovered visit is a billing question someone can correct, a failed
+  // seed is a missing visit the customer feels.
+  await applySeededPrepayCoverage(
+    conn, parent, columns,
+    insertedRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean),
+  );
   // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
   // every caller (estimate converter, admin-schedule, customer booking)
   // gets grouping for follow-ups landing on an existing groupable stop.
@@ -1313,6 +1444,7 @@ module.exports = {
   serviceKeyFor,
   shiftPastWeekend,
   _internals: {
+    applySeededPrepayCoverage,
     dateOnly,
     nextRecurringDate,
     recurrenceOrdinalOptions,
