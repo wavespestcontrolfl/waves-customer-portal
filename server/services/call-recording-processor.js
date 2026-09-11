@@ -6406,6 +6406,41 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
   }
 }
 
+// Reschedule apply — when a matched existing customer's call moved a visit
+// that is already on the books (V2 scheduling.status reschedule_requested +
+// agent_committed_booking + confirmed_start_at), move that visit through
+// the rebooker, note the access request, resolve the reschedule cards
+// (services/call-reschedule-apply.js). Runs after finalization, fenced on
+// this pass's GENERATION. Sends NOTHING to the customer. Dark behind
+// GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
+async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
+  if (extracted?.is_spam || !isEnabled('callRescheduleApply')) return;
+  if (v2Result?.status !== 'valid' || !v2Result.extraction) return;
+  if (!(call?.customer_id || customerId)) return;
+  try {
+    const result = await require('./call-reschedule-apply').applyCallReschedule({
+      conn: db,
+      call,
+      procGeneration,
+      appointmentCreated: !!appointmentResult?.scheduledServiceId,
+    });
+    if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
+      logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
+    }
+    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+    // the move just kept was written open and its proof did not exist yet.
+    // Re-run the fulfillment lookup now that the activity row exists, or the
+    // watchdog reports an overdue promise this pass already kept (GH codex
+    // #4204 r6 P2). Non-blocking, like every other line in this step.
+    if (result.outcome === 'applied' && isEnabled('callCommitments')) {
+      await require('./call-commitments').refreshFulfillment(db, call.id)
+        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+  }
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
@@ -16381,6 +16416,11 @@ const CallRecordingProcessor = {
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+
+      // Reschedule apply (applyCallRescheduleStep): an existing customer's
+      // agent-committed move of an on-the-books visit lands on the visit.
+      // No customer comms. Generation-fenced, never blocking.
+      await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization

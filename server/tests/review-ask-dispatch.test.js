@@ -69,6 +69,15 @@ describe('review ask dispatch boundary', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  test('excludeReservationId reaches lastManualAskAt so a caller\'s own pre-reserved row cannot self-block it', async () => {
+    const provider = jest.fn(async () => ({ sent: true }));
+    expect(await dispatchReviewAsk('customer', provider, { excludeReservationId: 'own-reservation' }))
+      .toEqual({ sent: true });
+    expect(history.lastManualAskAt).toHaveBeenCalledWith('customer', {
+      since: new Date(now.getTime() - history.ASK_SPACING_MS), excludeReservationId: 'own-reservation',
+    });
+  });
+
   test('a provider throw preserves its known outcome for the caller', async () => {
     const error = Object.assign(new Error('audit failed'), { providerOutcome: { sent: true } });
     await expect(dispatchReviewAsk('customer', async () => { throw error; })).rejects.toBe(error);
