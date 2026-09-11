@@ -243,6 +243,18 @@ async function estimateLinks(row, data) {
 // a figure nothing had verified (pre-push audit P1). A declined row is now
 // reconciled like any other, and commits nothing — because it committed
 // nothing.
+// SIDE EFFECTS, since this is a registered READ tool (action-policy kind:
+// "read", approval null) and the pre-push auditor asked: the reconciler
+// persists NOTHING. It mutates the in-memory row, and clears that estimate's
+// entry in the in-process pricing cache so the next page load recomputes —
+// verified against estimate-public.js reconcileFrozenMembershipSnapshot,
+// whose only non-local calls are invalidateSendSnapshotPricingBundle (on the
+// parsed object) and clearEstimatePricingCache(id). No UPDATE, no INSERT.
+// Its one DB read is the live plan lookup, once per row, at most
+// MAX_PER_CUSTOMER rows per call. The reconcile runs BEFORE the provenance
+// check on purpose — that is the public route's own order, and reading the
+// row's linkage from a pre-reconcile copy was itself a review finding — and
+// costs a blocked row nothing but that cache invalidation.
 const membershipFrozen = (row) => String(row.status || '').trim().toLowerCase() === 'accepted' || !!row.price_locked_at;
 
 async function reconcileMembership(row) {
