@@ -75,6 +75,7 @@ const mileage = {
       total_miles: 100,
       business_miles: 90,
       personal_miles: 10,
+      business_pct: 90,
       fuel_gallons: 5,
       fuel_cost: 20,
       jobs_serviced: 3,
@@ -111,6 +112,28 @@ const cost = {
   monthly_cost: 785,
   condition_rating: 8,
   total_irs_deduction: 63,
+};
+// Matches the job-cost summary below (1 pest job, $250 revenue, $100 cost,
+// 60% margin) so the list and the summary cannot disagree — the real
+// endpoints read the same `job_costs` table and never do.
+const jobCost = {
+  id: "job-cost-example",
+  service_record_id: null,
+  customer_id: "customer-example",
+  customer_name: "Fixture Customer",
+  service_date: "2026-09-05",
+  service_type: "pest",
+  products_cost: 40,
+  labor_cost: 45,
+  drive_cost: 10,
+  equipment_cost: 5,
+  total_cost: 100,
+  revenue: 250,
+  gross_profit: 150,
+  margin_pct: 60,
+  tank_mix_id: null,
+  sqft_treated: 2500,
+  products_used: [],
 };
 const calibration = {
   id: calibrationId,
@@ -212,7 +235,10 @@ function fixtures(state) {
           },
         },
     ],
-    ["GET /api/admin/equipment/job-costs", () => ({ job_costs: [] })],
+    [
+      "GET /api/admin/equipment/job-costs",
+      () => ({ job_costs: [jobCost], costs: [jobCost], total: 1, page: 1 }),
+    ],
     [
       "GET /api/admin/equipment-maintenance",
       () => ({ equipment: state.empty ? [] : [equipment] }),
@@ -614,7 +640,7 @@ function gallery(report) {
       .join("")}</main></html>`,
   );
 }
-async function section(page, group, leaf) {
+async function section(page, group, leaf, expected) {
   await page
     .getByRole("navigation", { name: "Equipment section", exact: true })
     .getByRole("button", { name: group, exact: true })
@@ -624,6 +650,18 @@ async function section(page, group, leaf) {
       .locator("main")
       .getByRole("tab", { name: leaf, exact: true })
       .click();
+  // EquipmentPage writes the rendered leaf into ?tab= (assets clears it), so
+  // the URL is the authoritative "which leaf mounted" signal. Without this a
+  // parent click that silently stops moving the leaf would leave the previous
+  // view mounted and every later check — screenshot, widths, NaN — would pass
+  // against the wrong screen under the next leaf's name.
+  await page.waitForFunction(
+    (want) =>
+      (new URL(window.location.href).searchParams.get("tab") || "assets") ===
+      want,
+    expected,
+    { timeout: 5000 },
+  );
   await page.waitForTimeout(200);
 }
 async function fleetDetail(page) {
@@ -688,10 +726,17 @@ async function views(page, server, state, report, device) {
     ["Costs", null, "job-costs"],
     ["Costs", "Analytics", "analytics"],
   ]) {
-    await section(page, group, leaf);
+    await section(page, group, leaf, key);
     await capture(page, state, report, device, key);
+    // A fixture that omits a field the real endpoint always returns renders it
+    // literally — `NaN` through a Number(), `undefined` when interpolated raw —
+    // and the screenshot captures that malformed state while the run passes.
     const rendered = await page.locator("main").innerText();
-    assert.ok(!/\bNaN\b/.test(rendered), `${key} view renders without NaN`);
+    const malformed = rendered.match(/\b(?:NaN|undefined)\b/);
+    assert.ok(
+      !malformed,
+      `${key} view renders without NaN/undefined (found "${malformed?.[0]}")`,
+    );
     if (key === "analytics") {
       const fleetTotalsRow = page.getByRole("row", { name: /Fleet Totals/ });
       assert.equal(await fleetTotalsRow.count(), 1, "Fleet totals row is rendered");
@@ -706,7 +751,7 @@ async function views(page, server, state, report, device) {
   const chart = page.getByRole("region", { name: "Monthly maintenance costs chart", exact: true });
   await chart.evaluate((node) => { node.scrollLeft = node.scrollWidth - node.clientWidth; });
   await shot(page, report, device + "-analytics-chart", chart);
-  await section(page, "Assets");
+  await section(page, "Assets", null, "assets");
   for (const [label, key] of [
     ["Add Equipment", "new-equipment"],
     ["Edit", "edit-equipment"],
@@ -724,7 +769,7 @@ async function views(page, server, state, report, device) {
       "Opener focus returns",
     );
   }
-  await section(page, "Maintenance");
+  await section(page, "Maintenance", null, "maintenance");
   await fleetDetail(page);
   await capture(page, state, report, device, "maintenance-detail",
     page.getByRole("button", { name: "Record Maintenance", exact: true }));
@@ -739,7 +784,7 @@ async function views(page, server, state, report, device) {
       page.getByRole("button", { name: label === "Record Maintenance" ? "Save Record" : "Save Mileage", exact: true }));
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
   }
-  await section(page, "Maintenance", "Calibrations");
+  await section(page, "Maintenance", "Calibrations", "calibrations");
   await page
     .getByLabel("Equipment system", { exact: true })
     .selectOption(systemId);
