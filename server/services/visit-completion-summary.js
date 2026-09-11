@@ -625,8 +625,15 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
     // the bounce landed before the initial send returned, or the handoff was
     // ambiguous — a delivery event is the proof either lacked.
-    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
-      .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
+    // A still-sent aggregate is judged too: a provider block that scheduled
+    // a retry never reopened it (the rail owns the block), so when that
+    // retry is refused and the ledger holds no accepted send any more, the
+    // aggregate settles as suppressed instead of reading as delivered.
+    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email' })
+      .where(function () {
+        this.where({ status: 'sent' })
+          .orWhere(function () { this.where({ status: 'unknown_delivery' }).whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']); });
+      }).forUpdate().first('id', 'status');
     if (!effect) return { reconciled: false };
     const { outcomes } = await summaryEmailEvidence(message, trx);
     // Every recipient row must be settled: a delivery proves sent, and a
@@ -636,6 +643,7 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       return { reconciled: false };
     }
     const settled = outcomes.includes('sent') ? 'sent' : 'suppressed';
+    if (effect.status === settled) return { reconciled: false };
     await trx('visit_effects').where({ id: effect.id })
       .update({ status: settled, sent_at: settled === 'sent' ? trx.fn.now() : null, last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the

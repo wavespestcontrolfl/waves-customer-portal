@@ -330,6 +330,21 @@ postgres('visit summary recipient recovery', () => {
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'unknown_delivery' });
   });
 
+  test('a retry refused after a provider block settles a still-sent summary as suppressed', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = false; });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'sent' });
+    // The block left the effect with the retry rail; the refused retry is the ledger's last word.
+    await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).update({ status: 'blocked', error_message: 'Suppressed before retry: do_not_email' });
+    expect(await Summary.reconcileSummaryEmailRecovery({ ...delivered, status: 'blocked' })).toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'suppressed', sent_at: null });
+    // A delivery event on an already-sent aggregate changes nothing.
+    await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).update({ status: 'delivered' });
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).update({ status: 'sent' });
+    expect(await Summary.reconcileSummaryEmailRecovery({ ...delivered, status: 'delivered' })).toEqual({ reconciled: false });
+  });
+
   test('a billing-email save assigning the recovery destination waits for the held retry handoff', async () => {
     const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary', recipient_email_snapshot: fixture.primaryEmail };
     const destination = `${randomUUID()}@example.invalid`;
