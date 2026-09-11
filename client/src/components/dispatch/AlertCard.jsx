@@ -23,6 +23,7 @@
  */
 import React, { useState } from 'react';
 import { Card, Button, cn } from '../ui';
+import { formatETTime, formatETDateOnly } from '../../lib/timezone';
 
 const SEVERITY_TONE = {
   info: 'neutral',
@@ -199,6 +200,39 @@ function RouteQualityBody({ alert }) {
   );
 }
 
+// Missing-departure/arrival tracking cards reuse the existing tech_late /
+// unassigned_overdue alert types (same Action Queue lifecycle — resolve,
+// auto-clear on status change) and are distinguished only by
+// payload.source. They still need their own body: the generic
+// TechLateBody/UnassignedOverdueBody read payload.delay_minutes, which
+// this generator never sets, so without this renderer a tracking card
+// would show "Unknown tech running late" with no way to tell which visit
+// needs attention (codex P1 — af4925f71).
+function TrackingBody({ alert }) {
+  const window = alert.payload?.promised_window;
+  const windowLabel = window?.start_at ? formatETTime(window.start_at) : null;
+  const dateLabel = alert.scheduled_date ? formatETDateOnly(alert.scheduled_date) : null;
+  const when = [dateLabel, windowLabel].filter(Boolean).join(' · ');
+  return (
+    <div className="text-14 text-ink-primary space-y-1">
+      <div>
+        {alert.tech_name ? (
+          <span className="font-medium">{alert.tech_name}</span>
+        ) : (
+          <span className="text-ink-tertiary italic">Unassigned</span>
+        )}
+        {customerLine(alert) && (
+          <>
+            {' '}— <span className="font-medium">{customerLine(alert)}</span>
+          </>
+        )}
+        {when && <span className="text-ink-secondary"> ({when})</span>}
+      </div>
+      <p className="text-ink-secondary">{alert.payload?.message}</p>
+    </div>
+  );
+}
+
 const TYPE_RENDERERS = {
   tech_late: TechLateBody,
   unassigned_overdue: UnassignedOverdueBody,
@@ -208,7 +242,8 @@ const TYPE_RENDERERS = {
 };
 
 export default function AlertCard({ alert, onResolve }) {
-  const Body = TYPE_RENDERERS[alert.type] || GenericBody;
+  const tracking = alert.payload?.source === 'no_show_detector';
+  const Body = tracking ? TrackingBody : (TYPE_RENDERERS[alert.type] || GenericBody);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState(null);
 
@@ -245,7 +280,7 @@ export default function AlertCard({ alert, onResolve }) {
             {alert.severity}
           </span>
           <span className={cn('font-medium text-ink-tertiary truncate', alert.type === 'schedule_route_quality' ? 'text-14' : 'text-11 uppercase tracking-label')}>
-            {alert.type === 'schedule_route_quality' ? 'Route needs review' : alert.type}
+            {alert.type === 'schedule_route_quality' ? 'Route needs review' : tracking ? 'Missing tracking' : alert.type}
           </span>
         </div>
         <span className="text-11 text-ink-tertiary flex-shrink-0">

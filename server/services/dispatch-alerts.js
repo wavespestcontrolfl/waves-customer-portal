@@ -185,6 +185,12 @@ function emitAlert(row) {
   io.to(ROOM).emit(EVENT, row);
 }
 
+async function clearTrackingBells(t, rows) {
+  const ids = rows.filter((row) => row?.payload?.source === 'no_show_detector').map((row) => String(row.id));
+  if (ids.length) await t('notifications').whereIn(t.raw("metadata->>'dispatch_alert_id'"), ids)
+    .whereNull('read_at').update({ read_at: t.fn.now() });
+}
+
 /**
  * Mark an alert resolved and broadcast dispatch:alert_resolved.
  *
@@ -225,7 +231,9 @@ async function resolveAlert({ id, resolvedBy, trx } = {}) {
         resolved_by: resolvedBy || null,
       })
       .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
-    return rows[0] || null;
+    const row = rows[0] || null;
+    await clearTrackingBells(t, row ? [row] : []);
+    return row;
   }
 
   if (trx) {
@@ -301,13 +309,15 @@ function summarizeResolvedAlerts(rows) {
  */
 async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   async function doWrite(t) {
-    return t('dispatch_alerts')
+    const rows = await t('dispatch_alerts')
       .whereNull('resolved_at')
       .update({
         resolved_at: t.fn.now(),
         resolved_by: resolvedBy || null,
       })
       .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+    await clearTrackingBells(t, rows);
+    return rows;
   }
 
   let rows;

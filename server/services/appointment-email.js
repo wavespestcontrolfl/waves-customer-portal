@@ -236,6 +236,10 @@ async function moveHoldLive(scheduledServiceId, renderedSlotMs = null) {
 }
 
 async function sendTemplate({ customerId, templateKey, eventType, payload = {}, idempotencyKey, categories = [], triggerEventId, metadata = {}, recipientFilter = null, moveHoldServiceId = null, renderedSlotMs = null, scheduledServiceId = null }) {
+  // rendered_slot_ms is the communicated window at send time — persisted so
+  // no-show-detector.js's loadPromiseEvents can prove what was promised
+  // without re-deriving it from the (mutable) current schedule.
+  if (Number.isFinite(renderedSlotMs) && moveHoldServiceId) metadata = { ...metadata, rendered_slot_ms: renderedSlotMs };
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
 

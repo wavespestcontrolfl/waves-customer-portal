@@ -505,7 +505,21 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
   }, visitId);
 }
 
+// Follow-through shares the staff notification and push paths. Its live
+// card is rendered by the shared feed, so it needs no separate Got it tap.
+async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeKey, message, payload }) {
+  if (!gateEnvValue('GATE_NOSHOW_DETECTOR') || !technicianId) return null;
+  const tech = await trx('technicians').where({ id: technicianId }).first('id', 'employment_status', 'field_dispatchable');
+  if (!isAssignable(tech)) return null;
+  const [row] = await trx('tech_notifications').insert({ technician_id: technicianId,
+    type: 'follow_through_tracking', dedupe_key: dedupeKey, message, payload })
+    .onConflict('dedupe_key').ignore().returning('id');
+  return row ? { technicianId, visitId, pushTitle: stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway' } : null;
+}
+
 module.exports = {
+  recordTrackingNotice,
+  pushTrackingNotice: pushCard,
   GATE,
   KINDS,
   isEnabled: enabled,
