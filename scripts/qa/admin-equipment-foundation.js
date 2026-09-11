@@ -860,6 +860,22 @@ async function main() {
         await views(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
+        // This is a view-only run: it opens dialogs but always Cancels, so the
+        // only write it may issue is the admin usage beacon. The write handlers
+        // below answer 200, so without this an accidental Save/Recalc/Dismiss
+        // would be quietly accepted instead of landing in state.unmatched —
+        // the writes runner asserts each of those requests individually.
+        assert.deepEqual(
+          state.requests
+            .map((request) => request.key)
+            .filter(
+              (key) =>
+                !key.startsWith("GET ") &&
+                key !== "POST /api/admin/usage/track",
+            ),
+          [],
+          "Unexpected write",
+        );
         assert.deepEqual(state.consoleErrors, [], "Unexpected console errors");
       } catch (error) {
         report.error = error.stack;
