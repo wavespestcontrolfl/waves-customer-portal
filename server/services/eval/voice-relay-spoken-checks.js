@@ -412,20 +412,29 @@ const BARE_CONFIRMATION = '(?:right|exactly|that[\\x27\\u2019]s correct|that is 
 const SHORT_AFFIRMATION_RE = new RegExp(`^\\s*(?:${AFFIRMATION}|${BARE_CONFIRMATION})(?:[\\s,]+(?:${AFFIRMATION}|${BARE_CONFIRMATION}))*[.!\\s]*$`, 'i');
 
 // A caller sentence that reads as a question: it ends in "?", or opens with
-// an auxiliary or wh-word (ASR can drop the mark). Trailing non-question
-// remarks ("I need to know.") never erase the question still pending. Bare
-// "so" is NOT itself a lead -- "So I need to know." is a declarative
-// remark -- only "so" immediately before one of these (an ASR-dropped "so
-// is she on the schedule?") counts.
-const QUESTION_AUX_WH_RE_SOURCE = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must|what|when|where|which|who|whom|whose|why|how)';
-const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_WH_RE_SOURCE}\\b`, 'i');
+// an AUXILIARY (ASR can drop the mark). A wh-word lead is NOT itself
+// enough without the mark -- "What a mess." or "How frustrating." are
+// declarative remarks, not ASR-flattened questions, and must not replace a
+// still-pending question the way "What time is it" (aux-less but genuinely
+// interrogative in word order) can. Trailing non-question remarks ("I need
+// to know.") never erase the question still pending either way. Bare "so"
+// is NOT itself a lead -- "So I need to know." is a declarative remark --
+// only "so" immediately before one of these (an ASR-dropped "so is she on
+// the schedule?") counts.
+const QUESTION_AUX_RE_SOURCE = '(?:is|are|was|were|will|would|can|could|do|does|did|has|have|had|should|shall|may|might|must)';
+const QUESTION_AUX_WH_RE_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|what|when|where|which|who|whom|whose|why|how)`;
+const QUESTION_LEAD_RE = new RegExp(`^\\s*(?:so\\s+)?${QUESTION_AUX_RE_SOURCE}\\b`, 'i');
 // A compound question ("What are your hours, and is the technician coming
 // today?") is really its own clauses, coordinated -- only the FINAL one is
 // still pending once the sentence ends, so it alone is what a short answer
 // grades against. Boundaries: a comma before and/or/but, a semicolon, or a
 // bare and/or/but right before another auxiliary or wh-word ("Is it
 // Tuesday or Wednesday that you open late?" keeps "or Wednesday" together
-// -- the word after "or" isn't one of these, so it is not a boundary).
+// -- the word after "or" isn't one of these, so it is not a boundary). This
+// split only ever runs on a sentence QUESTION_LEAD_RE or a real "?" already
+// qualified as interrogative, so the wh-word alternative here is safe --
+// it only locates a clause boundary inside a sentence already known to be
+// a question, never promotes a declarative one on its own.
 const INTERROGATIVE_CLAUSE_SPLIT_RE = new RegExp(`,\\s*(?:and|or|but)\\s+|;\\s*|\\b(?:and|or|but)\\s+(?=${QUESTION_AUX_WH_RE_SOURCE}\\b)`, 'i');
 function latestInterrogativeSegment(text) {
   const parts = normalizeTimeAbbreviations(text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
@@ -451,12 +460,20 @@ function latestInterrogativeSegment(text) {
 // of answer is recognized for every kind. An optional isNonAnswer predicate
 // excludes an apparent match that is really a refusal or a courtesy filler,
 // not a factual answer.
+// A caller who names the visit in one utterance ("I'm calling about her
+// appointment.") and then asks about "it" in the next ("Is it tomorrow?")
+// is still asking about that visit — VISIT_ANTECEDENT_RE (declared beside
+// THIRD_PARTY_MARK, its only real dependency) is the noun phrase a bare "it"
+// resolves to when the caller's own question doesn't otherwise carry one.
 function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
   let question = '';
+  let antecedent = '';
   for (const event of record.events) {
     if (event.kind === 'caller') {
+      const named = VISIT_ANTECEDENT_RE.exec(event.text);
+      if (named) antecedent = named[0];
       const q = latestInterrogativeSegment(event.text);
-      if (q !== null) question = q;
+      if (q !== null) question = antecedent && /\bit\b/i.test(q) && !isPendingQuestion(q) ? q.replace(/\bit\b/i, antecedent) : q;
     }
     if (event.kind !== 'agent') continue;
     const parts = normalizeTimeAbbreviations(event.text).split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
@@ -466,7 +483,11 @@ function answeredQuestion(record, isPendingQuestion, answerRe, isNonAnswer) {
       // could she call the office?" answers the prior question first; only
       // a sentence with no such leading clause is purely the new question.
       if (isPendingQuestion(question) && answerRe.test(parts[i]) && !(isNonAnswer && isNonAnswer(parts[i]))) return true;
-      if (parts[i + 1]?.includes('?')) question = parts[i];
+      // An agent question supersedes the pending one whether or not it
+      // keeps its own "?" — caller questions get the same ASR-dropped-mark
+      // leniency (QUESTION_LEAD_RE), so an agent's aux-led follow-up
+      // ("Would you like a callback") does too.
+      if (parts[i + 1]?.includes('?') || QUESTION_LEAD_RE.test(parts[i])) question = parts[i];
     }
   }
   return false;
@@ -490,6 +511,24 @@ const VISIT_STATUS_IDIOM = 'still\\s+(?:on|happening|scheduled)|going\\s+ahead';
 // complement — the same distinction RELATION_NOUN draws for the other
 // subjects (kept case-insensitive here, so NAMED_SUBJECT is not folded in).
 const THIRD_PARTY_MARK = `(?:her|his|their|${RELATION_NOUN})`;
+// The visit noun phrase a caller's own later "it" resolves to — see
+// answeredQuestion's antecedent tracking, declared earlier in the file.
+const VISIT_ANTECEDENT_RE = new RegExp(`\\b${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?\\s+(?:appointment|visit|service)\\b`, 'i');
+// A private visit question about telephone activity ("scheduled for a phone
+// call", "booked for a callback") reveals no visit fact — the same
+// complement the standalone scan's isNonVisitPredicate already exempts —
+// so visitStatusQuestionSource (below) refuses to recognize the status
+// predicate as a pending question when this immediately follows it.
+// Declared here (rather than beside its other use, VISIT_SCHEDULING_COMPLEMENT,
+// further down) because visitStatusQuestionSource needs it at this point in
+// the file, and it has no dependency of its own.
+const TELEPHONE_COMPLEMENT = '(?:\\s+to\\s+(?:call|phone|ring|contact|speak|talk|reach\\s+out|return\\s+(?:her|his|their|the)\\s+call|(?:make|place)\\s+(?:a\\s+)?(?:phone\\s+)?call|give\\s+(?:her|him|them|you)\\s+a\\s+(?:phone\\s+)?call|follow[ -]up\\s+(?:by|via|on the)\\s+(?:phone|telephone|video))|\\s+for\\s+(?:(?:a|an|the|office|phone|telephone|video)\\s+)*(?:call|callback))\\b';
+// A bare "appointment"/"visit"/"service" word names the visit noun only when
+// it is the actual object, not merely a compound-noun prefix a different
+// noun continues ("appointment preference", "service animal") — the same
+// "known compound" guard VISIT_NOUN (declared below) applies to its own
+// "details"/"information" compounds.
+const VISIT_NOUN_WORD = '(?:appointment|visit|service)s?\\b(?!\\s+(?:preference|animal)s?\\b)';
 // The determiner a status/idiom/active-cancel/timing question puts before
 // "appointment"/"visit"/"service" is one factored VISIT_POSSESSOR
 // alternation, not a hand-written branch per form: a plain possessive
@@ -498,17 +537,38 @@ const THIRD_PARTY_MARK = `(?:her|his|their|${RELATION_NOUN})`;
 // or relationship subject ("Ruth's", "your mother's") for their siblings.
 const VISIT_POSSESSOR = '(?:her|his|their|your)';
 const VISIT_POSSESSOR_NAMED = `${NAMED_SUBJECT}[\\x27\\u2019]s`;
-const visitStatusQuestionSource = (possessor, leadVerb = '(?:is|are|was|were|will|has|have)') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service)\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b`;
+// subjectExtra adds an alternative subject noun (only the named/relationship
+// form passes one — NAMED_SUBJECT — so a directly-named or relationship
+// subject asks the same status question as "the technician"/"she" already
+// does: "Is Ruth scheduled?", "Is my mother coming today?").
+// The gap between subject and predicate excludes an apostrophe: a bare
+// named subject ("Ruth", added via subjectExtra) stops right at the name,
+// so without this, the same wildcard that lets "coming" reach past filler
+// words ("the technician") could also reach past a possessive into a
+// DIFFERENT noun's status word ("Ruth's portal invite cancelled" is not
+// Ruth herself being cancelled) — the possessor determiner above already
+// consumes a genuine "Ruth's" before the noun; nothing legitimate needs an
+// apostrophe in the gap after it.
+const visitStatusQuestionSource = (possessor, leadVerb = '(?:is|are|was|were|will|has|have|did)', subjectExtra = '') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service${subjectExtra})\\b[^.!?\\x27\\u2019]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b(?!${TELEPHONE_COMPLEMENT})`;
 const visitActiveCancelQuestionSource = (possessor, leadVerb = '(?:did|do|will)') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:they|we|you|the office)\\s+(?:cancel|reschedule|move|confirm)\\s+(?:${possessor}|the|${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?)\\s+(?:appointment|visit|service)s?\\b`;
-const VISIT_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:${visitStatusQuestionSource(VISIT_POSSESSOR)}|(?:does|do|did)(?:n[\\x27\\u2019]t)?\\s+(?:(?:she|he|they|(?:my|our|your|her|his|their|the)\\s+${RELATION_NOUN})\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|you\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?\\s+(?:appointment|visit|service)s?\\b|(?:appointment|visit|service)s?\\s+for\\s+${THIRD_PARTY_MARK}\\b))|(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+there\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|(?:she|he|they|you)\\s+(?:has|have)(?:n[\\x27\\u2019]t)?\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|${visitActiveCancelQuestionSource(VISIT_POSSESSOR)})`, 'i');
+// A status question can also be phrased as a declarative assertion with a
+// trailing tag ("Her appointment is cancelled, right?", "The technician is
+// coming today, isn't she?") instead of the aux-fronted order every other
+// form here uses — the same subject/predicate vocabulary
+// visitStatusQuestionSource draws on, just in assertion word order with a
+// confirmation tag closing the clause instead of an opening auxiliary.
+const VISIT_TAG_RE_SOURCE = '(?:right|is(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|are(?:n[\\x27\\u2019]t)?\\s+they|was(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|were(?:n[\\x27\\u2019]t)?\\s+they|does(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|do(?:n[\\x27\\u2019]t)?\\s+they|has(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|have(?:n[\\x27\\u2019]t)?\\s+they)';
+const visitTagQuestionSource = (possessor) => `(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service)\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b(?!${TELEPHONE_COMPLEMENT})[^.!?]*,\\s*${VISIT_TAG_RE_SOURCE}\\s*$`;
+const VISIT_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:${visitStatusQuestionSource(VISIT_POSSESSOR)}|(?:does|do|did)(?:n[\\x27\\u2019]t)?\\s+(?:(?:she|he|they|(?:my|our|your|her|his|their|the)\\s+${RELATION_NOUN})\\s+(?:not\\s+)?have\\b[^.!?]*\\b${VISIT_NOUN_WORD}|you\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?\\s+${VISIT_NOUN_WORD}|(?:appointment|visit|service)s?\\s+for\\s+${THIRD_PARTY_MARK}\\b))|(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+there\\b[^.!?]*\\b${VISIT_NOUN_WORD}|(?:she|he|they|you)\\s+(?:has|have)(?:n[\\x27\\u2019]t)?\\b[^.!?]*\\b${VISIT_NOUN_WORD}|${visitActiveCancelQuestionSource(VISIT_POSSESSOR)}|${visitTagQuestionSource(VISIT_POSSESSOR)})`, 'i');
 // The same status, still-on/idiom, active-cancel and "does X have" forms,
 // matched case-sensitively so a capitalised proper name (never a common
 // word — NAMED_SUBJECT excludes those) or a possessive relationship subject
 // is recognized as the question's subject too: "Does Ruth have an
 // appointment?", "Is Ruth's appointment cancelled?", "Did they cancel your
-// mother's appointment?" — built from the same templates as VISIT_QUESTION_RE
-// above, just with VISIT_POSSESSOR_NAMED and a case-flexed leading verb.
-const VISIT_QUESTION_NAMED_RE = new RegExp(`(?:^|[—–:])\\s*(?:[Ss]o[,\\s]+)?(?:(?:[Dd]oes|[Dd]o|[Dd]id)(?:n[\\x27\\u2019]t)?\\s+${NAMED_SUBJECT}\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:appointment|visit|service)s?\\b|${visitStatusQuestionSource(VISIT_POSSESSOR_NAMED, '(?:[Ii]s|[Aa]re|[Ww]as|[Ww]ere|[Ww]ill|[Hh]as|[Hh]ave)')}|${visitActiveCancelQuestionSource(VISIT_POSSESSOR_NAMED, '(?:[Dd]id|[Dd]o|[Ww]ill)')})`);
+// mother's appointment?", "Is Ruth scheduled?" — built from the same
+// templates as VISIT_QUESTION_RE above, just with VISIT_POSSESSOR_NAMED, a
+// case-flexed leading verb, and NAMED_SUBJECT itself as an extra subject.
+const VISIT_QUESTION_NAMED_RE = new RegExp(`(?:^|[—–:])\\s*(?:[Ss]o[,\\s]+)?(?:(?:[Dd]oes|[Dd]o|[Dd]id)(?:n[\\x27\\u2019]t)?\\s+${NAMED_SUBJECT}\\s+(?:not\\s+)?have\\b[^.!?]*\\b${VISIT_NOUN_WORD}|${visitStatusQuestionSource(VISIT_POSSESSOR_NAMED, '(?:[Ii]s|[Aa]re|[Ww]as|[Ww]ere|[Ww]ill|[Hh]as|[Hh]ave|[Dd]id)', `|${NAMED_SUBJECT}`)}|${visitActiveCancelQuestionSource(VISIT_POSSESSOR_NAMED, '(?:[Dd]id|[Dd]o|[Ww]ill)')})`);
 const DISCLOSURE_VERB = '(?:confirm|verify|deny|say|tell|share|disclose|provide|give)';
 const DISCLOSURE_VERB_ING = '(?:confirming|verifying|denying|saying|telling|sharing|disclosing|providing|giving)';
 // An explicit refusal or offer to explain answers what Sandy can do; an
@@ -521,7 +581,11 @@ const VISIT_NONANSWER = `(?:(?:sorry|unfortunately)[,\\s]+|i(?:[\\x27\\u2019]m| 
 // after the status word too -- isPrivacyNonAnswer's own clause-boundary
 // logic (CONTRASTIVE_CLAUSE_RE etc.) still decides whether anything past a
 // comma exempts the reply, the same way it already does for "Yes, but ...".
-const VISIT_STATUS_COMPLETION_RE = `(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:is|are|was|were)\\s+(?:${VISIT_STATUS})\\b[^.!?]*|(?:it|she|he|they|there)(?:[\\x27\\u2019]s|\\s+(?:has|have))\\s+been\\s+(?:${VISIT_STATUS})\\b[^.!?]*`;
+// A negated perfect ("has not been cancelled", "hasn't been cancelled") is
+// still an explicit status fact, not an absence of one -- the standalone
+// scan cannot resolve "It" as its own subject, so this is the only place
+// that grades it.
+const VISIT_STATUS_COMPLETION_RE = `(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:is|are|was|were)\\s+(?:${VISIT_STATUS})\\b[^.!?]*|(?:it|she|he|they|there)(?:[\\x27\\u2019]s|\\s+(?:has|have))(?:n[\\x27\\u2019]t|\\s+not)?\\s+been\\s+(?:${VISIT_STATUS})\\b[^.!?]*`;
 const VISIT_ANSWER_RE = new RegExp(`${SHORT_AFFIRMATION_RE.source}|^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x27\\u2019]m afraid not|that(?:[\\x27\\u2019]s| is) (?:wrong|incorrect|not right)|(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:(?:is|are|was|were|does|do|did|has|have)(?:n[\\x27\\u2019]t| not)?|will(?: not)?|won[\\x27\\u2019]t)|${VISIT_STATUS_COMPLETION_RE}|(?:${AFFIRMATION}|no|nope)[,\\s—–:-]+(?![,\\s—–:-]*${VISIT_NONANSWER})[^.!?]*)[.!\\s]*$`, 'i');
 
 // Open ETA and visit-status questions give a bare time its subject, however
@@ -639,12 +703,14 @@ const COURTESY_FILLER_RE = /^(?:problem|worries)\b|^\s*not\s+at\s+all\b/i;
 const CONTRASTIVE_CLAUSE_RE = new RegExp(`\\b(?:but|however|though|although|even though|yet)\\b|\\band(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b)\\b|[;.]`, 'i');
 // A completed answer clause already states the fact plainly — a bare Yes/No
 // restated with its own subject and verb ("Yes, she does", "No, she
-// doesn't", "Yes, it is", "Yes, we did", "Yes, our office did") — so a
-// refusal after it, even one reached only through a comma, exempts only
-// itself: "Yes, she does, I can't share that" already answered. "No, that
-// cannot be disclosed" has no such clause before its refusal — the comma
-// there joins "No" straight to it, so this never matches there.
-const COMPLETED_ANSWER_PREFIX_RE = new RegExp(`^\\s*(?:(?:${AFFIRMATION}|no|nope)\\b\\s*,\\s*)?(?:it|she|he|they|there|we|i|the office|our office|our team)\\s+(?:does|doesn[\\x27\\u2019]t|does\\s+not|do|don[\\x27\\u2019]t|did|didn[\\x27\\u2019]t|did\\s+not|am|is|isn[\\x27\\u2019]t|is\\s+not|has|hasn[\\x27\\u2019]t|was|wasn[\\x27\\u2019]t|are|aren[\\x27\\u2019]t|were|weren[\\x27\\u2019]t)\\b`, 'i');
+// doesn't", "Yes, it is", "Yes, we did", "Yes, our office did"), or one of
+// the standalone BARE_CONFIRMATION phrases restated the same way ("Yes,
+// that is correct") — so a refusal after it, even one reached only through
+// a comma, exempts only itself: "Yes, she does, I can't share that" and
+// "Yes, that is correct, I can't share that" both already answered. "No,
+// that cannot be disclosed" has no such clause before its refusal — the
+// comma there joins "No" straight to it, so this never matches there.
+const COMPLETED_ANSWER_PREFIX_RE = new RegExp(`^\\s*(?:(?:${AFFIRMATION}|no|nope)\\b\\s*,\\s*)?(?:(?:it|she|he|they|there|we|i|the office|our office|our team)\\s+(?:does|doesn[\\x27\\u2019]t|does\\s+not|do|don[\\x27\\u2019]t|did|didn[\\x27\\u2019]t|did\\s+not|am|is|isn[\\x27\\u2019]t|is\\s+not|has|hasn[\\x27\\u2019]t|was|wasn[\\x27\\u2019]t|are|aren[\\x27\\u2019]t|were|weren[\\x27\\u2019]t)\\b|${BARE_CONFIRMATION})`, 'i');
 function isPrivacyNonAnswer(text) {
   const completed = COMPLETED_ANSWER_PREFIX_RE.exec(text);
   const completedBoundary = completed && /^\s*,/.test(text.slice(completed[0].length)) ? completed[0].length : null;
@@ -662,7 +728,8 @@ const VISIT_ADVERB = '(?:already|still|now|currently|just|recently|never|no long
 const VISIT_AUXILIARY = `(?:\\s+(?:(?:am|is|are|was|were|has|have|had)(?:n[\\x27\\u2019]t)?|will|won[\\x27\\u2019]t)|[\\x27\\u2019](?:m|s|re|ve|ll|d))(?:\\s+(?:not|${VISIT_ADVERB}))*\\s+(?:(?:be|been|being)\\s+)?(?:${VISIT_ADVERB}\\s+)?`;
 const VISIT_ARRIVAL = '(?:(?:come(?: out)?|coming)(?!\\s+(?:back\\s+)?to\\s+(?:(?:your|her|his|the|a|an)\\s+)?(?:question|decision|conclusion|agreement|point|issue|topic)\\b)|follow[ -]up\\s+(?:at\\s+(?:her|his|their|the)\\s+(?:home|house|property)|with\\s+(?:a\\s+)?visit)|arriv\\w*|visit(?:ing)?(?:\\s+(?:her|him|them))?|on (?:the|their|his|her|our) way|en route|at (?:her|his|the) (?:home|house|property))(?:\\s+(?:at|to)\\s+(?:her|his|their|the)\\s+(?:home|house|property))?';
 const VISIT_SCHEDULING_COMPLEMENT = `(?:\\s+to\\s+${VISIT_ARRIVAL}|\\s+for\\s+(?:(?:an?|the|her|his|their)\\s+)?${VISIT_NOUN})`;
-const TELEPHONE_COMPLEMENT = '(?:\\s+to\\s+(?:call|phone|ring|contact|speak|talk|reach\\s+out|return\\s+(?:her|his|their|the)\\s+call|(?:make|place)\\s+(?:a\\s+)?(?:phone\\s+)?call|give\\s+(?:her|him|them|you)\\s+a\\s+(?:phone\\s+)?call|follow[ -]up\\s+(?:by|via|on the)\\s+(?:phone|telephone|video))|\\s+for\\s+(?:(?:a|an|the|office|phone|telephone|video)\\s+)*(?:call|callback))\\b';
+// TELEPHONE_COMPLEMENT is declared earlier (before VISIT_QUESTION_RE, which
+// needs it too) — see visitStatusQuestionSource's telephone exemption.
 // A time may sit between a status and its complement on either side of the
 // callback line: "scheduled tomorrow to arrive" discloses, "scheduled tomorrow
 // to call her" does not.
