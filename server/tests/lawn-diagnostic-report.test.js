@@ -653,6 +653,14 @@ describe('lawn diagnostic auto-release ladder', () => {
   });
 
   test.each([
+    'Large patch is not getting better', 'Chinch bug damage has not started to recover',
+    'Dollar spot not spreading much', 'Large patch is not getting better; weeds absent',
+  ])('an unrecognized negation %s never earns the clean label and never maps a cause', (name) => {
+    expect(safeConditionLabel(name, 'high')).toBe('a lawn condition we are monitoring');
+    expect(safeConditionLabel(name, 'low')).toBe('a lawn condition we are monitoring');
+  });
+
+  test.each([
     ['Chinch bugs not present, but drought stress visible', 'drought stress'],
     ['Rhizoctonia ruled out; dollar spot lesions', 'dollar spot'],
     ['Sod-webworm not present. Grub damage at the edge', 'grub activity'],

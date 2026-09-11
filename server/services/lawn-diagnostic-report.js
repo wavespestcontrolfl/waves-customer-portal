@@ -652,9 +652,24 @@ function predicateSegments(text) {
   if (carry) segments.push(carry);
   return segments;
 }
+// A bare not / never / n't whose object is neither an absence predicate nor a
+// governed cause ("is not getting better", "has not started to recover") does
+// not assert that the condition is absent. Such a clause is uncertain: it never
+// earns the clean label, and it never maps a cause either.
+const ABSENCE_OBJECT = '(?:present|observed|seen|noted|found|detected|visible|evident|apparent|active|confirmed|likely|suspected|there|any|much|significant|showing|involved|causing|responsible|to\\s+blame|the\\s+cause|an?\\s+(?:factor|issue|concern|problem|cause))';
+let unrecognizedNegation = null;
+function unrecognizedNegationRe() {
+  if (!unrecognizedNegation) {
+    const cause = SUMMARY_CAUSE_RE.source.slice(2, -2);
+    unrecognizedNegation = new RegExp(`\\b(?:not|never|\\w+n['’]t)\\s+(?!(?:yet\\s+|fully\\s+|really\\s+|quite\\s+|even\\s+|currently\\s+|clearly\\s+)?(?:${ABSENCE_OBJECT}|weeds?\\b|${cause}))`, 'i');
+  }
+  return unrecognizedNegation;
+}
+const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
+  let uncertain = false;
   const causeAhead = new RegExp(`^\\s*(?:the\\s+|any\\s+)?(?:weeds?\\b|${SUMMARY_CAUSE_RE.source.slice(2)})`, 'i');
   const FREE_DIFFERENTIAL = freeDifferentialRe();
   for (const clause of stripNegatedRecovery(spaceJoinedNon(lower)).split(CLAUSE_SPLIT)) {
@@ -669,6 +684,7 @@ function positiveClauses(lower) {
     }
     FREE_DIFFERENTIAL.lastIndex = 0;
     if (!CLEAN_CLAUSE_LEAD.test(text) && !NEGATION_MARKER.test(text)) { positive.push(text); continue; }
+    if (!CLEAN_CLAUSE_LEAD.test(text) && !RECOGNIZED_MARKER.test(text) && unrecognizedNegationRe().test(text)) { uncertain = true; continue; }
     negated = true;
     const forward = FORWARD_NEGATION.exec(text);
     const rest = forward ? text.slice(forward.index + forward[0].length) : '';
@@ -689,7 +705,7 @@ function positiveClauses(lower) {
       if (!CLEAN_CLAUSE_LEAD.test(part) && !NEGATION_MARKER.test(part)) positive.push(part);
     }
   }
-  return { positive, negated };
+  return { positive, negated, uncertain };
 }
 
 // Map any stored finding name (client/LLM free text) to a fixed, allowlisted
@@ -701,11 +717,14 @@ function safeConditionLabel(rawName, confidence) {
   const lower = String(rawName || '').toLowerCase();
   if (!lower) return null;
   let label = 'a lawn condition we are monitoring';
-  const { positive, negated } = positiveClauses(lower);
+  const { positive, negated, uncertain } = positiveClauses(lower);
   // The clean label applies only when NO positive clause remains: "No weeds;
-  // large patch is visible" maps its positive clause (Codex #4328 r2).
-  if (negated && !positive.length) {
+  // large patch is visible" maps its positive clause (Codex #4328 r2). An
+  // uncertain negation with nothing positive beside it keeps the generic label.
+  if (negated && !positive.length && !uncertain) {
     label = 'no major visible stress';
+  } else if (uncertain && !positive.length) {
+    return label;
   } else {
     // Only the non-negated clauses may map to a label.
     const mappable = positive.length ? positive.join('; ') : lower;
