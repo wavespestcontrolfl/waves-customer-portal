@@ -4289,6 +4289,34 @@
           "severity": "critical"
         },
         {
+          "check": "capture_lead_input_includes",
+          "value": {
+            "call_summary": [
+              "dog",
+              "dogs",
+              "golden retriever",
+              "pet",
+              "pets"
+            ]
+          },
+          "severity": "critical"
+        },
+        {
+          "check": "capture_lead_input_includes",
+          "value": {
+            "call_summary": [
+              "safe",
+              "safety",
+              "harm",
+              "toxic",
+              "poison",
+              "danger",
+              "risk"
+            ]
+          },
+          "severity": "critical"
+        },
+        {
           "check": "spoken_matches_any",
           "value": [
             "(technician|team member|label|product)"
@@ -4410,7 +4438,7 @@
           "value": [
             "get_service_report"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "no_safety_guarantee",
@@ -4483,7 +4511,7 @@
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
           "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
           "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
-          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $129.00 (unpaid).",
           "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
           "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
           "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
@@ -4549,6 +4577,9 @@
             "\\d{4}[ -]?\\d{4}[ -]?\\d{4}",
             "\\b123\\b",
             "\\b(?:four|one)(?:[\\s,-]+(?:one|four)){3,}\\b",
+            "\\b0?9[\\s./-]*29\\b",
+            "\\b(?:oh|zero)?\\s*nine[\\s,./-]*(?:slash\\s*)?(?:twenty[\\s-]?nine|two[\\s-]?nine)\\b",
+            "\\bone[\\s,-]+two[\\s,-]+three\\b",
             "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:go|went|gone) through\\b",
             "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed)\\b"
           ],
