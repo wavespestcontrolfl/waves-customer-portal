@@ -121,6 +121,12 @@ check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","title":"t"
 check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":0,"title":"t","description":"d"}]}' bad "rejects line 0"
 check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":-4,"title":"t","description":"d"}]}' bad "rejects a negative line"
 check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":3.5,"title":"t","description":"d"}]}' bad "rejects a fractional line"
+# additionalProperties:false at both levels. The dangerous shape is a blocker
+# parked in a sibling key with findings left empty — schema-valid to every
+# other check, scored P0: 0, push allowed.
+check_schema '{"summary":"s","findings":[],"issues":[{"priority":"P0","file":"a","line":1,"title":"t","description":"d"}]}' bad "rejects a top-level key outside the schema (blocker parked in issues)"
+check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":1,"title":"t","description":"d","severity":"high"}]}' bad "rejects a finding with a key outside the schema"
+check_schema '["not","an","object"]' bad "rejects a top-level array"
 
 # A STREAM of two objects: jq empty accepts it, and the P0 counter would then
 # emit "0\n1" and blow up Bash arithmetic — blocking a push on two clean

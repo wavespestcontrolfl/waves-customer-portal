@@ -84,6 +84,29 @@ DISALLOWED="$(hook_var CLAUDE_DISALLOWED_TOOLS)"
 [ -n "$ENV_SCRUB" ]     || { echo "FAIL: could not read CLAUDE_ENV_SCRUB from $HOOK"; exit 1; }
 [ -n "$DISALLOWED" ]    || { echo "FAIL: could not read CLAUDE_DISALLOWED_TOOLS from $HOOK"; exit 1; }
 
+# The assignments are not the sandbox — the INVOCATION is. Reading the three
+# variables proves nothing if run_claude_audit stops expanding one of them,
+# so pull the hook's actual `claude -p` command out of run_claude_audit and
+# require every component to appear in it. Also require that it is the only
+# `claude -p` in the hook: a second, unsandboxed call site would otherwise be
+# invisible to this script.
+HOOK_INVOCATION="$(awk '
+  /^run_claude_audit\(\)/ { in_fn = 1 }
+  in_fn && /[[:space:]]claude -p([[:space:]]|$)/ { in_cmd = 1 }
+  in_cmd { print }
+  in_cmd && /&[[:space:]]*$/ { exit }
+' "$HOOK")"
+[ -n "$HOOK_INVOCATION" ] || { echo "FAIL: could not find the claude -p invocation inside run_claude_audit in $HOOK"; exit 1; }
+CALL_SITES="$(grep -c '[[:space:]]claude -p\([[:space:]]\|$\)' "$HOOK")"
+[ "$CALL_SITES" = "1" ] || { echo "FAIL: expected exactly one claude -p call site in $HOOK, found $CALL_SITES — this script only proves the one in run_claude_audit"; exit 1; }
+for component in 'env $CLAUDE_ENV_SCRUB claude -p' '$CLAUDE_SANDBOX_FLAGS' '--disallowedTools "$CLAUDE_DISALLOWED_TOOLS"'; do
+  case "$HOOK_INVOCATION" in
+    *"$component"*) ;;
+    *) echo "FAIL: the hook's claude -p invocation no longer expands $component"; echo "$HOOK_INVOCATION" | sed 's/^/        /'; exit 1 ;;
+  esac
+done
+echo "  hook invocation expands all three sandbox components (1 call site)"
+
 # Assert the boundary the probes below assume, so a silently weakened hook
 # is a hard failure rather than a quietly easier test.
 for required in --restricted --strict-mcp-config; do

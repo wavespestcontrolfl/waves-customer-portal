@@ -457,12 +457,20 @@ verdict_matches_schema() {
   # must be an integer >= 1. Checking only `.line == null` conflated "absent"
   # with "explicitly null" and let a finding through with no citation at all;
   # checking only `type == "number"` admitted 0, -4 and 3.5.
+  # The schema is additionalProperties:false at BOTH levels, and that is not
+  # pedantry: a reply that puts its blocker in a sibling such as `issues`
+  # while leaving `findings: []` is schema-valid to everything below, and
+  # the counter then scores it P0: 0 and the push goes through clean.
   jq -e '
+    (type == "object") and
+    ((keys - ["summary", "findings"]) | length == 0) and
     (.summary | type == "string") and (.summary | length > 0) and
     (.findings | type == "array") and
     (
       [ .findings[]
-        | (.priority? | type == "string" and (. == "P0" or . == "P1" or . == "P2"))
+        | (type == "object")
+          and ((keys - ["priority", "file", "line", "title", "description"]) | length == 0)
+          and (.priority? | type == "string" and (. == "P0" or . == "P1" or . == "P2"))
           and (.file? | type == "string" and (. | length > 0))
           and (.title? | type == "string" and (. | length > 0))
           and (.description? | type == "string" and (. | length > 0))
@@ -766,7 +774,8 @@ run_claude_audit() {
           accepted=1
         else
           echo "[codex-review] claude's salvaged verdict for $label does not match the schema" >&2
-          echo "[codex-review] (bad priority value, or a finding missing file/title/description)." >&2
+          echo "[codex-review] (bad priority value, a finding missing file/title/description, or a" >&2
+          echo "[codex-review] key outside the schema — findings must live in the findings array)." >&2
           reject_reason="schema"
         fi
       fi
@@ -822,7 +831,9 @@ run_claude_audit() {
             echo "finding needs priority (exactly \"P0\", \"P1\" or \"P2\" — no"
             echo "brackets, no lowercase), a non-empty file, title and description,"
             echo "and a line key whose value is a whole number of at least 1, or"
-            echo "null when the finding has no single line. Re-issue the SAME"
+            echo "null when the finding has no single line. No keys outside the"
+            echo "schema at either level: every issue goes in the findings array,"
+            echo "never in a sibling such as issues or notes. Re-issue the SAME"
             echo "review correctly."
             ;;
           *)
