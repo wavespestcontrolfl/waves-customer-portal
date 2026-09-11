@@ -13,6 +13,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { runExclusive } = require('../utils/cron-lock');
@@ -134,7 +135,10 @@ async function sendYellowDigestLocked(opts = {}) {
   const wiki = opts.wiki || require('./agronomic-wiki');
   const queue = await wiki.getReviewQueue();
   const composed = composeYellowDigest(queue);
-  if (!composed) return { skipped: 'empty' };
+  if (!composed) {
+    await retireIfClean('wiki-yellow-digest'); // fall-off: review queue empty
+    return { skipped: 'empty' };
+  }
 
   if (!digestEnabled()) {
     logger.info(`[yellow-digest] gated OFF — would send: ${composed.pendingCount} blocked, ${composed.yellowCount} yellow`);

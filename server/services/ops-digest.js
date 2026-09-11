@@ -18,8 +18,9 @@
 //
 // Deliberately NOT routed here (they keep emailing regardless of the gate):
 // the two reply-to-approve flows (newsletter proof, content email approvals)
-// and the two "something is broken" FIX alerts (stripe-webhook-health,
-// llm-dispatch-metrics). Customer-facing mail never touches this module.
+// and the stripe-webhook-health FIX alert (payments pipeline down).
+// llm-dispatch-metrics joined 2026-09-11 (email shutoff): its email now
+// runs only as the fallback. Customer-facing mail never touches this module.
 
 const logger = require('./logger');
 
@@ -83,6 +84,9 @@ function inAppEnabled() {
  * @param {string} [p.html]
  * @param {string} [p.link]     admin route the digest points at
  * @param {object} [p.metadata]
+ * @param {string} [p.dedupeKey]      one standing row per key (notifyAdmin dedupe)
+ * @param {number} [p.dedupeWindowMs] rolling window for that dedupe
+ * @param {boolean} [p.refreshOnDedupe] rewrite the standing row (and re-bell it) when the content changed
  * @param {() => Promise<any>} p.sendEmail  the sender's existing mailer call
  * @returns {{ ok: boolean, channel: 'email'|'in_app', result?: any, error?: string, id?: string|null, fallback?: boolean }}
  *
@@ -90,7 +94,7 @@ function inAppEnabled() {
  * eval) still get an ops_digest row here: that row is what the Activity feed
  * lists, and it is created only on the email's cadence.
  */
-async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, sendEmail }) {
+async function deliverOpsDigest({ key, subject, text, html, link = null, metadata = {}, dedupeKey, dedupeWindowMs, refreshOnDedupe, sendEmail }) {
   if (typeof sendEmail !== 'function') throw new Error('deliverOpsDigest: sendEmail is required');
   if (!inAppEnabled()) {
     const result = await sendEmail();
@@ -106,6 +110,10 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
     row = await notificationService().notifyAdmin(CATEGORY, title, body, {
       link,
       bell: true,
+      // Optional dedupe (2026-09-11 email shutoff): a daily digest that
+      // reports the same standing list must hold ONE row, refreshed when
+      // the list changes, not one unread row per morning.
+      ...(dedupeKey ? { dedupeKey, ...(dedupeWindowMs ? { dedupeWindowMs } : {}), ...(refreshOnDedupe ? { refreshOnDedupe: true } : {}) } : {}),
       metadata: { opsKey: key, subject, ...metadata },
     });
   } catch (err) {

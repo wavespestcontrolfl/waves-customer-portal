@@ -25,6 +25,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { MONTHLY_LANE_SQL } = require('./billing-lane');
@@ -248,7 +249,10 @@ async function runAutopaySmsDigest(opts = {}) {
   }
 
   const composed = composeAutopaySmsDigest(rows);
-  if (!composed) return { skipped: 'nothing_found' };
+  if (!composed) {
+    await retireIfClean('autopay-sms-digest'); // fall-off: a quiet day clears the last activity digest
+    return { skipped: 'nothing_found' };
+  }
 
   if (digestDisabled()) {
     logger.info(`[autopay-sms-digest] disabled — would report ${composed.count} text(s)`);

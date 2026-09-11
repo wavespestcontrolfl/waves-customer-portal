@@ -24,6 +24,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -169,7 +170,10 @@ async function runTurfVarianceDigest(opts = {}) {
   }
 
   const composed = composeTurfVarianceDigest(rows, opts.thresholds || {});
-  if (!composed) return { skipped: 'within_threshold' };
+  if (!composed) {
+    await retireIfClean('turf-variance'); // fall-off: variance back inside threshold
+    return { skipped: 'within_threshold' };
+  }
 
   if (digestDisabled()) {
     logger.info(`[turf-variance] disabled — would send: avg ${composed.avgDeltaPct}% over ${composed.samples} services`);

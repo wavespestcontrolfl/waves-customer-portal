@@ -38,6 +38,7 @@
 const sendgrid = require('../sendgrid-mail');
 const logger = require('../logger');
 const { deliverOpsDigest } = require('../ops-digest');
+const { retireIfClean } = require('../ops-digest-fall-off');
 const db = require('../../models/db');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { runExclusive } = require('../../utils/cron-lock');
@@ -421,7 +422,10 @@ async function alertPausedLanes({ database, mailer, tracker }) {
     logger.warn(`[impact-digest] paused-marker re-arm sweep failed: ${err.message}`);
   }
 
-  if (!paused.length) return { skipped: 'none-paused' };
+  if (!paused.length) {
+    await retireIfClean('impact-digest:paused-lane alert'); // fall-off: no lane paused
+    return { skipped: 'none-paused' };
+  }
 
   const due = [];
   for (const entry of paused) {
@@ -461,7 +465,10 @@ async function alertBlindLoop({ database, mailer }) {
 
   const counts = tallyVerdicts(rows);
   const measured = MEASURED_VERDICTS.reduce((sum, key) => sum + counts[key], 0);
-  if (measured > 0) return { skipped: 'grading' };
+  if (measured > 0) {
+    await retireIfClean('impact-digest:blind-loop alert'); // fall-off: the loop is grading again
+    return { skipped: 'grading' };
+  }
 
   const composed = composeBlindLoopAlert({ ungraded: counts.insufficient_data, days: BLIND_LOOP_DAYS });
   if (!composed) return { skipped: 'below-floor' };

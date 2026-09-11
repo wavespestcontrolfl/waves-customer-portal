@@ -63,6 +63,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { deliverOpsDigest } = require('../ops-digest');
+const { retireIfClean } = require('../ops-digest-fall-off');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 // Shared classifier — kinds email-approvals already covers with per-item
@@ -486,7 +487,10 @@ async function runParkedRunDigest(opts = {}) {
   // the Sunday full digest would resend the same stale rows forever
   // (Codex r1). Every survivor is post-watermark by construction.
   const stale = staleAll.filter(isNew).map((item) => ({ ...item, is_new: true }));
-  if (active.length + stale.length === 0) return { skipped: 'no_parked_runs' };
+  if (active.length + stale.length === 0) {
+    await retireIfClean('parked-run-digest'); // fall-off: nothing parked (not on no_new_parks — rows still exist there)
+    return { skipped: 'no_parked_runs' };
+  }
   const newCount = [...active, ...stale].filter((item) => item.is_new).length;
 
   // Exception-based cadence: daily sends need NEW parks; Sundays send the

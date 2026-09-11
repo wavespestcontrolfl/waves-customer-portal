@@ -52,6 +52,7 @@ const EVAL_CALLER_TO = '+19415550100';
 const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'run-voice-relay-eval.js');
 const MANUAL_RERUN = 'node server/scripts/run-voice-relay-eval.js --json --judge';
 const OPS_KEY = 'voice-relay-eval';
+const { retireIfClean } = require('../ops-digest-fall-off');
 const OPS_HEADING = 'Voice relay conversation eval';
 // Operational ceiling for the shipped fixture plus one retry, sized for a
 // fixture of up to ninety caller turns and thirty-four scenarios (today's is
@@ -1800,6 +1801,7 @@ async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt,
   }
   if (finalAttempt.status === 'fail') return notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   if (finalAttempt.status === 'inconclusive') return notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  await retireIfClean(OPS_KEY); // fall-off: a scheduled pass clears the standing FIX
   return null;
 }
 

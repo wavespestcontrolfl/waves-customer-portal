@@ -12,6 +12,7 @@ const path = require('path');
 const logger = require('../logger');
 
 const { deliverOpsDigest } = require('../ops-digest');
+const { retireIfClean } = require('../ops-digest-fall-off');
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'call-extraction-eval', 'reviewed-calls.json');
 const MANUAL_RERUN = 'node server/scripts/run-call-extraction-replay-eval.js --json';
 
@@ -290,6 +291,8 @@ async function runCallExtractionReplayEval(opts = {}) {
     await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   } else if (finalAttempt.status === 'inconclusive') {
     await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  } else {
+    await retireIfClean('call-extraction-eval'); // fall-off: a scheduled pass clears the standing FIX (manual runs never retire)
   }
 
   const run = finalAttempt.run || {};
