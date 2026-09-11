@@ -14487,9 +14487,15 @@ export function CompletionPanel({
   // submitting state on the stale mount), else "done".
   async function finishCompletionSuccess(result) {
     const completion = result || {};
-    const photosOwed = completion.completionPhotoUpload?.failed > 0;
+    // The server may report every photo attached but the report still owed
+    // a reconciliation (its parked-summary restore failed): keep the same
+    // recovery marker the client-side reconcile failure uses, with no
+    // photos to re-upload (server pre-push Codex P1 on 19acd4765).
+    const reconcileOwed = completion.completionPhotoUpload?.reconcileOwed === true
+      && !(completion.completionPhotoUpload?.failed > 0);
+    const photosOwed = completion.completionPhotoUpload?.failed > 0 || reconcileOwed;
     if (photosOwed) {
-      const photos = lastSubmitBodyRef.current?.completionPhotos || servicePhotos;
+      const photos = reconcileOwed ? [] : (lastSubmitBodyRef.current?.completionPhotos || servicePhotos);
       // Keep the autosaved photo revision when this is the same photo set.
       // localStorage names the revision synchronously while the IndexedDB
       // write is still in flight; a page killed in that window must find
@@ -14509,6 +14515,7 @@ export function CompletionPanel({
         savedAt: new Date().toISOString(),
         servicePhotos: photos,
         generationPhotoCount: photos.length,
+        reconcileOwed,
         pendingPhotoCompletion: result,
       };
       draftSnapshotRef.current = draft;

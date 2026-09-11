@@ -259,6 +259,37 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(uploads[0].body.get('sortOrder')).toBe('0');
   });
 
+  it('a server-side reconcileOwed with every photo attached keeps recovery open and finishes with one reconcile, no uploads', async () => {
+    await seed();
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 0, reconcileOwed: true } });
+    const first = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+    await screen.findByText(/report still needs updating/);
+    expect(screen.getByRole('button', { name: 'Finish report update' })).toBeTruthy();
+    expect(completionResumeOwed(service.id)).toBe(true);
+    first.unmount();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ reconcileOwed: true, servicePhotos: [], pendingPhotoCompletion: { serviceRecordId: 'record-1' } });
+
+    const originalFetch = fetch.getMockImplementation();
+    const uploads = [];
+    const reconciles = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) { uploads.push(options); return { ok: true, json: async () => ({}) }; }
+      if (url === `/api/tech/services/${service.id}/photos/reconcile`) { reconciles.push(options); return { ok: true, json: async () => ({ ok: true }) }; }
+      return originalFetch(url, options);
+    });
+    const resubmit = vi.fn();
+    const second = await mount(resubmit);
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Finish report update' })));
+    expect(uploads).toHaveLength(0);
+    expect(reconciles).toHaveLength(1);
+    expect(resubmit).not.toHaveBeenCalled();
+    expect(completionResumeOwed(service.id)).toBe(false);
+    second.unmount();
+    expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
   it('keeps the recovery marker when the uploads land but the report reconciliation fails', async () => {
     await seed();
     const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });

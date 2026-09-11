@@ -6729,7 +6729,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }).then(() => {
             record.service_data = sd;
           }).catch((restoreErr) => {
-            logger.error(`[dispatch] parked photo summary restore failed for ${record.id} (still parked; /photos/reconcile can restore it): ${restoreErr.message}`);
+            // The copy stays parked. Tell the client reconciliation is
+            // still owed: CompletionPanel keeps its recovery marker on
+            // reconcileOwed and drives /photos/reconcile, which restores
+            // the summary (pre-push Codex P1 on 19acd4765). Without this
+            // flag failed=0 would clear recovery and park the copy forever.
+            logger.error(`[dispatch] parked photo summary restore failed for ${record.id} (still parked; reconciliation owed): ${restoreErr.message}`);
+            completionPhotoUploadResult = { ...completionPhotoUploadResult, reconcileOwed: true };
           });
         }
       }
