@@ -5,15 +5,14 @@ import { BarChart3, Truck, Wrench, Droplets, Cog, RotateCw, Syringe, Leaf, Shiel
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 const API = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
-// stay distinct from green/amber/red/muted in their respective scopes.
-// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
-
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
-// stay distinct from green/amber/red/muted in their respective scopes.
-// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
+// Alert severity → shared Badge tone. Critical and high are genuine alerts
+// (alert tone); medium stays prominent (strong); low is informational (neutral).
+const SEVERITY_TONES = {
+  critical: "alert",
+  high: "alert",
+  medium: "strong",
+  low: "neutral"
+};
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, {
@@ -51,7 +50,7 @@ function EquipmentCategoryIcon({
   size = 16
 }) {
   const Icon = CAT_ICONS[category] || Wrench;
-  return <Icon size={size} aria-hidden="true" className="inline-block shrink-0 align-middle" />;
+  return <Icon size={size} role="img" aria-label={category || "equipment"} className="inline-block shrink-0 align-middle" />;
 }
 const FLEET_SECTIONS = [{
   key: "fleet",
@@ -142,6 +141,20 @@ function StatCard({
 // ═══════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════
+function hasFleetData(overview, equipment, alerts) {
+  return overview != null || equipment.length > 0 || alerts.length > 0;
+}
+function FleetLoadError({
+  loaded,
+  error,
+  onRetry
+}) {
+  return <ActionFeedback error onRetry={onRetry} className="mb-4">
+      {loaded ? "Could not refresh fleet: " : "Could not load fleet: "}
+      {error}
+      {loaded && ". Showing previously loaded data."}
+    </ActionFeedback>;
+}
 export default function EquipmentMaintenancePage({
   embedded = false,
   initialTab = "fleet"
@@ -262,6 +275,7 @@ export default function EquipmentMaintenancePage({
   };
 
   // ─── RENDER ─────────────────────────────────────────────────────
+  const fleetLoaded = hasFleetData(overview, equipment, alerts);
   return <div style={embedded ? undefined : {
     maxWidth: 1300,
     margin: "0 auto"
@@ -273,13 +287,11 @@ export default function EquipmentMaintenancePage({
       {toast && <Card role="status" className="fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
-      {tab === "fleet" && fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
-          Could not load fleet: {fleetError}
-        </ActionFeedback>}
+      {tab === "fleet" && fleetError && <FleetLoadError loaded={fleetLoaded} error={fleetError} onRetry={loadFleet} />}
       {analyticsError && tab === "analytics" && <ActionFeedback error onRetry={loadAnalytics} className="mb-4">
           Could not load analytics: {analyticsError}
         </ActionFeedback>}
-      {tab === "fleet" && !fleetError && <FleetTab {...{
+      {tab === "fleet" && (!fleetError || fleetLoaded) && <FleetTab {...{
       loading,
       overview,
       alerts,
@@ -369,7 +381,7 @@ function FleetTab({
         borderBottom: `1px solid ${"#E4E4E7"}`
       }}>
               {" "}
-              <Badge tone="neutral">{a.severity}</Badge>{" "}
+              <Badge tone={SEVERITY_TONES[a.severity] || "neutral"}>{a.severity}</Badge>{" "}
               <span style={{
           flex: 1,
           minWidth: 0,
@@ -415,8 +427,7 @@ function FleetTab({
       marginBottom: 16
     }}>
         {" "}
-        <Field label="Category">
-          <Select value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
+        <Select aria-label="Category" value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
           width: "auto",
           minWidth: 140
         }}>
@@ -425,10 +436,8 @@ function FleetTab({
             {categories.map(c => <option key={c} value={c}>
                 {c}
               </option>)}
-          </Select>
-        </Field>{" "}
-        <Field label="Status">
-          <Select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
+          </Select>{" "}
+        <Select aria-label="Status" value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
           width: "auto",
           minWidth: 130
         }}>
@@ -439,10 +448,8 @@ function FleetTab({
             <option value="retired">Retired</option>{" "}
             <option value="sold">Sold</option>{" "}
             <option value="lost">Lost</option>{" "}
-          </Select>
-        </Field>{" "}
-        <Field label="Sort by">
-          <Select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
+          </Select>{" "}
+        <Select aria-label="Sort by" value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
           width: "auto",
           minWidth: 130
         }}>
@@ -450,8 +457,7 @@ function FleetTab({
             <option value="name">Sort: Name</option>{" "}
             <option value="condition">Sort: Condition</option>{" "}
             <option value="cost">Sort: Cost</option>{" "}
-          </Select>
-        </Field>{" "}
+          </Select>{" "}
       </div>
       {/* Equipment Grid */}
       <div style={{
@@ -488,33 +494,18 @@ function EquipmentCard({
   const isMobile = useIsMobile(768);
   const [detail, setDetail] = useState(null);
   const [mileage, setMileage] = useState(null);
-  const [recordForm, setRecordForm] = useState(false);
-  const [mileageForm, setMileageForm] = useState(false);
-  const [detailError, setDetailError] = useState("");
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [attempt, setAttempt] = useState(0);
+  const [openForm, setOpenForm] = useState(null);
+  const recordForm = openForm === "record";
+  const mileageForm = openForm === "mileage";
+  const toggleForm = name => setOpenForm(current => current === name ? null : name);
   useEffect(() => {
-    if (!isExpanded || detail) {
-      setDetailLoading(false);
-      return;
-    }
-    let active = true;
-    setDetailLoading(true);
-    setDetailError("");
-    Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
-      if (active) {
+    if (isExpanded && !detail) {
+      Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
         setDetail(d);
         setMileage(m);
-      }
-    }).catch(error => {
-      if (active) setDetailError(error.message);
-    }).finally(() => {
-      if (active) setDetailLoading(false);
-    });
-    return () => {
-      active = false;
-    };
-  }, [isExpanded, eq.id, eq.category, detail, attempt]);
+      }).catch(console.error);
+    }
+  }, [isExpanded, eq.id, eq.category, detail]);
   const nm = eq.next_maintenance;
   const overdue = nm && nm.is_overdue;
   return <Card style={{
@@ -528,8 +519,8 @@ function EquipmentCard({
       display: "flex",
       gap: 12,
       alignItems: "flex-start"
-    }} variant="secondary" className="!h-auto w-full text-left whitespace-normal" aria-expanded={isExpanded} aria-controls={`equipment-detail-${eq.id}`} aria-label={`Open ${eq.name}`} disabled={formBusy}>
-        {" "}
+    }} variant="secondary" className="!h-auto w-full text-left whitespace-normal" aria-expanded={isExpanded} aria-controls={`equipment-detail-${eq.id}`} disabled={formBusy}>
+        <span className="sr-only">{isExpanded ? "Collapse" : "Expand"} </span>
         <div style={{
         fontSize: 28,
         lineHeight: 1
@@ -555,7 +546,7 @@ function EquipmentCard({
           }}>
               {eq.name}
             </span>{" "}
-            <Badge tone="neutral">{eq.status}</Badge>{" "}
+            <Badge tone={eq.status === "lost" ? "alert" : "neutral"}>{eq.status}</Badge>{" "}
           </div>{" "}
           <div style={{
           fontSize: 14,
@@ -611,12 +602,6 @@ function EquipmentCard({
           </div>{" "}
         </div>{" "}
       </Button>
-      {isExpanded && detailLoading && <div className="min-h-24 py-4 text-zinc-500" id={`equipment-detail-${eq.id}`}>
-          Loading equipment details…
-        </div>}
-      {isExpanded && detailError && <ActionFeedback error onRetry={() => setAttempt(v => v + 1)} className="mt-4">
-          Could not load equipment details: {detailError}
-        </ActionFeedback>}
       {/* Expanded Detail */}
       {isExpanded && detail && <div style={{
       marginTop: 16,
@@ -715,7 +700,7 @@ function EquipmentCard({
                   }}>
                           {intervals.join(" / ") || "--"}
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                     color: s.is_overdue ? "#C8312F" : "#27272A"
                   }}>
                           {s.is_overdue && "OVERDUE "}
@@ -724,9 +709,9 @@ function EquipmentCard({
                           {s.next_due_hours ? ` / ${s.next_due_hours} hrs` : ""}
                         </TD>
                         <TD>
-                          <Badge tone="neutral">{s.priority}</Badge>
+                          <Badge tone={SEVERITY_TONES[s.priority] || "neutral"}>{s.priority}</Badge>
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                     color: "#27272A",
                     textAlign: "right"
                   }}>
@@ -746,16 +731,16 @@ function EquipmentCard({
         flexWrap: "wrap"
       }}>
             {" "}
-            <Button onClick={() => setRecordForm(!recordForm)} type="button" variant="primary" className="min-w-11" disabled={formBusy}>
+            <Button onClick={() => toggleForm("record")} type="button" variant="primary" className="min-w-11" disabled={formBusy}>
               {recordForm ? "Cancel" : "Record Maintenance"}
             </Button>
-            {eq.category === "vehicle" && <Button onClick={() => setMileageForm(!mileageForm)} type="button" variant="secondary" className="min-w-11" disabled={formBusy}>
+            {eq.category === "vehicle" && <Button onClick={() => toggleForm("mileage")} type="button" variant="secondary" className="min-w-11" disabled={formBusy}>
                 {mileageForm ? "Cancel" : "Log Mileage"}
               </Button>}
           </div>
           {/* Record Maintenance Form */}
           {recordForm && <MaintenanceForm equipmentId={eq.id} schedules={detail.schedules || []} onDone={() => {
-        setRecordForm(false);
+        setOpenForm(null);
         setDetail(null);
         loadFleet();
         showToast("Maintenance recorded");
@@ -763,7 +748,7 @@ function EquipmentCard({
 
           {/* Log Mileage Form */}
           {mileageForm && <MileageForm vehicleId={eq.id} currentMiles={eq.current_miles} onDone={() => {
-        setMileageForm(false);
+        setOpenForm(null);
         setMileage(null);
         setDetail(null);
         loadFleet();
@@ -828,7 +813,7 @@ function EquipmentCard({
                     {detail.recentRecords.slice(0, 10).map(r => <TR key={r.id} style={{
                 borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A"
                 }}>
                           {formatETDate(r.performed_at)}
@@ -846,7 +831,7 @@ function EquipmentCard({
                 }}>
                           {r.performed_by || r.vendor_name || "--"}
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A",
                   textAlign: "right"
                 }}>
@@ -1143,7 +1128,7 @@ function EquipmentCard({
                     {mileage.logs.slice(0, 30).map(l => <TR key={l.id} style={{
                 borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A"
                 }}>
                           {formatETDateOnly(l.log_date)}
@@ -1160,13 +1145,13 @@ function EquipmentCard({
                 }}>
                           {l.business_pct}%
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A",
                   textAlign: "right"
                 }}>
                           {l.fuel_cost ? fmt(l.fuel_cost) : "--"}
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#18181B",
                   textAlign: "right"
                 }}>

@@ -105,7 +105,7 @@ Required (fail-closed in the engine): `treatmentType` (nutrition / insecticide /
 | Stories source | review flag only | lookup | — | — | keep |
 | Ownership (own / rent) | install $ vs rental uplift | UI-A (gated) | literal 'rent' | own | keep |
 | Bond term | rider $60/$54/$45 per application | UI-A (gated) | enum | none | keep |
-| Inventory | station cost $22.05 literal; catalog Trelona row is $24 and flagged stale/needs_pricing | — | — | — | link station and cartridge cost to the catalog |
+| Inventory | station cost + cartridge cost read from the catalog on sync (approved vendor price, sanity band, kill switch `link_station_costs_to_catalog`); $24.00 / $6.83 fallbacks; `materialCostSource` on the line | — | — | catalog | DONE 2026-09-09 (PR A1) — owner enters the cartridge vendor price in the inventory UI |
 | Labor | install 5 min/station computed but excluded from the billed base (`service-pricing.js:4772-4774`); monitoring 5 min/station report-only | — | — | — | owner decision on whether install labor is priced |
 
 ## 8. Rodent (`rodent_bait`, `rodent_trapping`, exclusion, sanitation, guarantee)

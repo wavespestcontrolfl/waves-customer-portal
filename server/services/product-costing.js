@@ -291,7 +291,7 @@ function costLineFromUsage(row, areaSqFt = 0) {
 // persist one-twelfth of a case price as the catalog figure.
 const COUNT_GENERIC = /^(?:count|ct|pcs?|pieces?|each|ea|units?)$/;
 const COUNT_CONTAINER = /^(?:cases?|packs?|boxes|box|bags?|pails?|kits?)$/;
-const COUNT_ITEM = /^(?:stations?|traps?|tubes?|blocks?|blox|briquets?|briquettes?|dunks?|tablets?|signs?|stakes?|cards?|stickers?|placements?|refills?|sachets?)$/;
+const COUNT_ITEM = /^(?:stations?|cartridges?|traps?|tubes?|blocks?|blox|briquets?|briquettes?|dunks?|tablets?|signs?|stakes?|cards?|stickers?|placements?|refills?|sachets?)$/;
 const singularCount = (w) => ({ boxes: 'box', blox: 'block', briquettes: 'briquet' }[w] || w.replace(/s$/, ''));
 function parsePackCount(quantity) {
   const raw = String(quantity || '').toLowerCase().trim();

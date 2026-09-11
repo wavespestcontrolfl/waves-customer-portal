@@ -59,8 +59,10 @@ function withSchedulingDuration(service) {
 
 // All booking callers use the catalog allowance. Appointment overrides are
 // supplied separately by staff paths and must never be truncated to this range.
-function serviceDurationMinutes(service, fallback = 60) {
-  const duration = Number(withSchedulingDuration(service)?.default_duration_minutes);
+function serviceDurationMinutes(service, fallback = 60, { preserveCapacity = false } = {}) {
+  const policy = service?.scheduling_duration_policy;
+  const duration = Number(preserveCapacity && policy?.version === 1
+    ? policy.default_duration_minutes : withSchedulingDuration(service)?.default_duration_minutes);
   return Number.isInteger(duration) && duration > 0 ? duration : fallback;
 }
 
