@@ -133,6 +133,7 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
   expect(shaped.offered_pricing).toEqual({
     default_service_mode: 'recurring',
     waveguard_tier: 'Silver',
+    price_locked: false,
     // BUNDLE never sets snapshotHit (the route only stamps it on the frozen-
     // snapshot fast path) — its absence means this bundle was rebuilt, so
     // the rebuilt bundle's own default sellable cadence rides here too
@@ -410,6 +411,31 @@ test('an ACCEPTED (price-locked) estimate never has its committed totals overrid
   }));
   expect(declined.offered_pricing.rebuilt_default_frequency).toBeUndefined();
   expect(declined.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+});
+
+test('a price-locked estimate also keeps its committed ONE-TIME total — the rebuilt bundle\'s anchorOneTimePrice (today\'s setup-fee rules) does not override the accepted onetime_total column (pre-push audit P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], anchorOneTimePrice: 300 }); // today's setup-fee rules differ from what was accepted
+  const shaped = await shapeEstimate(estimateRow({
+    status: 'accepted', accepted_at: '2026-09-01T00:00:00Z', monthly_total: '47.00', annual_total: '564.00', onetime_total: '125.00',
+  }));
+  expect(shaped.offered_pricing.price_locked).toBe(true);
+  expect(shaped.offered_pricing.one_time_total).toBe(300); // still reported on offered_pricing, for reference
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 }); // but totals stay the committed figure
+});
+
+test('a rebuilt bundle whose default sellable cadence is itself a narrow LOW-confidence line withholds the exact total and carries the range instead — PriceCard shows a range, never a midpoint (pre-push audit P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    { key: 'monthly', monthly: 500, annual: 6000, perTreatment: 500, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 },
+  ] });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.offered_pricing.rebuilt_default_frequency).toEqual({
+    key: 'monthly', low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
+  });
+  expect(shaped.totals).toEqual({
+    monthly: null, annual: null, one_time: 125,
+    low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [400, 600], annual: [4800, 7200] },
+    source: 'rebuilt_bundle_default',
+  });
 });
 
 test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {

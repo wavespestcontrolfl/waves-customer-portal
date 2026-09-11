@@ -360,11 +360,26 @@ async function offeredPricing(row, data) {
   if (!snapshotHit && !priceLocked) {
     const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
     const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
-    if (candidate) rebuiltDefaultFrequency = { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
+    if (candidate) {
+      // A narrow LOW-confidence candidate has no exact price on the customer
+      // page either — PriceCard shows the range, never the midpoint. Carry
+      // the range instead of the raw monthly/annual figures, so a rebuilt
+      // total is never a false precision the page itself withholds.
+      const range = lowConfidenceRange(candidate);
+      rebuiltDefaultFrequency = range
+        ? { key: candidate.key || null, low_confidence_range: range }
+        : { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
+    }
   }
   return {
     offered_pricing: {
       default_service_mode: bundle.defaultServiceMode || null,
+      // A price-locked (accepted/declined) row's totals — monthly, annual,
+      // AND one-time — describe what was actually committed, never today's
+      // re-derived pricing, even when the bundle rebuilt without a
+      // snapshotHit (pre-push audit P1: buildPricingBundle carries no
+      // price-lock guard of its own).
+      price_locked: priceLocked,
       waveguard_tier: bundle.waveGuardTier || null,
       snapshot_hit: snapshotHit,
       ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
@@ -447,20 +462,28 @@ function resolveInvoiceMode(row, data) {
   }
 }
 
-// Authored proposal: its computed totals ARE the quote. Otherwise monthly /
-// annual are the stored totals the send path wrote (after reconciliation),
-// UNLESS the bundle was rejected and rebuilt (offered.snapshot_hit === false
-// — retired/below-floor lawn cadence, stale termite pricing, missing setup
-// fee: estimate-proposal-billing.js:148-169), in which case the frozen
-// columns no longer describe what this bundle offers and the rebuilt
-// default sellable cadence is used instead. One-time is the composer's
-// corrected figure when the bundle built (it is what the page shows), the
-// stored column otherwise. Withheld entirely when membership could not be
-// verified, OR when offered_pricing itself is unavailable (an enabled
-// authored proposal's projection failed, or the pricing bundle failed /
-// doesn't exist — pre-push audit P1): this tool exists because the stored
-// columns are not trusted as the quote on their own, so a failed pricing
-// read must not fall back to exposing them as if they were.
+// Authored proposal: its computed totals ARE the quote. A price-locked
+// (accepted/declined) row always keeps ALL THREE stored columns — monthly,
+// annual, AND one-time — because they describe what was actually committed;
+// buildPricingBundle re-derives today's pricing regardless of lock state, so
+// its anchorOneTimePrice is no safer to trust here than its cadence ladder
+// (pre-push audit P1). Otherwise monthly/annual are the stored totals the
+// send path wrote (after reconciliation), UNLESS the bundle was rejected and
+// rebuilt (offered.snapshot_hit === false — retired/below-floor lawn
+// cadence, stale termite pricing, missing setup fee:
+// estimate-proposal-billing.js:148-169), in which case the frozen columns no
+// longer describe what this bundle offers and the rebuilt default sellable
+// cadence is used instead — its OWN low_confidence_range when that cadence
+// is a narrow LOW-confidence line (PriceCard shows the range, never an exact
+// midpoint, so totals must not promote one either). One-time (unlocked) is
+// the composer's corrected figure when the bundle built (it is what the
+// page shows), the stored column otherwise. Withheld entirely when
+// membership could not be verified, OR when offered_pricing itself is
+// unavailable (an enabled authored proposal's projection failed, or the
+// pricing bundle failed / doesn't exist — pre-push audit P1): this tool
+// exists because the stored columns are not trusted as the quote on their
+// own, so a failed pricing read must not fall back to exposing them as if
+// they were.
 function totalsFor(row, pricing, reconciliation_error) {
   if (reconciliation_error) return { monthly: null, annual: null, one_time: null, withheld: true };
   const offered = pricing.offered_pricing;
@@ -469,11 +492,15 @@ function totalsFor(row, pricing, reconciliation_error) {
     return { monthly: t.monthly_equivalent, annual: t.annual_recurring, one_time: t.one_time, total_tax: t.total_tax, first_year_total: t.first_year_total, source: 'authored_proposal' };
   }
   if (!offered) return { monthly: null, annual: null, one_time: null, withheld: true };
-  const oneTime = offered.one_time_total ?? money(row.onetime_total);
-  if (offered.snapshot_hit === false && offered.rebuilt_default_frequency) {
-    const d = offered.rebuilt_default_frequency;
-    return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
+  if (offered.price_locked === true) {
+    return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: money(row.onetime_total) };
   }
+  const oneTime = offered.one_time_total ?? money(row.onetime_total);
+  const d = offered.snapshot_hit === false ? offered.rebuilt_default_frequency : null;
+  if (d?.low_confidence_range) {
+    return { monthly: null, annual: null, one_time: oneTime, low_confidence_range: d.low_confidence_range, source: 'rebuilt_bundle_default' };
+  }
+  if (d) return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
   return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: oneTime };
 }
 
