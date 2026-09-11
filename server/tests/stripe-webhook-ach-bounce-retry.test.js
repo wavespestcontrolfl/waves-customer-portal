@@ -311,7 +311,7 @@ describe('payment_failed admin bell payload', () => {
     await new Promise((resolve) => setImmediate(resolve));
     const call = triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed');
     expect(call).toBeTruthy();
-    expect(call[1]).toMatchObject({ customerId: 'cust-1', amount: expect.any(Number), reason: expect.any(String) });
+    expect(call[1]).toMatchObject({ customerId: 'cust-1', amount: expect.any(Number), reason: expect.any(String), paymentIntentId: 'pi_ach_1', attemptId: 'ch_1' });
   });
 
   test('orphan intent (no invoice, no ledger row) falls back to the PI metadata waves_customer_id', async () => {

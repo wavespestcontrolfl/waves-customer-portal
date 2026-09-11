@@ -135,26 +135,40 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
  * failed retire is logged and reported as 0 so the caller can retry on its
  * next clean run.
  */
-async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons' } = {}) {
+// `lockKey`: the dedupeKey the matching ingest uses. When given, the retire
+// runs in its own transaction under the SAME advisory lock notifyAdmin's
+// dedupe takes (`admin:${dedupeKey}`), so an overlapping recurrence and a
+// clean-run resolve for one key serialize — never "deduped onto a row that
+// is being resolved" nor "fresh failure resolved by the clean run" (codex
+// P1 r6 on #4392). Without it the update runs on the shared connection.
+async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
   const db = require('../models/db');
-  try {
+  const retire = async (conn) => {
     const stamp = new Date().toISOString();
-    let q = db('notifications')
+    let q = conn('notifications')
       .where({ recipient_type: 'admin', category: CATEGORY })
       .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
     if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
-    const count = await q.update({
-      read_at: db.raw('COALESCE(read_at, NOW())'),
+    return q.update({
+      read_at: conn.raw('COALESCE(read_at, NOW())'),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never
       // be the "standing" row notifyAdmin's rolling-window dedupe finds, or a
       // finding that clears and recurs inside the window would be swallowed
       // as deduped with no live bell (codex P1 on #4392). opsKey stays for
       // history and the Activity feed.
-      metadata: db.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
+      metadata: conn.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
     });
+  };
+  try {
+    const count = lockKey
+      ? await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${lockKey}`]);
+        return retire(trx);
+      })
+      : await retire(db);
     logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s) (${resolvedBy})`);
     return Number(count) || 0;
   } catch (err) {
