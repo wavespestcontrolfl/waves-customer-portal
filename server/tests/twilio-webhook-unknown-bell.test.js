@@ -1,5 +1,5 @@
 // Real webhook control flow; synthetic persistence and inert delivery seams.
-const mockState = { sms: [], sequence: 0, ai: true, read: false, pending: 0, claims: new Map() };
+const mockState = { sms: [], sequence: 0, ai: true, read: false, pending: 0, claims: new Map(), smsLogInsertPayloads: [] };
 let mockPg;
 let mockDatabase;
 function mockDb(table) {
@@ -78,6 +78,10 @@ function mockDb(table) {
   q.insert = (row) => {
     const stored = { id: `synthetic-${++mockState.sequence}`, created_at: new Date(Date.now() + mockState.sequence), ...row };
     if (table === 'sms_log') {
+      // The row EXACTLY as written, before any later metadata merge — the
+      // only way to tell a stamp that is part of the insert from one the
+      // deferred dispatch adds after the 200 (codex #4210 round-4 P1).
+      mockState.smsLogInsertPayloads.push(JSON.parse(JSON.stringify(row)));
       mockState.sms.push(stored);
       // Seam for the "sms_log insert succeeded but returned a row without
       // created_at" scenario (claude pre-push audit P1, round 2): the
@@ -89,6 +93,14 @@ function mockDb(table) {
     q.rows = [stored]; return q;
   };
   q.update = async (patch) => {
+    // Seam for a failed delivery-receipt write (codex #4210 round-4 P2):
+    // only the sms_reply_alerted stamp fails, so the bell still rings and
+    // only the durable evidence of it is lost.
+    if (mockState.failReceiptWrite && table === 'sms_log' && patch.metadata?.merge?.sms_reply_alerted) {
+      const err = new Error('synthetic receipt write failure');
+      err.code = 'synthetic_receipt_failure';
+      throw err;
+    }
     if (table === 'sms_log') for (const row of matches()) {
       if (patch.metadata?.merge) row.metadata = JSON.stringify({ ...JSON.parse(row.metadata || '{}'), ...patch.metadata.merge });
     }
@@ -206,7 +218,7 @@ beforeEach(async () => {
   if (mockPg) await mockPg.raw('TRUNCATE sms_log');
   jest.clearAllMocks();
   mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false; mockState.claims = new Map(); mockState.omitSmsLogCreatedAt = false;
-  mockClaim.calls = []; mockClaim.fail = false; mockState.failSmsLogInsert = false;
+  mockClaim.calls = []; mockClaim.fail = false; mockState.failSmsLogInsert = false; mockState.failReceiptWrite = false; mockState.smsLogInsertPayloads = [];
   processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
   sendCustomerMessage.mockResolvedValue({ sent: true });
   triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
@@ -414,6 +426,47 @@ test('a failed sms_log insert for a LOUD REACTION is the same failed webhook (50
   expect(triggerNotification).not.toHaveBeenCalled();
   expect(mockClaim.calls).toEqual([]);
   expect(mockState.sms).toEqual([]);
+});
+
+test('a loud reaction stamps sms_reply_eligible in the insert itself, so a worker exit after the 200 still leaves a recoverable row (codex #4210 round-4 P1)', async () => {
+  mockState.ai = false;
+  await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+  const inserted = mockState.smsLogInsertPayloads.find((r) => r.direction === 'inbound' && r.message_body.startsWith('Disliked'));
+  expect(inserted).toBeDefined();
+  // Asserted against the INSERT payload, not the row's later state: the
+  // deferred dispatch stamps the same key after the 200, so reading the
+  // stored row would pass either way. Twilio stops retrying at that 200,
+  // so a stamp that exists only after it is lost for good if the worker
+  // dies in between — the row must carry it from the moment it exists.
+  expect(JSON.parse(inserted.metadata || '{}').sms_reply_eligible).toBe(true);
+});
+
+test('a loud reaction to a TRACKING line is not stamped eligible — the stamp is driven by the same single flag the dispatch guard reads (codex #4210 round-4 P1)', async () => {
+  mockState.ai = false;
+  await receive('Disliked "We will treat inside"', numbers.domainTracking[0].number);
+  const inserted = mockState.smsLogInsertPayloads.find((r) => r.direction === 'inbound' && r.message_body.startsWith('Disliked'));
+  expect(inserted).toBeDefined();
+  // Tracking lines first-contact through new_lead, never the sms_reply
+  // bell, so stamping them eligible would hand the recovery sweep messages
+  // it must never alert on.
+  expect(JSON.parse(inserted.metadata || '{}').sms_reply_eligible).toBeUndefined();
+  expect(triggerNotification).not.toHaveBeenCalledWith('sms_reply', expect.anything(), expect.anything());
+});
+
+test('a delivery whose receipt never persists releases the window instead of confirming it, so the sweep settles it in minutes rather than re-alerting stale hours later (codex #4210 round-4 P2)', async () => {
+  mockState.ai = false;
+  mockState.failReceiptWrite = true;
+  try {
+    await receive('Please quote pest control.', numbers.locations.parrish.number);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    // The bell rang, but nothing durable records that it did. Confirming a
+    // 4h window on that basis hides the message from the sweep until the
+    // claim lapses, then produces a stale duplicate; releasing leaves it
+    // recoverable on the next tick.
+    expect(mockState.claims.get(sender)).toBeUndefined();
+  } finally {
+    mockState.failReceiptWrite = false;
+  }
 });
 
 test('a delivered alert confirms the claim to the full 4h window, not left on the short claim lease (codex #4210 round-2 P1)', async () => {

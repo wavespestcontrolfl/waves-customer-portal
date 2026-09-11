@@ -786,6 +786,16 @@ router.post('/sms', async (req, res) => {
     // One flag, computed once, used by both.
     const isTrackingLeadInbound = numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking';
 
+    // Computed ONCE, before the insert, and used by both the recoverability
+    // stamp below and the dispatch guard in the deferred block (codex #4210
+    // round-4 P1) — the same one-flag rule isTrackingLeadInbound follows. A
+    // loud reaction's alert eligibility is fully known here: it depends only
+    // on the sender being unmatched, the line not being a tracking line, and
+    // the message not being Adam texting himself. (Quiet reactions return
+    // before any alert lifecycle, so they are never eligible.)
+    const reactionAlertEligible = smsReaction && !quietReaction && !customer && !isTrackingLeadInbound
+      && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE);
+
     if (smsReaction) {
       // Same persistence contract as the ordinary-text insert below (codex
       // #4210 round-3 P1; docs/public-route-contracts.md "Failure to persist
@@ -806,6 +816,16 @@ router.post('/sms', async (req, res) => {
           source: numberConfig.type,
           domain: numberConfig.domain,
           media: inboundMedia,
+          // Stamped HERE, in the insert, rather than by
+          // dispatchUnknownSenderAlert in the deferred block (codex #4210
+          // round-4 P1): the recovery sweep can only see a message that
+          // carries sms_reply_eligible, and the deferred block runs AFTER
+          // the 200 that stops Twilio retrying. A worker exit in that
+          // window used to leave an unread first-contact reaction with no
+          // bell and no way for anything to find it again. Written
+          // synchronously, the row is recoverable the moment it exists;
+          // the dispatch's own later stamp is then merely idempotent.
+          ...(reactionAlertEligible ? { sms_reply_eligible: true } : {}),
         }),
       }).catch(() => {
         sourcePersistenceFailed = true;
@@ -854,8 +874,7 @@ router.post('/sms', async (req, res) => {
           // first-contact channel is new_lead) via the SAME isTrackingLeadInbound
           // flag alertEligible uses below.
           let unknownSenderAlertHandled = false;
-          if (!customer && !isTrackingLeadInbound
-            && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+          if (reactionAlertEligible) {
             unknownSenderAlertHandled = await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
           }
           if (isAiNumber) return;
@@ -2163,6 +2182,16 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
     threadId: customer?.id || null,
     twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
   }, { beforePush: unifiedStillUnread });
+  // Whether the DURABLE receipt for this delivery actually landed (codex
+  // #4210 round-4 P2). The bell ringing and the receipt persisting are two
+  // different facts: the sweep can only read the second one, so confirming
+  // a four-hour window on the strength of the first alone leaves a message
+  // that looks un-alerted to the sweep while its claim silently blocks
+  // recovery until it expires — then produces a stale duplicate hours
+  // later. dispatchUnknownSenderAlert reads this to decide confirm vs
+  // release, so a lost receipt is recovered in the next sweep tick
+  // (~2 min) instead of 4 hours later.
+  let receiptWritten = false;
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
     // `updated_at` records WHEN this delivery was actually confirmed —
     // distinct from the row's own `created_at` (the message's arrival),
@@ -2173,11 +2202,21 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
     // arrives within the true confirmed window is recognized as covered
     // even when the window itself started a few minutes after this row's
     // own arrival.
-    await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).update({
+    const writeReceipt = () => db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_alerted: true })]),
       updated_at: new Date(),
-    }).catch((err) => logger.warn('[notifications] SMS alert receipt failed', { code: err.code || 'unknown' }));
+    });
+    // One retry before giving up: a transient blip must not cost the window
+    // confirmation (and buy a duplicate alert) when writing again would do.
+    receiptWritten = await writeReceipt()
+      .then(() => true)
+      .catch(() => writeReceipt().then(() => true))
+      .catch((err) => {
+        logger.warn('[notifications] SMS alert receipt failed', { code: err.code || 'unknown' });
+        return false;
+      });
   }
+  if (stats && typeof stats === 'object') stats.receiptWritten = receiptWritten;
   try {
     // Post-insert race: the thread was opened while the bell was being
     // written. A known customer's bell is per-thread, so retiring it by SID
@@ -2289,6 +2328,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // preferences happened to change — working exactly as designed against
   // a decision that was never accidental.
   let suppressed = false;
+  let stats = null;
   // "Thread read before the bell" is the third HANDLED outcome (claude
   // pre-push audit P1 on f5d8a2cf4): staff opened the thread while this
   // dispatch was in flight, so there is nothing left to alert about. The
@@ -2300,14 +2340,19 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // only looks at unread rows — never retries it either.
   let alreadyRead = false;
   try {
-    const stats = await ringSmsReplyBell({ customer: null, From, MessageSid, message });
+    stats = await ringSmsReplyBell({ customer: null, From, MessageSid, message });
     delivered = Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
     suppressed = Boolean(stats && (stats.suppressed || stats.policySilenced));
   } catch (e) {
     if (e.alreadyRead) { alreadyRead = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
     else logger.error('[notifications] unknown-sender sms_reply trigger failed', { code: e.code || 'unknown' });
   }
-  if (delivered) {
+  // A delivery whose receipt never persisted is NOT a confirmable window
+  // (codex #4210 round-4 P2): the sweep reads the receipt, not this
+  // variable, so confirming here would hide the message behind a 4h claim
+  // and then re-alert it, stale, once the claim lapsed. Releasing instead
+  // lets the next sweep tick settle it within ~2 minutes.
+  if (delivered && stats?.receiptWritten !== false) {
     // Confirm the claim to the full 4h window only now that delivery is
     // proven (codex #4210 round-2 P1) — see claimUnknownSenderAlertWindow.
     await confirmUnknownSenderAlertWindow(From, token);
