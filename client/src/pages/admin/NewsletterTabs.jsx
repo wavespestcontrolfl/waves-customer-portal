@@ -838,9 +838,7 @@ export function ComposeView({
     if (draftId || pendingEventRef.current) return; // already editing a draft or event-seeded
     let cancelled = false;
     if (editDraftIdParam) {
-      adminFetch(
-        `/admin/newsletter/sends/${encodeURIComponent(editDraftIdParam)}`,
-      )
+      adminFetch(`/admin/newsletter/sends/${encodeURIComponent(editDraftIdParam)}`)
         .then((d) => {
           if (!cancelled && d?.send && !userHasEdited.current)
             hydrateSavedSend(d.send);
@@ -887,9 +885,7 @@ export function ComposeView({
     let cancelled = false;
     adminFetch("/admin/newsletter/segment-preview", {
       method: "POST",
-      body: JSON.stringify({
-        segmentFilter,
-      }),
+      body: JSON.stringify({ segmentFilter }),
     })
       .then((d) => {
         if (!cancelled) setSegmentCount(d.count);
@@ -989,11 +985,7 @@ export function ComposeView({
     try {
       const res = await adminFetch("/admin/newsletter/preview", {
         method: "POST",
-        body: JSON.stringify({
-          htmlBody,
-          previewText,
-          newsletterType: activeNewsletterType,
-        }),
+        body: JSON.stringify({ htmlBody, previewText, newsletterType: activeNewsletterType }),
       });
       setPreviewHtml(res.html || "");
     } catch (e) {
@@ -1011,9 +1003,7 @@ export function ComposeView({
     try {
       await adminFetch(`/admin/newsletter/sends/${savedId}/test`, {
         method: "POST",
-        body: JSON.stringify({
-          email: testEmail,
-        }),
+        body: JSON.stringify({ email: testEmail }),
       });
       setStatus(`Test sent to ${testEmail}.`);
     } catch (e) {
@@ -1029,12 +1019,9 @@ export function ComposeView({
     if (!savedId) return;
     try {
       setStatus("Validating…");
-      const v = await adminFetch(
-        `/admin/newsletter/sends/${savedId}/validate`,
-        {
-          method: "POST",
-        },
-      );
+      const v = await adminFetch(`/admin/newsletter/sends/${savedId}/validate`, {
+        method: "POST",
+      });
       setValidationResult(v);
       if (v.errors?.length > 0) {
         setStatus("Validation failed — fix errors before sending.");
@@ -1092,9 +1079,7 @@ export function ComposeView({
         `/admin/newsletter/sends/${savedId}/schedule`,
         {
           method: "POST",
-          body: JSON.stringify({
-            scheduledFor: when.toISOString(),
-          }),
+          body: JSON.stringify({ scheduledFor: when.toISOString() }),
         },
       );
       setStatus(`Scheduled for ${formatEtDateTime(res.send.scheduled_for)}.`);
@@ -2545,9 +2530,7 @@ export function HistoryView() {
     )
       return;
     try {
-      await adminFetch(`/admin/newsletter/sends/${id}`, {
-        method: "DELETE",
-      });
+      await adminFetch(`/admin/newsletter/sends/${id}`, { method: "DELETE" });
       load();
     } catch (e) {
       alert("Delete failed: " + e.message);
@@ -2564,9 +2547,7 @@ export function HistoryView() {
     )
       return;
     try {
-      await adminFetch(`/admin/newsletter/sends/${send.id}/resume`, {
-        method: "POST",
-      });
+      await adminFetch(`/admin/newsletter/sends/${send.id}/resume`, { method: "POST" });
       load();
     } catch (e) {
       alert(`${recovery ? "Recovery" : "Resume"} failed: ${e.message}`);
@@ -3274,9 +3255,7 @@ export function SubscribersView() {
     if (q) qs.set("q", q);
     qs.set("limit", String(SUBSCRIBERS_PAGE_SIZE));
     qs.set("offset", "0");
-    adminFetch(`/admin/newsletter/subscribers?${qs}`, {
-      signal: controller.signal,
-    })
+    adminFetch(`/admin/newsletter/subscribers?${qs}`, { signal: controller.signal })
       .then((d) => {
         if (controller.signal.aborted) return;
         const next = d.subscribers || [];
@@ -3335,11 +3314,7 @@ export function SubscribersView() {
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
-      const url = URL.createObjectURL(
-        new Blob([text], {
-          type: "text/csv",
-        }),
-      );
+      const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
       const a = document.createElement("a");
       a.href = url;
       a.download = `newsletter-subscribers-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -3359,9 +3334,7 @@ export function SubscribersView() {
     try {
       await adminFetch("/admin/newsletter/subscribers", {
         method: "POST",
-        body: JSON.stringify({
-          email,
-        }),
+        body: JSON.stringify({ email }),
       });
       setStatus(`Added ${email}.`);
       load();
@@ -3388,11 +3361,7 @@ export function SubscribersView() {
       setStatus(`Importing ${subscribers.length.toLocaleString()} rows…`);
       const result = await adminFetch("/admin/newsletter/subscribers/import", {
         method: "POST",
-        body: JSON.stringify({
-          subscribers,
-          source: "admin_import",
-          preConsented: importPreConsented,
-        }),
+        body: JSON.stringify({ subscribers, source: "admin_import", preConsented: importPreConsented }),
       });
       setStatus(
         `Imported ${result.inserted.toLocaleString()} subscriber${result.inserted === 1 ? "" : "s"}; ${result.skipped.toLocaleString()} skipped or already present.`,

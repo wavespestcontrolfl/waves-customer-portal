@@ -752,9 +752,7 @@ function EventInboxView({ onDraftFromEvent }) {
     if (freshnessFilter) params.set("freshness", freshnessFilter);
     if (zoneFilter) params.set("zone", zoneFilter);
     if (searchQuery) params.set("q", searchQuery);
-    adminFetch(`/admin/newsletter/events/inbox?${params}`, {
-      signal: controller.signal,
-    })
+    adminFetch(`/admin/newsletter/events/inbox?${params}`, { signal: controller.signal })
       .then((d) => {
         if (controller.signal.aborted) return;
         setEvents(d.events || []);
@@ -805,10 +803,7 @@ function EventInboxView({ onDraftFromEvent }) {
     try {
       await adminFetch("/admin/newsletter/events/bulk-action", {
         method: "POST",
-        body: JSON.stringify({
-          action,
-          ids: [...selected],
-        }),
+        body: JSON.stringify({ action, ids: [...selected] }),
       });
       setActionStatus(
         `${selected.size} event${selected.size === 1 ? "" : "s"} updated.`,
@@ -847,10 +842,7 @@ function EventInboxView({ onDraftFromEvent }) {
     try {
       await adminFetch("/admin/newsletter/events/merge", {
         method: "POST",
-        body: JSON.stringify({
-          primaryId,
-          duplicateIds,
-        }),
+        body: JSON.stringify({ primaryId, duplicateIds }),
       });
       setSelected(new Set());
       fetchEvents();
@@ -1420,7 +1412,7 @@ function CalendarView() {
 
   const fetchCalendar = () => {
     setLoading(true);
-    adminFetch("/admin/newsletter/calendar?pastWeeks=4&futureWeeks=12")
+    adminFetch('/admin/newsletter/calendar?pastWeeks=4&futureWeeks=12')
       .then((d) => {
         setCalendar(d.calendar || []);
         setCurrentWeek(d.currentWeek || null);
@@ -1438,16 +1430,13 @@ function CalendarView() {
       const entry = calendar.find((c) => c.weekOf === weekOf);
       if (entry && entry.id) {
         await adminFetch(`/admin/newsletter/calendar/${entry.id}`, {
-          method: "PATCH",
+          method: 'PATCH',
           body: JSON.stringify(updates),
         });
       } else {
-        await adminFetch("/admin/newsletter/calendar", {
-          method: "POST",
-          body: JSON.stringify({
-            weekOf,
-            ...updates,
-          }),
+        await adminFetch('/admin/newsletter/calendar', {
+          method: 'POST',
+          body: JSON.stringify({ weekOf, ...updates }),
         });
       }
       fetchCalendar();
@@ -1467,8 +1456,8 @@ function CalendarView() {
       // Save current editor values first (create or update)
       if (!calendarId) {
         // Placeholder — create the row
-        const created = await adminFetch("/admin/newsletter/calendar", {
-          method: "POST",
+        const created = await adminFetch('/admin/newsletter/calendar', {
+          method: 'POST',
           body: JSON.stringify({
             weekOf: row.weekOf,
             topic: row.topic || null,
@@ -1480,7 +1469,7 @@ function CalendarView() {
       } else {
         // Existing row — persist any pending edits
         await adminFetch(`/admin/newsletter/calendar/${calendarId}`, {
-          method: "PATCH",
+          method: 'PATCH',
           body: JSON.stringify({
             topic: row.topic || null,
             homeownerMinuteTopic: row.homeownerMinuteTopic || null,
@@ -1489,12 +1478,9 @@ function CalendarView() {
       }
 
       // Now draft from the saved row
-      await adminFetch(
-        `/admin/newsletter/calendar/${calendarId}/draft-from-plan`,
-        {
-          method: "POST",
-        },
-      );
+      await adminFetch(`/admin/newsletter/calendar/${calendarId}/draft-from-plan`, {
+        method: 'POST',
+      });
       fetchCalendar();
       setCalendarStatus("Draft created. Open Compose to review it.");
     } catch (e) {
