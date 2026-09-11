@@ -234,7 +234,7 @@ async function main() {
   let chrome;
   let safari;
   try {
-    server = await previewServer(root, "http://127.0.0.1:25157");
+    server = await previewServer(root, process.env.ADMIN_UI_PREVIEW_URL || "http://127.0.0.1:25157");
     chrome = await launchBrowser();
     safari = await webkit.launch();
     for (const [name, browser, hasTouch] of [

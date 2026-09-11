@@ -13,6 +13,8 @@ const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
 
 const MODULES = [
+  ['customer-estimate-tools', 'CUSTOMER_ESTIMATE_TOOLS', 'executeCustomerEstimateTool'],
+  ['property-tools', 'PROPERTY_TOOLS', 'executePropertyTool'],
   ['tools', 'TOOLS', 'executeTool'],
   ['schedule-tools', 'SCHEDULE_TOOLS', 'executeScheduleTool'],
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
