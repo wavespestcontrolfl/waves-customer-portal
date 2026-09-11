@@ -4664,6 +4664,54 @@ async function previewMergeEffects(database, winnerId, loserId) {
   return { moving, referral: await referralFoldEffects(database, winnerId, loserId) };
 }
 
+/**
+ * The merge mutations the FK/polymorphic sweep CANNOT see, because the
+ * customer id they key on is not a column: the loser's unstamped visits
+ * (stamped with the loser's own address before the repoint so the schedule
+ * board cannot dispatch to the winner's house), an operator's
+ * call_log.metadata.customer_link_override, the irrigation weekly delivery
+ * identity embedded in email_messages.trigger_event_id, and the sprinkler
+ * "home changed" stamp. Disclosed on the card and pinned in the effects
+ * fingerprint (codex #4348 r9 P2) — without this, such a row could be
+ * created during the pending window and still be rewritten by an approval
+ * that never mentioned it. Keys are the executor's own `repointed` keys.
+ * Omitted entirely when nothing of the sort exists.
+ */
+async function nonFkMergeRewrites(database, winner, loser) {
+  const out = {};
+  const countInto = async (key, build) => {
+    try {
+      const row = await build().count({ n: '*' }).first();
+      const n = Number(row?.n || 0);
+      if (n > 0) out[key] = n;
+    } catch (err) {
+      out[key] = 'unknown';
+      logger.warn(`[customer-dedupe] nonFkMergeRewrites: count failed for ${key}: ${err.message}`);
+    }
+  };
+  // Only when the loser HAS an address — the executor's own condition.
+  if (loser.address_line1) {
+    await countInto('scheduled_services.service_address_stamp', () => database('scheduled_services')
+      .where({ customer_id: loser.id }).whereNull('service_address_line1'));
+  }
+  await countInto('call_log.customer_link_override', () => database('call_log')
+    .whereRaw("metadata -> 'customer_link_override' ->> 'customer_id' = ?", [String(loser.id)]));
+  await countInto('email_messages.trigger_event_id', () => database('email_messages')
+    .where('trigger_event_id', 'like', `irrigation.weekly:${loser.id}:%`));
+  // A pure predicate, not a count: the same premise test the executor runs.
+  try {
+    const fanout = require('./customer-address-fanout');
+    if (fanout.addressMatchKey(winner?.address_line1) && fanout.addressMatchKey(loser?.address_line1)
+      && fanout.homesDiffer(winner, loser)) {
+      out['property_preferences.irrigation_home_changed_at'] = 'stamped';
+    }
+  } catch (err) {
+    out['property_preferences.irrigation_home_changed_at'] = 'unknown';
+    logger.warn(`[customer-dedupe] nonFkMergeRewrites: sprinkler move premise failed: ${err.message}`);
+  }
+  return out;
+}
+
 async function referralFoldEffects(database, winnerId, loserId) {
   const loserPromoter = await database('referral_promoters').where({ customer_id: loserId }).first();
   if (!loserPromoter) return { loser_enrolled: false };
@@ -4722,7 +4770,11 @@ async function previewCollectionCaseReconciliation(database, winnerId, loserId) 
     rows = await database('collection_cases')
       .whereIn('customer_id', [winnerId, loserId])
       .whereIn('current_state', ['approved', 'dialing', 'held'])
+      // approved_at decides which approval survives the reconcile, so it
+      // leads — but it ties, and this list is fingerprinted, so the unique
+      // id breaks the tie (codex #4348 r9 P2).
       .orderBy('approved_at', 'desc')
+      .orderBy('id')
       .select('id', 'customer_id', 'current_state', 'case_version');
   } catch (err) {
     if (err && err.code === '42P01') return { available: false, live: [], demoted_to_proposed: [], defers_on_dialing: false };
@@ -4742,6 +4794,17 @@ async function previewCollectionCaseReconciliation(database, winnerId, loserId) 
   };
 }
 
+// Deterministic JSON: object keys sorted at every depth, arrays left in
+// their (meaning-bearing, source-pinned) order. Used for the effects
+// fingerprint the executor re-derives under its locks and compares exactly.
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
 // EVERYTHING a merge of (winner, loser) would do beyond the row retire,
 // stated as the IB confirmation card discloses it, plus one stable
 // fingerprint of it all (key-sorted JSON). Read over any knex handle: the
@@ -4750,6 +4813,11 @@ async function previewCollectionCaseReconciliation(database, winnerId, loserId) 
 // `winner` / `loser` are full customer rows (select *).
 async function describeMergeEffects(database, winner, loser) {
   const { moving, referral } = await previewMergeEffects(database, winner.id, loser.id);
+  // Non-FK rewrites (jsonb-embedded ids, trigger-id identities, address
+  // stamps) alongside the swept counts — same object, so they ride in the
+  // fingerprint the executor recomputes under its locks.
+  const nonFk = await nonFkMergeRewrites(database, winner, loser);
+  if (Object.keys(nonFk).length) moving.non_fk_rewrites = nonFk;
   const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
   const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
   const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
@@ -4810,8 +4878,14 @@ async function describeMergeEffects(database, winner, loser) {
     // make the queue undo refuse — stated, never promised away.
     revertible_from_queue: predictedCollisionHandlers.length ? false : 'unless the sweep has to fold colliding rows (journaled; the undo then refuses)',
   };
-  const sortKeys = (obj) => Object.fromEntries(Object.entries(obj || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
-  const fingerprint = JSON.stringify({ moving: sortKeys(moving), financial_effects: sortKeys(financial_effects) });
+  // Key-sorted at EVERY depth, not just the two top-level objects (codex
+  // #4348 r9 P2). executeMerge compares this string exactly against the
+  // approved card's, so any ordering the reads do not pin would refuse a
+  // merge nothing had changed. Array ORDER is still meaning-bearing and is
+  // pinned at the source instead: stamped sessions sort by
+  // (payment_intent_id, invoice_id) and live collection cases by
+  // (approved_at desc, id) — both unique — so equal reads serialize equal.
+  const fingerprint = stableStringify({ moving, financial_effects });
   return { moving, financial_effects, fingerprint };
 }
 
@@ -4837,6 +4911,7 @@ module.exports = {
   predictWinnerBackfills,
   deriveSavedCardStripeCustomer,
   predictSavedCardDemotions,
+  nonFkMergeRewrites,
   rowLevelMergeConflict,
   inheritedAutopayRestrictions,
   acquirePairAdjudicationLock,

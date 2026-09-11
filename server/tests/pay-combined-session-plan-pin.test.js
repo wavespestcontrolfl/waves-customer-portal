@@ -16,7 +16,7 @@ const { listUnconfirmedCombinedSessionsForCustomer, releaseUnconfirmedCombinedSe
 function database(rowsByCustomer) {
   const fn = jest.fn((table) => {
     const q = { _table: table };
-    for (const m of ['where', 'whereNotNull', 'whereNotIn', 'select']) q[m] = jest.fn((...args) => { if (m === 'where') q._where = args[0]; return q; });
+    for (const m of ['where', 'whereNotNull', 'whereNotIn', 'orderBy', 'select']) q[m] = jest.fn((...args) => { if (m === 'where') q._where = args[0]; return q; });
     q.update = jest.fn(async () => 1); // the stamp cleanup after a cancel
     q.then = (resolve, reject) => Promise.resolve(rowsByCustomer[q._where?.customer_id] || []).then(resolve, reject);
     return q;

@@ -528,6 +528,12 @@ function stampedCombinedSessionRows(database, customerId) {
     // out hid the exact in-flight sessions the merge's defer check exists
     // to detect.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    // Ordered by the invoice id, which is unique: one combined PaymentIntent
+    // is stamped onto EVERY invoice in its allocation, so without a
+    // tie-breaker two reads of the same unchanged rows can come back in
+    // different orders — and the merge fingerprints this list (codex #4348
+    // r9 P2: a spurious `preview_changed` on a merge nothing had touched).
+    .orderBy('id')
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
 }
 
@@ -593,7 +599,14 @@ async function listUnconfirmedCombinedSessionsForCustomer(database, customerId, 
     if (!outcome) throw new Error(`Could not verify payment session ${piId} for the merge preview (payment service unavailable) — try again`);
     sessions.push({ invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: piId, outcome });
   }
-  return sessions.sort((a, b) => (a.payment_intent_id < b.payment_intent_id ? -1 : a.payment_intent_id > b.payment_intent_id ? 1 : 0));
+  // Sorted by PaymentIntent id, then by the unique invoice id: the same PI
+  // appears once per stamped invoice, so the second key is what makes the
+  // order — and therefore the merge's effects fingerprint — deterministic.
+  return sessions.sort((a, b) => (
+    a.payment_intent_id < b.payment_intent_id ? -1
+      : a.payment_intent_id > b.payment_intent_id ? 1
+        : String(a.invoice_id) < String(b.invoice_id) ? -1
+          : String(a.invoice_id) > String(b.invoice_id) ? 1 : 0));
 }
 
 /**

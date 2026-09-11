@@ -2424,6 +2424,65 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.combined_payment_sessions.loser[0].outcome).toBe('stamps_cleared');
   });
 
+  it('fingerprints deterministically: nested keys sorted at every depth, and one PaymentIntent across several invoices in a fixed order (Codex r9 P2)', async () => {
+    // A combined session is stamped onto EVERY invoice in its allocation, so
+    // the same PI id comes back once per invoice. Without a unique
+    // tie-breaker the two reads (unlocked card, locked recheck) could order
+    // those rows differently and the exact string compare would refuse a
+    // merge nothing had touched.
+    mockStripePis = { pi_a: { id: 'pi_a', status: 'requires_payment_method', metadata: { combined_allocation: '{"x":1}' } } };
+    const rows = [
+      { id: 'inv-b', invoice_number: 'INV-B', stripe_payment_intent_id: 'pi_a' },
+      { id: 'inv-a', invoice_number: 'INV-A', stripe_payment_intent_id: 'pi_a' },
+    ];
+    install({}, { sessions: { L: rows } });
+    const first = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(first.financial_effects.combined_payment_sessions.loser.map((sess) => sess.invoice_id)).toEqual(['inv-a', 'inv-b']);
+    // The SAME rows handed back in the opposite order fingerprint identically.
+    install({}, { sessions: { L: [...rows].reverse() } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).toBe(first.fingerprint);
+    // Keys are sorted at every depth, not just the two top-level objects:
+    // collection_cases is built { available, live, demoted_to_proposed,
+    // defers_on_dialing } and must serialize alphabetically.
+    expect(first.fingerprint).toContain('"collection_cases":{"available":true,"defers_on_dialing"');
+    // ...and the string still round-trips to exactly what the card shows.
+    expect(JSON.parse(first.fingerprint)).toEqual({ moving: first.moving, financial_effects: first.financial_effects });
+  });
+
+  it('discloses and pins the non-FK rewrites the row sweep cannot see (Codex r9 P2)', async () => {
+    // jsonb-embedded ids and trigger-id identities: not FK columns, so the
+    // sweep's counts never mention them, yet the executor rewrites them.
+    const movedHome = { ...loser, address_line1: '900 Other Ave' };
+    const route = (counts) => (table, q) => {
+      if (table === 'referral_promoters') return null;
+      if (table === 'payment_methods') return q.called('first') ? null : [];
+      if (table === 'invoices' && !q.called('count')) return [];
+      if (table === 'customer_plan_rates') return { n: 0 };
+      return { n: counts[table] || 0 };
+    };
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb(route({ scheduled_services: 3, call_log: 2, email_messages: 1 }));
+    const out = await dedupe.describeMergeEffects(db, winner, movedHome);
+    expect(out.moving.non_fk_rewrites).toEqual({
+      'scheduled_services.service_address_stamp': 3,
+      'call_log.customer_link_override': 2,
+      'email_messages.trigger_event_id': 1,
+      // winner '100 Test St' vs loser '900 Other Ave' — different homes.
+      'property_preferences.irrigation_home_changed_at': 'stamped',
+    });
+    // Pinned: it is inside `moving`, which the fingerprint covers, so a row
+    // added during the pending window invalidates the approval.
+    expect(JSON.parse(out.fingerprint).moving.non_fk_rewrites['call_log.customer_link_override']).toBe(2);
+    const before = out.fingerprint;
+    // One hand-linked call appears during the pending window.
+    installDb(route({ scheduled_services: 3, call_log: 3, email_messages: 1 }));
+    expect((await dedupe.describeMergeEffects(db, winner, movedHome)).fingerprint).not.toBe(before);
+    // An addressless loser is not a different home and has no visits to stamp.
+    install({});
+    const quiet = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(quiet.moving.non_fk_rewrites).toBeUndefined();
+  });
+
   it('discloses and pins the CRM / technician notes the merge appends onto the winner (Codex r7 P2)', async () => {
     const withNotes = { ...loser, crm_notes: 'Gate code 4417', technician_notes: 'Dog in the back yard' };
     install({});

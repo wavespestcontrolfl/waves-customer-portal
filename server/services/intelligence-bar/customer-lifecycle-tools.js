@@ -158,6 +158,26 @@ function noteAppendsNote(appends) {
   return ` Notes: the archived record's ${fields.map((f) => LABELS[f] || f).join(' and ')} are appended to the surviving record's — the surviving text is kept and the merged text is added below it.`;
 }
 
+// Mutations the row sweep cannot see because the customer id is embedded in
+// jsonb or a trigger-id string (customer-dedupe nonFkMergeRewrites): the
+// operator is told about them in words, since "rows listed above repoint"
+// does not describe an address stamp or a rewritten delivery identity.
+const NON_FK_REWRITE_LABELS = {
+  'scheduled_services.service_address_stamp': (n) => `${n} unaddressed visit(s) on the archived record are stamped with its own address first, so the schedule board cannot send a tech to the wrong house`,
+  'call_log.customer_link_override': (n) => `${n} call(s) an operator linked by hand are re-linked to the surviving record`,
+  'email_messages.trigger_event_id': (n) => `${n} weekly watering-plan delivery record(s) are re-keyed to the surviving record so next week's plan is not sent twice`,
+  'property_preferences.irrigation_home_changed_at': () => 'the two records are different homes, so the surviving sprinkler settings are marked moved and the weekly plan withholds sizing until they are re-saved',
+};
+
+function nonFkRewritesNote(rewrites) {
+  if (!rewrites || !Object.keys(rewrites).length) return '';
+  const parts = Object.entries(rewrites)
+    .map(([key, value]) => (value === 'unknown'
+      ? `${key} could not be counted (it is still rewritten)`
+      : NON_FK_REWRITE_LABELS[key]?.(value) || `${key}: ${value}`));
+  return ` Beyond the row counts: ${parts.join('; ')}.`;
+}
+
 async function previewMergeCustomers(winnerId, loserId) {
   const check = await loadMergeEligibility(winnerId, loserId);
   if (!check.ok) return { error: check.error, code: check.code };
@@ -205,7 +225,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     financial_effects,
     moving,
     effects_fingerprint: fingerprint,
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)}${noteAppendsNote(financial_effects.note_appends)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)}${noteAppendsNote(financial_effects.note_appends)}${nonFkRewritesNote(moving.non_fk_rewrites)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
 

@@ -213,6 +213,23 @@ describe('merge_customers', () => {
     expect(card.note_to_operator).not.toMatch(/2 unconfirmed combined payment session/);
   });
 
+  test('the card puts the non-FK rewrites in words — an address stamp and a re-keyed delivery are not "rows listed above" (Codex r9 P2)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({
+      ...EFFECTS,
+      moving: { ...EFFECTS.moving, non_fk_rewrites: { 'scheduled_services.service_address_stamp': 3, 'call_log.customer_link_override': 2, 'email_messages.trigger_event_id': 1, 'property_preferences.irrigation_home_changed_at': 'stamped' } },
+    });
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(card.note_to_operator).toMatch(/Beyond the row counts: 3 unaddressed visit\(s\).*own address first, so the schedule board cannot send a tech to the wrong house/);
+    expect(card.note_to_operator).toMatch(/2 call\(s\) an operator linked by hand are re-linked/);
+    expect(card.note_to_operator).toMatch(/1 weekly watering-plan delivery record\(s\) are re-keyed/);
+    expect(card.note_to_operator).toMatch(/different homes, so the surviving sprinkler settings are marked moved/);
+    // Nothing of the sort → the sentence is absent, not an empty clause.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    const quiet = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(quiet.note_to_operator).not.toMatch(/Beyond the row counts/);
+  });
+
   test('the card names every loser card the merge strips of default/autopay, with its before-flags (Codex r6 P1)', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
     mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, saved_card_demotions: { winner_has_default: true, cards: [{ id: 'pm_l1', is_default: true, autopay_enabled: true }, { id: 'pm_l2', is_default: false, autopay_enabled: true }] } } });
