@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { ASK_TOUCH_SQL } = require('./review-outreach-templates');
+const { isUnresolvedReviewAskReservation } = require('./messaging/review-ask-reservation');
 
 const ASK_SPACING_MS = 72 * 3600000;
 const REVIEW_LINK_RE = /g\.page\/(?:r\/)?[^\s/]+\/review\b|writereview|writeareview|facebook\.com\/[^\s/]+\/reviews\b/i;
@@ -73,7 +74,7 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
   // and the normal request/log correlation must still distinguish an
   // automated pipeline send from a staff ask.
   const reservations = includeReservations
-    ? outbound.filter(row => row.status === 'sending' && isReviewReservation(row))
+    ? outbound.filter(row => isUnresolvedReviewAskReservation(row))
     : [];
   const reservedAt = reservations.reduce((latest, row) => {
     const at = new Date(row.created_at);

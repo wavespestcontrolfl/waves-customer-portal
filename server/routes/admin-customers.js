@@ -23,6 +23,7 @@ const { acceptanceServiceLists } = require('./estimate-public');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const { listCustomerPrepaidPlans } = require('../services/prepaid-series');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
+const { excludeUnresolvedReviewAskReservations } = require('../services/messaging/review-ask-reservation');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
@@ -3177,7 +3178,11 @@ router.get('/:id', async (req, res, next) => {
         .orderBy('ss.scheduled_date')
         .orderBy('ss.window_start')
         .limit(20),
-      db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
+      // Unresolved review-ask reservations excluded BEFORE the limit (Codex
+      // #4331 P2): the in-flight placeholder must not displace a real
+      // message out of this bounded history — a resolved row still shows.
+      excludeUnresolvedReviewAskReservations(db('sms_log').where({ customer_id: c.id }))
+        .orderBy('created_at', 'desc').limit(20),
       latestHealthScoreForCustomer(c.id),
       db('invoices').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(10).catch(e => { logger.warn(`[customers:${c.id}] invoices: ${e.message}`); return []; }),
       db('payment_methods').where({ customer_id: c.id }).catch(e => { logger.warn(`[customers:${c.id}] payment_methods: ${e.message}`); return []; }),
