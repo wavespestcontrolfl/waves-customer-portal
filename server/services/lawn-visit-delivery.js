@@ -55,8 +55,12 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       // The customer send is the one non-idempotent effect: the sender re-checks
       // this worker's lease immediately before dispatching, so a stale worker
       // cannot text a customer the replacement is already notifying.
-      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, { beforeSend: guard })],
+      // The report comes BEFORE the text that announces it. A customer no
+      // channel will deliver to leaves the notification step permanently owed,
+      // and running it first starved the report — which stands on its own in
+      // the portal — behind a send that can never succeed.
       ['report', () => LawnIntel.generateServiceReport(assessmentId)],
+      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, { beforeSend: guard })],
     ];
     for (const [step, action] of actions) {
       const state = await runs.deliveryState(assessmentId, knex);
@@ -98,7 +102,11 @@ async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = 
     candidates = await knex('lawn_assessment_runs as run')
       .join('lawn_assessments as assessment', 'assessment.id', 'run.assessment_id')
       .where('assessment.confirmed_by_tech', true).whereNull('run.pipeline_completed_at')
-      .whereRaw("assessment.confirmed_at < clock_timestamp() - interval '2 minutes'")
+      // The confirm route still runs its own delivery inline, without claiming
+      // the run (it moves onto this leased runner in the confirm-route unit),
+      // so quarantine a confirmation for a full lease before recovery may touch
+      // it — otherwise a slow request-path delivery and a sweep could both run.
+      .whereRaw("assessment.confirmed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs])
       // A run that cannot finish — a customer no channel will ever deliver to,
       // say — must not be reclaimed every ten minutes forever. Each attempt is
       // already logged; after the horizon the row stops being swept.

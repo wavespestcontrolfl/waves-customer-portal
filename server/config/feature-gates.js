@@ -140,7 +140,9 @@ const gates = {
   // the house rule — a dev box or preview pointed at a production-seeded database
   // must never text a customer on boot. Off → the sweep shadow-logs its candidate
   // count and delivers nothing. Double-gated: the cron also needs cronJobs.
-  lawnDeliveryRecovery: process.env.GATE_LAWN_DELIVERY_RECOVERY === 'true',
+  // gateEnvValue here and in the sweep, so startup logging can never report this
+  // safety gate as disabled while it is actually open ('1' / 'on').
+  lawnDeliveryRecovery: gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.

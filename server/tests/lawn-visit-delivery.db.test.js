@@ -39,7 +39,9 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     const [assessment] = await db.knex('lawn_assessments').insert({
       customer_id: customerId, technician_id: technicianId, service_date: etDateString(),
       ...FINAL, overall_score: 75, confirmed_by_tech: confirmed,
-      confirmed_at: confirmed ? db.knex.raw("clock_timestamp() - interval '3 minutes'") : null,
+      // Older than one lease, so the sweep's quarantine on in-flight request-path
+      // deliveries does not hide the fixtures.
+      confirmed_at: confirmed ? db.knex.raw("clock_timestamp() - interval '30 minutes'") : null,
       service_id: service ? randomUUID() : null,
     }).returning('*');
     await db.knex('lawn_assessment_runs').insert({
@@ -74,7 +76,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     // Recovery must compare the frozen confirmation, even if the assessment changes.
     await db.knex('lawn_assessments').where({ id: assessment.id }).update({ turf_density: 99 });
     const deps = dependencies();
-    expect(await deliver(assessment.id, deps)).toMatchObject({ done: ['calibration', 'recommendations', 'health', 'notification', 'report'], gaps: [] });
+    expect(await deliver(assessment.id, deps)).toMatchObject({ done: ['calibration', 'recommendations', 'health', 'report', 'notification'], gaps: [] });
     const comparison = await db.knex('tech_calibration').where({ assessment_id: assessment.id }).first();
     expect(comparison).toMatchObject({ technician_id: assessment.technician_id, ai_turf_density: 80, tech_turf_density: 60, ai_stress_damage: 85, tech_stress_damage: 70, bias_direction: 'lower' });
     expect(Number(comparison.avg_delta)).toBe(5.8);
@@ -216,7 +218,8 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     await rejected;
     expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledWith(assessment.id, { beforeSend: expect.any(Function) });
     expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).notification_sent).toBe(false);
-    expect(deps.LawnIntel.generateServiceReport).not.toHaveBeenCalled();
+    // The report precedes the send, so it is already durable; only the text is lost.
+    expect(deps.LawnIntel.generateServiceReport).toHaveBeenCalledTimes(1);
     expect((await stored(assessment.id)).pipeline_owner_token).toBe(replacement.pipeline_owner_token);
     expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
   });
@@ -246,6 +249,26 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(await sweepAbandonedDeliveries({ knex: db.knex, deliver: swept })).toMatchObject({ candidates: 1 });
     expect(swept.mock.calls.map(([arg]) => arg.assessmentId)).toEqual([recent.id]);
     await expect(sweepAbandonedDeliveries({ knex: db.knex, retryHorizonMs: 60 })).rejects.toThrow(/horizon must outlast its lease/);
+  });
+
+  test('a just-confirmed run is left to the request path for one full lease', async () => {
+    await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
+    const settled = await seed(), justConfirmed = await seed();
+    await db.knex('lawn_assessments').where({ id: justConfirmed.id })
+      .update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '3 minutes'") });
+    const deliver = jest.fn(async () => ({ done: [], gaps: [] }));
+    expect(await sweepAbandonedDeliveries({ knex: db.knex, deliver })).toMatchObject({ candidates: 1 });
+    expect(deliver.mock.calls.map(([arg]) => arg.assessmentId)).toEqual([settled.id]);
+  });
+
+  test('a terminally undeliverable customer still gets a generated report', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    // No channel will ever deliver: the sender releases its claim and returns.
+    deps.LawnIntel.sendAssessmentNotification.mockResolvedValue({ sent: false });
+    await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
+    expect(deps.LawnIntel.generateServiceReport).toHaveBeenCalledTimes(1);
+    expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).report_auto_generated).toBe(true);
   });
 
   test('an ungated environment counts recovery candidates and sends nothing', async () => {
