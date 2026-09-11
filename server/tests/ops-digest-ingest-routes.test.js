@@ -7,16 +7,22 @@
 
 const mockNotifyAdmin = jest.fn();
 const mockResolve = jest.fn();
-const mockClampUpdates = [];
+const mockLockCalls = [];
+const mockStanding = { row: null };
 jest.mock('../models/db', () => {
-  const trx = jest.fn(() => {
+  const builder = () => {
     const b = {};
-    b.where = jest.fn(() => b);
-    b.update = jest.fn(async (patch) => { mockClampUpdates.push(patch); return 1; });
+    for (const m of ['where', 'whereRaw', 'orderBy', 'select']) b[m] = jest.fn(() => b);
+    b.first = jest.fn(async () => mockStanding.row);
+    b.update = jest.fn(async () => 1);
     return b;
+  };
+  const trx = jest.fn(() => builder());
+  trx.raw = jest.fn((sql, bindings) => {
+    if (/pg_advisory/.test(String(sql))) mockLockCalls.push(bindings);
+    return { sql, bindings };
   });
-  trx.raw = (sql, bindings) => ({ sql, bindings });
-  const db = jest.fn(() => trx());
+  const db = jest.fn(() => builder());
   db.raw = (sql, bindings) => ({ sql, bindings });
   db.transaction = jest.fn(async (fn) => fn(trx));
   return db;
@@ -61,7 +67,8 @@ let server; let baseUrl;
 beforeEach(() => {
   mockNotifyAdmin.mockReset();
   mockResolve.mockReset();
-  mockClampUpdates.length = 0;
+  mockLockCalls.length = 0;
+  mockStanding.row = null;
   process.env.NODE_ENV = 'test';
   process.env.OPS_DIGEST_INGEST_TOKEN = TOKEN;
   lane(true);
@@ -212,7 +219,7 @@ describe('bell write', () => {
       // a later run's recurrence refreshes the standing row (observedAt above all)
       refreshOnDedupe: true,
       dedupeVersion: expect.any(String),
-      // write + clamp share one advisory-locked transaction
+      // probe + write share one advisory-locked transaction
       trx: expect.anything(),
       metadata: {
         check: { id: 'e22-schedule-integrity', title: 'Schedule integrity', cadence: 'daily' },
@@ -225,26 +232,40 @@ describe('bell write', () => {
     });
   });
 
-  test('dedupeVersion is the observation time, so a new run re-raising the key rewrites the row', async () => {
-    mockNotifyAdmin.mockResolvedValue({ id: 'n-v', deduped: true, refreshed: true });
-    await post({ ...good(), observedAt: '2026-09-11T11:10:00Z' });
+  test('the write takes the dedupe advisory lock first — the same one /resolve takes', async () => {
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-lock', deduped: false });
+    await post(good());
+    expect(mockLockCalls).toEqual([['admin:ops-crons:e22-schedule-integrity:overlaps-2026-09-11']]);
+  });
+
+  test('a DELAYED re-post from an earlier run cannot lower the stored observation', async () => {
+    // A recurrence already raised the standing row to 14:00.
+    mockStanding.row = { created_at: new Date('2026-09-11T10:00:00Z'), observed_at: '2026-09-11T14:00:00.000Z' };
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-old', deduped: true });
+    await post({ ...good(), observedAt: '2026-09-11T12:00:00Z' });
     const opts = mockNotifyAdmin.mock.calls[0][3];
-    expect(opts.dedupeVersion).toBe('2026-09-11T11:10:00.000Z');
-    expect(opts.metadata.observedAt).toBe('2026-09-11T11:10:00.000Z');
+    // The stored 14:00 wins, so nothing regresses and the version is
+    // unchanged — a plain dedupe, no rewrite, no re-bell.
+    expect(opts.metadata.observedAt).toBe('2026-09-11T14:00:00.000Z');
+    expect(opts.dedupeVersion).toBe('2026-09-11T14:00:00.000Z');
   });
 
-  test('the stored observation is clamped upward in the same transaction, so it never regresses', async () => {
-    mockNotifyAdmin.mockResolvedValue({ id: 'n-clamp', deduped: true, refreshed: true });
-    await post({ ...good(), observedAt: '2026-09-11T11:00:00Z' });
-    expect(mockClampUpdates).toHaveLength(1);
-    expect(mockClampUpdates[0].metadata.sql).toBe("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{observedAt}', to_jsonb(GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), ?::timestamptz)::text))");
-    expect(mockClampUpdates[0].metadata.bindings).toEqual(['2026-09-11T11:00:00.000Z']);
+  test('a LATER run raises the observation and so rewrites the standing row', async () => {
+    mockStanding.row = { created_at: new Date('2026-09-11T10:00:00Z'), observed_at: '2026-09-11T11:00:00.000Z' };
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-new', deduped: true, refreshed: true });
+    await post({ ...good(), observedAt: '2026-09-11T13:00:00Z' });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.metadata.observedAt).toBe('2026-09-11T13:00:00.000Z');
+    expect(opts.dedupeVersion).toBe('2026-09-11T13:00:00.000Z');
   });
 
-  test('no row written means no clamp', async () => {
-    mockNotifyAdmin.mockResolvedValue(null);
-    expect((await post(good())).status).toBe(503);
-    expect(mockClampUpdates).toHaveLength(0);
+  test('laterOf and the standing probe: no standing row, unparsable or missing observation all fall back to the incoming value', async () => {
+    const { laterOf } = router._private;
+    expect(laterOf(null, '2026-09-11T12:00:00.000Z')).toBe('2026-09-11T12:00:00.000Z');
+    expect(laterOf(undefined, '2026-09-11T12:00:00.000Z')).toBe('2026-09-11T12:00:00.000Z');
+    expect(laterOf('nonsense', '2026-09-11T12:00:00.000Z')).toBe('2026-09-11T12:00:00.000Z');
+    expect(laterOf('2026-09-11T09:00:00.000Z', '2026-09-11T12:00:00.000Z')).toBe('2026-09-11T12:00:00.000Z');
+    expect(laterOf(new Date('2026-09-11T15:00:00Z'), '2026-09-11T12:00:00.000Z')).toBe('2026-09-11T15:00:00.000Z');
   });
 
   test('201 with deduped:true when the keyed row already stands', async () => {

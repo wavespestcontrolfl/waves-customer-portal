@@ -146,14 +146,14 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // requests, not observations, so a later failure whose ingest won the lock
 // first must survive an earlier clean run's resolve (codex P1 r7 on #4392).
 // The row's observation is GREATEST(metadata.observedAt, created_at).
-// observedAt is kept MONOTONIC by the ingest route, which clamps it upward
-// inside the same advisory-locked transaction as the write — necessary
-// because notifyAdmin's refreshOnDedupe merge takes the INCOMING metadata
-// verbatim (pinned by notification-dedupe-refresh-semantics.test.js), so a
-// delayed re-post from an earlier run would otherwise lower it. created_at
-// stays in the comparison as a floor for rows written by any other path,
-// so the cutoff fails safe (a bell stays up) rather than clearing a live
-// failure (pre-push P1 ×2).
+// observedAt is kept MONOTONIC by the ingest route: under the same advisory
+// lock, it reads the standing observation BEFORE writing and stores the
+// later of the two — necessary because notifyAdmin's refreshOnDedupe merge
+// takes the INCOMING metadata verbatim (pinned by
+// notification-dedupe-refresh-semantics.test.js), so a delayed re-post from
+// an earlier run would otherwise lower it. created_at stays in the
+// comparison as a floor for rows written by any other path, so the cutoff
+// fails safe (a bell stays up) rather than clearing a live failure.
 async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null, notAfter = null } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
