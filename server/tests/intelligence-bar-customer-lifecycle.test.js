@@ -42,10 +42,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockExecuteMerge = jest.fn();
 const mockDuplicatePairEligibility = jest.fn();
 const mockPreviewMergeEffects = jest.fn();
+const mockInheritedAutopayRestrictions = jest.fn(() => ({}));
 jest.mock('../services/customer-dedupe', () => ({
   executeMerge: (...args) => mockExecuteMerge(...args),
   duplicatePairEligibility: (...args) => mockDuplicatePairEligibility(...args),
   previewMergeEffects: (...args) => mockPreviewMergeEffects(...args),
+  inheritedAutopayRestrictions: (...args) => mockInheritedAutopayRestrictions(...args),
 }));
 
 const db = require('../models/db');
@@ -71,6 +73,7 @@ beforeEach(() => {
   db.__qb.update.mockResolvedValue(1);
   mockDuplicatePairEligibility.mockResolvedValue(ELIGIBLE);
   mockPreviewMergeEffects.mockResolvedValue(EFFECTS);
+  mockInheritedAutopayRestrictions.mockReturnValue({});
 });
 
 describe('merge_customers', () => {
@@ -107,8 +110,14 @@ describe('merge_customers', () => {
       per_application_fee_adopted_from_loser: 85,
       loser_plan_rate_rows_deleted: 0,
       referral_fold: NOT_ENROLLED,
+      autopay_restrictions_inherited: {},
+      predicted_collision_handlers: [],
+      revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
     });
+    expect(mockInheritedAutopayRestrictions).toHaveBeenCalledWith(winnerRow, loserRow);
+    expect(result.billing_and_contacts.loser).toEqual(expect.objectContaining({ autopay_paused_until: null, autopay_pause_reason: null, auto_apply_account_credit: null }));
     expect(result.note_to_operator).toMatch(/archived/);
+    expect(result.note_to_operator).toMatch(/revertible from there unless the sweep has to fold colliding rows/);
     expect(db.__qb.update).not.toHaveBeenCalled();
     expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
@@ -121,6 +130,18 @@ describe('merge_customers', () => {
     const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
     expect(result.financial_effects.referral_fold).toEqual(fold);
     expect(JSON.parse(result.effects_fingerprint).financial_effects.referral_fold).toEqual(fold);
+    // A fold into an existing winner enrollment is a collision handler the queue undo refuses — said up front, pinned in the fingerprint.
+    expect(result.financial_effects).toMatchObject({ predicted_collision_handlers: ['referral_promoters'], revertible_from_queue: false });
+    expect(result.note_to_operator).toMatch(/EXCEPT that this merge folds referral_promoters/);
+  });
+
+  test('preview discloses the autopay / credit restrictions the winner inherits, through the engine\'s own rule (pre-push Codex P1)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    db.__qb.first.mockResolvedValueOnce({ n: 0 });
+    mockInheritedAutopayRestrictions.mockReturnValueOnce({ auto_apply_account_credit: false, autopay_paused_until: '2027-01-01T00:00:00.000Z', autopay_pause_reason: 'disputed charge' });
+    const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(result.financial_effects.autopay_restrictions_inherited).toEqual({ auto_apply_account_credit: false, autopay_paused_until: '2027-01-01T00:00:00.000Z', autopay_pause_reason: 'disputed charge' });
+    expect(JSON.parse(result.effects_fingerprint).financial_effects.autopay_restrictions_inherited).toEqual(result.financial_effects.autopay_restrictions_inherited);
   });
 
   test('preview refuses not_in_queue with the canonical message', async () => {
@@ -245,7 +266,7 @@ describe('merge_customers', () => {
     // Card showed 3 scheduled_services + 5 sms_log + 2 notifications, 12.50 credits, 0 plan-rate rows, no enrollment.
     const approved = JSON.stringify({
       moving: { 'notifications.recipient_id': 2, scheduled_services: 3, sms_log: 5, total_rows: 10 },
-      financial_effects: { account_credits_moved_to_winner: 12.5, billing_mode_adopted_from_loser: 'per_application', loser_plan_rate_rows_deleted: 0, per_application_fee_adopted_from_loser: 85, referral_fold: NOT_ENROLLED },
+      financial_effects: { account_credits_moved_to_winner: 12.5, autopay_restrictions_inherited: {}, billing_mode_adopted_from_loser: 'per_application', loser_plan_rate_rows_deleted: 0, per_application_fee_adopted_from_loser: 85, predicted_collision_handlers: [], referral_fold: NOT_ENROLLED, revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)' },
     });
     mockExecuteMerge.mockImplementation(async ({ underLock }) => {
       await underLock(db, { winner: winnerRow, loser: loserRow });

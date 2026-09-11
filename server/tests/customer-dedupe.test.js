@@ -2113,6 +2113,24 @@ describe('duplicatePairEligibility', () => {
 // ---------------------------------------------------------------------------
 // customerFkColumns — FK discovery export, cached per process.
 // ---------------------------------------------------------------------------
+describe('inheritedAutopayRestrictions (pure rule shared by executeMerge and the IB preview)', () => {
+  const NOW = Date.parse('2026-09-10T12:00:00Z');
+  it('nothing inherited when the loser is no more restrictive', () => {
+    expect(dedupe.inheritedAutopayRestrictions({ autopay_enabled: true, auto_apply_account_credit: true }, { autopay_enabled: true, auto_apply_account_credit: true, autopay_paused_until: '2026-01-01T00:00:00Z' }, NOW)).toEqual({});
+  });
+  it('loser autopay off, credit opt-out, and a longer future pause (with reason) all carry to the winner', () => {
+    expect(dedupe.inheritedAutopayRestrictions(
+      { autopay_enabled: true, auto_apply_account_credit: true, autopay_paused_until: '2026-10-01T00:00:00Z' },
+      { autopay_enabled: false, auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'disputed charge' },
+      NOW,
+    )).toEqual({ autopay_enabled: false, auto_apply_account_credit: false, autopay_paused_until: '2026-12-01T00:00:00Z', autopay_pause_reason: 'disputed charge' });
+  });
+  it('a shorter or expired loser pause does not shorten the winner\'s', () => {
+    expect(dedupe.inheritedAutopayRestrictions({ autopay_paused_until: '2026-12-01T00:00:00Z' }, { autopay_paused_until: '2026-10-01T00:00:00Z' }, NOW)).toEqual({});
+    expect(dedupe.inheritedAutopayRestrictions({}, { autopay_paused_until: '2026-01-01T00:00:00Z', autopay_pause_reason: 'old' }, NOW)).toEqual({});
+  });
+});
+
 describe('previewMergeEffects (shared merge-effect reader)', () => {
   const FK_ROWS = { rows: [
     { table_name: 'scheduled_services', column_name: 'customer_id' },

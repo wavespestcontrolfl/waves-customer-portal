@@ -887,6 +887,35 @@ const REFERRAL_FOLD_COUNTERS = ['referral_balance_cents', 'total_earned_cents',
   'total_paid_out_cents', 'total_clicks', 'total_referrals_sent', 'total_referrals_converted',
   'available_balance_cents', 'pending_earnings_cents'];
 
+// The most-restrictive customer-level autopay/credit settings the winner
+// INHERITS from the loser (applied by executeMerge under its locks; read by
+// the IB merge preview so the approval card shows them). Pure: same inputs,
+// same answer, on any row shape that carries the three columns.
+//   autopay_enabled=false      — a retired row that turned autopay off keeps it off
+//   auto_apply_account_credit  — the account-credit auto-apply opt-in (owner
+//                                ruling 2026-08-28) is consent the same way:
+//                                the loser's ledger and cached balance move
+//                                to the winner, so "don't apply my credit"
+//                                must survive on the surviving row
+//   autopay_paused_until       — a longer, still-future pause wins (+ its reason)
+function inheritedAutopayRestrictions(winner, loser, now = Date.now()) {
+  const restrictions = {};
+  if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
+    restrictions.autopay_enabled = false;
+  }
+  if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
+    restrictions.auto_apply_account_credit = false;
+  }
+  const pauseTs = (v) => (v ? new Date(v).getTime() : null);
+  const loserPause = pauseTs(loser.autopay_paused_until);
+  const winnerPause = pauseTs(winner.autopay_paused_until);
+  if (loserPause && loserPause > now && (!winnerPause || loserPause > winnerPause)) {
+    restrictions.autopay_paused_until = loser.autopay_paused_until;
+    if (loser.autopay_pause_reason) restrictions.autopay_pause_reason = loser.autopay_pause_reason;
+  }
+  return restrictions;
+}
+
 let fkColumnsCache = null;
 async function customerFkColumns(database) {
   if (fkColumnsCache) return fkColumnsCache;
@@ -1626,26 +1655,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // monthly cron must never charge a customer whose retired row said stop.
     // autopay_log keeps the provenance; re-enabling is an operator action on
     // the surviving row.
-    const autopayRestrictions = {};
-    if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
-      autopayRestrictions.autopay_enabled = false;
-    }
-    // The account-credit auto-apply opt-in (owner ruling 2026-08-28) is
-    // consent the same way: the loser's ledger and cached balance move to
-    // the winner, so a retired row that said "don't apply my credit" must
-    // keep that answer on the surviving row — its credit would otherwise
-    // be consumed by the next automatic seam. Journaled + undone with the
-    // other most-restrictive columns.
-    if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
-      autopayRestrictions.auto_apply_account_credit = false;
-    }
-    const pauseTs = (v) => (v ? new Date(v).getTime() : null);
-    const loserPause = pauseTs(loser.autopay_paused_until);
-    const winnerPause = pauseTs(winner.autopay_paused_until);
-    if (loserPause && loserPause > Date.now() && (!winnerPause || loserPause > winnerPause)) {
-      autopayRestrictions.autopay_paused_until = loser.autopay_paused_until;
-      if (loser.autopay_pause_reason) autopayRestrictions.autopay_pause_reason = loser.autopay_pause_reason;
-    }
+    const autopayRestrictions = inheritedAutopayRestrictions(winner, loser);
     // Journal the winner's ORIGINAL customer-level autopay fields for
     // exactly the columns this block overwrites (applied directly, not via
     // winner_backfills), so an undo can put the winner's own autopay state
@@ -4474,6 +4484,7 @@ module.exports = {
   // polymorphic-pointer, and referral-fold sets the executor acts on — never
   // a hand-picked subset that could omit a table or a fold.
   previewMergeEffects,
+  inheritedAutopayRestrictions,
   REFERRAL_FOLD_COUNTERS,
   // Refuse-policy sets, exported so GET /merges' revertible mirror can never
   // drift from the revert endpoint's own count-only refusals.

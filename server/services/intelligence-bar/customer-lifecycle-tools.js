@@ -38,6 +38,10 @@ const BILLING_CONTACT_COLUMNS = [
   // Money the executor moves or adopts: cached credit balance (added to the
   // winner), per-application fee (rides along with a loser-only billing mode).
   'per_application_fee', 'account_credits',
+  // The most-restrictive settings the winner inherits (customer-dedupe.js
+  // inheritedAutopayRestrictions): disclosed both-sided AND as the resulting
+  // restriction set in financial_effects.
+  'autopay_paused_until', 'autopay_pause_reason', 'auto_apply_account_credit',
 ];
 
 // The executor's special-case money effects, stated as amounts the card can
@@ -47,8 +51,18 @@ const BILLING_CONTACT_COLUMNS = [
 // DELETED, not repointed (customer_plan_rates is excluded from the generic
 // FK repoint — the ledger is rebuilt on the winner); a loser referral
 // enrollment is folded into the winner's (balances added, promoter-keyed
-// rows repointed) — that fold is read by the engine's own effect reader.
+// rows repointed) — that fold is read by the engine's own effect reader;
+// the winner inherits the loser's more restrictive autopay / credit
+// settings (the engine's own rule, never re-derived here). A referral fold
+// into an existing winner enrollment is a collision handler: the journal
+// records it and the duplicates-queue revert refuses such merges (restore
+// by hand from the snapshot) — disclosed up front as predicted_collision_
+// handlers + revertible_from_queue, and pinned in the fingerprint. Other
+// collision folds (e.g. duplicate customer_tags) are only knowable inside
+// the executor's sweep, so the card states the limitation rather than a
+// false "revertible" promise.
 async function financialEffects(database, winner, loser, referral) {
+  const { inheritedAutopayRestrictions } = require('../customer-dedupe');
   const credits = Math.round(Number(loser.account_credits || 0) * 100) / 100;
   const adoptsBillingMode = !winner.billing_mode && !!loser.billing_mode;
   const adoptsFee = adoptsBillingMode && (winner.per_application_fee == null || winner.per_application_fee === '')
@@ -66,6 +80,9 @@ async function financialEffects(database, winner, loser, referral) {
     per_application_fee_adopted_from_loser: adoptsFee ? Number(loser.per_application_fee) : null,
     loser_plan_rate_rows_deleted: loserPlanRates,
     referral_fold: referral,
+    autopay_restrictions_inherited: inheritedAutopayRestrictions(winner, loser),
+    predicted_collision_handlers: referral?.folded_into_winner_promoter ? ['referral_promoters'] : [],
+    revertible_from_queue: referral?.folded_into_winner_promoter ? false : 'unless the sweep has to fold colliding rows (journaled)',
   };
 }
 
@@ -158,7 +175,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     financial_effects,
     moving,
     effects_fingerprint: effectsFingerprint(moving, financial_effects),
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable (and revertible) from the duplicates queue afterward. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
 
