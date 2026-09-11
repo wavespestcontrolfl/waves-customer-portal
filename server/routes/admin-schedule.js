@@ -9263,6 +9263,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             provFence = { techId: prov.technician_id || null, day: prov.day };
           }
         }
+        // OWNERSHIP ROWS FIRST for a Bill-To edit (Codex #4311 r28 P2): the
+        // reconciliation this save runs (resolvePacketOwnershipLocked) takes
+        // the customer row and then every billed member, and the customer
+        // Bill-To writer holds its customer row while doing the same. Taking
+        // this job's customer row FOR SHARE before any scheduled_services
+        // lock below puts this route on that one order; the reverse
+        // (member row held, customer row awaited) deadlock-aborts one side.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          const owner = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+          if (owner?.customer_id) await trx('customers').where({ id: owner.customer_id }).forShare().first('id');
+        }
         let preTupleRow = null;
         if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
           // FOR UPDATE first (codex P2 #3152 round 20): the correction and

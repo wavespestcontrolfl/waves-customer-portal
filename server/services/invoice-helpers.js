@@ -103,6 +103,13 @@ function isInvoiceCollectibleStatus(status) {
 // place instead of a convention each new collection path has to remember.
 const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
 
+// The stale-send recovery parks an ambiguous claim here: status `scheduled`
+// with a NULL scheduled_send_at (so no worker picks it up) and this text as
+// the operator's evidence. A withdrawal has to preserve that state — the row
+// may already have reached the customer — instead of turning it into a fresh
+// draft the release would re-queue.
+const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
+
 function invoiceWithdrawnFromCustomer(invoice) {
   return !!invoice
     && typeof invoice === 'object'
@@ -196,6 +203,7 @@ function formatCardLine(brand, last4) {
 
 module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
+  STALE_SEND_PARK_ERROR,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,

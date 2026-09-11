@@ -3375,8 +3375,7 @@ const InvoiceService = {
       .update({
         status: "scheduled",
         scheduled_send_at: null,
-        scheduled_send_error:
-          "Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually",
+        scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
         updated_at: new Date(),
       });
 

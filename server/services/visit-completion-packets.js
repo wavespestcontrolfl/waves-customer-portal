@@ -10,6 +10,7 @@
  * transaction. A rejected member rolls back the packet and ALL member writes.
  */
 const crypto = require('crypto');
+const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
 const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
@@ -528,13 +529,25 @@ async function resolvePacketOwnershipLocked(packetId, trx) {
 // Returns whether the invoice was withdrawn (false = it was already terminal
 // or payer-owned when held, and nothing was recorded).
 async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
-  const stamp = `payer_billed:${payerId}`;
   // A repeated withdrawal (a second claim on the same draft) keeps the hold
   // flag the first one recorded: the invoice row is held before the marker
   // is read, so two withdrawals cannot both read the pre-flag value.
-  const prior = await trx('invoices').where({ id: invoiceId }).forUpdate().first('scheduled_send_error');
-  const withdrawn = await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
-    .update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: stamp, updated_at: trx.fn.now() });
+  const prior = await trx('invoices').where({ id: invoiceId }).forUpdate().first('scheduled_send_error', 'status', 'scheduled_send_at');
+  // A row the stale-send recovery PARKED (scheduled with no send time, its
+  // delivery unverified) may already have reached the customer (Codex #4311
+  // r28 P1). Turning it into a draft would erase that evidence, and the
+  // release below would then re-queue it as a fresh send — a second invoice
+  // for a handoff that may well have succeeded. Such a row keeps its status
+  // and its empty send time; only the stamp is written, flagged `park` so
+  // the release restores the operator's evidence instead of scheduling it.
+  const parked = prior?.status === 'scheduled' && !prior.scheduled_send_at
+    && (String(prior.scheduled_send_error || '') === STALE_SEND_PARK_ERROR || /:park(:|$)/.test(String(prior.scheduled_send_error || '')));
+  const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}`;
+  const withdrawn = parked
+    ? await trx('invoices').where({ id: invoiceId, status: 'scheduled' }).whereNull('payer_id').whereNull('scheduled_send_at')
+      .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() })
+    : await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
+      .update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: stamp, updated_at: trx.fn.now() });
   // A pay link the homeowner already holds (sent, viewed, overdue) or a
   // settlement in flight cannot be recalled here. The stamp alone records
   // the withdrawal on such a row, so the office review below carries the
@@ -602,7 +615,11 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
   const query = trx('invoices').whereNotIn('status', INVOICE_TERMINAL_STATUSES).whereNull('payer_id').whereNotNull('visit_completion_packet_id')
     .where('scheduled_send_error', 'like', 'payer_billed:%');
   if (customerId) query.where({ customer_id: customerId });
-  if (payerId) query.whereIn('scheduled_send_error', [`payer_billed:${payerId}`, `payer_billed:${payerId}:hold`]);
+  // Any flag combination for this payer (`:hold`, `:park`, both).
+  if (payerId) {
+    query.where((q) => q.where('scheduled_send_error', `payer_billed:${payerId}`)
+      .orWhere('scheduled_send_error', 'like', `payer_billed:${payerId}:%`));
+  }
   if (scheduledServiceId) {
     query.whereIn('visit_completion_packet_id', trx('visit_completion_packet_items').where({ scheduled_service_id: scheduledServiceId }).select('packet_id'));
   }
@@ -620,7 +637,12 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
 // own hold and office-review state are lifted. A failed packet keeps its
 // hold and state: only the marker is cleared. Returns whether it was released.
 async function releaseWithdrawnPacketInvoice(trx, invoice) {
-  const [, stampedPayer, holdFlag] = invoice.scheduled_send_error.split(':');
+  // `payer_billed:<payerId>[:park][:hold]` — the flags are order-independent
+  // so a later one can be appended without re-parsing the rest.
+  const [, stampedPayer, ...flags] = invoice.scheduled_send_error.split(':');
+  const holdFlag = flags.includes('hold') ? 'hold' : null;
+  const parked = flags.includes('park');
+  const flagSuffix = flags.length ? `:${flags.join(':')}` : '';
   // Ownership is resolved under the customer, member and payer rows
   // (resolvePacketOwnershipLocked), so two Bill-To clears committing side by
   // side cannot each read the other's old payer and strand the withdrawal.
@@ -628,7 +650,7 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   if (live) {
     if (String(live) !== stampedPayer) {
       await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error })
-        .update({ scheduled_send_error: `payer_billed:${live}${holdFlag ? `:${holdFlag}` : ''}`, updated_at: trx.fn.now() });
+        .update({ scheduled_send_error: `payer_billed:${live}${flagSuffix}`, updated_at: trx.fn.now() });
       // The office-review state records WHICH AP account owes this invoice,
       // so a payer-to-payer handoff has to move it with the stamp (fallback
       // audit P1): the packet error and the open alert were written with the
@@ -642,7 +664,9 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   const moved = await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
     .update(requeue
       ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() }
-      : { scheduled_send_error: null, updated_at: trx.fn.now() });
+      // A parked ambiguous send returns to the park it came from — its
+      // evidence restored, its send time still empty — never to the queue.
+      : { scheduled_send_error: parked ? STALE_SEND_PARK_ERROR : null, updated_at: trx.fn.now() });
   if (!moved || !packet || packet.status === 'failed') return false;
   // Only a hold the withdrawal created is lifted: a visit held before it
   // for another office-owned reason keeps that hold.

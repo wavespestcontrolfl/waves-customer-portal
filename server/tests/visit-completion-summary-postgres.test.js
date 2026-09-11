@@ -3045,6 +3045,67 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a withdrawal preserves a parked ambiguous send instead of re-queueing it later', async () => {
+    // The stale-send recovery parks an invoice whose provider handoff may
+    // have succeeded (scheduled, no send time, its evidence in the error).
+    // Turning that into a draft and later re-queueing it sends the customer a
+    // second copy of an invoice they may already hold.
+    const Packets = require('../services/visit-completion-packets');
+    const { STALE_SEND_PARK_ERROR } = require('../services/invoice-helpers');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'scheduled', total: 120, visit_completion_packet_id: fixture.packetId,
+      scheduled_send_at: null, scheduled_send_attempts: 3, scheduled_send_error: STALE_SEND_PARK_ERROR });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first();
+      // Still parked — not a draft, and no send time it could be picked up on.
+      expect(withdrawn).toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_attempts: 3 });
+      expect(withdrawn.scheduled_send_error).toMatch(/^payer_billed:\d+:park/);
+
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      const released = await mockPg('invoices').where({ id: invoiceId }).first();
+      // Back to the park it came from, evidence restored — never queued.
+      expect(released).toMatchObject({ status: 'scheduled', scheduled_send_at: null, scheduled_send_attempts: 3, scheduled_send_error: STALE_SEND_PARK_ERROR });
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('an unavailable-summary deferral is reported only when the retry is actually scheduled', async () => {
+    // This branch keeps the row and schedules its own retry, so a swallowed
+    // failure leaves a pending ask with a NULL scheduled_for — processScheduled
+    // never picks it up and packet recovery cannot re-create a manual ask.
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'pending', token: randomUUID().replace(/-/g, ''), channel: 'sms', triggered_by: 'manual' });
+    try {
+      const nextAllowedAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      expect(await Review._deferAskForUnavailableSummary({ id: askId }, nextAllowedAt)).toBe(true);
+      const row = await mockPg('review_requests').where({ id: askId }).first('status', 'scheduled_for');
+      expect(row.status).toBe('pending');
+      expect(new Date(row.scheduled_for).getTime()).toBe(new Date(nextAllowedAt).getTime());
+      // A failed write is reported as such, so the caller retries now instead
+      // of trusting a schedule that was never written.
+      expect(await Review._deferAskForUnavailableSummary({ id: askId }, 'not-a-date')).toBe(false);
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move

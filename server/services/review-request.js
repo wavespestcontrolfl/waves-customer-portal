@@ -3090,6 +3090,26 @@ const ReviewService = {
     return true;
   },
 
+  /**
+   * The UNAVAILABLE-summary deferral, verified the same way the park is
+   * (Codex #4311 r28 P2). This branch does not park — it keeps the row and
+   * schedules the retry itself — so a swallowed failure here leaves a pending
+   * ask with a NULL scheduled_for: processScheduled only takes due rows with
+   * a schedule, and packet recovery cannot re-create a manual ask, so the
+   * request is lost while the caller is told it was deferred. Reports whether
+   * the schedule is actually on the row.
+   */
+  async _deferAskForUnavailableSummary(request, nextAllowedAt) {
+    const scheduled = await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id })
+      .update({ status: "pending", scheduled_for: new Date(nextAllowedAt), claimed_at: null })
+      .then(() => true).catch(() => false);
+    if (!scheduled) {
+      logger.error(`[review] Scheduling the unavailable-summary retry FAILED (requestId=${request.id}) — no retry is scheduled`);
+      return false;
+    }
+    return true;
+  },
+
   async processScheduled() {
     await this.reconcileStrandedSends().catch((err) => logger.warn(`[review] stranded send reconciliation failed: ${err.message}`));
     // Terminate (not just skip) due requests whose customer was
@@ -4025,7 +4045,9 @@ const ReviewService = {
       // Parked: the parking operation removed or will remove the durable
       // row; unreadable: keep the ask pending for a later pass.
       if (summaryVerdict.reason === "summary_state_unavailable") {
-        await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
+        if (!await this._deferAskForUnavailableSummary(request, summaryVerdict.nextAllowedAt)) {
+          return { ...summaryVerdict, deferred: false, reason: "visit_summary_defer_failed" };
+        }
       } else if (!await this._parkAskAtProviderBoundary(request)) {
         // Nothing durable was written: no cron will pick this row up, so the
         // caller must retry now rather than trust a scheduled retry.
@@ -4266,7 +4288,9 @@ const ReviewService = {
     const summaryVerdict = summaryBlock && this._visitSummaryVerdictOutcome(summaryBlock, request);
     if (summaryVerdict) {
       if (summaryVerdict.reason === "summary_state_unavailable") {
-        await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
+        if (!await this._deferAskForUnavailableSummary(request, summaryVerdict.nextAllowedAt)) {
+          return { ...summaryVerdict, channel: "email", deferred: false, reason: "visit_summary_defer_failed" };
+        }
       } else if (!await this._parkAskAtProviderBoundary(request)) {
         return { ...summaryVerdict, channel: "email", deferred: false, reason: "visit_summary_park_failed" };
       }
