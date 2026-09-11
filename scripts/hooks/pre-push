@@ -410,15 +410,48 @@ persist_ref_artifacts() {
 # The structural fix is that every attempt now carries the diff; this is the
 # cheap belt to go with those braces. Narrow on purpose: it only rejects a
 # verdict that BOTH found nothing AND says it could not see anything.
+# The matcher is deliberately narrow. An earlier version accepted a bare
+# "no code changes", which also matches the perfectly ordinary clean summary
+# "No code changes introduce correctness issues" — that would have rejected
+# good reviews and reported the ref UN-AUDITED. Every alternative below
+# requires wording that the diff itself was absent or unreachable, not
+# merely that the changes were fine.
 verdict_reviewed_nothing() {
   # $1 = verdict json. 0 = the reviewer admits it reviewed nothing.
   [ "$(jq -r '(.findings|length)' "$1" 2>/dev/null)" = "0" ] || return 1
   jq -r '.summary // ""' "$1" 2>/dev/null | grep -Eqi \
-    'no diff|diff (was )?(not|un)available|no code (changes|content)|could not (see|read|access|retrieve)|nothing (was )?(provided|to review)|was not (provided|included)|empty diff'
+    "(no|empty|missing) diff( content| was provided| was available| was included)?[.,;: ]|diff (was |is )?(not |un)(available|provided|supplied|included|attached)|could not (see|read|access|retrieve|find|locate) (the |any )?(diff|changes|patch|content)|no (code )?(changes|content|files) (were |was )?(provided|available|supplied|included|attached|visible)|nothing (was )?(provided|supplied|to review|was reviewed)|(diff|changes|patch) (were|was) not (provided|included|supplied|available)"
+}
+
+# ── Full schema validation ───────────────────────────────────────────────
+# Codex is held to .github/codex-review-schema.json by --output-schema.
+# Claude is not, so a reply can be valid JSON with a findings array and
+# still be wrong in a way that scores as clean: the P0 count is an EXACT
+# string match on "P0", so a finding whose priority is "[P0]" or "p0", or
+# one missing file/description, silently counts as zero P0s and the push is
+# allowed. Validate the whole object before trusting the count.
+verdict_matches_schema() {
+  # $1 = verdict json. 0 = conforms well enough for the scoring block.
+  jq -e '
+    (.summary | type == "string") and (.summary | length > 0) and
+    (.findings | type == "array") and
+    (
+      [ .findings[]
+        | (.priority? | type == "string" and (. == "P0" or . == "P1" or . == "P2"))
+          and (.file? | type == "string" and (. | length > 0))
+          and (.title? | type == "string" and (. | length > 0))
+          and (.description? | type == "string" and (. | length > 0))
+          and ((.line == null) or (.line | type == "number"))
+      ] | all
+    )
+  ' "$1" >/dev/null 2>&1
 }
 
 extract_review_json() {
-  # $1 = raw reply text, $2 = out file. 0 = salvaged, 1 = nothing usable.
+  # $1 = raw reply text, $2 = out file.
+  # 0 = exactly one review object salvaged, 1 = none usable,
+  # 2 = AMBIGUOUS (more than one candidate — the caller must reject rather
+  #     than guess which one is the verdict).
   command -v python3 >/dev/null 2>&1 || return 1
   python3 - "$1" "$2" <<'PYEOF' 2>/dev/null
 import json, sys
@@ -426,11 +459,18 @@ try:
     raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 except OSError:
     sys.exit(1)
+
+# Collect EVERY schema-shaped object, not just the first. Taking the first
+# is unsafe: a reply that shows an illustrative empty verdict and then the
+# real one carrying a P0 would salvage as clean and the push would be
+# allowed. More than one candidate is ambiguous, and ambiguous is not clean.
+candidates = []
 start = raw.find("{")
 while start != -1:
     depth = 0
     in_string = False
     escaped = False
+    end = -1
     for i in range(start, len(raw)):
         ch = raw[i]
         if escaped:
@@ -449,17 +489,25 @@ while start != -1:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                try:
-                    obj = json.loads(raw[start:i + 1])
-                except ValueError:
-                    break
-                if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
-                    with open(sys.argv[2], "w", encoding="utf-8") as fh:
-                        json.dump(obj, fh)
-                    sys.exit(0)
+                end = i
                 break
-    start = raw.find("{", start + 1)
-sys.exit(1)
+    if end == -1:
+        break
+    try:
+        obj = json.loads(raw[start:end + 1])
+    except ValueError:
+        obj = None
+    if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+        candidates.append(obj)
+        start = raw.find("{", end + 1)   # a review object is top level
+    else:
+        start = raw.find("{", start + 1)
+
+if len(candidates) == 1:
+    with open(sys.argv[2], "w", encoding="utf-8") as fh:
+        json.dump(candidates[0], fh)
+    sys.exit(0)
+sys.exit(2 if len(candidates) > 1 else 1)
 PYEOF
 }
 
@@ -492,6 +540,16 @@ PYEOF
 # CONTROL run without the flags must succeed at the read, or the script
 # fails rather than reporting a green sandbox it did not measure. Re-run it
 # after any `claude` CLI upgrade or any change to these flags.
+# The verifier greps all three of these out of this file so it can assert the
+# sandbox the hook ACTUALLY uses. Keep them as plain single-line assignments.
+CLAUDE_SANDBOX_FLAGS="--restricted --strict-mcp-config"
+# The hook usually runs from inside a Claude Code session, which exports a
+# messaging socket, a bearer token and session ids. A child auditing an
+# untrusted diff has no business inheriting the parent session's channel, so
+# they are stripped. (CLAUDECODE itself does NOT block a nested run — every
+# fallback verdict on this PR was produced with CLAUDECODE=1 set — but it is
+# dropped with the rest so the child is a plain, unattached session.)
+CLAUDE_ENV_SCRUB="-u CLAUDECODE -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_MESSAGING_SOCKET -u CLAUDE_CODE_MESSAGING_TOKEN -u CLAUDE_CODE_BRIDGE_SESSION_ID -u CLAUDE_CODE_ENTRYPOINT -u CLAUDE_PID -u CLAUDE_EFFORT"
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
   # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
@@ -504,6 +562,14 @@ run_claude_audit() {
 
   {
     cat "$prompt_file"
+    echo ""
+    echo "── AGENTS.md (the repository review rubric, inlined) ──────────────"
+    echo "You have NO tools, so you cannot open this file yourself. It is"
+    echo "reproduced here in full because it is the authority on what counts"
+    echo "as P0 and P1 in this repo. Review against it, not only against the"
+    echo "short focus list above."
+    echo ""
+    cat "$AGENTS_MD"
     echo ""
     echo "── Output contract ────────────────────────────────────────────────"
     echo "Reply with a SINGLE JSON object and NOTHING else: no prose before"
@@ -523,25 +589,34 @@ run_claude_audit() {
   # for a reply that contained no object at all. A rejected reply is NOT
   # treated as clean — it falls through to UN-AUDITED like any other
   # failure.
-  local attempt accepted
+  local attempt accepted salvage_status remaining
+  # ONE budget for the whole fallback, not one per attempt: CLAUDE_REVIEW_TIMEOUT
+  # is documented per-ref, and a per-attempt watchdog let a malformed first
+  # attempt push a routine push to roughly double the stated ceiling.
+  local deadline=$(( $(date +%s) + CLAUDE_TIMEOUT ))
   for attempt in 1 2; do
     : > "$envelope"
     rm -f "$TMPDIR_RUN/timed-out-claude-$idx"
     child_status=0
+    remaining=$(( deadline - $(date +%s) ))
+    if [ "$remaining" -lt 20 ]; then
+      echo "[codex-review] claude budget exhausted for $label (${CLAUDE_TIMEOUT}s total) — no retry." >&2
+      return 1
+    fi
 
     # Same process-group watchdog discipline as the codex leg above.
     set -m
-    claude -p \
+    # shellcheck disable=SC2086  # both vars are intentionally word-split
+    env $CLAUDE_ENV_SCRUB claude -p \
            --model "$CLAUDE_MODEL" \
            --output-format json \
-           --restricted \
-           --strict-mcp-config \
+           $CLAUDE_SANDBOX_FLAGS \
            --disallowedTools "$CLAUDE_DISALLOWED_TOOLS" \
            --append-system-prompt "You are being called as a machine-readable code reviewer. Your ENTIRE reply must be one JSON object matching the schema you are given. No prose, no markdown, no code fence, no commentary before or after. Findings go in the findings array, never in prose." \
            < "$claude_prompt" >"$envelope" 2>"$TMPDIR_RUN/claude-$idx.stderr" &
     child_pid=$!
     (
-      sleep "$CLAUDE_TIMEOUT"
+      sleep "$remaining"
       touch "$TMPDIR_RUN/timed-out-claude-$idx"
       kill -TERM -"$child_pid" 2>/dev/null
       sleep 5
@@ -582,11 +657,24 @@ run_claude_audit() {
 
     accepted=0
     if [ -s "$out_file" ] && jq empty "$out_file" >/dev/null 2>&1 \
-       && [ "$(jq -r 'has("findings") and (.findings|type=="array")' "$out_file")" = "true" ]; then
+       && verdict_matches_schema "$out_file"; then
       accepted=1
-    elif extract_review_json "$TMPDIR_RUN/claude-raw-$idx.txt" "$out_file"; then
-      echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
-      accepted=1
+    else
+      extract_review_json "$TMPDIR_RUN/claude-raw-$idx.txt" "$out_file"
+      salvage_status=$?
+      if [ "$salvage_status" = "2" ]; then
+        echo "[codex-review] claude's reply for $label contains MORE THAN ONE review object —" >&2
+        echo "[codex-review] refusing to guess which is the verdict (the first could be an" >&2
+        echo "[codex-review] illustrative clean example and the second the real P0)." >&2
+      elif [ "$salvage_status" = "0" ]; then
+        if verdict_matches_schema "$out_file"; then
+          echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
+          accepted=1
+        else
+          echo "[codex-review] claude's salvaged verdict for $label does not match the schema" >&2
+          echo "[codex-review] (bad priority value, or a finding missing file/title/description)." >&2
+        fi
+      fi
     fi
 
     if [ "$accepted" = "1" ]; then
@@ -930,7 +1018,19 @@ if [ "$P0_TOTAL" -gt 0 ]; then
   exit 1
 fi
 
-if [ "$P1_TOTAL" -gt 0 ]; then
+# The LAST line is the one that gets read, so it must not say "clean" when
+# part of the push was never looked at. A multi-ref push with one audited
+# clean ref and one that blew the size cap or lost both auditors used to
+# print the un-audited warning and then "clean — push allowed" underneath
+# it, which is the sentence anyone skimming a scrollback would keep.
+if [ "$UNAUDITED_REFS" -gt 0 ]; then
+  if [ "$P1_TOTAL" -gt 0 ]; then
+    echo "[codex-review] PARTIALLY AUDITED — push allowed with P1 warnings, and $UNAUDITED_REFS ref(s) were never reviewed." >&2
+  else
+    echo "[codex-review] PARTIALLY AUDITED — the audited ref(s) were clean, but $UNAUDITED_REFS ref(s) were" >&2
+    echo "[codex-review] never reviewed. This push is NOT pre-push clean; say so in the PR body." >&2
+  fi
+elif [ "$P1_TOTAL" -gt 0 ]; then
   echo "[codex-review] push allowed with P1 warnings." >&2
 else
   echo "[codex-review] clean — push allowed." >&2
