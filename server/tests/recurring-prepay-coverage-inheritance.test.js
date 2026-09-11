@@ -69,12 +69,22 @@ describe('buildRecurringFollowUpRows carries the LINK and never a stamp', () => 
 
 // Both generators reach the authority the same way: load the term, hand it
 // and the caller's connection to applyPrepaidCoverageForTerm, quietly.
-function connWithTerm(term) {
+function connWithTerm(term, { isTransaction = false } = {}) {
   const conn = (table) => {
     const b = {};
     b.where = () => b;
     b.first = () => Promise.resolve(table === 'annual_prepay_terms' ? term : undefined);
     return b;
+  };
+  conn.isTransaction = isTransaction;
+  // knex's nested transaction == a SAVEPOINT. The fake hands the callback a
+  // child connection and records that the savepoint was opened.
+  conn.savepoints = 0;
+  conn.transaction = (run) => {
+    conn.savepoints += 1;
+    const sp = connWithTerm(term);
+    sp.isTransaction = true;
+    return Promise.resolve(run(sp));
   };
   return conn;
 }
@@ -113,6 +123,32 @@ describe.each([
   test('a term row that no longer exists never calls the authority', async () => {
     await run(connWithTerm(undefined), parent);
     expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  test('inside a caller transaction the work runs in a SAVEPOINT', async () => {
+    // A failed statement poisons a PostgreSQL transaction (25P02), so a bare
+    // try/catch would still roll back the visit that was just inserted.
+    const conn = connWithTerm(LIVE_TERM, { isTransaction: true });
+    await run(conn, parent);
+    expect(conn.savepoints).toBe(1);
+    expect(applySpy).toHaveBeenCalledTimes(1);
+    // The allocator gets the SAVEPOINT connection, not the outer trx.
+    expect(applySpy.mock.calls[0][1]).not.toBe(conn);
+    expect(applySpy.mock.calls[0][1].isTransaction).toBe(true);
+  });
+
+  test('a plain connection needs no savepoint', async () => {
+    const conn = connWithTerm(LIVE_TERM);
+    await run(conn, parent);
+    expect(conn.savepoints).toBe(0);
+    expect(applySpy.mock.calls[0][1]).toBe(conn);
+  });
+
+  test('a failure inside the savepoint is swallowed, not propagated', async () => {
+    applySpy.mockRejectedValue(new Error('boom'));
+    const conn = connWithTerm(LIVE_TERM, { isTransaction: true });
+    await expect(run(conn, parent)).resolves.toBeUndefined();
+    expect(conn.savepoints).toBe(1);
   });
 
   test('a failure leaves the visit uncovered rather than failing the insert', async () => {

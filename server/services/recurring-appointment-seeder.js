@@ -1156,11 +1156,22 @@ async function applySeededPrepayCoverage(conn, parent, columns) {
   if (!columns?.annual_prepay_term_id) return;
   const termId = parent?.annual_prepay_term_id;
   if (!conn || !termId) return;
-  try {
+  const run = async (c) => {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-    const term = await conn('annual_prepay_terms').where({ id: termId }).first();
+    const term = await c('annual_prepay_terms').where({ id: termId }).first();
     if (!term) return;
-    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, conn, { quietExceptions: true });
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietExceptions: true });
+  };
+  try {
+  // Inside a caller transaction the work must run on that trx (the row we
+  // just inserted is invisible elsewhere), but a coverage failure must not
+  // abort the caller — in PostgreSQL a failed statement poisons every later
+  // one with 25P02, so catching in JS is NOT enough to keep this
+  // best-effort. The WHOLE attempt, the term read included, runs inside a
+  // SAVEPOINT (knex nested transaction) and the catch swallows the
+  // rolled-back savepoint. Same shape as visit-groups.maybeGroupRow.
+    if (conn.isTransaction) await conn.transaction(run);
+    else await run(conn);
   } catch (e) {
     require('./logger').warn(`[recurring-seeder] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
   }
