@@ -1,4 +1,4 @@
-import { ActionFeedback, Badge, Button, Card, Input, Select, Table, TBody, TD, TH, THead, TR, Textarea, UiSurface, Field } from "../../components/ui";
+import { ActionFeedback, Badge, Button, Card, Checkbox, Input, Select, Table, TBody, TD, TH, THead, TR, Textarea, UiSurface, Field } from "../../components/ui";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -1965,11 +1965,14 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
 }
 
 function UnitReviewTab({ showToast }) {
-  const [data, setData] = useState({ products: [], forecastRows: [], counts: {} });
+  const [data, setData] = useState({
+    products: [],
+    forecastRows: [],
+    counts: {},
+  });
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState("");
   const [drafts, setDrafts] = useState({});
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1981,13 +1984,12 @@ function UnitReviewTab({ showToast }) {
       setLoading(false);
     }
   }, [showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   async function fixUnit(product, unit) {
-    const inventoryUnit = unit || drafts[product.id]?.inventoryUnit || product.suggestedUnit;
+    const inventoryUnit =
+      unit || drafts[product.id]?.inventoryUnit || product.suggestedUnit;
     if (!inventoryUnit) {
       showToast("Choose a unit first");
       return;
@@ -1998,7 +2000,8 @@ function UnitReviewTab({ showToast }) {
         method: "POST",
         body: JSON.stringify({
           inventoryUnit,
-          convertExistingStock: drafts[product.id]?.convertExistingStock !== false,
+          convertExistingStock:
+            drafts[product.id]?.convertExistingStock !== false,
         }),
       });
       showToast("Inventory unit updated");
@@ -2009,115 +2012,152 @@ function UnitReviewTab({ showToast }) {
       setSavingId("");
     }
   }
-
   const products = data.products || [];
   const forecastRows = data.forecastRows || [];
   const unitChoices = ["fl_oz", "gal", "oz", "lb", "g", "kg", "ml", "l"];
-
   return (
-    <div style={sCard}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>Inventory unit review</h3>
-          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
-            Clean up unsupported, missing, and ambiguous inventory units before they affect forecast or closeout math.
+          <h3 className="m-0 text-zinc-900">Inventory unit review</h3>
+          <p className="text-ink-secondary text-ui-body">
+            Clean up unsupported, missing, and ambiguous inventory units before
+            they affect forecast or closeout math.
           </p>
         </div>
-        <button onClick={load} disabled={loading} style={sBtn(D.card, D.text)}>Refresh</button>
+        <Button onClick={load} disabled={loading} variant="secondary">
+          Refresh
+        </Button>
       </div>
 
       {loading ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>Loading unit review...</div>
+        <ActionFeedback>Loading unit review…</ActionFeedback>
       ) : products.length === 0 && forecastRows.length === 0 ? (
-        <div style={{ color: D.green, fontSize: 13 }}>No inventory unit issues found.</div>
+        <div className="text-zinc-900 text-ui-body">
+          No inventory unit issues found.
+        </div>
       ) : (
         <>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
+          <div className="overflow-x-auto">
+            <Table className="w-full">
+              <THead>
+                <TR>
                   {["Product", "Current", "Issues", "Fix"].map((h) => (
-                    <th key={h} style={thS}>{h}</th>
+                    <TH key={h}>{h}</TH>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
+                </TR>
+              </THead>
+              <TBody>
                 {products.map((product) => {
                   const draft = drafts[product.id] || {};
                   return (
-                    <tr key={product.id}>
-                      <td style={tdS}>
+                    <TR key={product.id}>
+                      <TD>
                         <strong>{product.name}</strong>
-                        <div style={{ color: D.muted, fontSize: 12 }}>
-                          {product.category || "Product"} · {product.formulation || "unspecified"}
+                        <div className="text-ink-secondary text-ui-body">
+                          {product.category || "Product"} ·{" "}
+                          {product.formulation || "unspecified"}
                         </div>
-                      </td>
-                      <td style={tdS}>
-                        {product.inventoryOnHand ?? "—"} {product.inventoryUnit || "no unit"}
+                      </TD>
+                      <TD>
+                        {product.inventoryOnHand ?? "—"}{" "}
+                        {product.inventoryUnit || "no unit"}
                         {product.lowStockThreshold != null && (
-                          <div style={{ color: D.muted, fontSize: 12 }}>Low at {product.lowStockThreshold}</div>
+                          <div className="text-ink-secondary text-ui-body">
+                            Low at {product.lowStockThreshold}
+                          </div>
                         )}
-                      </td>
-                      <td style={tdS}>
+                      </TD>
+                      <TD>
                         {(product.reasons || []).map((reason) => (
-                          <div key={reason.code} style={{ color: reason.severity === "block" ? D.red : D.amber, fontSize: 12, marginBottom: 3 }}>
+                          <div
+                            key={reason.code}
+                            className="text-ui-body mb-[3px]"
+                          >
                             {reason.message}
                           </div>
                         ))}
-                      </td>
-                      <td style={tdS}>
-                        <div style={{ display: "grid", gap: 6, minWidth: 260 }}>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      </TD>
+                      <TD>
+                        <div className="grid gap-[6px] min-w-[260px]">
+                          <div className="flex gap-[6px] flex-wrap">
                             {unitChoices.map((unit) => (
-                              <button
+                              <Button
                                 key={unit}
                                 onClick={() => fixUnit(product, unit)}
                                 disabled={savingId === product.id}
-                                style={sBtn(product.suggestedUnit === unit ? D.green : D.card, product.suggestedUnit === unit ? D.white : D.text)}
+                                variant="secondary"
                               >
                                 {unit}
-                              </button>
+                              </Button>
                             ))}
                           </div>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            <input
+                          <div className="flex gap-[6px]">
+                            <Input
                               value={draft.inventoryUnit ?? ""}
-                              onChange={(e) => setDrafts((prev) => ({ ...prev, [product.id]: { ...(prev[product.id] || {}), inventoryUnit: e.target.value } }))}
-                              style={{ ...sInput, flex: 1 }}
+                              onChange={(e) =>
+                                setDrafts((prev) => ({
+                                  ...prev,
+                                  [product.id]: {
+                                    ...(prev[product.id] || {}),
+                                    inventoryUnit: e.target.value,
+                                  },
+                                }))
+                              }
                               placeholder="custom supported unit"
+                              className="flex-[1]"
                             />
-                            <button onClick={() => fixUnit(product)} disabled={savingId === product.id} style={sBtn(D.teal, D.white)}>Apply</button>
+
+                            <Button
+                              onClick={() => fixUnit(product)}
+                              disabled={savingId === product.id}
+                              variant="primary"
+                            >
+                              Apply
+                            </Button>
                           </div>
-                          <label style={{ color: D.muted, fontSize: 12, display: "flex", alignItems: "center", gap: 6 }}>
-                            <input
-                              type="checkbox"
-                              checked={draft.convertExistingStock !== false}
-                              onChange={(e) => setDrafts((prev) => ({ ...prev, [product.id]: { ...(prev[product.id] || {}), convertExistingStock: e.target.checked } }))}
-                            />
-                            Convert existing stock and low-stock threshold
-                          </label>
+                          <Checkbox
+                            label="Convert existing stock and low-stock threshold"
+                            checked={draft.convertExistingStock !== false}
+                            onChange={(e) =>
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [product.id]: {
+                                  ...(prev[product.id] || {}),
+                                  convertExistingStock: e.target.checked,
+                                },
+                              }))
+                            }
+                          />
                         </div>
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   );
                 })}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
 
           {forecastRows.length > 0 && (
-            <div style={{ marginTop: 16, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-              <h4 style={{ margin: "0 0 8px", color: D.heading }}>Forecast Unit Review</h4>
+            <div className="mt-[16px] border-t border-solid border-zinc-200 pt-[12px]">
+              <h4 className="text-zinc-900">Forecast Unit Review</h4>
               {forecastRows.map((row) => (
-                <div key={row.productId} style={{ color: D.muted, fontSize: 13, marginBottom: 8 }}>
-                  <strong style={{ color: D.text }}>{row.productName}</strong>: {row.unconvertedDemand} {row.demandUnit || "unknown unit"} could not convert to {row.inventoryUnit || "inventory unit"} across {row.unitMismatchCount} appointment{row.unitMismatchCount === 1 ? "" : "s"}.
+                <div
+                  key={row.productId}
+                  className="text-ink-secondary text-ui-body mb-[8px]"
+                >
+                  <strong className="text-zinc-900">{row.productName}</strong>:{" "}
+                  {row.unconvertedDemand} {row.demandUnit || "unknown unit"}{" "}
+                  could not convert to {row.inventoryUnit || "inventory unit"}{" "}
+                  across {row.unitMismatchCount} appointment
+                  {row.unitMismatchCount === 1 ? "" : "s"}.
                 </div>
               ))}
             </div>
           )}
         </>
       )}
-    </div>
+    </Card>
   );
 }
 
