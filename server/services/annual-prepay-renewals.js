@@ -1646,13 +1646,40 @@ async function remainingCoverageSlots(term, conn = db) {
   if (!term?.id || !(visitCount > 0)) return 0;
   const row = await conn('scheduled_services')
     .where({ annual_prepay_term_id: term.id })
-    .whereNotIn('status', [...COVERAGE_EXCLUDED_STATUSES])
-    .where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD)
-    .where('prepaid_amount', '>', 0)
+    // status is nullable and the coverage logic treats NULL as live; a plain
+    // NOT IN drops those rows (NULL NOT IN (…) is NULL, never true), which
+    // would free an already-covered slot for reuse. Same shape the stamping
+    // update uses.
+    .where((q) => q.whereNull('status').orWhereNotIn('status', [...COVERAGE_EXCLUDED_STATUSES]))
+    .where((q) => q
+      // Stamped while scheduled.
+      .where((s) => s
+        .where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD)
+        .where('prepaid_amount', '>', 0))
+      // OR consumed at completion. reconcilePendingWindowCompletions settles
+      // a completed visit's invoice — or returns its slice as credit —
+      // WITHOUT stamping the row, so counting stamps alone reports the slot
+      // as free and hands out an extra covered visit. Counting every
+      // completed visit on the term is deliberately conservative: the
+      // failure it prevents (a silently suppressed invoice) is invisible,
+      // while the one it risks (a visit billing that someone must credit) is
+      // visible and correctable.
+      .orWhere('status', 'completed'))
     .count({ n: '*' })
     .first();
   const spent = Number(row?.n ?? row?.count) || 0;
   return Math.max(0, visitCount - spent);
+}
+
+// The slices a term has not yet handed out, in order, remainder cents last.
+// splitCoverageAmount puts the odd cents on the FINAL slice, so always taking
+// slices[0] loses them ($100 over 3 visits stamps 33.33 three times = 99.99).
+async function remainingCoverageSlices(term, conn = db) {
+  const visitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
+  const slots = await remainingCoverageSlots(term, conn);
+  if (!(slots > 0)) return [];
+  const slices = splitCoverageAmount(term.prepay_amount, visitCount);
+  return slices.slice(Math.max(0, slices.length - slots));
 }
 
 async function applyPrepaidCoverageForTerm(term, conn = db) {
@@ -5623,6 +5650,7 @@ module.exports = {
   hasAnnualPrepayRenewal,
   applyPrepaidCoverageForTerm,
   remainingCoverageSlots,
+  remainingCoverageSlices,
   reconcilePendingWindowCompletions,
   reconcileDisputeWindowMonthlyDues,
   finishDisputeRecoveryForTerm,

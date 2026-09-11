@@ -2498,7 +2498,6 @@ async function resolveExtensionPrepayCoverage(conn, parent, cols, childServiceTy
   if (!termId) return null;
   try {
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    const { splitCoverageAmount } = AnnualPrepayRenewals._private;
     const term = await conn('annual_prepay_terms').where({ id: termId }).first();
     if (!term) return null;
     const visitCount = Number(term.coverage_visit_count);
@@ -2514,14 +2513,14 @@ async function resolveExtensionPrepayCoverage(conn, parent, cols, childServiceTy
       return null;
     }
     // Budget check: the term buys exactly coverage_visit_count visits.
-    // remainingCoverageSlots counts live stamped rows with NO date bound —
-    // a window-bounded count would treat an extension past term_end as
-    // unspent and hand out a free slot on every renewal. Cancelled/no-show/
-    // skipped/rescheduled rows are excluded, so a written-off slot is free
-    // to be reissued.
-    const slots = await AnnualPrepayRenewals.remainingCoverageSlots(term, conn);
-    if (!(slots > 0)) return null; // plan exhausted — this visit bills, correctly
-    const [amount] = splitCoverageAmount(term.prepay_amount, visitCount);
+    // remainingCoverageSlices counts consumption with NO date bound — a
+    // window-bounded count would treat an extension past term_end as unspent
+    // and hand out a free slot on every renewal — and returns the unspent
+    // slices in order, so the remainder cents stay on the final one.
+    // Cancelled/no-show/skipped/rescheduled rows are excluded, so a
+    // written-off slot is free to be reissued.
+    const [amount] = await AnnualPrepayRenewals.remainingCoverageSlices(term, conn);
+    // undefined = plan exhausted; this visit bills, correctly.
     if (!(Number(amount) > 0)) return null;
     return {
       annual_prepay_term_id: termId,

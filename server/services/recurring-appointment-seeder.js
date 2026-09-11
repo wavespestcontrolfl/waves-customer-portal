@@ -399,8 +399,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     intervalDays: opts.recurringIntervalDays ?? parent.recurring_interval_days,
   });
   const existingDates = new Set([baseDate, ...(opts.existingDates || []).map(dateOnly).filter(Boolean)]);
-  // Annual-prepay slots this seed may still spend (see the allocation below).
-  let prepaidSlotsLeft = Math.max(0, Number(opts.prepaidSlots) || 0);
+  // Annual-prepay slices this seed may still spend, in order (see the
+  // allocation below). Ordered because splitCoverageAmount puts the odd
+  // remainder cents on the final slice.
+  const prepaidSlicesLeft = Array.isArray(opts.prepaidSlices) ? [...opts.prepaidSlices] : [];
   const rows = [];
   const parentId = opts.parentId || parent.id || parent.recurring_parent_id || null;
   const targetNewRows = Math.max(0, plannedCount - existingDates.size);
@@ -499,12 +501,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
     // is correct for a visit beyond the plan. With no allocation supplied
     // nothing is stamped — the safe default for the direct callers of this
     // exported builder.
-    if (row.annual_prepay_term_id
-      && prepaidSlotsLeft > 0
-      && Number(opts.prepaidSliceAmount) > 0) {
+    if (row.annual_prepay_term_id && prepaidSlicesLeft.length
+      && Number(prepaidSlicesLeft[0]) > 0) {
       row.prepaid_method = ANNUAL_PREPAY_PREPAID_METHOD;
-      row.prepaid_amount = Number(opts.prepaidSliceAmount);
-      prepaidSlotsLeft -= 1;
+      row.prepaid_amount = Number(prepaidSlicesLeft.shift());
     }
 
     // Resolved identity outranks the parent's copied link AND snapshot (the
@@ -1194,13 +1194,9 @@ async function resolvePrepaidSeedAllocation(conn, parent, columns) {
       && !AnnualPrepayRenewals.serviceMatchesCoverage({ service_type: parent.service_type }, term.coverage_service_type)) {
       return {};
     }
-    const slots = await AnnualPrepayRenewals.remainingCoverageSlots(term, conn);
-    if (!(slots > 0)) return {};
-    const [slice] = AnnualPrepayRenewals._private.splitCoverageAmount(
-      term.prepay_amount, term.coverage_visit_count,
-    );
-    if (!(Number(slice) > 0)) return {};
-    return { prepaidSlots: slots, prepaidSliceAmount: Number(slice) };
+    const slices = await AnnualPrepayRenewals.remainingCoverageSlices(term, conn);
+    if (!slices.length || !(Number(slices[0]) > 0)) return {};
+    return { prepaidSlices: slices.map(Number) };
   } catch (e) {
     require('./logger').warn(`[recurring-seeder] prepay allocation lookup failed for parent=${parent?.id}: ${e.message}`);
     return {};

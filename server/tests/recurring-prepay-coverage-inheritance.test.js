@@ -38,7 +38,7 @@ test('the seeder mirrors the renewals module prepaid-method constant', () => {
   // The seeder holds the literal to avoid a require cycle; this pins them.
   const rows = buildRecurringFollowUpRows(
     { ...PARENT, annual_prepay_term_id: TERM_ID },
-    { pattern: 'quarterly', plannedCount: 2, prepaidSlots: 1, prepaidSliceAmount: 111.15 },
+    { pattern: 'quarterly', plannedCount: 2, prepaidSlices: [111.15] },
   );
   expect(rows[0].prepaid_method).toBe(AnnualPrepayRenewals.ANNUAL_PREPAY_PREPAID_METHOD);
 });
@@ -51,7 +51,7 @@ describe('buildRecurringFollowUpRows allocates coverage against a budget', () =>
 
   test('only as many children as there are slots are stamped', () => {
     const rows = build({ annual_prepay_term_id: TERM_ID }, {
-      prepaidSlots: 2, prepaidSliceAmount: 111.15,
+      prepaidSlices: [111.15, 111.15],
     });
     expect(rows.length).toBeGreaterThan(2);
     expect(stampedRows(rows)).toHaveLength(2);
@@ -82,7 +82,7 @@ describe('buildRecurringFollowUpRows allocates coverage against a budget', () =>
       annual_prepay_term_id: TERM_ID,
       prepaid_method: 'check',
       prepaid_amount: '500.00',
-    }, { prepaidSlots: 4, prepaidSliceAmount: 111.15 });
+    }, { prepaidSlices: [111.15, 111.15, 111.15, 111.15] });
     for (const row of rows) {
       expect(row.prepaid_method).not.toBe('check');
       expect(Number(row.prepaid_amount || 0)).not.toBe(500);
@@ -91,10 +91,10 @@ describe('buildRecurringFollowUpRows allocates coverage against a budget', () =>
 
   test('a slice of zero or a parent on no term stamps nothing', () => {
     expect(stampedRows(build({ annual_prepay_term_id: TERM_ID }, {
-      prepaidSlots: 4, prepaidSliceAmount: 0,
+      prepaidSlices: [0],
     }))).toHaveLength(0);
     expect(stampedRows(build({}, {
-      prepaidSlots: 4, prepaidSliceAmount: 111.15,
+      prepaidSlices: [111.15, 111.15, 111.15, 111.15],
     }))).toHaveLength(0);
   });
 });
@@ -102,12 +102,21 @@ describe('buildRecurringFollowUpRows allocates coverage against a budget', () =>
 describe('remainingCoverageSlots counts allocations with NO date bound', () => {
   // A window-bounded count would read a visit scheduled past term_end as
   // unspent and hand out a free slot on every extension, indefinitely.
+  // The real query nests its predicates in where(cb) groups, so the fake
+  // builder runs any callback against itself and records what it sees.
   function countingConn(spent) {
-    const captured = {};
+    const captured = { calls: [] };
     const conn = () => {
       const b = {};
-      b.where = (...args) => { captured.where = [...(captured.where || []), args]; return b; };
-      b.whereNotIn = (...args) => { captured.whereNotIn = args; return b; };
+      const record = (name) => (...args) => {
+        if (typeof args[0] === 'function') { args[0](b); return b; }
+        captured.calls.push([name, ...args]);
+        if (name === 'whereNotIn' || name === 'orWhereNotIn') captured.excluded = args[1];
+        return b;
+      };
+      for (const m of ['where', 'orWhere', 'whereNot', 'whereNull', 'orWhereNull', 'whereNotIn', 'orWhereNotIn']) {
+        b[m] = record(m);
+      }
       b.count = () => b;
       b.first = () => Promise.resolve({ n: spent });
       return b;
@@ -130,9 +139,14 @@ describe('remainingCoverageSlots counts allocations with NO date bound', () => {
     await AnnualPrepayRenewals.remainingCoverageSlots(term, conn);
     const flat = JSON.stringify(conn.captured);
     expect(flat).toContain(TERM_ID);
-    expect(conn.captured.whereNotIn[1]).toEqual(
+    expect(conn.captured.excluded).toEqual(
       expect.arrayContaining(['cancelled', 'no_show', 'skipped', 'rescheduled']),
     );
+    // NULL status is live, so it must be admitted rather than dropped by NOT IN.
+    expect(conn.captured.calls.some(([name]) => name === 'whereNull')).toBe(true);
+    // A completed visit consumed its slice even when nothing stamped the row.
+    expect(flat).toContain('completed');
+    // No date bound: an extension past term_end must still count as spent.
     expect(flat).not.toMatch(/term_start|term_end|scheduled_date/);
   });
 
@@ -161,9 +175,17 @@ afterEach(() => {
 });
 
 function connWith(term, slotsLeft = 0) {
+  // Both consumers read remainingCoverageSlices; it derives from
+  // remainingCoverageSlots, so stub the outer seam and hand back the LAST
+  // `slotsLeft` slices, remainder cents included, exactly as the real one does.
   slotsSpy = jest
-    .spyOn(AnnualPrepayRenewals, 'remainingCoverageSlots')
-    .mockResolvedValue(slotsLeft);
+    .spyOn(AnnualPrepayRenewals, 'remainingCoverageSlices')
+    .mockImplementation(async (t) => {
+      const count = Number(t?.coverage_visit_count);
+      if (!(count > 0) || !(slotsLeft > 0)) return [];
+      const all = AnnualPrepayRenewals._private.splitCoverageAmount(t.prepay_amount, count);
+      return all.slice(Math.max(0, all.length - slotsLeft)).map(Number);
+    });
   const conn = (table) => {
     const b = {};
     b.where = () => b;
@@ -232,6 +254,21 @@ describe('resolveExtensionPrepayCoverage — the auto-extend budget rule', () =>
     )).resolves.toBeNull();
   });
 
+  test('the remainder cents ride the FINAL slice, not the first', async () => {
+    // $100 over 3 visits is 33.33 / 33.33 / 33.34. Always taking slices[0]
+    // would stamp 33.33 three times and lose a cent of the customer's money.
+    const oddTerm = { ...LIVE_TERM, prepay_amount: '100.00', coverage_visit_count: 3 };
+    const last = await resolveExtensionPrepayCoverage(
+      connWith(oddTerm, 1), parent, COLS, 'Quarterly Pest Control Service',
+    );
+    expect(last.prepaid_amount).toBe(33.34);
+    slotsSpy.mockRestore();
+    const middle = await resolveExtensionPrepayCoverage(
+      connWith(oddTerm, 2), parent, COLS, 'Quarterly Pest Control Service',
+    );
+    expect(middle.prepaid_amount).toBe(33.33);
+  });
+
   test('a query failure fails to UNCOVERED rather than blocking the extension', async () => {
     const conn = () => { throw new Error('column does not exist'); };
     await expect(resolveExtensionPrepayCoverage(
@@ -246,7 +283,7 @@ describe('resolvePrepaidSeedAllocation — the seeder budget lookup', () => {
 
   test('resolves the remaining slots and one slice', async () => {
     await expect(resolvePrepaidSeedAllocation(connWith(LIVE_TERM, 3), parent, COLS))
-      .resolves.toEqual({ prepaidSlots: 3, prepaidSliceAmount: 111.15 });
+      .resolves.toEqual({ prepaidSlices: [111.15, 111.15, 111.15] });
   });
 
   test('a spent plan, an uncovered service, and no term all allocate nothing', async () => {
