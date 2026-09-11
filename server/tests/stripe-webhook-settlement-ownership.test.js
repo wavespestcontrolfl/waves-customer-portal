@@ -97,6 +97,7 @@ function resetMockState() {
     processingPaymentsUpdated: 0,
     // What the settle-time re-read sees (null = same as the pre-lock read).
     settleReadInvoice: null,
+    settleReadThrows: false,
   });
 }
 
@@ -118,7 +119,10 @@ function mockMakeBuilder(table, { inTrx } = {}) {
       // The settle-time re-read names its columns explicitly; every other
       // invoice read in this handler takes the whole row. That is how the
       // harness models a withdrawal that commits DURING the payment.
-      if (cols.includes('scheduled_send_error')) return mockState.settleReadInvoice ?? mockState.preLockInvoice;
+      if (cols.includes('scheduled_send_error')) {
+        if (mockState.settleReadThrows) throw new Error('connection reset');
+        return mockState.settleReadInvoice ?? mockState.preLockInvoice;
+      }
       // Inside the transaction WITH forUpdate = the post-wait re-read.
       return (inTrx && b._forUpdate) ? mockState.lockedInvoice : mockState.preLockInvoice;
     }
@@ -227,6 +231,17 @@ describe('a withdrawn invoice never settles from a customer-minted intent', () =
 
     expect(mockState.inserts.find((i) => i.table === 'payments')).toBeTruthy();
     expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeFalsy();
+  });
+
+  test('a settle-time re-read that fails surfaces to Stripe instead of settling without the alert', async () => {
+    // The flip and its withdrawal check share a transaction: a failed re-read
+    // rolls the flip back and the handler throws, so the redelivery repeats
+    // the check rather than leaving a paid invoice with no alert.
+    mockState.processingPaymentsUpdated = 1;
+    mockState.settleReadThrows = true;
+
+    await expect(handlePaymentIntentSucceeded(succeededPI())).rejects.toThrow('connection reset');
+    expect(mockState.inserts.find((i) => i.table === 'customer_health_alerts')).toBeFalsy();
   });
 });
 

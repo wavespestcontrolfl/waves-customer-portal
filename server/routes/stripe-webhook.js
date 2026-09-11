@@ -1782,36 +1782,42 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
   let fallbackLinkedInvoiceId = null;
-  const updated = await db('payments')
-    .where({ stripe_payment_intent_id: piId, status: 'processing' })
-    .update(paymentUpdates);
+  // The processing → paid flip and its withdrawal check commit together: a
+  // payment already sitting in `processing` was accepted server-side while
+  // the invoice was still self-pay — our own guards would have refused it
+  // otherwise — so a withdrawal that committed during the ACH wait cannot be
+  // quarantined: the money is captured and the payments row exists. Settling
+  // is right, but the office has to act (refund the homeowner or re-bill AP),
+  // so the anomaly gets a durable alert instead of a silent paid invoice
+  // (audit P0). The re-read happens at settle time — the pre-lock check
+  // earlier in this handler ran before the withdrawal could commit — and it
+  // is deliberately uncaught, as is the alert insert: a failure rolls the
+  // flip back so Stripe's redelivery repeats the whole check, instead of a
+  // swallowed read leaving the invoice paid with no alert (audit P1).
+  const updated = await db.transaction(async (trx) => {
+    const flipped = await trx('payments')
+      .where({ stripe_payment_intent_id: piId, status: 'processing' })
+      .update(paymentUpdates);
+    if (flipped > 0 && invoiceForTenderGuard?.id) {
+      const settledInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
+        .first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
+      if (invoiceWithdrawnFromCustomer(settledInvoice)) {
+        logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
+        await trx('customer_health_alerts').insert({
+          customer_id: settledInvoice.customer_id || paymentIntent.metadata?.waves_customer_id || null,
+          alert_type: 'wh_payer_billed_settled',
+          severity: 'high',
+          title: 'Customer payment settled on payer-billed debt',
+          description: "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
+          trigger_data: JSON.stringify({ stripe_payment_intent_id: paymentIntent.id, invoice_number: settledInvoice.invoice_number }),
+        });
+      }
+    }
+    return flipped;
+  });
 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
-    // A payment already sitting in `processing` was accepted server-side while
-    // the invoice was still self-pay — our own guards would have refused it
-    // otherwise — so a withdrawal that committed during the ACH wait cannot be
-    // quarantined: the money is captured and the payments row exists. Settling
-    // is right, but the office has to act (refund the homeowner or re-bill AP),
-    // so the anomaly gets a durable alert instead of a silent paid invoice
-    // (audit P0). Re-read at settle time — the pre-lock check earlier in this
-    // handler ran before the withdrawal could commit.
-    if (invoiceForTenderGuard?.id) {
-      const settledInvoice = await db('invoices').where({ id: invoiceForTenderGuard.id })
-        .first('id', 'invoice_number', 'customer_id', 'scheduled_send_error')
-        .catch(() => null);
-      if (invoiceWithdrawnFromCustomer(settledInvoice)) {
-        logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
-        await alertSurchargeBypass(
-          paymentIntent,
-          settledInvoice,
-          'wh_payer_billed_settled',
-          'high',
-          'Customer payment settled on payer-billed debt',
-          "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
-        );
-      }
-    }
   } else {
     await db.transaction(async (trx) => {
       await lockPaymentIntentPaymentRow(trx, piId);
