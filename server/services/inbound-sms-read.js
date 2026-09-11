@@ -188,39 +188,62 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       // is cheap) makes every read for the same sender go through ONE
       // retarget-or-clear decision instead of splitting it across two
       // independent code paths.
-      const unknownReadRows = await db('messages as m')
+      // Resolve every read SID's durable phone (see retargetOrClearUnknownSenderBell
+      // for why sms_log.from_phone, not contact_phone, is the source of truth
+      // once a thread is promoted).
+      const candidateRows = await db('messages as m')
         .join('conversations as c', 'c.id', 'm.conversation_id')
-        // sms_log.from_phone is the durable sender identity — unlike
-        // conversations.contact_phone, promoteUnknownPhoneThreadWith never
-        // clears it (codex #4210 round-5 P1). Left-joined so a message
-        // whose sms_log twin is somehow missing still falls back to
-        // contact_phone via the COALESCE below.
         .leftJoin('sms_log as l', function join() {
           this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
         })
         .whereIn('m.twilio_sid', mirrorSids)
-        .where(function scope() {
-          this.whereNull('c.customer_id')
-            // Promoted thread (codex #4210 round-2 P2): the conversation may
-            // have gained a customer_id since the alert rang, but the SID
-            // being read here is still what an unlinked-style bell (no
-            // thread param) is CURRENTLY pointed at. Deciding purely from
-            // today's linkage would hand this SID to the blunt by-SID clear
-            // below, which has no phone-wide unread check and can clear the
-            // bell out from under a still-unread sibling message that never
-            // got a bell of its own.
-            .orWhereExists(function unlinkedBell() {
-              this.select(1).from('notifications')
-                .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
-                .whereNull('read_at')
-                .whereRaw("metadata->'payload'->>'twilioSid' = m.twilio_sid");
-            });
-        })
-        .select('m.twilio_sid', db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
+        .select('m.twilio_sid', 'c.customer_id', db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
+      // Which of those phones currently own a live unlinked-style bell
+      // (link='/admin/communications', unread) — resolved by PHONE, not by
+      // "is this exact SID the bell's current target" (codex #4210
+      // round-7 P1). The target-SID check used here through round 6 was a
+      // TOCTOU race for a promoted thread with two unread siblings: reading
+      // them as two concurrent calls, whichever call's SID the bell did NOT
+      // currently target failed this membership check (evaluated outside
+      // any lock) and fell to the by-SID clear/no-op, while the OTHER call
+      // retargeted the bell onto it under the phone lock — the retarget
+      // landing after the membership check already missed it permanently
+      // orphans the bell on an already-read message nothing revisits.
+      // Resolving by phone is stable regardless of which SID the bell
+      // happens to target at the instant this runs: a promoted phone with
+      // an active bell always routes ALL of its scoped SIDs through the
+      // phone lock, so the retarget-or-clear decision — not this
+      // membership check — is what's left to serialize, and the lock
+      // already does that.
+      const phonesWithLiveBell = new Set();
+      const candidatePhones = [...new Set(candidateRows.map((r) => r.contact_phone).filter(Boolean))];
+      if (candidatePhones.length) {
+        const liveBellRows = await db('notifications')
+          .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
+          .whereNull('read_at')
+          .select(db.raw("metadata->'payload'->>'twilioSid' as sid"));
+        const liveBellSids = liveBellRows.map((r) => r.sid).filter(Boolean);
+        if (liveBellSids.length) {
+          const rows = await db('messages as m')
+            .join('conversations as c', 'c.id', 'm.conversation_id')
+            .leftJoin('sms_log as l', function join() {
+              this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
+            })
+            .whereIn('m.twilio_sid', liveBellSids)
+            .select(db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
+          for (const row of rows) { if (row.contact_phone) phonesWithLiveBell.add(row.contact_phone); }
+        }
+      }
       const phones = new Set();
-      for (const row of unknownReadRows) {
-        unknownSenderSids.add(row.twilio_sid);
-        if (row.contact_phone) phones.add(row.contact_phone);
+      for (const row of candidateRows) {
+        // Still unlinked (the ordinary case) OR promoted but this phone
+        // owns a live unlinked bell right now.
+        const isUnknownSenderScoped = row.customer_id === null
+          || (row.contact_phone && phonesWithLiveBell.has(row.contact_phone));
+        if (isUnknownSenderScoped) {
+          unknownSenderSids.add(row.twilio_sid);
+          if (row.contact_phone) phones.add(row.contact_phone);
+        }
       }
       for (const phone of phones) {
         notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now);

@@ -517,4 +517,56 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);
+
+  test('concurrently reading a promoted thread\'s two unread siblings converges on a cleared bell rather than orphaning it on an already-read message (codex #4210 round-7 P1)', async () => {
+    const conversationId = randomUUID();
+    const firstMessageId = randomUUID();
+    const secondMessageId = randomUUID();
+    const firstSid = `SM-synthetic-promoted-race-a-${randomBytes(4).toString('hex')}`;
+    const secondSid = `SM-synthetic-promoted-race-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // Promoted, both messages unread, one bell currently targeting the
+      // first. Round 6 decided per-SID membership by "is this exact SID the
+      // bell's current target" — a snapshot taken OUTSIDE any lock, so
+      // reading the two messages as separate concurrent calls could have
+      // the second miss its own membership check (the bell still targeted
+      // the first at that instant), fall to a by-SID no-op, and then have
+      // the first's retarget hand the bell to it anyway under the phone
+      // lock — landing after the second's read had already finished,
+      // orphaning the bell on an already-read message nothing revisits.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: null, our_endpoint_id: '+19415550193' });
+      await mockPg('messages').insert([
+        { id: firstMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: firstSid, body: 'First synthetic text, promoted', created_at: new Date(Date.now() - 120000) },
+        { id: secondMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic text, promoted', created_at: new Date(Date.now() - 60000) },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550193', twilio_sid: firstSid, message_body: 'First synthetic text, promoted' },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550193', twilio_sid: secondSid, message_body: 'Second synthetic text, promoted' },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: firstSid } }),
+      }).returning('*');
+
+      await Promise.all([
+        markInboundSmsRead({ messageIds: [firstMessageId], role: 'admin' }),
+        markInboundSmsRead({ messageIds: [secondMessageId], role: 'admin' }),
+      ]);
+
+      expect((await mockPg('messages').where({ id: firstMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: secondMessageId }).first()).is_read).toBe(true);
+      // Both messages are read, so the bell must end up cleared regardless
+      // of which call's phone-lock transaction ran last.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).not.toBeNull();
+    } finally {
+      await mockPg('messages').whereIn('id', [firstMessageId, secondMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [firstSid, secondSid]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
 });
