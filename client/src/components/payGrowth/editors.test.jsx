@@ -300,9 +300,15 @@ describe('EvidenceEditor', () => {
     expect(screen.getByLabelText('Application number in original allocation')).toBeDisabled();
     expect(screen.getByLabelText('Employee 1')).toBeDisabled();
     expect(screen.getByLabelText('Employee 1 share (%)')).toBeDisabled();
+    // The classification of an allocated revision can still be corrected; the allocation and ordinal ride along unchanged.
+    expect(screen.getByLabelText('Production exclusion')).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Production exclusion'), { target: { value: 'duplicate' } });
     fireEvent.click(screen.getByRole('button', { name: 'Retain service evidence' }));
     await waitFor(() => expect(lastCallBody('/service-evidence')).toBeTruthy());
     expect(lastCallBody('/service-evidence').base_id).toBe('rev-1');
+    expect(lastCallBody('/service-evidence').exclusion).toBe('duplicate');
+    expect(lastCallBody('/service-evidence').allocation_id).toBe('alloc-1');
+    expect(lastCallBody('/service-evidence').ordinal).toBe(1);
   });
 
   it('disables the form and warns when the service is not marked complete', async () => {
