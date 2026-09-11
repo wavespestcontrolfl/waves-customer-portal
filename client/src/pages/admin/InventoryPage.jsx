@@ -3159,14 +3159,21 @@ const COMPLETION_SERVICE_LINES = [
 
 // Auto-reorder + per-visit consumable authoring for one product: its own
 // form state and save path (PUT /admin/inventory/:id).
-function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) {
+function AutoReorderEditor({
+  product,
+  vendors,
+  showToast,
+  onInventoryChanged,
+}) {
   const [autoForm, setAutoForm] = useState({
     autoReorderEnabled: !!product.autoReorderEnabled,
     autoReorderVendorId: product.autoReorderVendorId || "",
     reorderQuantity: product.reorderQuantity ?? "",
     perCompletionUsage: product.perCompletionUsage ?? "",
     // null = every service line; array = only those lines consume this item
-    perCompletionServiceLines: Array.isArray(product.perCompletionServiceLines) ? product.perCompletionServiceLines : null,
+    perCompletionServiceLines: Array.isArray(product.perCompletionServiceLines)
+      ? product.perCompletionServiceLines
+      : null,
   });
   const [autoSaving, setAutoSaving] = useState(false);
   const saveAutoReorder = async () => {
@@ -3177,8 +3184,14 @@ function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) 
         body: JSON.stringify({
           autoReorderEnabled: !!autoForm.autoReorderEnabled,
           autoReorderVendorId: autoForm.autoReorderVendorId || null,
-          reorderQuantity: autoForm.reorderQuantity === "" ? null : Number(autoForm.reorderQuantity),
-          perCompletionUsage: autoForm.perCompletionUsage === "" ? null : Number(autoForm.perCompletionUsage),
+          reorderQuantity:
+            autoForm.reorderQuantity === ""
+              ? null
+              : Number(autoForm.reorderQuantity),
+          perCompletionUsage:
+            autoForm.perCompletionUsage === ""
+              ? null
+              : Number(autoForm.perCompletionUsage),
           perCompletionServiceLines: autoForm.perCompletionServiceLines,
         }),
       });
@@ -3190,104 +3203,123 @@ function AutoReorderEditor({ product, vendors, showToast, onInventoryChanged }) 
       setAutoSaving(false);
     }
   };
-
   return (
-      <div style={{ marginBottom: 12 }}>
-        <div
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            textTransform: "uppercase",
-            letterSpacing: 1,
-            marginBottom: 6,
-          }}
-        >
-          Auto-reorder
-        </div>
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            flexWrap: "wrap",
-            fontSize: 12,
-          }}
-        >
-          <label style={{ color: D.text, display: "flex", alignItems: "center", gap: 4 }}>
-            <input
-              type="checkbox"
-              checked={!!autoForm.autoReorderEnabled}
-              onChange={(e) => setAutoForm((f) => ({ ...f, autoReorderEnabled: e.target.checked }))}
-            />
-            Reorder when low
-          </label>
-          <select
-            value={autoForm.autoReorderVendorId}
-            onChange={(e) => setAutoForm((f) => ({ ...f, autoReorderVendorId: e.target.value }))}
-            style={{ ...sInput, width: 160 }}
-          >
-            <option value="">No vendor</option>
-            {vendors.map((v) => (
-              <option key={v.id} value={v.id}>{v.name}</option>
-            ))}
-          </select>
-          <input
-            type="number"
-            step="0.0001"
-            min="0"
-            placeholder="Reorder qty"
-            title="Quantity to request when stock reaches the low-stock threshold"
-            value={autoForm.reorderQuantity}
-            onChange={(e) => setAutoForm((f) => ({ ...f, reorderQuantity: e.target.value }))}
-            style={{ ...sInput, width: 100 }}
-          />
-          <input
-            type="number"
-            step="0.0001"
-            min="0"
-            placeholder="Used per visit"
-            title="Units consumed by every completed visit (yard-sign kit items); blank = not a per-visit consumable"
-            value={autoForm.perCompletionUsage}
-            onChange={(e) => setAutoForm((f) => ({ ...f, perCompletionUsage: e.target.value }))}
-            style={{ ...sInput, width: 110 }}
-          />
-          <button type="button" onClick={saveAutoReorder} disabled={autoSaving} style={sBtn(D.teal, D.white)}>
-            {autoSaving ? "Saving…" : "Save"}
-          </button>
-        </div>
-        <div
-          style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12, marginTop: 6 }}
-          title="Which completed visits consume this item. All = every service line."
-        >
-          <span style={{ color: D.muted }}>Used on:</span>
-          <label style={{ color: D.text, display: "flex", alignItems: "center", gap: 4 }}>
-            <input
-              type="checkbox"
-              checked={autoForm.perCompletionServiceLines == null}
-              onChange={(e) => setAutoForm((f) => ({ ...f, perCompletionServiceLines: e.target.checked ? null : [] }))}
-            />
-            All
-          </label>
-          {COMPLETION_SERVICE_LINES.map((line) => {
-            const scoped = Array.isArray(autoForm.perCompletionServiceLines);
-            const on = scoped && autoForm.perCompletionServiceLines.includes(line.id);
-            return (
-              <label key={line.id} style={{ color: scoped ? D.text : D.muted, display: "flex", alignItems: "center", gap: 4 }}>
-                <input
-                  type="checkbox"
-                  disabled={!scoped}
-                  checked={on}
-                  onChange={(e) => setAutoForm((f) => {
-                    const cur = Array.isArray(f.perCompletionServiceLines) ? f.perCompletionServiceLines : [];
-                    return { ...f, perCompletionServiceLines: e.target.checked ? [...new Set([...cur, line.id])] : cur.filter((x) => x !== line.id) };
-                  })}
-                />
-                {line.label}
-              </label>
-            );
-          })}
-        </div>
+    <div className="mb-[12px]">
+      <div className="text-ui-body text-ink-secondary mb-[6px]">
+        Auto-reorder
       </div>
+      <div className="flex gap-[8px] items-center flex-wrap text-ui-body">
+        <Checkbox
+          label="Reorder when low"
+          checked={!!autoForm.autoReorderEnabled}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              autoReorderEnabled: e.target.checked,
+            }))
+          }
+        />
+        <Select
+          value={autoForm.autoReorderVendorId}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              autoReorderVendorId: e.target.value,
+            }))
+          }
+          className="w-[160px]"
+        >
+          <option value="">No vendor</option>
+          {vendors.map((v) => (
+            <option key={v.id} value={v.id}>
+              {v.name}
+            </option>
+          ))}
+        </Select>
+        <Input
+          type="number"
+          step="0.0001"
+          min="0"
+          placeholder="Reorder qty"
+          title="Quantity to request when stock reaches the low-stock threshold"
+          value={autoForm.reorderQuantity}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              reorderQuantity: e.target.value,
+            }))
+          }
+          className="w-[100px]"
+        />
+
+        <Input
+          type="number"
+          step="0.0001"
+          min="0"
+          placeholder="Used per visit"
+          title="Units consumed by every completed visit (yard-sign kit items); blank = not a per-visit consumable"
+          value={autoForm.perCompletionUsage}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              perCompletionUsage: e.target.value,
+            }))
+          }
+          className="w-[110px]"
+        />
+
+        <Button
+          type="button"
+          onClick={saveAutoReorder}
+          disabled={autoSaving}
+          variant="primary"
+        >
+          {autoSaving ? "Saving…" : "Save"}
+        </Button>
+      </div>
+      <div
+        title="Which completed visits consume this item. All = every service line."
+        className="flex gap-[10px] items-center flex-wrap text-ui-body mt-[6px]"
+      >
+        <span className="text-ink-secondary">Used on:</span>
+        <Checkbox
+          label="All"
+          checked={autoForm.perCompletionServiceLines == null}
+          onChange={(e) =>
+            setAutoForm((f) => ({
+              ...f,
+              perCompletionServiceLines: e.target.checked ? null : [],
+            }))
+          }
+        />
+        {COMPLETION_SERVICE_LINES.map((line) => {
+          const scoped = Array.isArray(autoForm.perCompletionServiceLines);
+          const on =
+            scoped && autoForm.perCompletionServiceLines.includes(line.id);
+          return (
+            <Checkbox
+              key={line.id}
+              label={line.label}
+              disabled={!scoped}
+              checked={on}
+              onChange={(e) =>
+                setAutoForm((f) => {
+                  const cur = Array.isArray(f.perCompletionServiceLines)
+                    ? f.perCompletionServiceLines
+                    : [];
+                  return {
+                    ...f,
+                    perCompletionServiceLines: e.target.checked
+                      ? [...new Set([...cur, line.id])]
+                      : cur.filter((x) => x !== line.id),
+                  };
+                })
+              }
+            />
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -3313,14 +3345,16 @@ function ExpandedProduct({
     reason: "",
     note: "",
   });
-
   const loadMovements = useCallback(async () => {
     setMovementLoading(true);
     try {
       // Movements are owner-only (rows carry costUsed) — a technician's
       // expanded product just shows no history instead of erroring.
-      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
-        .catch(() => ({ movements: [] }));
+      const data = await adminFetch(
+        `/admin/inventory/${product.id}/movements`,
+      ).catch(() => ({
+        movements: [],
+      }));
       setMovements(data.movements || []);
     } catch {
       setMovements([]);
@@ -3328,7 +3362,6 @@ function ExpandedProduct({
       setMovementLoading(false);
     }
   }, [product.id]);
-
   useEffect(() => {
     loadMovements();
     setAdjustForm((f) => ({
@@ -3336,7 +3369,6 @@ function ExpandedProduct({
       unit: product.inventoryUnit || f.unit || "oz",
     }));
   }, [loadMovements, product.inventoryUnit]);
-
   const submitAdjustment = async () => {
     if (!adjustForm.quantity || !adjustForm.unit) {
       showToast?.("Amount and unit required");
@@ -3364,14 +3396,15 @@ function ExpandedProduct({
       showToast?.(`Failed: ${e.message}`);
     }
   };
-
   const queueRefresh = async (vendorPricing) => {
     try {
       const data = await adminFetch(
         `/admin/inventory/${product.id}/pricing/refresh`,
         {
           method: "POST",
-          body: JSON.stringify({ vendorId: vendorPricing.vendorId }),
+          body: JSON.stringify({
+            vendorId: vendorPricing.vendorId,
+          }),
         },
       );
       showToast?.(data.message || "Refresh queued");
@@ -3379,197 +3412,143 @@ function ExpandedProduct({
       showToast?.(`Refresh failed: ${e.message}`);
     }
   };
-
   return (
-    <div style={{ padding: 12 }}>
+    <div className="p-[12px]">
       {" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 16,
-          marginBottom: 12,
-          flexWrap: "wrap",
-          fontSize: 12,
-        }}
-      >
+      <div className="flex gap-[16px] mb-[12px] flex-wrap text-ui-body">
         {product.formulation && (
-          <span style={{ color: D.muted }}>
+          <span className="text-ink-secondary">
             Formulation:{" "}
-            <span style={{ color: D.text }}>{product.formulation}</span>
+            <span className="text-zinc-900">{product.formulation}</span>
           </span>
         )}
         {product.unitSizeOz && (
-          <span style={{ color: D.muted }}>
+          <span className="text-ink-secondary">
             Size (oz):{" "}
-            <span style={{ color: D.text }}>{product.unitSizeOz}</span>
+            <span className="text-zinc-900">{product.unitSizeOz}</span>
           </span>
         )}
         {product.sku && (
-          <span style={{ color: D.muted }}>
-            SKU: <span style={{ color: D.text }}>{product.sku}</span>
+          <span className="text-ink-secondary">
+            SKU: <span className="text-zinc-900">{product.sku}</span>
           </span>
         )}
-        <span style={{ color: D.muted }}>
+        <span className="text-ink-secondary">
           Stock:{" "}
-          <span style={{ color: product.lowStock ? D.red : D.text }}>
+          <span>
             {product.inventoryOnHand != null
               ? `${product.inventoryOnHand} ${product.inventoryUnit || ""}`
               : "not set"}
           </span>
         </span>
         {product.lowStockThreshold != null && (
-          <span style={{ color: D.muted }}>
+          <span className="text-ink-secondary">
             Low at:{" "}
-            <span style={{ color: D.text }}>
+            <span className="text-zinc-900">
               {product.lowStockThreshold} {product.inventoryUnit || ""}
             </span>
           </span>
         )}
       </div>
       {/* Authoring only: PUT /admin/inventory/:id is requireAdmin, so a
-          technician would only ever see a 403 here. */}
+           technician would only ever see a 403 here. */}
       {canAuthor && (
-        <AutoReorderEditor product={product} vendors={vendors} showToast={showToast} onInventoryChanged={onInventoryChanged} />
+        <AutoReorderEditor
+          product={product}
+          vendors={vendors}
+          showToast={showToast}
+          onInventoryChanged={onInventoryChanged}
+        />
       )}
-      {canAuthor && labelPipelineEnabled && <ProductLabelReview key={product.id} product={product} />}
+      {canAuthor && labelPipelineEnabled && (
+        <ProductLabelReview key={product.id} product={product} />
+      )}
       {product.vendorPricing.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
+        <div className="mb-[12px]">
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              marginBottom: 6,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[6px]">
             Vendor Prices
           </div>{" "}
-          <div style={{ display: "grid", gap: 4 }}>
+          <div className="grid gap-[4px]">
             {product.vendorPricing.map((vp, i) => (
               <div
                 key={i}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                  padding: "6px 10px",
-                  background: D.input,
-                  borderRadius: 6,
-                  fontSize: 12,
-                }}
+                className="flex items-center gap-[12px] text-ui-body"
               >
                 {" "}
-                <span
-                  style={{ color: D.heading, fontWeight: 500, minWidth: 140 }}
-                >
+                <span className="text-zinc-900 font-medium min-w-[140px]">
                   {vp.vendorName}
                 </span>{" "}
-                <span
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    color: vp.isBest ? D.green : D.text,
-                  }}
-                >
-                  ${vp.price.toFixed(2)}
-                </span>
+                <span>${vp.price.toFixed(2)}</span>
                 {vp.quantity && (
-                  <span style={{ color: D.muted }}>{vp.quantity}</span>
+                  <span className="text-ink-secondary">{vp.quantity}</span>
                 )}
                 {(() => {
                   const unitLabel =
                     formatUnitPriceList(vp.unitPrices) ||
                     (vp.normalizedUnitPrice != null && vp.normalizedUnit
-                      ? formatUnitCost(vp.normalizedUnitPrice, vp.normalizedUnit)
+                      ? formatUnitCost(
+                          vp.normalizedUnitPrice,
+                          vp.normalizedUnit,
+                        )
                       : null);
                   return unitLabel ? (
-                    <span
-                      style={{
-                        color: D.muted,
-                        fontFamily: "'JetBrains Mono', monospace",
-                        fontSize: 11,
-                      }}
-                    >
+                    <span className="text-ink-secondary text-ui-body">
                       {unitLabel}
                     </span>
                   ) : null;
                 })()}
                 {vp.sourceType && (
-                  <span style={sBadge(`${D.teal}14`, D.muted)}>
+                  <Badge tone="neutral">
                     {String(vp.sourceType).replace(/_/g, " ")}
-                  </span>
+                  </Badge>
                 )}
                 {vp.availability && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {vp.availability}
                   </span>
                 )}
                 {vp.branchLocation && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {vp.branchLocation}
                   </span>
                 )}
                 {vp.confidenceScore != null && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {Math.round(vp.confidenceScore * 100)}% conf
                   </span>
                 )}
-                {vp.isBest && (
-                  <span style={sBadge(`${D.green}22`, D.green)}>Best</span>
-                )}
+                {vp.isBest && <Badge tone="neutral">Best</Badge>}
                 {vp.url && (
                   <a
                     href={vp.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    style={{ color: D.teal, fontSize: 11 }}
+                    className="text-zinc-900 text-ui-body"
                   >
                     Open
                   </a>
                 )}
                 {vp.lastChecked && (
-                  <span style={{ color: D.muted, fontSize: 11 }}>
+                  <span className="text-ink-secondary text-ui-body">
                     {new Date(vp.lastChecked).toLocaleDateString()}
                   </span>
                 )}
-                <button
-                  onClick={() => queueRefresh(vp)}
-                  style={{
-                    marginLeft: "auto",
-                    fontSize: 11,
-                    padding: "3px 8px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.border}`,
-                    background: D.card,
-                    color: D.teal,
-                    cursor: "pointer",
-                  }}
-                >
+                <Button onClick={() => queueRefresh(vp)} variant="secondary">
                   Refresh
-                </button>
+                </Button>
               </div>
             ))}
           </div>{" "}
         </div>
       )}
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+      <div className="flex gap-[8px] items-end">
         {" "}
-        <div>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            Vendor
-          </label>{" "}
-          <select
+        <Field label="Vendor">
+          <Select
             value={vendorId}
             onChange={(e) => setVendorId(e.target.value)}
-            style={{ ...sInput, width: 160 }}
+            className="w-[160px]"
           >
             {vendors
               .filter((v) => v.active)
@@ -3578,47 +3557,27 @@ function ExpandedProduct({
                   {v.name}
                 </option>
               ))}
-          </select>
-        </div>{" "}
-        <div>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            Price
-          </label>{" "}
-          <input
+          </Select>
+        </Field>{" "}
+        <Field label="Price">
+          <Input
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             type="number"
             step="0.01"
             placeholder="0.00"
-            style={{ ...sInput, width: 100 }}
+            className="w-[100px]"
           />
-        </div>{" "}
-        <div>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            Quantity
-          </label>{" "}
-          <input
+        </Field>{" "}
+        <Field label="Quantity">
+          <Input
             value={qty}
             onChange={(e) => setQty(e.target.value)}
             placeholder="e.g. 32 oz"
-            style={{ ...sInput, width: 120 }}
+            className="w-[120px]"
           />
-        </div>{" "}
-        <button
+        </Field>{" "}
+        <Button
           onClick={() => {
             if (price) {
               onSave(product.id, vendorId, price, qty);
@@ -3626,212 +3585,168 @@ function ExpandedProduct({
               setQty("");
             }
           }}
-          style={sBtn(D.teal, D.white)}
+          variant="primary"
         >
           Add Price
-        </button>{" "}
+        </Button>{" "}
       </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(260px, 380px) 1fr",
-          gap: 12,
-          marginTop: 14,
-        }}
-      >
+      <div className="grid gap-[12px] mt-[14px]">
         {" "}
-        <div
-          style={{
-            background: D.input,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: 12,
-          }}
-        >
+        <Card className="p-3">
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Manual Adjustment
           </div>{" "}
-          <div
-            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
-          >
+          <div className="grid gap-[8px]">
             {" "}
-            <select
+            <Select
               value={adjustForm.movementType}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, movementType: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  movementType: e.target.value,
+                }))
               }
-              style={sInput}
             >
               {" "}
               <option value="restock">Restock</option>{" "}
               <option value="correction">Correction</option>{" "}
               <option value="damaged_lost">Damaged/Lost</option>{" "}
-            </select>{" "}
-            <div style={{ display: "flex", gap: 6 }}>
+            </Select>{" "}
+            <div className="flex gap-[6px]">
               {" "}
-              <input
+              <Input
                 value={adjustForm.quantity}
                 onChange={(e) =>
-                  setAdjustForm((f) => ({ ...f, quantity: e.target.value }))
+                  setAdjustForm((f) => ({
+                    ...f,
+                    quantity: e.target.value,
+                  }))
                 }
                 type="number"
                 step="0.0001"
                 placeholder="Amount"
-                style={{ ...sInput, width: "100%" }}
+                className="w-full"
               />{" "}
-              <input
+              <Input
                 value={adjustForm.unit}
                 onChange={(e) =>
-                  setAdjustForm((f) => ({ ...f, unit: e.target.value }))
+                  setAdjustForm((f) => ({
+                    ...f,
+                    unit: e.target.value,
+                  }))
                 }
                 placeholder="unit"
-                style={{ ...sInput, width: 70 }}
+                className="w-[70px]"
               />{" "}
             </div>{" "}
-            <input
+            <Input
               value={adjustForm.lotNumber}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, lotNumber: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  lotNumber: e.target.value,
+                }))
               }
               placeholder="Lot number"
-              style={sInput}
             />{" "}
-            <input
+            <Input
               value={adjustForm.reason}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, reason: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  reason: e.target.value,
+                }))
               }
               placeholder="Reason"
-              style={sInput}
             />{" "}
-            <input
+            <Input
               value={adjustForm.note}
               onChange={(e) =>
-                setAdjustForm((f) => ({ ...f, note: e.target.value }))
+                setAdjustForm((f) => ({
+                  ...f,
+                  note: e.target.value,
+                }))
               }
               placeholder="Note"
-              style={{ ...sInput, gridColumn: "1 / -1" }}
+              className="col-span-full"
             />{" "}
           </div>{" "}
-          <button
+          <Button
             onClick={submitAdjustment}
-            style={{ ...sBtn(D.green, D.white), marginTop: 8, width: "100%" }}
+            variant="primary"
+            className="mt-[8px] w-full"
           >
             Apply Adjustment
-          </button>{" "}
-        </div>{" "}
-        <div
-          style={{
-            background: D.input,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: 12,
-            minWidth: 0,
-          }}
-        >
+          </Button>{" "}
+        </Card>{" "}
+        <Card className="p-3 min-w-[0px]">
           {" "}
-          <div
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Movement History
           </div>
           {movementLoading ? (
-            <div style={{ color: D.muted, fontSize: 12 }}>
+            <div className="text-ink-secondary text-ui-body">
               Loading movements...
             </div>
           ) : movements.length === 0 ? (
-            <div style={{ color: D.muted, fontSize: 12 }}>
+            <div className="text-ink-secondary text-ui-body">
               No inventory movements yet.
             </div>
           ) : (
             // overflowX spelled explicitly (not the `overflow` shorthand) so
             // the serialized style attribute contains "overflow-x: auto" and
             // the index.css scroll-shadow affordance selector matches.
-            <div style={{ maxHeight: 220, overflowY: "auto", overflowX: "auto" }}>
+            <div className="max-h-[220px] overflow-y-auto overflow-x-auto">
               {" "}
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead>
-                  <tr>
+              <Table className="w-full">
+                <THead>
+                  <TR>
                     {["Date", "Type", "Amount", "Stock", "Job/Reason"].map(
                       (h) => (
-                        <th key={h} style={thS}>
-                          {h}
-                        </th>
+                        <TH key={h}>{h}</TH>
                       ),
                     )}
-                  </tr>
-                </thead>
-                <tbody>
+                  </TR>
+                </THead>
+                <TBody>
                   {movements.map((m) => (
-                    <tr key={m.id}>
-                      <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
+                    <TR key={m.id}>
+                      <TD className="text-ink-secondary">
                         {m.createdAt
                           ? new Date(m.createdAt).toLocaleDateString()
                           : "—"}
-                      </td>
-                      <td style={tdS}>
-                        <span
-                          style={sBadge(
-                            m.movementType === "usage"
-                              ? `${D.teal}22`
-                              : m.movementType === "damaged_lost"
-                                ? `${D.red}22`
-                                : `${D.green}22`,
+                      </TD>
+                      <TD>
+                        <Badge
+                          tone={
                             m.movementType === "damaged_lost"
-                              ? D.red
-                              : m.movementType === "usage"
-                                ? D.teal
-                                : D.green,
-                          )}
+                              ? "alert"
+                              : "neutral"
+                          }
                         >
                           {m.movementType}
-                        </span>
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
+                        </Badge>
+                      </TD>
+                      <TD>
                         {m.quantity ?? "—"} {m.unit || ""}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 12,
-                        }}
-                      >
+                      </TD>
+                      <TD>
                         {m.stockBefore ?? "—"} → {m.stockAfter ?? "—"}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
+                      </TD>
+                      <TD className="text-ink-secondary">
                         {m.customerName ||
                           m.metadata?.reason ||
                           m.metadata?.note ||
                           "—"}
-                      </td>
-                    </tr>
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>
-              </table>{" "}
+                </TBody>
+              </Table>{" "}
             </div>
           )}
-        </div>{" "}
+        </Card>{" "}
       </div>{" "}
     </div>
   );
