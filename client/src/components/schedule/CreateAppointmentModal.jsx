@@ -2218,37 +2218,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   );
   const appointmentDiscountOptions = presetsStackableWith(lineLaneRows(-1), { spansAll: true })
     .filter((d) => APPOINTMENT_DISCOUNT_TYPES.includes(d.discount_type));
-  // Both catalog scope fields gate a line the same way appointmentDiscountReaches
-  // checks it below — a preset can restrict by exact service key AND/OR by
-  // category (e.g. a lawn-category appointment discount with no key filter).
-  // Checking key only (Codex r2 P1) meant a split-cadence booking's
-  // category-scoped discount picked appointmentSubmitGroups[0] by default —
-  // whichever cadence happened to book first — and never reached the group
-  // it actually applied to.
-  const lineMatchesDiscountFilters = (svc, discount, scopeKey) => {
-    const key = discount.service_key_filter || scopeKey || null;
-    if (key && key !== lineServiceKey(svc)) return false;
-    if (discount.service_category_filter && discount.service_category_filter !== (svc?.category || svc?.serviceCategory || null)) return false;
-    return true;
-  };
+  // Group selection and per-line eligibility both go through the exported
+  // lineMatchesDiscountScope / resolveAppointmentDiscountGroup above — one
+  // scope test, so a line can never be eligible for a discount that was
+  // posted to a different group (Codex r2 P1).
   const appointmentDiscountGroup = (() => {
     if (!appointmentDiscount || services.length === 0) return null;
-    const groups = appointmentSubmitGroups;
-    const hasScopeFilter = !!(appointmentDiscount.service_key_filter || appointmentDiscountScopeKey || appointmentDiscount.service_category_filter);
-    // No scope filter at all → the discount is appointment-wide; keep the
-    // pre-existing default of the first group. Otherwise find the group
-    // that actually holds an eligible line — else null (no group to post it
-    // with), same as the prior key-only fallback semantics.
-    const target = hasScopeFilter
-      ? groups.find((group) => group.lines.some((svc) => lineMatchesDiscountFilters(svc, appointmentDiscount, appointmentDiscountScopeKey)))
-      : groups[0];
-    return target ? { key: groupKey(target), lines: target.lines, split: groups.length > 1 } : null;
+    const target = resolveAppointmentDiscountGroup(
+      appointmentSubmitGroups, appointmentDiscount, appointmentDiscountScopeKey, lineServiceKey,
+    );
+    return target
+      ? { key: groupKey(target), lines: target.lines, split: appointmentSubmitGroups.length > 1 }
+      : null;
   })();
   const appointmentDiscountReaches = (svc) => {
     if (!appointmentDiscount) return false;
     // Only the group this discount actually rides.
     if (appointmentDiscountGroup && !appointmentDiscountGroup.lines.includes(svc)) return false;
-    if (!lineMatchesDiscountFilters(svc, appointmentDiscount, appointmentDiscountScopeKey)) return false;
+    if (!lineMatchesDiscountScope(svc, appointmentDiscount, appointmentDiscountScopeKey, lineServiceKey)) return false;
     // A percentage never reaches a percent-excluded line (termite bond,
     // palm injection, ...). An unknown catalog (the fetch failed) withholds
     // the line rather than previewing dollars the server will refuse —
@@ -2814,17 +2801,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // discount. Gate-off single-discount saves are unaffected: the picker (and
   // so appointmentDiscountState) only ever gets a value while stackingEnabled
   // is true in the first place.
-  const stackingUnconfirmedBlocksSave = !stackingKnown && !!appointmentDiscountState;
+  const stackingUnconfirmedBlocksSave = stackingSaveBlocked({
+    known: stackingKnown, appointmentDiscountSelected: appointmentDiscountState,
+  });
   const retryPercentExclusions = () => setPercentExclusionsAttempt((n) => n + 1);
   // A percentage/variable_percentage appointment discount previews against
   // the live exclusion catalog; if that fetch hasn't resolved, every line
   // reads excluded in the preview (appointmentDiscountReaches) but nothing
   // else stopped Save, so the persisted total (server has its own catalog)
   // could differ from what was shown.
-  const isPercentAppointmentDiscount = !!appointmentDiscount && (
-    appointmentDiscount.discount_type === 'percentage' || appointmentDiscount.discount_type === 'variable_percentage'
-  );
-  const percentExclusionsBlockSave = isPercentAppointmentDiscount && percentExcludedKeys === null;
+  const percentExclusionsBlockSave = percentExclusionsSaveBlocked({
+    discount: appointmentDiscount, excludedKeys: percentExcludedKeys,
+  });
   const discountSaveBlockedReason = stackingUnconfirmedBlocksSave
     ? 'Could not confirm the discount-stacking status — retry before saving.'
     : (percentExclusionsBlockSave

@@ -1372,7 +1372,7 @@ const {
 const { anchorSoleProperty } = require('../services/customer-properties');
 // The one stacking rule (owner 2026-09-11): fixed credits first, then
 // percentages compounding on the remainder; one WaveGuard tier per visit.
-const { stackVisitDiscounts, stackDiscounts, assertStackGroups } = require('../services/discount-stack');
+const { stackVisitDiscounts, stackDiscounts, assertStackGroups, isVariableOrCustomDiscountPreset } = require('../services/discount-stack');
 
 function clearAppointmentDiscountCatalogFields(target, cols) {
   if (!target || !cols) return;
@@ -2921,15 +2921,6 @@ function moneyValuesDiffer(a, b) {
 // trust the STORED amount as-is (Codex #4405 r2 P1: a stored custom 10% on
 // $100 plus a new $30 fixed appointment discount must preview AND save
 // $63, not collapse to a frozen $10 credit and save $60).
-function isVariableOrCustomDiscountPreset(catalogRow) {
-  const dbAmount = Number(catalogRow?.amount);
-  return catalogRow?.discount_type === 'variable_amount'
-    || catalogRow?.discount_type === 'variable_percentage'
-    || (catalogRow?.discount_type === 'percentage'
-      && (catalogRow?.discount_key === 'custom_percent' || !(dbAmount > 0)))
-    || (catalogRow?.discount_type === 'fixed_amount'
-      && (catalogRow?.discount_key === 'custom_dollar' || !(dbAmount > 0)));
-}
 async function reconstructPrimaryLineSlot({ stacking, existing, conn = db }) {
   if (stacking && existing?.line_discount_type
     && existing.line_discount_amount != null && existing.line_discount_amount !== ''

@@ -93,7 +93,13 @@ export function useDiscountStackingState() {
       alive = false;
     };
   }, [attempt]);
-  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+  // An operator-initiated retry is an explicit "try again now" — it clears
+  // the failure backoff so the next probe actually hits the API instead of
+  // returning the same unknown for the rest of the window.
+  const retry = useCallback(() => {
+    lastErrorAt = null;
+    setAttempt((n) => n + 1);
+  }, []);
   return { enabled: state.enabled, known: state.known, retry };
 }
 

@@ -35,6 +35,33 @@ function isFixedDiscountType(type) {
   return type === 'fixed_amount' || type === 'variable_amount';
 }
 
+/**
+ * Is this catalog row a VARIABLE/CUSTOM preset — one whose real amount the
+ * operator types per use, so the catalog's own `amount` stays 0 (or a
+ * placeholder) and the entered value is stored on the visit / line item?
+ * The variable_* types, plus the seeded custom_percent / custom_dollar
+ * rows and any row of a fixed type left with no positive amount.
+ *
+ * One predicate because two surfaces have to agree on it: the invoice
+ * service reads the operator value off the line item (lineItemDiscountTerm)
+ * and the schedule route reconstructs an untouched stored slot from it
+ * (reconstructPrimaryLineSlot). They disagreed until Codex #4405 r2 — the
+ * route required the catalog amount to EQUAL the stored amount before it
+ * would trust the term, which a custom preset can never satisfy, so a
+ * stored custom 10% collapsed into a flat dollar credit on restack.
+ */
+function isVariableOrCustomDiscountPreset(row) {
+  const amount = Number(row?.amount) || 0;
+  return (
+    row?.discount_type === 'variable_percentage' ||
+    row?.discount_type === 'variable_amount' ||
+    (row?.discount_type === 'percentage' &&
+      (row?.discount_key === 'custom_percent' || !(amount > 0))) ||
+    (row?.discount_type === 'fixed_amount' &&
+      (row?.discount_key === 'custom_dollar' || !(amount > 0)))
+  );
+}
+
 function cents(value) {
   return Math.round((Number(value) || 0) * 100) / 100;
 }
@@ -352,6 +379,7 @@ function assertStackGroups(rows) {
 module.exports = {
   isPercentDiscountType,
   isFixedDiscountType,
+  isVariableOrCustomDiscountPreset,
   stackDiscounts,
   stackVisitDiscounts,
   stackDocumentDiscounts,
