@@ -175,7 +175,15 @@ async function main() {
           body = {
             summary: {},
             policy: { enabled: true },
-            payouts: [],
+            payouts: url.searchParams.get("days") === "7" ? [{
+              id: "payout-synthetic",
+              technicianName: "Synthetic Technician",
+              customerName: "Taylor Example",
+              status: "earned",
+              amountCents: 500,
+              source: "google_review",
+              earnedAt: "2026-09-10T12:00:00.000Z",
+            }] : [],
             period: {},
           };
         else if (
@@ -261,6 +269,8 @@ async function main() {
       assert.notEqual(await pipelineBadge.evaluate((node) => getComputedStyle(node).color), "rgb(255, 255, 255)");
 
       await page.getByRole("button", { name: "Outreach", exact: true }).click();
+      await page.getByText("Review Routing", { exact: true }).waitFor();
+      await capture("outreach-dashboard");
       await page
         .getByRole("button", { name: /Pipeline/ })
         .last()
@@ -312,9 +322,13 @@ async function main() {
         page.waitForResponse((res) => res.url().endsWith("/incentives?days=7")),
         page.getByRole("combobox").selectOption("7"),
       ]);
+      await page.getByText("Synthetic Technician", { exact: true }).waitFor();
+      await capture("incentives-ledger");
       await page.getByRole("button", { name: "GBP", exact: true }).click();
       await page.getByText("Waves Pest Control", { exact: true }).waitFor();
       await capture("gbp");
+      const rating = page.getByRole("button", { name: /Sarasota/ }).getByText("4.9", { exact: true });
+      assert.ok(await rating.evaluate((node) => getComputedStyle(node).color !== getComputedStyle(node.closest("button")).backgroundColor), "selected location rating must contrast with its button");
       await page.getByRole("button", { name: "Profile", exact: true }).click();
       await page.getByLabel("Business Name", { exact: true }).fill("Waves Pest Control");
       await capture("gbp-profile");

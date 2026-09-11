@@ -794,7 +794,7 @@ function fmtDateTime(value) {
 }
 function PolicyInfoCard({ Icon, label, value, sub, color }) {
   return (
-    <Card className="p-[14px] grid gap-[10px]">
+    <Card className="p-[14px] grid grid-cols-[20px_minmax(0,1fr)] items-start gap-[10px]">
       <Icon size={18} className="mt-[1px]" />
       <div className="min-w-[0px]">
         <div className="text-ui-body font-medium text-ink-secondary mb-[4px]">
@@ -1150,7 +1150,7 @@ function ReviewIncentivesPanel() {
         </div>
       ) : (
         <>
-          <div className="grid gap-[10px] mb-[14px]">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-[10px] mb-[14px]">
             <PolicyInfoCard
               Icon={Award}
               label="Program active since"
@@ -1172,7 +1172,7 @@ function ReviewIncentivesPanel() {
           </div>
 
           {noEligiblePostLaunchReviews && (
-            <Card className="grid gap-[10px] p-[14px] mb-[14px]">
+            <Card className="grid grid-cols-[22px_minmax(0,1fr)] items-start gap-[10px] p-[14px] mb-[14px]">
               <CheckCircle2 size={18} className="mt-[1px]" />
               <div>
                 <div className="text-ui-body font-medium text-zinc-900">
@@ -1266,7 +1266,7 @@ function ReviewIncentivesPanel() {
                     const isOpen = activeRepairId === review.id;
                     return (
                       <Card key={review.id} className="p-[12px]">
-                        <div className="grid gap-[10px] items-center">
+                        <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-[10px] items-center">
                           <div>
                             <div className="flex items-center gap-[8px] flex-wrap">
                               <span className="text-ui-body font-medium text-zinc-900">
@@ -1400,7 +1400,7 @@ function ReviewIncentivesPanel() {
             )}
           </Card>
 
-          <div className="grid gap-[14px]">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(260px,0.8fr)_minmax(0,1.4fr)] items-start gap-[14px]">
             <Card className="p-[16px]">
               <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
                 Leaderboard
@@ -1414,7 +1414,7 @@ function ReviewIncentivesPanel() {
                   {data.leaderboard.map((row, index) => (
                     <div
                       key={row.technicianId || index}
-                      className="grid gap-[10px] items-center border-bottom border-hairline border-zinc-200"
+                      className="grid grid-cols-[24px_1fr_auto] gap-[10px] items-center py-[10px] border-b border-hairline border-zinc-200"
                     >
                       <div className="font-medium text-ink-secondary">
                         {index + 1}
@@ -1460,7 +1460,7 @@ function ReviewIncentivesPanel() {
               ) : (
                 <div className="grid gap-[8px]">
                   {payouts.slice(0, 50).map((p) => (
-                    <Card key={p.id} className="grid items-center">
+                    <Card key={p.id} className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-1.5 md:gap-3 items-center px-3 py-2.5">
                       <div>
                         <div className="text-ui-body font-medium text-zinc-900">
                           {p.technicianName}

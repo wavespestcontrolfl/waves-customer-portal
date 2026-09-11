@@ -273,11 +273,11 @@ export default function GBPManagement() {
             <div className="text-ui-body font-medium">{l.name}</div>{" "}
             <div className="flex items-center gap-[6px] mt-[4px]">
               {l.rating && (
-                <span className="text-ui-body font-medium text-zinc-900">
+                <span className="text-ui-body font-medium">
                   {l.rating}
                 </span>
               )}
-              <span className="text-ui-body text-ink-secondary">
+              <span className="text-ui-body">
                 ({l.totalReviews || 0})
               </span>
               {l.pendingUpdates > 0 && (
@@ -1012,7 +1012,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
     setSaving(false);
   };
   return (
-    <div className="grid gap-[16px]">
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-[16px]">
       {/* Current services */}
       <Card className="p-5 mb-3">
         {" "}
@@ -1133,7 +1133,7 @@ function PhotosTab({ loc, gbp }) {
           No photos found
         </Card>
       ) : (
-        <div className="grid gap-[12px]">
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-[12px]">
           {photos.map((photo, i) => (
             <div
               key={i}
@@ -1240,7 +1240,7 @@ function UpdateQueueTab({
                     {new Date(u.detected_at).toLocaleString()}
                   </span>{" "}
                 </div>{" "}
-                <div className="grid gap-[8px] text-ui-body">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-[8px] text-ui-body">
                   {" "}
                   <div className="p-[10px] rounded-md border-hairline border-zinc-200">
                     {" "}
@@ -1642,5 +1642,5 @@ function NotificationsTab({ showToast }) {
 
 // ── Shared layout helpers ──
 function FieldGroup({ children }) {
-  return <div className="grid gap-[12px]">{children}</div>;
+  return <div className="grid grid-cols-1 md:grid-cols-2 gap-[12px]">{children}</div>;
 }

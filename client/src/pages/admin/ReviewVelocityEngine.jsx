@@ -1110,11 +1110,14 @@ function Dashboard({
           <div className="text-ui-body font-medium">Review Pipeline</div>{" "}
           <SectionLabel>Last 90 Days</SectionLabel>{" "}
         </div>{" "}
-        <div className="grid">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
           {kpis.map((k) => (
-            <Card key={k.label} className="relative overflow-hidden">
+            <Card
+              key={k.label}
+              className="relative overflow-hidden px-[10px] py-3 sm:px-[18px] sm:py-4"
+            >
               {" "}
-              <div className="absolute h-[2px]" />{" "}
+              <div className="absolute inset-x-0 top-0 h-[2px] bg-zinc-900" />{" "}
               <div className="text-[28px] font-medium mb-[2px]">{k.value}</div>{" "}
               <div className="text-ui-body font-medium text-zinc-900 mb-[4px]">
                 {k.label}
@@ -1129,14 +1132,19 @@ function Dashboard({
         <div className="text-ui-body font-medium mb-[10px]">
           Conversion Funnel
         </div>
-        <div className="grid gap-[12px]">
+        <div className="grid grid-cols-1 gap-3 sm:[grid-template-columns:1.4fr_1fr]">
           {/* Funnel bars */}
           <Card className="p-[16px]">
             {funnelStages.map((s, i) => {
               const top = funnelStages[0].value || 0;
               const pct = top > 0 ? Math.round((s.value / top) * 100) : 0;
               return (
-                <div key={s.label}>
+                <div
+                  key={s.label}
+                  className={
+                    i < funnelStages.length - 1 ? "mb-[10px]" : undefined
+                  }
+                >
                   <div className="flex justify-between mb-[4px]">
                     <span className="text-ui-body font-medium text-zinc-900">
                       {s.label}
@@ -1173,7 +1181,7 @@ function Dashboard({
                 {byChannel.map((ch) => (
                   <div
                     key={ch.channel}
-                    className="flex-[1] min-w-[90px] bg-white rounded-md"
+                    className="flex-[1] min-w-[90px] bg-white rounded-md px-[10px] py-2"
                   >
                     <div className="text-ui-body text-zinc-900">
                       {ch.channel}
@@ -1196,7 +1204,7 @@ function Dashboard({
               byTemplate.map((t) => (
                 <div
                   key={t.templateKey}
-                  className="flex justify-between text-ui-body border-bottom border-hairline border-zinc-200"
+                  className="flex justify-between border-b border-hairline border-zinc-200 py-[3px] text-ui-body"
                 >
                   <span className="text-zinc-900">{t.templateKey}</span>
                   <span className="text-zinc-900">
@@ -1206,7 +1214,7 @@ function Dashboard({
                 </div>
               ))
             )}
-            <div className="flex gap-[12px] mt-[10px]">
+            <div className="mt-[10px] flex flex-wrap gap-3">
               <div className="text-ui-body text-zinc-900">
                 Active cadences:{" "}
                 <span className="font-medium text-zinc-900">
@@ -1236,7 +1244,7 @@ function Dashboard({
           {" "}
           <div className="text-ui-body font-medium">Review Routing</div>{" "}
         </div>{" "}
-        <div className="grid">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-3">
           {GBP_LOCATIONS.map((loc) => {
             const locCusts = customers.filter((c) => c.gbpId === loc.id);
             // Reviewed + asked now come from real analytics (audit O1), not the
@@ -1258,10 +1266,10 @@ function Dashboard({
               <Card
                 key={loc.id}
                 onClick={() => setPage("pipeline")}
-                className="cursor-pointer"
+                className="cursor-pointer p-[14px] sm:p-[18px]"
               >
                 {" "}
-                <div className="flex justify-between items-start">
+                <div className="mb-[10px] flex items-start justify-between sm:mb-[14px]">
                   {" "}
                   <div className="text-ui-body font-medium">
                     {loc.name}
@@ -1270,7 +1278,7 @@ function Dashboard({
                 </div>
                 {/* Stat strip — 2×2 on phones, 4-col single row on desktop so each
                     number gets more horizontal space and reads cleanly at a glance. */}
-                <div className="grid gap-[8px]">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {[
                     {
                       v: locReviewed,
@@ -1289,7 +1297,10 @@ function Dashboard({
                       l: "Conv Rate",
                     },
                   ].map((s) => (
-                    <div key={s.l} className="text-center bg-white rounded-md">
+                    <div
+                      key={s.l}
+                      className="rounded-md bg-white px-1 py-2 text-center"
+                    >
                       {" "}
                       <div className="text-ui-body font-medium text-zinc-900">
                         {s.v}
@@ -1306,7 +1317,7 @@ function Dashboard({
                   rel="noopener noreferrer"
                   onClick={(e) => e.stopPropagation()}
                   title={loc.reviewUrl}
-                  className="inline-block text-ui-body text-zinc-900 mt-[10px] border-bottom border-hairline border-zinc-200"
+                  className="mt-[10px] inline-block border-b border-dotted border-zinc-200 text-ui-body text-zinc-900"
                 >
                   Open review link
                 </a>{" "}
@@ -1459,7 +1470,7 @@ function Pipeline({
       {" "}
       <div className="text-ui-body font-medium mb-[0px]">Review Pipeline</div>
       {/* Filter bar */}
-      <div className="flex gap-[8px] border-bottom border-hairline border-zinc-200 mb-[12px] flex-wrap items-center">
+      <div className="mb-[12px] flex flex-wrap items-center gap-2 border-b border-hairline border-zinc-200 py-3">
         {" "}
         <Input
           value={pipeSearch}
@@ -1481,7 +1492,7 @@ function Pipeline({
       </div>
       {/* Batch bar */}
       {selectedIds.size > 0 && (
-        <Card className="flex gap-[8px] items-center mb-[12px]">
+        <Card className="mb-[12px] flex items-center gap-2 px-4 py-[10px]">
           {" "}
           <span className="text-ui-body font-medium text-zinc-900">
             {selectedIds.size} selected
@@ -1754,10 +1765,10 @@ function ActivityList({ log, max }) {
         return (
           <div
             key={i}
-            className="flex gap-[10px] border-bottom border-hairline border-zinc-200"
+            className="flex gap-[10px] border-b border-hairline border-zinc-200 py-[10px]"
           >
             {" "}
-            <div className="w-[28px] h-[28px] rounded-sm grid text-ui-body font-medium">
+            <div className="grid h-[28px] w-[28px] shrink-0 place-items-center rounded-sm text-ui-body font-medium">
               {glyph}
             </div>{" "}
             <div className="flex-[1] min-w-[0px]">
@@ -1919,7 +1930,7 @@ function CustomerDrawer({
               aria-label="Review readiness score"
             />{" "}
           </div>{" "}
-          <div className="grid gap-[4px] text-ui-body">
+          <div className="grid grid-cols-2 gap-1 text-ui-body">
             {[
               {
                 l: "Sentiment",
@@ -1958,7 +1969,7 @@ function CustomerDrawer({
                 v: c.lastAsked || "Never",
               },
             ].map((r) => (
-              <div key={r.l} className="flex justify-between">
+              <div key={r.l} className="flex justify-between py-1">
                 {" "}
                 <span className="text-zinc-900">{r.l}</span>{" "}
                 <span className="font-medium">{r.v}</span>{" "}
@@ -1983,7 +1994,7 @@ function CustomerDrawer({
             c.jobs.map((j, i) => (
               <div
                 key={i}
-                className="border-bottom border-hairline border-zinc-200 text-ui-body"
+                className="border-b border-hairline border-zinc-200 py-[6px] text-ui-body"
               >
                 {" "}
                 <div className="flex justify-between">
@@ -2009,7 +2020,7 @@ function CustomerDrawer({
         <DrawerSection title="Recent SMS">
           {c.sms.length > 0 ? (
             c.sms.slice(-5).map((m, i) => (
-              <Card key={i} className="mb-[4px] text-ui-body">
+              <Card key={i} className="mb-1 px-[10px] py-2 text-ui-body">
                 {" "}
                 <div className="text-ui-body text-zinc-900 mb-[2px]">
                   {m.date} {m.dir === "out" ? "→ Sent" : "← Received"}
@@ -2136,7 +2147,7 @@ function DrawerSection({ title, children }) {
   return (
     <div className="mb-[16px]">
       {" "}
-      <div className="text-ui-body font-medium text-zinc-900 mb-[8px] pb-[4px] border-bottom border-hairline border-zinc-200">
+      <div className="mb-2 border-b border-hairline border-zinc-200 pb-1 text-ui-body font-medium text-zinc-900">
         {title}
       </div>
       {children}
@@ -2210,7 +2221,7 @@ function BatchModal({
           already-reviewed flag, 30-day cooldown, and 3-request cap.
         </p>
         {sending && (
-          <div className="text-ui-body text-zinc-900 bg-white rounded-md mt-[8px]">
+          <div className="mt-2 rounded-md bg-white px-3 py-[10px] text-ui-body text-zinc-900">
             Sending… {progress.done}/{progress.total}
           </div>
         )}
