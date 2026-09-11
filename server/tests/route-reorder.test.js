@@ -26,13 +26,23 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn();
   return fn;
 });
+// Lazily required by runScheduleQualityAlertsOnly — no existing test in this
+// file sets GATE_SCHEDULE_QUALITY_ALERTS, so the real module is never
+// otherwise exercised here.
+jest.mock('../services/scheduling/quality-alerts', () => ({
+  refreshScheduleQualityAlerts: jest.fn(),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
-const { runRouteReorder, runRouteRepairAfterChange, runRouteReorderIfEnabled, recordSkippedTick } = require('../services/route-reorder');
+const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
+const {
+  runRouteReorder, runRouteRepairAfterChange, runRouteReorderIfEnabled, recordSkippedTick,
+  runScheduleQualityAlertsOnly,
+} = require('../services/route-reorder');
 
 // Fixed clock: 2026-08-13 04:10 ET (08:10Z). Band = 2026-08-14 .. 2026-08-19.
 const NOW = new Date('2026-08-13T08:10:00Z');
@@ -818,4 +828,50 @@ test('GATE_ROUTE_REORDER off ⇒ hard no-op (no queries, no ledger)', async () =
   } finally {
     if (orig !== undefined) process.env.GATE_ROUTE_REORDER = orig;
   }
+});
+
+// With GATE_ROUTE_REORDER off, runRouteReorder (and the nightly alert
+// reconciliation folded into it) never runs — so with the measurement +
+// alert gates ON, existing route-quality defects never got an initial card
+// and no card ever expired. runScheduleQualityAlertsOnly is the standalone
+// nightly trigger for exactly that case (codex #4295 r2 P2).
+describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the nightly reconciliation)', () => {
+  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'];
+  let saved;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
+    for (const g of GATES) delete process.env[g];
+  });
+  afterEach(() => {
+    for (const g of GATES) {
+      if (saved[g] === undefined) delete process.env[g];
+      else process.env[g] = saved[g];
+    }
+  });
+
+  test('either gate off ⇒ gate_off, no reconciliation call', async () => {
+    const res = await runScheduleQualityAlertsOnly(NOW);
+    expect(res).toEqual({ status: 'gate_off' });
+    process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+    const res2 = await runScheduleQualityAlertsOnly(NOW);
+    expect(res2).toEqual({ status: 'gate_off' });
+    expect(refreshScheduleQualityAlerts).not.toHaveBeenCalled();
+  });
+
+  test('both gates on ⇒ reconciles the same six-date band the full nightly pass would use', async () => {
+    process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
+    refreshScheduleQualityAlerts.mockResolvedValue({ status: 'reconciled', created: 1, resolved: 2 });
+
+    const res = await runScheduleQualityAlertsOnly(NOW, db);
+
+    expect(res).toEqual({ status: 'reconciled', created: 1, resolved: 2 });
+    expect(refreshScheduleQualityAlerts).toHaveBeenCalledTimes(1);
+    expect(refreshScheduleQualityAlerts).toHaveBeenCalledWith({ dates: BAND, now: NOW }, db);
+    // No repair, no distance optimization, no planner-runs ledger row — this
+    // path skips everything runRouteReorder's writer side owns.
+    expect(dayStopsQuery).not.toHaveBeenCalled();
+    expect(ledgerInserts).toHaveLength(0);
+  });
 });

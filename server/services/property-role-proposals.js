@@ -611,7 +611,11 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
   let applied = 0;
   let skipped = 0;
 
-  // LOCK ORDER: the shared customer-comms lock FIRST (its contract: take
+  // Callers pre-acquire property-preferences before comms/customer locks.
+  // Reentrant here for direct callers; the primary flip later moves sprinkler
+  // settings under this same advisory lock (also used by customer merges).
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+  // LOCK ORDER: property-preferences, then the shared customer-comms lock (take
   // it before this customer's row lock, as early as the id is known —
   // codex #3418 r11: every scheduled_services INSERT holds it, so the
   // flip's pin-and-mirror serializes with appointment creators and the
@@ -620,7 +624,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
   // address save uses (customer → primary property; codex #3418 r5).
   // Reentrant: the route pre-acquires both in this same transaction.
   await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
-  await trx('customers').where({ id: customerId }).forUpdate().first();
+  const customer = await trx('customers').where({ id: customerId }).forUpdate().first();
 
   // PREFLIGHT a batch that carries a primary flip (codex #3418 r13): the
   // proposals execute sequentially, so a flip that would skip on stale
@@ -669,6 +673,10 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       }
     }
     if (!viable) return { applied: 0, skipped: proposals.length };
+    // Freeze before companion occupancy writes too: a busy billing row must
+    // roll back the entire reviewed batch and leave the triage card open.
+    // Stale, occupancy-only and already-applied batches do not freeze invoices.
+    if (!target.is_primary) await require('./invoice-address').freezeCustomerInvoiceAddresses(trx, customer);
   }
 
   for (const p of proposals) {
@@ -1104,6 +1112,7 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
 
 module.exports = {
   REASON_CODE,
+  TERMINAL_VISIT_STATUSES,
   classifiedPropertiesFromExtraction,
   buildPropertyRoleProposals,
   stagePropertyRoleReview,

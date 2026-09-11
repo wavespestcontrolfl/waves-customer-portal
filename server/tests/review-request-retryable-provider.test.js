@@ -100,7 +100,7 @@ describe('_applyOutreachSendResult settles the outreach step from deliveryOutcom
     expect(db).toHaveBeenCalledWith('review_requests');
     expect(update).toHaveBeenCalledWith({ status: 'deferred' });
     expect(outcome).toEqual({
-      ok: false, deferred: true, channel: 'sms', requestId: 'req-uncertain', code: 'PROVIDER_FAILURE',
+      ok: false, deferred: true, uncertain: true, channel: 'sms', requestId: 'req-uncertain', code: 'PROVIDER_FAILURE',
     });
   });
 

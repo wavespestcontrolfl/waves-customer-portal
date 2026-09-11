@@ -114,6 +114,11 @@ const SUGGEST_WORKFLOW = 'sms_house_voice_suggest';
 const SUGGEST_AGENT_NAME = 'House Voice Drafter';
 const SUGGEST_DECISION_VERSION = 'house_voice_suggest_v1';
 const EXPIRY_HOURS = 48;
+// How long recoverSuggestionHoldingStates protects a reservation flagged
+// provider_outcome_uncertain before treating it as an ordinary orphan.
+// Bounded terminal settlement, not a resend: reopening only returns the
+// linked decision(s) to pending_review for operator visibility.
+const UNCERTAIN_RESERVATION_HOLD_HOURS = 24;
 
 // Human-authored/approved outbounds that really left the system — the same
 // ground-truth allowlists the shadow judge pairs against (sms-shadow-judge).
@@ -797,12 +802,16 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
   });
 }
 
-async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], heldDecisionIds = parkedDecisionIds, reservationId = null, sent, reviewedBy, reason }) {
+async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], heldDecisionIds = parkedDecisionIds, reservationId = null, sent, ambiguous = false, reviewedBy, reason }) {
   // tech-line deliberately passes [] instead of its reserved parked ids for
-  // an ambiguous provider result. Retain that linked marker; a definite miss
-  // passes the ids and reopens them below, while a no-card reservation has no
-  // state to protect and can be removed.
-  const uncertain = !sent && reservationId && parkedDecisionIds.length === 0 && heldDecisionIds.length > 0;
+  // an ambiguous provider result, and sets `ambiguous: true` explicitly —
+  // needed because a reservation created solely to fence an in-flight
+  // auto-send (autoSendEnabled with no suggestion yet published) has
+  // heldDecisionIds: [] too, so the two cases can't be told apart from the
+  // decision-id arrays alone. A definite miss passes the real ids and
+  // reopens them below; a no-card, non-ambiguous reservation has no state
+  // to protect and can be removed.
+  const uncertain = !sent && reservationId && parkedDecisionIds.length === 0 && (ambiguous || heldDecisionIds.length > 0);
   if (!sent) {
     await settleReplyHoldingReservation({ reservationId, uncertain });
     if (parkedDecisionIds.length) await reopenScheduledSuggestions({ decisionIds: parkedDecisionIds, reason: reason || 'The staff reply was not sent — suggestion reopened.' });
@@ -990,12 +999,23 @@ async function resolveSuggestionAfterSend({ decisionId, sentBody, reviewedBy }) 
  * suggest-mode gate, and a post-claim crash must never strand those rows
  * invisible.
  */
-async function recoverSuggestionHoldingStates({ orphanMinutes = 30 } = {}) {
+async function recoverSuggestionHoldingStates({ orphanMinutes = 30, uncertainReconciliationHours = UNCERTAIN_RESERVATION_HOLD_HOURS } = {}) {
   // Short window on purpose: legacy immediate-send claims and pre-reservation
   // failures can have no backing sms_log row. The NOT EXISTS check keeps queued
   // sends and linked reply reservations untouched while delivery is unresolved.
   // Runs from the 5-min scheduled-SMS cron as well as the nightly sweep.
   const cutoff = new Date(Date.now() - orphanMinutes * 60 * 1000);
+  // A reservation flagged provider_outcome_uncertain has no durable delivery
+  // evidence to wait on — Twilio never returned a SID, so the sent-linked
+  // sweep above can never resolve it. Protecting it indefinitely would hide
+  // the suggestion (and any auto-send claim) from every operator surface
+  // forever (codex P2). Bounded instead: it still blocks reopening while
+  // recent (the ordinary case — most uncertainty resolves within minutes),
+  // but past this window it is treated like any other orphan and reopened
+  // for operator visibility. Reopening only flips agent_decisions.status —
+  // it never touches sms_log or fires a send, so this cannot duplicate the
+  // text; it just stops silently swallowing a suggestion no one can act on.
+  const uncertainCutoff = new Date(Date.now() - uncertainReconciliationHours * 60 * 60 * 1000);
 
   // Sent-linked first: a 'scheduled' decision whose queued row already went
   // SENT means the cron crashed between its sent-update and resolution. The
@@ -1054,9 +1074,9 @@ async function recoverSuggestionHoldingStates({ orphanMinutes = 30 } = {}) {
           (sl.metadata->>'manual_send_reservation' IS DISTINCT FROM 'true'
             AND sl.metadata->>'auto_send_reservation' IS DISTINCT FROM 'true')
           OR sl.created_at >= ?
-          OR sl.metadata->>'provider_outcome_uncertain' = 'true'
+          OR (sl.metadata->>'provider_outcome_uncertain' = 'true' AND sl.updated_at >= ?)
         )
-    )`, [cutoff])
+    )`, [cutoff, uncertainCutoff])
     .update({
       status: 'pending_review',
       correction_note: 'Scheduled send never fired — suggestion reopened by the recovery sweep.',

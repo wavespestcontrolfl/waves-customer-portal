@@ -159,7 +159,7 @@ async function textFromLine({ req, ctx, target, body }) {
   // Ambiguous: retain the reservation and parked suggestions so recovery
   // cannot reopen a reply the customer may already hold. Provider evidence
   // can settle the held decisions later.
-  const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, reviewedBy: req.technicianId }).catch(() => {});
+  const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, ambiguous: true, reviewedBy: req.technicianId }).catch(() => {});
   let result;
   try {
     result = await sendCustomerMessage({

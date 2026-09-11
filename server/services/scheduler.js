@@ -1204,7 +1204,29 @@ function initScheduledJobs() {
     // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
     // takes effect on the next tick without a redeploy — matching the
     // documented gate contract and the service's own internal check.
-    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) {
+      // The reorder pass below is also the ONLY nightly trigger for the
+      // route-quality alert reconciliation folded into it — with reorder
+      // off, existing defects never got an initial card and no card ever
+      // expired, even with the measurement + alert gates on (codex #4295
+      // r2 P2). Run just that reconciliation, under its own gates, over the
+      // same six-date band; skip repair and distance optimization entirely.
+      // No runExclusive: unlike the reorder pass, this never writes
+      // route_order, so it needs none of that writer-serialization, and
+      // the reconciler already self-serializes on its own advisory lock.
+      try {
+        const { runScheduleQualityAlertsOnly } = require('./route-reorder');
+        const result = await runScheduleQualityAlertsOnly();
+        if (result.status === 'failed') {
+          logger.error('[route-reorder] quality-alerts-only cron run failed');
+        } else if (result.status === 'reconciled') {
+          logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
+        }
+      } catch (err) {
+        logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
+      }
+      return;
+    }
     logger.info('Running: Route-Tiers nightly reorder');
     try {
       // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap

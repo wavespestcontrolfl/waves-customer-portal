@@ -22,6 +22,7 @@ const {
 } = require('../services/messaging/review-ask-reservation');
 const ContextAggregator = require('../services/context-aggregator');
 const customerHealth = require('../services/customer-health');
+const signalDetector = require('../services/customer-intelligence/signal-detector');
 
 describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
   test('true only for the in-flight placeholder: status sending + the marker', () => {
@@ -32,6 +33,11 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
     for (const status of ['sent', 'delivered', 'failed', 'undelivered', 'blocked', 'canceled']) {
       expect(isUnresolvedReviewAskReservation({ status, metadata: { review_ask_reservation: true } })).toBe(false);
     }
+  });
+
+  test('a Communications reply reservation (manual_send_reservation) is the same kind of placeholder', () => {
+    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { manual_send_reservation: true } })).toBe(true);
+    expect(isUnresolvedReviewAskReservation({ status: 'sent', metadata: { manual_send_reservation: true } })).toBe(false);
   });
 
   test('false for an ordinary sending row without the marker', () => {
@@ -51,6 +57,7 @@ describe('excludeUnresolvedReviewAskReservations — SQL-level exclusion', () =>
     const { sql } = excludeUnresolvedReviewAskReservations(knex('sms_log')).toSQL();
     expect(sql).toContain("NOT (sms_log.status = 'sending'");
     expect(sql).toContain("sms_log.metadata->>'review_ask_reservation'");
+    expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
   });
 
   test('qualifies an aliased/joined table when given', () => {
@@ -214,5 +221,178 @@ describe('customer-health computeEngagementScore — outbound-count signal exclu
     const { details } = await customerHealth.computeEngagementScore('cust-eng-2');
     expect(details.smsOutbound).toBe(0);
     expect(details.daysSinceLastContact).toBeNull();
+  });
+});
+
+// A more general chainable sms_log fake for signal-detector's shape:
+// several `.where(field, [op,] val)` calls (not just an object/customer_id
+// pair), an optional exclusion whereRaw, then either `.count().first()` or
+// `.select(...)`/`.orderBy().limit()` as the terminal op.
+function makeGeneralSmsLogQuery(rows) {
+  let filtered = rows.slice();
+  let excludeReservations = false;
+  let order = null;
+  let limitN = null;
+  const applyMatch = (field, op, val) => (row) => {
+    const rv = row[field];
+    if (op === '>') return new Date(rv).getTime() > new Date(val).getTime();
+    if (op === '>=') return new Date(rv).getTime() >= new Date(val).getTime();
+    return rv === val;
+  };
+  const resolved = () => {
+    let out = filtered;
+    if (excludeReservations) out = out.filter((r) => !isUnresolvedReviewAskReservation(r));
+    if (order) {
+      const [col, dir] = order;
+      out = [...out].sort((a, b) => {
+        const diff = new Date(a[col]).getTime() - new Date(b[col]).getTime();
+        return dir === 'desc' ? -diff : diff;
+      });
+    }
+    if (limitN != null) out = out.slice(0, limitN);
+    return out;
+  };
+  const q = {
+    where(a, b, c) {
+      const [field, op, val] = c === undefined ? [a, '=', b] : [a, b, c];
+      filtered = filtered.filter(applyMatch(field, op, val));
+      return q;
+    },
+    whereRaw(sql) { if (/review_ask_reservation/.test(sql)) excludeReservations = true; return q; },
+    orderBy(col, dir = 'asc') { order = [col, dir]; return q; },
+    limit(n) { limitN = n; return q; },
+    select() { return q; },
+    count() { return { first: async () => ({ count: String(resolved().length) }) }; },
+    first() { return Promise.resolve(resolved()[0] || null); },
+    then(resolve, reject) { return Promise.resolve(resolved()).then(resolve, reject); },
+    catch(rej) { return q.then(undefined, rej); },
+  };
+  return q;
+}
+
+describe('signal-detector NO_RESPONSE_MULTIPLE — outbound count excludes only the unresolved reservation', () => {
+  function installDb(sms) {
+    db.mockImplementation((table) => (table === 'sms_log' ? makeGeneralSmsLogQuery(sms) : genericQuery([])));
+  }
+
+  test('4 unresolved reservations + 0 replies does NOT read as a churn signal', async () => {
+    installDb(Array.from({ length: 4 }, (_, i) => ({
+      customer_id: 'cust-sig-1', direction: 'outbound', status: 'sending',
+      metadata: { review_ask_reservation: true },
+      created_at: new Date(Date.now() - (i + 1) * 3600000),
+    })));
+
+    const signals = await signalDetector.detectSignals('cust-sig-1');
+    expect(signals.some((s) => s.signal_type === 'NO_RESPONSE_MULTIPLE')).toBe(false);
+  });
+
+  test('4 REAL outbound sends + 0 replies still reads as NO_RESPONSE_MULTIPLE', async () => {
+    installDb(Array.from({ length: 4 }, (_, i) => ({
+      customer_id: 'cust-sig-2', direction: 'outbound', status: 'sent',
+      created_at: new Date(Date.now() - (i + 1) * 3600000),
+    })));
+
+    const signals = await signalDetector.detectSignals('cust-sig-2');
+    expect(signals.some((s) => s.signal_type === 'NO_RESPONSE_MULTIPLE')).toBe(true);
+  });
+});
+
+describe('admin-communications ai-draft context — excludes only the unresolved reservation', () => {
+  // Route handlers aren't easily invoked in isolation here; this exercises
+  // the same excludeUnresolvedReviewAskReservations + limit(5) composition
+  // ai-draft applies to its recent-SMS-for-context query, the same
+  // SQL-level guarantee proven for excludeUnresolvedReviewAskReservations
+  // above (bounded window can't be displaced by an unresolved reservation).
+  test('a reservation newer than the last 5 real messages cannot occupy a context slot', async () => {
+    const real = Array.from({ length: 5 }, (_, i) => ({
+      from_phone: '+19415551234', to_phone: '+19415559999', direction: i % 2 === 0 ? 'inbound' : 'outbound',
+      message_body: `real-${i}`, created_at: new Date(Date.UTC(2026, 8, 1, 0, i)),
+    }));
+    const reservation = {
+      from_phone: '+19415559999', to_phone: '+19415551234', direction: 'outbound', status: 'sending',
+      message_body: 'Please leave a Google review: https://g.page/r/example/review',
+      metadata: { review_ask_reservation: true },
+      created_at: new Date(Date.UTC(2026, 8, 1, 1, 0)),
+    };
+    const knex = require('knex')({ client: 'pg' });
+    const rows = [...real, reservation];
+    // Build against a real knex query compiler (mirrors the module's own
+    // SQL-compile test above) to prove the exact composition ai-draft uses
+    // — where(...).orderBy(...).limit(5) — filters the reservation out at
+    // the SQL level before the LIMIT, then apply that same WHERE/ORDER/LIMIT
+    // in-memory against the fixture to assert the resulting row set.
+    const { sql } = excludeUnresolvedReviewAskReservations(
+      knex('sms_log').where(function () {
+        this.where('from_phone', 'like', '%5551234').orWhere('to_phone', 'like', '%5551234');
+      }),
+    ).orderBy('created_at', 'desc').limit(5).toSQL();
+    expect(sql).toContain("NOT (sms_log.status = 'sending'");
+
+    const matched = rows.filter((r) => !isUnresolvedReviewAskReservation(r))
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, 5);
+    expect(matched.length).toBe(5);
+    expect(matched.some((r) => r.message_body.includes('Please leave a Google review'))).toBe(false);
+    for (let i = 0; i < 5; i++) expect(matched.some((r) => r.message_body === `real-${i}`)).toBe(true);
+  });
+});
+
+describe('csr-coach verifyFollowUps — an unresolved reservation is not proof staff completed the follow-up', () => {
+  jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
+  const csrCoach = require('../services/csr/csr-coach');
+
+  function installDb({ sms, tasks }) {
+    const updates = [];
+    const smsQuery = (rows) => {
+      let excludeReservations = false;
+      let customerId;
+      const q = {
+        where(col, val) { if (col === 'customer_id') customerId = val; return q; },
+        whereRaw(sql) { if (/review_ask_reservation/.test(sql)) excludeReservations = true; return q; },
+        async first() {
+          let out = rows.filter((r) => r.customer_id === customerId && r.direction === 'outbound');
+          if (excludeReservations) out = out.filter((r) => !isUnresolvedReviewAskReservation(r));
+          return out[0] ?? null;
+        },
+      };
+      return q;
+    };
+    db.mockImplementation((table) => {
+      if (table === 'sms_log') return smsQuery(sms);
+      if (table === 'ai_follow_up_tasks') {
+        const q = {
+          whereIn: () => q,
+          where: (col, val) => (col === 'id' ? { update: async (patch) => { updates.push({ id: val, ...patch }); return 1; } } : q),
+          then: (resolve, reject) => Promise.resolve(tasks).then(resolve, reject),
+        };
+        return q;
+      }
+      if (table === 'customer_interactions') {
+        const q = { where: () => q, whereIn: () => q, first: async () => null };
+        return q;
+      }
+      return genericQuery([]);
+    });
+    return updates;
+  }
+
+  const task = { id: 'task-1', customer_id: 'cust-csr-1', created_at: new Date('2026-09-01T00:00:00Z') };
+
+  test('a still-unresolved reservation after the task does NOT verify it', async () => {
+    const updates = installDb({
+      tasks: [task],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') }],
+    });
+    await csrCoach.verifyFollowUps();
+    expect(updates.filter((u) => u.status === 'verified')).toHaveLength(0);
+  });
+
+  test('a real outbound text after the task still verifies it', async () => {
+    const updates = installDb({
+      tasks: [task],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') }],
+    });
+    await csrCoach.verifyFollowUps();
+    expect(updates.filter((u) => u.status === 'verified')).toHaveLength(1);
   });
 });
