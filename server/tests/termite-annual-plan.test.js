@@ -162,6 +162,16 @@ describe('annual plan — an issued plan survives the gate being unset (codex r2
     const fresh = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } })));
     expect(fresh.plan).toBe('quarterly');
   });
+
+  test('a stamp outside the admin validator bands cannot underprice or overprice the plan — the live constants price instead', () => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const forged = { plan: 'annual_protection', setupPerStation: 0.01, annualBase: 0.5, annualStep: 99999, bracketStations: 0, bracketFloor: 5000 };
+    const replayed = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } }, termitePricingKnobs: forged })));
+    // 15 stations: setup 15 × $30 (0.01 refused), annual $249 + $50 (0.5 refused, 99999 refused, 0/5000 refused).
+    expect(replayed.installation).toMatchObject({ kind: 'setup', price: 450 });
+    expect(replayed.annual).toBe(299);
+    expect(replayed.pricingKnobs).toMatchObject({ setupPerStation: 30, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10 });
+  });
 });
 
 describe('annual plan — DB overlay and admin validation', () => {

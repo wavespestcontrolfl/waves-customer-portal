@@ -4744,8 +4744,18 @@ function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultS
 // Annual protection plan basis (ruling A-1 = P1): the replayed snapshot's
 // plan constants where stamped, else the live TERMITE.annualPlan (which the
 // DB bridge may have overlaid from pricing_config.termite_annual_plan).
+// [key, default, min, max, integer] — the SAME bands the admin validator
+// enforces at write time (admin-pricing-config `termite_annual_plan`), so a
+// value outside them can only be a forged or corrupted stamp, never a saved
+// config; it is ignored and the live value (or default) prices instead.
+// The engine is the dollar authority: a replay stamp may pin WHICH saved
+// constants price a quote, never invent amounts the config could not hold.
 const TERMITE_ANNUAL_PLAN_KNOBS = Object.freeze([
-  ['setupPerStation', 30, true], ['annualBase', 249, true], ['annualStep', 50, false], ['bracketStations', 5, true], ['bracketFloor', 10, false],
+  ['setupPerStation', 30, 1, 200, false],
+  ['annualBase', 249, 1, 2000, false],
+  ['annualStep', 50, 0, 500, false],
+  ['bracketStations', 5, 1, 50, true],
+  ['bracketFloor', 10, 0, 100, true],
 ]);
 function resolveTermiteAnnualPlanBasis(knobs) {
   const live = TERMITE.annualPlan || {};
@@ -4755,8 +4765,11 @@ function resolveTermiteAnnualPlanBasis(knobs) {
     coverageMonths: Number(live.coverageMonths) > 0 ? Number(live.coverageMonths) : 12,
     label: live.label || 'Subterranean Termite Protection',
   };
-  for (const [key, fallback, strictlyPositive] of TERMITE_ANNUAL_PLAN_KNOBS) {
-    const accept = (v) => Number.isFinite(Number(v)) && (strictlyPositive ? Number(v) > 0 : Number(v) >= 0);
+  for (const [key, fallback, min, max, integer] of TERMITE_ANNUAL_PLAN_KNOBS) {
+    const accept = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= min && n <= max && (!integer || Number.isInteger(n));
+    };
     const stamped = snap && accept(snap[key]) ? Number(snap[key]) : null;
     basis[key] = stamped ?? (accept(live[key]) ? Number(live[key]) : fallback);
   }
