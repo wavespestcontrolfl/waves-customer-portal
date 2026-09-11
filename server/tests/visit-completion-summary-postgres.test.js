@@ -3266,6 +3266,30 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a handoff whose claim moves no row never reaches the provider', async () => {
+    // The pre-provider mark IS the send permit (audit P1): a row already
+    // `sending` under another sender, or suppressed/deleted since it was
+    // batched, must not produce a second provider request.
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'sms', triggered_by: 'auto' });
+    try {
+      let dispatched = false;
+      const verdict = await Summary.reviewSendThroughSummaryHandoff(
+        fixture.recordIds[0],
+        async () => { dispatched = true; return { ok: true }; },
+        undefined,
+        { requestId: askId },
+      );
+      expect(verdict).toMatchObject({ ok: false, code: 'REVIEW_CLAIM_LOST' });
+      expect(dispatched).toBe(false);
+      // The other sender's claim is left exactly as it was.
+      expect(await mockPg('review_requests').where({ id: askId }).first('status')).toMatchObject({ status: 'sending' });
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
   test('a review email handoff shares the packet row so a bounce reconciliation waits for the send', async () => {
     fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
@@ -3291,13 +3315,25 @@ postgres('visit summary recipient recovery', () => {
       return verdict.ok === true ? { sent: true } : { sent: false, blocked: true, code: verdict.code, reason: verdict.reason };
     });
     const request = { id: randomUUID(), service_record_id: fixture.recordIds[0], sequence_id: randomUUID(), sequence_step: 1 };
+    // The handoff's pre-provider claim is a real pending→sending transition,
+    // so the ask needs its durable row: a requestId that claims nothing is
+    // refused before the provider (audit P1).
+    await mockPg('review_requests').insert({ id: request.id, customer_id: fixture.customerId, service_record_id: request.service_record_id,
+      status: 'pending', token: randomUUID().replace(/-/g, ''), channel: 'email', triggered_by: 'auto' });
     const args = { request, customer: { id: fixture.customerId, first_name: 'Fixture' }, contact: { email: fixture.primaryEmail, name: 'Fixture' },
       reviewUrl: 'https://portal.test/r', techName: 'Fixture', manageRetryVia: 'sequence' };
     expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ ok: true, sent: true, channel: 'email' });
     expect(blockedCode).toBe('55P03');
-    // Once the bounce lands, the next email handoff parks the ask instead of sending it.
+    // Once the bounce lands, the next email handoff parks the ask instead of
+    // sending it. The row is put back to pending first: the send above
+    // consumed the claim, and a second attempt in production is a fresh
+    // pending ask, not a re-send of a claimed one.
+    await mockPg('review_requests').where({ id: request.id }).update({ status: 'pending', claimed_at: null });
     await mockPg.transaction(async (trx) => { await Summary.reconcileSummaryEmailBounce({ ...delivered, status: 'bounced' }, trx); });
     expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ ok: false, deferred: true, reason: 'visit_summary_parked', channel: 'email' });
+    // The suite's per-test cleanup drops the fixture customer; this ask row
+    // holds a foreign key onto it.
+    await mockPg('review_requests').where({ id: request.id }).del();
   });
 
   test('a bounce reconciliation serializes behind the packet close and alerts on the closed packet', async () => {

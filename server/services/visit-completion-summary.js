@@ -736,6 +736,15 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   const marked = requestId
     ? Number(await require('../models/marker-db')()('review_requests').where({ id: requestId, status: 'pending' })
       .update({ status: 'sending', claimed_at: new Date() })) : 0;
+  // A claim that moved NO row is not a send permit (audit P1): the row is
+  // already `sending` under another sender, or it was suppressed, parked or
+  // deleted between batching and here. Dispatching anyway lets two senders
+  // reach the provider for one ask, or sends an ask that has been withdrawn.
+  // The verdict is decided INSIDE the transaction below, after the summary
+  // check, so a park (which removes the row) still reports itself as a park
+  // rather than as a lost claim. Nothing is written either way — the row
+  // belongs to whoever holds the claim, or to the state that replaced it.
+  const claimLost = !!requestId && !marked;
   const release = () => database('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending', claimed_at: null });
   let dispatched = false;
   let verdict;
@@ -748,6 +757,9 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
         const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
           .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
         if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+      }
+      if (claimLost) {
+        return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is already being sent or is no longer pending' };
       }
       dispatched = true;
       return dispatch(trx);

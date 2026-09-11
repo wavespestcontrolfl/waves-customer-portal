@@ -224,6 +224,18 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
+    // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
+    // read at the top of this function can be overtaken by a Bill-To
+    // assignment that stamps the withdrawal, and only `status` is re-checked
+    // at the paid flip below. The self-pay fence does not cover it either —
+    // that resolver reads this invoice's own representative service, while the
+    // payer may sit on another billed member of the same packet, and it is
+    // skipped entirely when the caller does not require self-pay.
+    try {
+      assertInvoiceCollectible(locked);
+    } catch (err) {
+      return { noLongerCollectible: err.message };
+    }
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
@@ -351,6 +363,9 @@ async function recordManualPayment(id, {
   }
   if (updatedInvoice?.visitNeverRan) {
     throw refusal(409, `This invoice's visit is ${updatedInvoice.visitNeverRan.replace('_', '-')} — nothing was recorded. Void or reissue the invoice, or record the money as account credit.`, { visitNeverRan: updatedInvoice.visitNeverRan });
+  }
+  if (updatedInvoice?.noLongerCollectible) {
+    throw refusal(409, `${updatedInvoice.noLongerCollectible} — nothing was recorded`);
   }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
