@@ -76,7 +76,7 @@ test.each([
 test('model confidence is recorded without taking an enforcement action', async () => {
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.93 } });
   expect(await screenInboundSms({ body: SOFT_PITCH })).toEqual({
-    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v1',
+    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v2',
   });
 });
 
@@ -138,6 +138,7 @@ test.each([
   'I can provide you with more lawn leads. They are my neighbors and need quotes.',
   'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
   'I can provide you with more pest-control leads. They are my friends who need quotes. Can you quote them?',
+  'We have qualified pest control jobs available at five rental homes we manage. Can you quote all of them?',
 ])('a neighbor referral reaches the model before any enforcement: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });

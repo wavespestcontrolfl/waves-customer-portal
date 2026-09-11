@@ -54,6 +54,13 @@ describe('shared SMS vendor-pitch detector', () => {
     // context only, so a friend/family referral still enforced.
     'I can provide you with more pest-control leads. They are my friends who need quotes. Can you quote them?',
     'I can send you more lawn leads. They are my family and need service.',
+    // Codex P1, 2026-09-11: a strong marker (sender_work_offer) hit a
+    // genuine multi-property service request at confidence 1 — the veto
+    // now applies to the whole class of strong markers, not just the
+    // referral-shaped ones.
+    'We have qualified pest control jobs available at five rental homes we manage. Can you quote all of them?',
+    "I'm the property manager for three units; can you quote pest control for all of them?",
+    'We manage several rental properties and need service for all of them. Can we get unlimited estimates?',
   ])('ambiguous customer wording does not establish a pitch: %s', (body) => {
     expect(isSolicitationPitch(body)).toBe(false);
   });
@@ -62,6 +69,9 @@ describe('shared SMS vendor-pitch detector', () => {
     // Paired negative for the friend/family veto above: the same
     // lead_supplier wording with no referral context still enforces.
     'I can provide you with more pest-control leads for your business.',
+    // Paired negative for the multi-property veto above: a pure vendor
+    // pitch with no request for our own service still enforces.
+    'We have qualified pest control jobs available. Want to partner with us?',
     'Our network offers exclusive lawn leads.',
     'We can provide more lawn leads.',
     'We can send you more pest-control leads.',

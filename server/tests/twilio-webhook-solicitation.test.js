@@ -251,8 +251,13 @@ test.each([
       expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({
         isRead: false,
       }));
-      expect(updateByTwilioSid.mock.calls[0][1]).toMatchObject({ is_read: true, read_at: expect.any(Date) });
+      // Codex P1, 2026-09-11: the unified copy is marked read only in a
+      // SECOND call, made after the legacy sms_log row (first call carries
+      // only the verdict metadata, with no is_read) — a crash between the
+      // two calls must never leave a read unified copy with no legacy row.
+      expect(updateByTwilioSid.mock.calls[0][1].is_read).toBeUndefined();
       expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(true);
+      expect(updateByTwilioSid.mock.calls[1][1]).toMatchObject({ is_read: true, read_at: expect.any(Date) });
       const writes = mockWrites.filter(({ table }) => table === 'sms_log');
       expect(writes).toHaveLength(1);
       expect(writes[0].row.is_read).toBe(true);
@@ -308,6 +313,7 @@ test.each([
   'I can provide you with more lawn leads. They are my neighbors and need quotes.',
   'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
   'I can provide you with more pest-control leads. They are my friends who need quotes. Can you quote them?',
+  'We have qualified pest control jobs available at five rental homes we manage. Can you quote all of them?',
 ])('a genuine referral remains unread and reaches ordinary handling in enforcement mode: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   await receive(body);
@@ -381,4 +387,30 @@ test('a first-contact unknown sender with no prior row still gets the owner aler
   const res = await receive('Can we schedule for Tuesday?');
   expect(res.body).toBe('<Response></Response>');
   expect(sendSMS).toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
+});
+
+// Codex P1, 2026-09-11: the unified copy was marked read at classification
+// time, well before the legacy sms_log row existed — a crash in between left
+// only a read unified copy, with the durable webhook claim still owned (so a
+// Twilio retry was rejected as a duplicate) and no legacy row, alert, or
+// downstream handling ever created. The read-mark must land strictly after
+// the legacy row is durably persisted.
+test('the unified copy is marked read only after the legacy sms_log row is persisted', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  const callOrder = [];
+  updateByTwilioSid.mockImplementation(async (sid, patch) => {
+    callOrder.push({
+      op: 'updateByTwilioSid', isRead: patch.is_read === true,
+      smsLogRowsSoFar: mockWrites.filter(({ table }) => table === 'sms_log').length,
+    });
+    return { id: 'saved-inbound-message' };
+  });
+  await receive(PITCH);
+  const readCall = callOrder.find((c) => c.isRead);
+  expect(readCall).toBeDefined();
+  // At least one sms_log row already existed when the read-marking call fired.
+  expect(readCall.smsLogRowsSoFar).toBeGreaterThanOrEqual(1);
+  const metadataOnlyCall = callOrder.find((c) => !c.isRead);
+  expect(metadataOnlyCall).toBeDefined();
+  expect(metadataOnlyCall.smsLogRowsSoFar).toBe(0);
 });

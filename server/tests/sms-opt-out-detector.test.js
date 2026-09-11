@@ -67,6 +67,15 @@ describe('SMS opt-out detector', () => {
   });
 
   test.each([
+    'We have exclusive pest leads. If this is the wrong number, reply STOP.',
+    'We have exclusive pest leads for you. If wrong number, text STOP.',
+    'Exclusive leads available in your area\nIf this is the wrong number, reply NO',
+  ])('can exclude a condition-first vendor wrong-number footer while keeping legacy detection: %s', (body) => {
+    expect(detectSmsOptCommand(body).action).toBe('opt_out');
+    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
+  });
+
+  test.each([
     'wrong number',
     'sorry wrong number',
     'you have the wrong number',

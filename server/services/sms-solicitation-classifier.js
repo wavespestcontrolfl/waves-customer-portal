@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { isSolicitationPitch } = require('./sms-solicitation-detector');
 const { detectSmsOptCommand, detectHelp } = require('./messaging/opt-out-detector');
 
-const CLASSIFIER_VERSION = 'sms-solicitation-v1';
+const CLASSIFIER_VERSION = 'sms-solicitation-v2';
 const TIMEOUT_MS = 3500;
 
 const SCHEMA = {

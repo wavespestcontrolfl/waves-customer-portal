@@ -389,8 +389,9 @@ router.post('/sms', async (req, res) => {
         const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
+          // NOT marked read here even when enforced — see the deferred
+          // read-mark right after the legacy sms_log row persists, below.
           verdictMessage = await updateByTwilioSid(MessageSid, {
-            ...(solicitation.enforced ? { is_read: true, read_at: new Date() } : {}),
             metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: solicitation })]),
             updated_at: new Date(),
           });
@@ -817,6 +818,17 @@ router.post('/sms', async (req, res) => {
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
+
+    // Mark the UNIFIED copy read only now that the legacy sms_log row (just
+    // above, in the same insert) is durably persisted — codex P1, 2026-09-11:
+    // marking it read at classification time, well before this insert, meant
+    // a worker crash in between left only a read unified copy behind: the
+    // durable webhook claim stayed owned, so Twilio's retry was rejected as a
+    // duplicate and the legacy row, alert, and downstream handling never
+    // existed. Best-effort — the legacy row is already correct either way.
+    if (solicitationEnforced) {
+      await updateByTwilioSid(MessageSid, { is_read: true, read_at: new Date() }).catch(() => {});
+    }
 
     // Keep both source rows, then stop before lead creation, quoting,
     // notifications or any auto-reply. This also covers tracking/tech lines.
