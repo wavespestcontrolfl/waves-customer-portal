@@ -299,6 +299,39 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
     expect(termite.pricingKnobs.plan).not.toBe('annual_protection');
   });
 
+  test('the customer-facing replay builds its stamp from the stored RESULT, never from stored/posted input fields', () => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    // The stored inputs REQUEST the plan (a service option, legitimately
+    // stored and not an identity field) — so the only thing standing between
+    // this replay and annual-plan pricing with the gate off is where the
+    // stamp comes from.
+    const inputs = { homeSqFt: 2400, lotSqFt: 9000, services: { termite: { system: 'trelona', plan: 'annual_protection' } } };
+    const forged = { plan: 'annual_protection', setupPerStation: 30, annualBase: 249, annualStep: 50, bracketStations: 5, bracketFloor: 10 };
+    // A QUARTERLY estimate whose every stored input slot has been polluted
+    // with an annual-plan stamp (the save path scrubs these, so this is the
+    // shape a pre-scrub row or a forged write would have).
+    const quarterlySold = {
+      engineInputs: { ...inputs, termitePricingKnobs: forged },
+      inputs: { ...inputs, termitePricingKnobs: forged },
+      engineRequest: { profile: {}, selectedServices: [], options: { termitePricingKnobs: forged } },
+      result: { lineItems: [{ service: 'termite_bait', plan: 'quarterly', system: 'trelona', stations: 15, pricingKnobs: { system: 'trelona', stationCost: 24 } }] },
+    };
+    const replayed = extractEngineInputs(quarterlySold);
+    expect(replayed.termitePricingKnobs.plan).toBeUndefined();
+    expect(termiteLine(generateEstimate(replayed)).plan).toBe('quarterly');
+
+    // Positive control: the SAME reader returns the plan stamp when the
+    // stored RESULT says the job was sold as a plan — that is the evidence
+    // the gate-off replay runs on, and it lives in the priced line.
+    const planSold = {
+      ...quarterlySold,
+      result: { lineItems: [{ service: 'termite_bait', plan: 'annual_protection', system: 'trelona', stations: 15, pricingKnobs: { system: 'trelona', stationCost: 24, ...forged } }] },
+    };
+    expect(extractEngineInputs(planSold).termitePricingKnobs.plan).toBe('annual_protection');
+    expect(termiteLine(generateEstimate(extractEngineInputs(planSold))).plan).toBe('annual_protection');
+  });
+
   test('the admin quick-quote sandbox strips the same stamp — gate off, no annual-plan pricing', async () => {
     delete process.env.GATE_TERMITE_ANNUAL_PLAN;
     const handler = adminPricingConfigRouter.stack
