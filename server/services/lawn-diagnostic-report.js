@@ -567,7 +567,9 @@ const CLEAN_CLAUSE_LEAD = /^\s*(?:no|none|not|clear|nothing)\b/;
 // positive finding that carries a negated differential ("Possible fungal disease;
 // no weed pressure", "Chinch bugs not present, but drought stress visible") still
 // maps its positive clause. Same marker set as the copy module's establishesCause.
-const CLAUSE_SPLIT = /[;.]|\b(?:but|while|although|though|whereas|however|yet)\b/;
+// Every sentence terminator splits, so "No weeds! Large patch is visible" keeps
+// its positive sentence.
+const CLAUSE_SPLIT = /[;.!?]|\b(?:but|while|although|though|whereas|however|yet)\b/;
 const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
 // Negation scope inside one clause. A determiner-style marker (no / without /
 // non / neither, and not / never when a cause term follows) negates what FOLLOWS
@@ -622,6 +624,21 @@ function freeDifferentialRe() {
   freeDifferential.lastIndex = 0;
   return freeDifferential;
 }
+const SEGMENT_PREDICATE = /\b(?:present|visible|spreading|active|observed|seen|noted|confirmed|is|are|was|were|has|have|had|appears?|looks?|remains?)\b/;
+function predicateSegments(text) {
+  const segments = [];
+  let carry = '';
+  for (const raw of text.split(/[,:]|\s+(?:and|plus|&)\s+/)) {
+    const part = raw.trim();
+    if (!part) continue;
+    const joined = carry ? `${carry} and ${part}` : part;
+    if (!SEGMENT_PREDICATE.test(part) && !NEGATION_MARKER.test(part)) { carry = joined; continue; }
+    segments.push(joined);
+    carry = '';
+  }
+  if (carry) segments.push(carry);
+  return segments;
+}
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
@@ -651,11 +668,12 @@ function positiveClauses(lower) {
       continue;
     }
     // A postpositive marker ("weeds absent", "not present", "ruled out") negates
-    // the comma-separated segment that carries it, not its siblings: "Large patch
-    // present, weeds absent" keeps large patch.
-    for (const segment of text.split(/[,:]/)) {
-      const part = segment.trim();
-      if (part && !CLEAN_CLAUSE_LEAD.test(part) && !NEGATION_MARKER.test(part)) positive.push(part);
+    // the segment that carries it, not its siblings: "Large patch present, weeds
+    // absent" and "Large patch present and weeds absent" keep large patch. A
+    // conjunct with no predicate of its own shares the next one ("Chinch bugs and
+    // weeds absent" is all negated).
+    for (const part of predicateSegments(text)) {
+      if (!CLEAN_CLAUSE_LEAD.test(part) && !NEGATION_MARKER.test(part)) positive.push(part);
     }
   }
   return { positive, negated };

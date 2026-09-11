@@ -633,6 +633,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Healthy overall, nothing concerning', 'Nothing concerning',
     // A non prefix joined directly to the cause.
     'Nonfungal stress', 'Nonchinch damage',
+    // A conjunct without its own predicate shares the negated one after it.
+    'Chinch bugs and weeds absent', 'Large patch and dollar spot ruled out',
     // "free of" keeps its scope across a coordinated list.
     'Free of chinch bugs and weeds', 'Free of chinch bugs, weeds, or grubs',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
@@ -673,7 +675,13 @@ describe('lawn diagnostic auto-release ladder', () => {
     // A "free of" list ends at its conjunction item or at a new statement.
     ['Free of chinch bugs and weeds, large patch present', 'large patch (fungal) activity'],
     ['Free of chinch bugs, weeds, large patch is spreading', 'large patch (fungal) activity'],
-    // A postpositive marker negates only its own comma-separated segment.
+    // Every sentence terminator splits clauses.
+    ['No weeds! Large patch is visible', 'large patch (fungal) activity'],
+    ['No weeds? Large patch is visible', 'large patch (fungal) activity'],
+    // A postpositive marker negates only its own segment, comma- or and-joined.
+    ['Large patch present and weeds absent', 'large patch (fungal) activity'],
+    ['Large patch absent and drought stress visible', 'drought stress'],
+    ['Weeds absent and large patch present', 'large patch (fungal) activity'],
     ['Large patch present, weeds absent', 'large patch (fungal) activity'],
     ['Chinch bugs not present, drought stress visible', 'drought stress'],
     ['Chinch bugs not a factor, drought stress visible', 'drought stress'],
