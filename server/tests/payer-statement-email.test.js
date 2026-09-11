@@ -85,15 +85,16 @@ test('dry-run builds the PDF + resolves recipient but never sends or stamps', as
 test('sends via SendGrid + stamps finalized→sent', async () => {
   const updates = [];
   mockDbHandler = () => ({ where(w) { this._w = w; return this; }, first: async () => finalized(), update: async (p) => { updates.push(p); return 1; } });
-  const res = await sendStatementEmail(7);
+  const res = await sendStatementEmail(7, { actorTechnicianId: 'tech-1', actorRole: 'admin' });
   expect(res.ok).toBe(true);
   expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
     templateKey: 'payer.statement.sent', to: 'ap@westbay.com',
   }));
   expect(updates).toHaveLength(1);
   expect(updates[0]).toMatchObject({ status: 'sent' });
-  // Delivery → the linked child invoices' open visits are closed out (every delivery, resends included).
-  expect(mockCloseOutVisitsForStatement).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ trigger: 'sent' }));
+  // Delivery → the linked child invoices' open visits are closed out (every delivery, resends included),
+  // with the operator behind the send as the closeout actor (GitHub r10 P2 #4127).
+  expect(mockCloseOutVisitsForStatement).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ trigger: 'sent', actorTechnicianId: 'tech-1', actorRole: 'admin' }));
 });
 
 test('an in-flight dedupe collision is reported as deduped (no false failure) and does not stamp', async () => {

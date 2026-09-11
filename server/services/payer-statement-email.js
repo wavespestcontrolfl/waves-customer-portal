@@ -140,7 +140,7 @@ async function resolveApRecipient(statement, database) {
  * freshness check and this read) still dedupe on the base key instead of the
  * later one going keyless and double-mailing AP.
  */
-async function sendStatementEmail(statementId, { dryRun = false, forceResend = false, firstDelivery = false, database = db } = {}) {
+async function sendStatementEmail(statementId, { dryRun = false, forceResend = false, firstDelivery = false, actorTechnicianId = null, actorRole = null, database = db } = {}) {
   if (!isEnabled('payerStatements')) return { ok: false, skipped: 'gate_off' };
 
   const statement = await database('payer_statements').where({ id: statementId }).first();
@@ -273,7 +273,7 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
     }
   }
 
-  await markStatementSent(statementId, database);
+  await markStatementSent(statementId, database, { actorTechnicianId, actorRole });
 
   logger.info(`[payer-statement-email] statement ${statementId} sent to payer ${statement.payer_id} AP inbox (${lines.length} visits)`);
   return { ok: true, recipient, total: statement.total };
@@ -285,7 +285,7 @@ async function sendStatementEmail(statementId, { dryRun = false, forceResend = f
 // (composer-customer-links.markStatementsSent) both land here, so an
 // SMS-delivered statement enters the viewed/dunning lifecycle exactly like
 // an emailed one (GH Codex #3844 r2 P1).
-async function markStatementSent(statementId, database = db) {
+async function markStatementSent(statementId, database = db, { actorTechnicianId = null, actorRole = null } = {}) {
   await database('payer_statements')
     .where({ id: statementId, status: 'finalized' })
     .update({ status: 'sent', sent_at: database.fn.now(), updated_at: database.fn.now() });
@@ -293,9 +293,12 @@ async function markStatementSent(statementId, database = db) {
   // invoice is delivered, so its open visit closes out like an individually
   // sent invoice (GitHub r9 P1 #4127); a resend is the reachable retry for a
   // child closeout that committed but still owes post-commit work. Idempotent
-  // (a closed visit refuses quietly), best-effort by contract.
+  // (a closed visit refuses quietly), best-effort by contract. The operator
+  // behind the delivery (the /close-with-send and /send routes, the
+  // composer's statement link) is the closeout actor; an automated delivery
+  // carries none and acts as the system (GitHub r10 P2 #4127).
   const { closeOutVisitsForStatement } = require('./invoice-issued-closeout');
-  await closeOutVisitsForStatement(statementId, { trigger: 'sent', conn: database });
+  await closeOutVisitsForStatement(statementId, { trigger: 'sent', actorTechnicianId, actorRole, conn: database });
 }
 
 module.exports = { sendStatementEmail, resolveApRecipient, forcedRetryKey, markStatementSent };

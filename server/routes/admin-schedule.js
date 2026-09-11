@@ -8706,6 +8706,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung (slot-reservation's order) and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      if (reServiceConversionZeroPrice) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
+      }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
       // revalidate after locking: an assignment may finish while we wait.

@@ -135,20 +135,91 @@ async function issuedCloseoutOwnsRecord(serviceRecordId, conn = db) {
 // and settlement (the reconcile route and the Stripe webhook, AFTER their
 // money transaction commits — the closeout takes its own row locks) run the
 // closeout for every linked child. Best-effort, sequential, never throws.
-async function closeOutVisitsForStatement(statementId, { trigger, actorTechnicianId = null, conn = db } = {}) {
+async function closeOutVisitsForStatement(statementId, { trigger, actorTechnicianId = null, actorRole = null, conn = db } = {}) {
   let invoiceIds = [];
   try {
     invoiceIds = (await conn('invoices').where({ payer_statement_id: statementId }).whereNotNull('scheduled_service_id').select('id')).map((r) => r.id);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] statement ${statementId}: child invoice lookup failed — no closeouts run: ${err.message}`);
-    return { attempted: 0, closed: 0 };
+    return { attempted: 0, closed: 0, failed: [] };
   }
   let closed = 0;
+  const failed = [];
   for (const invoiceId of invoiceIds) {
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId, conn });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId, actorRole, conn });
+    if (out?.closed) closed += 1;
+    else if (out?.reason === 'error') failed.push(invoiceId);
+  }
+  if (failed.length) {
+    // A settled statement has no later send or payment to retry through
+    // (GitHub r10 P2 #4127) — the failure is recorded on each child's
+    // audit row and picked up by retrySettledStatementCloseouts.
+    logger.warn(`[invoice-issued-closeout] statement ${statementId} ${trigger}: ${failed.length} child closeout(s) failed — ${failed.join(', ')}; the daily settled-statement sweep retries them`);
+  }
+  return { attempted: invoiceIds.length, closed, failed };
+}
+
+const CLOSEOUT_AUDIT_ACTIONS = ['visit.completed_on_invoice_issued', 'visit.completion_on_invoice_issued_refused'];
+
+// The durable retry for settlement closeouts (GitHub r10 P2 #4127). A
+// statement settled with no prior delivery closeout (a finalized statement
+// paid by check, say) runs its child closeouts exactly once, after the money
+// transaction commits — and a child that failed there with a transient error,
+// or never ran because the process died between the commit and the closeout,
+// has no reachable retry: the statement is `paid`, so the reconcile route,
+// the statement send and the webhook all refuse a second pass. The audit row
+// every closeout writes is the persisted record of that failure; this sweep
+// (the daily payer-statement scheduler tick) re-runs the closeout for each
+// linked child of a recently settled statement whose visit is still open and
+// not in the future AND whose latest paid-trigger closeout audit is missing
+// or an error. A child refused for a real reason (grouped, packet-owned,
+// project-backed, moved) carries a non-error refusal row and is left alone —
+// the sweep never re-audits an intentional no-op. System actor: nobody is
+// behind a retry.
+async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
+  if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
+  let rows = [];
+  try {
+    rows = await conn('payer_statements as ps')
+      .join('invoices as i', 'i.payer_statement_id', 'ps.id')
+      .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+      .where('ps.status', 'paid')
+      .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
+      .whereIn('s.status', OPEN_VISIT_STATUSES)
+      .where('s.scheduled_date', '<=', today)
+      .orderBy(['ps.id', 'i.id'])
+      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id');
+  } catch (err) {
+    logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
+    return { candidates: 0, retried: 0, closed: 0 };
+  }
+  let retried = 0;
+  let closed = 0;
+  for (const row of rows) {
+    let last;
+    try {
+      last = await conn('audit_log')
+        .where({ resource_type: 'scheduled_services', resource_id: row.visit_id })
+        .whereIn('action', CLOSEOUT_AUDIT_ACTIONS)
+        .whereRaw("metadata->>'invoiceId' = ?", [String(row.invoice_id)])
+        .whereRaw("metadata->>'trigger' = 'paid'")
+        .orderBy('created_at', 'desc')
+        .first('action', 'metadata');
+    } catch (err) {
+      logger.error(`[invoice-issued-closeout] settled-statement retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+      continue;
+    }
+    if (last) {
+      let meta = last.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+      if (last.action !== 'visit.completion_on_invoice_issued_refused' || meta?.code !== 'error') continue;
+    }
+    retried += 1;
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
     if (out?.closed) closed += 1;
   }
-  return { attempted: invoiceIds.length, closed };
+  if (retried) logger.info(`[invoice-issued-closeout] settled-statement retry: ${rows.length} open linked child(ren), ${retried} retried, ${closed} closed`);
+  return { candidates: rows.length, retried, closed };
 }
 
 // Entry point for the send and record-payment paths. Best-effort by
@@ -295,6 +366,7 @@ async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnici
 module.exports = {
   issuedCloseoutOwnsRecord,
   closeOutVisitsForStatement,
+  retrySettledStatementCloseouts,
   OPEN_VISIT_STATUSES,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,

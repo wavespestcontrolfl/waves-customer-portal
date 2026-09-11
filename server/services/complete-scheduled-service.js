@@ -4529,7 +4529,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // service_products), so its semantics don't change with the
     // timing move, but it now only fires alerts on a successful
     // completion. Race rejection → no completion → no MOA alert.
-    const fromStatus = svc.status;
+    let fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
     // Final follow-up verdict for typed completions (profiles
     // followup_policy / default_followup_days, adjusted by the shared
@@ -4926,6 +4926,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (!['pending', 'confirmed'].includes(String(lockedSvcRow?.status))) {
               throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }
+            // The LOCKED status is the transition source (GitHub r10 P2
+            // #4127): pending → confirmed between the unlocked read and this
+            // lock is still office-only and eligible, but transitionJobStatus
+            // requires an exact current-status match — carrying the stale
+            // svc.status rolled a delivered invoice's closeout back with
+            // "not in state" and left an eligible visit open until another
+            // send or payment retried it.
+            fromStatus = String(lockedSvcRow.status);
             // Project ownership re-resolved from the LOCKED row (GitHub r9 P2
             // #4127): the wrapper's strict profile check and the unlocked
             // project_required_completion guard above read the identity

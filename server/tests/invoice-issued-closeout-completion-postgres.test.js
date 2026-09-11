@@ -128,10 +128,10 @@ describe('source contracts', () => {
   });
   test('GitHub r9: statement delivery + settlement run the closeout for linked children AFTER commit; the locked recheck re-resolves project ownership', () => {
     const email = fs.readFileSync(path.join(__dirname, '../services/payer-statement-email.js'), 'utf8');
-    expect(email).toMatch(/await database\('payer_statements'\)[\s\S]{0,1200}?closeOutVisitsForStatement\(statementId, \{ trigger: 'sent', conn: database \}\);\s*\}/);
+    expect(email).toMatch(/await database\('payer_statements'\)[\s\S]{0,1200}?closeOutVisitsForStatement\(statementId, \{ trigger: 'sent', actorTechnicianId, actorRole, conn: database \}\);\s*\}/);
     const payers = fs.readFileSync(path.join(__dirname, '../routes/admin-payers.js'), 'utf8');
     const settleAt = payers.indexOf("{ database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });");
-    const closeAt = payers.indexOf("closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null })");
+    const closeAt = payers.indexOf("closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null })");
     expect(settleAt).toBeGreaterThan(-1);
     expect(closeAt).toBeGreaterThan(settleAt);
     const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
@@ -140,7 +140,7 @@ describe('source contracts', () => {
     expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,2000}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'project_required_completion' && issuedInvoiceCloseout\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
     // The office-only status set is re-checked on the locked row, ahead of the profile re-resolve.
-    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,700}?if \(!\['pending', 'confirmed'\]\.includes\(String\(lockedSvcRow\?\.status\)\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,1200}?const lockedProfile = await resolveLockedProfile/);
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,700}?if \(!\['pending', 'confirmed'\]\.includes\(String\(lockedSvcRow\?\.status\)\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2200}?const lockedProfile = await resolveLockedProfile/);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -156,6 +156,29 @@ describe('source contracts', () => {
     expect(visitLockAt).toBeGreaterThan(customerLockAt);
     // …and the locked visit row's day is re-validated after the visit lock.
     expect(source.indexOf("{ code: 'issued_visit_rescheduled' }", visitLockAt)).toBeGreaterThan(visitLockAt);
+  });
+  test('GitHub r10: the locked status is the transition source; the zero-price conversion takes the mint advisory lock after the occupancy rung and before any row lock; the settled-statement retry runs on the daily statement tick', () => {
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(completion).toMatch(/let fromStatus = svc\.status;/);
+    expect(completion).toMatch(/\{ code: 'issued_visit_in_progress' \}\);\s*\}[\s\S]{0,800}?fromStatus = String\(lockedSvcRow\.status\);[\s\S]{0,1200}?const \{ resolveCompletionProfileForScheduledService: resolveLockedProfile \}/);
+    const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const detailsTrxAt = schedule.indexOf("const commsPeek = await trx('scheduled_services')");
+    const occupancyAt = schedule.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);', detailsTrxAt);
+    const mintAt = schedule.indexOf('if (reServiceConversionZeroPrice) {\n        const { acquireScheduledInvoiceMintLock } = require(\'../services/scheduled-invoice-mint\');\n        await acquireScheduledInvoiceMintLock(trx, req.params.id);', detailsTrxAt);
+    const firstRowLockAt = schedule.indexOf('.forUpdate()', detailsTrxAt);
+    const conversionVoidAt = schedule.indexOf('await voidConversionInvoicesRestoringCredits({ trx, ids: nonAccruedIds, voidUpdate });', detailsTrxAt);
+    expect(detailsTrxAt).toBeGreaterThan(-1);
+    expect(occupancyAt).toBeGreaterThan(detailsTrxAt);
+    expect(mintAt).toBeGreaterThan(occupancyAt);
+    expect(firstRowLockAt).toBeGreaterThan(mintAt);
+    expect(conversionVoidAt).toBeGreaterThan(firstRowLockAt);
+    const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toMatch(/StatementFollowups\.runPending\(\);[\s\S]{0,600}?retrySettledStatementCloseouts\(\);/);
+    // Statement delivery carries the operator through to the child closeouts.
+    const payers = fs.readFileSync(path.join(__dirname, '../routes/admin-payers.js'), 'utf8');
+    expect(payers.match(/sendStatementEmail\(statement\.id, \{[^}]*actorTechnicianId: req\.technicianId \|\| null, actorRole: req\.techRole \|\| null \}\)/g)).toHaveLength(2);
+    const comms = fs.readFileSync(path.join(__dirname, '../routes/admin-communications.js'), 'utf8');
+    expect(comms.match(/markStatementsSent\(statementLinkIds, \{ actorTechnicianId: req\.technicianId \|\| null, actorRole: req\.techRole \|\| null \}\)/g)).toHaveLength(2);
   });
 });
 

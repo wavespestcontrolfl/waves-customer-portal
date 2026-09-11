@@ -37,7 +37,7 @@ jest.mock('../services/service-completion-profiles', () => {
 const mockGate = { on: true };
 jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'invoiceIssuedClosesVisit' && mockGate.on }));
 const { randomUUID } = require('node:crypto');
-const { resolveVisitForIssuedInvoice, closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+const { resolveVisitForIssuedInvoice, closeOutVisitForIssuedInvoice, retrySettledStatementCloseouts } = require('../services/invoice-issued-closeout');
 const { recordAuditEvent } = require('../services/audit-log');
 
 const { backfillCompletionPlan, backfillCompletionEndInstant } = jest.requireActual('../services/complete-scheduled-service');
@@ -328,6 +328,67 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(mockCompleteScheduledService).not.toHaveBeenCalled();
   });
 
+  test('settled-statement retry: a child whose paid-trigger closeout never ran or failed is retried; a real refusal, a closed visit and an old settlement are left alone (GitHub r10 P2)', async () => {
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const statement = async (paidAt) => {
+      const [id] = await trx('payer_statements').insert({
+        payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'paid', terms_snapshot: 'net30',
+        token: randomUUID().replace(/-/g, ''), paid_at: paidAt,
+      }).returning('id').then((r) => r.map((x) => x.id ?? x));
+      return id;
+    };
+    const recent = await statement(new Date());
+    const stale = await statement(new Date(Date.now() - 30 * 86400000));
+    const auditRow = (visitId, invoiceId, action, code) => trx('audit_log').insert({
+      actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
+      metadata: JSON.stringify({ invoiceId, trigger: 'paid', code }),
+    });
+    // 1. never ran (no audit row) → retried
+    const v1 = await visit(); const i1 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v1.id });
+    // 2. failed with an outage → retried
+    const v2 = await visit(); const i2 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v2.id });
+    await auditRow(v2.id, i2.id, 'visit.completion_on_invoice_issued_refused', 'error');
+    // 3. refused for a real reason → left alone
+    const v3 = await visit(); const i3 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v3.id });
+    await auditRow(v3.id, i3.id, 'visit.completion_on_invoice_issued_refused', 'grouped_visit');
+    // 4. an older error superseded by a completion → left alone (the visit is closed anyway)
+    const v4 = await visit({ status: 'completed' }); const i4 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v4.id });
+    await auditRow(v4.id, i4.id, 'visit.completion_on_invoice_issued_refused', 'error');
+    // 5. future visit → not a candidate
+    const v5 = await visit({ date: '2040-03-05' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v5.id });
+    // 6. settled outside the window → not a candidate
+    const v6 = await visit(); await invoice({ status: 'paid', payer_statement_id: stale, scheduled_service_id: v6.id });
+
+    const out = await retrySettledStatementCloseouts({ conn: trx, today: TODAY });
+    expect(out).toEqual({ candidates: 3, retried: 2, closed: 2 });
+    const retriedIds = mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort();
+    expect(retriedIds).toEqual([v1.id, v2.id].sort());
+    // A retry is nobody's action: the system is the actor.
+    for (const [args] of mockCompleteScheduledService.mock.calls) expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
+    mockGate.on = false;
+    expect(await retrySettledStatementCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
+  });
+  test('a statement closeout reports the children that failed, so the caller can log what the sweep will retry', async () => {
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const [statementId] = await trx('payer_statements').insert({
+      payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'paid', terms_snapshot: 'net30', token: randomUUID().replace(/-/g, ''), paid_at: new Date(),
+    }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    // The statement helper resolves against the real today: past-dated visits.
+    const day = '2020-01-06';
+    const ok = await visit({ date: day }); await invoice({ status: 'paid', date: day, payer_statement_id: statementId, scheduled_service_id: ok.id });
+    const bad = await visit({ date: day }); const badInvoice = await invoice({ status: 'paid', date: day, payer_statement_id: statementId, scheduled_service_id: bad.id });
+    mockCompleteScheduledService.mockImplementation(async ({ serviceId }) => {
+      if (serviceId === bad.id) throw new Error('connection reset');
+      return { status: 200, body: { success: true } };
+    });
+    const { closeOutVisitsForStatement } = require('../services/invoice-issued-closeout');
+    const out = await closeOutVisitsForStatement(statementId, { trigger: 'paid', actorTechnicianId: 'tech-1', actorRole: 'technician', conn: trx });
+    expect(out).toEqual({ attempted: 2, closed: 1, failed: [badInvoice.id] });
+    // The operator's role reaches the child audit rows.
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ actor_type: 'technician', actor_id: 'tech-1', action: 'visit.completed_on_invoice_issued', resource_id: ok.id }));
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ actor_type: 'technician', action: 'visit.completion_on_invoice_issued_refused', resource_id: bad.id, metadata: expect.objectContaining({ code: 'error' }) }));
+    mockCompleteScheduledService.mockImplementation(async () => ({ status: 200, body: { success: true } }));
+  });
   test('a refused completion is reported, audited as refused, and never thrown', async () => {
     mockCompleteScheduledService.mockResolvedValueOnce({ status: 409, body: { code: 'already_completed' } });
     const open = await visit();
