@@ -180,6 +180,20 @@ function StatCard({
 // ═══════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════
+function hasFleetData(overview, equipment, alerts) {
+  return overview != null || equipment.length > 0 || alerts.length > 0;
+}
+function FleetLoadError({
+  loaded,
+  error,
+  onRetry
+}) {
+  return <ActionFeedback error onRetry={onRetry} className="mb-4">
+      {loaded ? "Could not refresh fleet: " : "Could not load fleet: "}
+      {error}
+      {loaded && ". Showing previously loaded data."}
+    </ActionFeedback>;
+}
 export default function EquipmentMaintenancePage({
   embedded = false,
   initialTab = "fleet"
@@ -300,7 +314,7 @@ export default function EquipmentMaintenancePage({
   };
 
   // ─── RENDER ─────────────────────────────────────────────────────
-  const fleetLoaded = overview != null || equipment.length > 0 || alerts.length > 0;
+  const fleetLoaded = hasFleetData(overview, equipment, alerts);
   return <div style={embedded ? undefined : {
     maxWidth: 1300,
     margin: "0 auto"
@@ -312,11 +326,7 @@ export default function EquipmentMaintenancePage({
       {toast && <Card role="status" className="fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
-      {tab === "fleet" && fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
-          {fleetLoaded ? "Could not refresh fleet: " : "Could not load fleet: "}
-          {fleetError}
-          {fleetLoaded && ". Showing previously loaded data."}
-        </ActionFeedback>}
+      {tab === "fleet" && fleetError && <FleetLoadError loaded={fleetLoaded} error={fleetError} onRetry={loadFleet} />}
       {analyticsError && tab === "analytics" && <ActionFeedback error onRetry={loadAnalytics} className="mb-4">
           Could not load analytics: {analyticsError}
         </ActionFeedback>}
