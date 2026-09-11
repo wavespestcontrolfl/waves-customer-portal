@@ -386,6 +386,47 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('markInboundSmsReadAdmin clears bells by twilioSids against real Postgres — the `= ANY(?)` binding is a pg array, not a comma list (claude pre-push audit P1, refuted)', async () => {
+    // A fallback auditor read `whereRaw("... = ANY(?)", [sids])` as compiling
+    // to `ANY('a', 'b')` — invalid SQL Postgres rejects, which would make the
+    // by-SID bell clear silently fail-soft forever. It does not: knex's pg
+    // client serializes a JS array binding as a Postgres array literal
+    // ('{"a","b"}'), so ANY gets exactly the single array-typed expression it
+    // requires. No PG-backed test covered this specific path, which is the
+    // half of that finding that WAS right — so it is covered now, for one SID
+    // and for several.
+    const sids = [0, 1, 2].map((i) => `SM-synthetic-any-${i}-${randomBytes(4).toString('hex')}`);
+    const bells = [];
+    try {
+      for (const sid of sids) {
+        const [row] = await mockPg('notifications').insert({
+          recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic by-SID bell', link: '/admin/communications',
+          metadata: JSON.stringify({ payload: { twilioSid: sid } }),
+          // Explicit past timestamp: the read's `before` bound is a Node
+          // Date, while a defaulted created_at is Postgres' own clock — a
+          // sub-millisecond skew between the two would flake the bound.
+          created_at: new Date(Date.now() - 60000),
+        }).returning('*');
+        bells.push(row);
+      }
+
+      // Several SIDs at once.
+      const clearedMany = await realNotificationService.markInboundSmsReadAdmin({ twilioSids: [sids[0], sids[1]], role: 'admin' });
+      expect(clearedMany).toBe(2);
+      expect((await mockPg('notifications').where({ id: bells[0].id }).first()).read_at).not.toBeNull();
+      expect((await mockPg('notifications').where({ id: bells[1].id }).first()).read_at).not.toBeNull();
+      // The unrelated third bell is untouched — ANY matched a set, not everything.
+      expect((await mockPg('notifications').where({ id: bells[2].id }).first()).read_at).toBeNull();
+
+      // The single-element case the finding called out specifically.
+      const clearedOne = await realNotificationService.markInboundSmsReadAdmin({ twilioSid: sids[2], role: 'admin' });
+      expect(clearedOne).toBe(1);
+      expect((await mockPg('notifications').where({ id: bells[2].id }).first()).read_at).not.toBeNull();
+    } finally {
+      if (bells.length) await mockPg('notifications').whereIn('id', bells.map((b) => b.id)).delete();
+    }
+  }, 30000);
+
   test('reading an unknown sender\'s message never clears a bell created after this read began, even when nothing else is unread (codex #4210 round-2 P1)', async () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();
