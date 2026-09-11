@@ -77,6 +77,12 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
   useEffect(() => {
     mounted.current = true;
     pages.current = 1;
+    // A filter change starts over: the rows and pagination of the previous
+    // query never outlive it (a failed replacement read shows the error, not
+    // the old filter's cards; there is no stale "Load more" to mix pages).
+    // The enabled flag carries over so the host does not flip its own list
+    // while the replacement read is pending.
+    setData((old) => old ? { callbacks_enabled: old.callbacks_enabled, commitments: [], has_more: false, pending: true } : null);
     load({ page: 0 });
     const tick = () => { if (!document.hidden && !busyRef.current) refresh(); };
     const timer = setInterval(tick, pollMs);
@@ -135,7 +141,7 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
     {notice && <div role="status"><Text>{notice}</Text></div>}
     {callbacks.filter((r) => !snoozed.includes(r)).map(renderCallback)}
     {snoozed.length > 0 && <details><summary className="cursor-pointer py-2">{snoozed.length} snoozed callback{snoozed.length === 1 ? '' : 's'}</summary><div className="space-y-3">{snoozed.map(renderCallback)}</div></details>}
-    {enabled && !callbacks.length && <Text tone="muted">No follow-through needs attention.</Text>}
+    {enabled && !callbacks.length && <Text tone="muted">{data?.pending ? 'Loading follow-through…' : 'No follow-through needs attention.'}</Text>}
     {data?.has_more && <Button secondary disabled={!!busy} onClick={() => load({ page: pages.current })}>Load more</Button>}
   </section>;
 }
