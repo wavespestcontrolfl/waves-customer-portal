@@ -677,29 +677,43 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
 // whose delivery is about to be recorded (a throw from the request rolls
 // the mark back with the transaction).
 async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db, { requestId = null } = {}) {
-  return database.transaction(async (trx) => {
-    const item = serviceRecordId
-      ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
-    if (item) {
-      const packet = await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
-      const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
-        .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
-      if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
-    }
-    // claimed_at is the mark's time: a row still `sending` past the claim
-    // window after this commits had its provider request made, and the
-    // stranded-send reconciliation (review-request.js) proves or releases it.
-    const marked = requestId
-      ? Number(await trx('review_requests').where({ id: requestId, status: 'pending' }).update({ status: 'sending', claimed_at: trx.fn.now() })) : 0;
-    const verdict = await dispatch(trx);
-    // A refusal before the request (consent, suppression, send window) is
-    // provably unsent: the row returns to pending in this same transaction,
-    // so a worker lost before the sender's own bookkeeping strands nothing.
-    if (marked && verdict && verdict.ok === false) {
-      await trx('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending', claimed_at: null });
-    }
-    return verdict;
-  });
+  // The pre-provider mark is durable BEFORE the held handoff, on the marker
+  // connection (never inside the transaction it would roll back with): a
+  // worker lost after the provider accepted but before this transaction
+  // commits leaves a `sending` row the stranded-send reconciliation
+  // (review-request.js) proves or releases, never a pending row the
+  // scheduler would send again. claimed_at is written at JavaScript
+  // precision so the reconciliation's guards compare it losslessly.
+  const marked = requestId
+    ? Number(await require('../models/marker-db')()('review_requests').where({ id: requestId, status: 'pending' })
+      .update({ status: 'sending', claimed_at: new Date() })) : 0;
+  const release = () => database('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending', claimed_at: null });
+  let dispatched = false;
+  let verdict;
+  try {
+    verdict = await database.transaction(async (trx) => {
+      const item = serviceRecordId
+        ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
+      if (item) {
+        const packet = await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
+        const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
+          .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+        if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+      }
+      dispatched = true;
+      return dispatch(trx);
+    });
+  } catch (err) {
+    // A throw before the request is provably unsent; one from the request
+    // is not, and the row stays marked for the reconciliation to judge.
+    if (marked && !dispatched) await release().catch(() => {});
+    throw err;
+  }
+  // A refusal before the request (consent, suppression, send window, an
+  // uncertain summary) is provably unsent: the row returns to pending, so a
+  // worker lost before the sender's own bookkeeping strands nothing.
+  if (marked && verdict && verdict.ok === false) await release();
+  return verdict;
 }
 
 // The retry rail's provider request runs while the customer and preference
@@ -780,8 +794,15 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     // that already closed goes back on the recovery queue so the coordinator
     // re-observes the settled summary and enrolls the review it still owes.
     if (!otherUncertain) {
-      await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' })
-        .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+      // A packet closed for office review of its payment (a payer owns the
+      // invoice, the visit is on billing hold) owes no review enrollment:
+      // reopening it would only re-record the payer alert it already holds.
+      const closed = await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id', 'error');
+      const state = closed?.error ? (() => { try { return typeof closed.error === 'string' ? JSON.parse(closed.error) : closed.error; } catch { return null; } })() : null;
+      if (closed && state?.payment !== 'office_required') {
+        await trx('visit_completion_packets').where({ id: closed.id, status: 'done' })
+          .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+      }
     }
     return { reconciled: true };
   });

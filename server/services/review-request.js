@@ -1748,10 +1748,9 @@ const ReviewService = {
             `[review] SMS DEFERRED (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) (queued for retry at ${deferredRetryAt.toISOString()})`,
           );
         } else if (result.blocked && result.code === "VISIT_SUMMARY_UNCERTAIN") {
-          // Parked with its summary: the pending ask is removed, exactly as
-          // the parking operation does, and re-created when the summary settles.
-          await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: requestId }).del().catch(() => {});
-          logger.info(`[review] Parked request at the provider (requestId=${requestId} reason=visit_summary_bounced)`);
+          // Parked with its summary (an automatic ask is removed and
+          // re-created when the summary settles; a manual one waits).
+          await this._parkAskAtProviderBoundary(request);
         } else if (result.blocked && result.code === "VISIT_SUMMARY_STATE_UNAVAILABLE") {
           const retryAt = new Date(Date.now() + 30 * 60 * 1000);
           await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt });
@@ -2675,10 +2674,11 @@ const ReviewService = {
    * reconciliation in claimInlineForSend.
    */
   async reconcileStrandedSends() {
+    const staleBefore = new Date(Date.now() - INLINE_CLAIM_STALE_MS);
     const stranded = await db("review_requests")
       .where({ status: "sending" })
       .whereNotNull("claimed_at")
-      .where("claimed_at", "<=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
+      .where("claimed_at", "<=", staleBefore)
       .where(function () {
         this.whereNull("triggered_by").orWhereNot("triggered_by", "auto_inline");
       })
@@ -2707,27 +2707,37 @@ const ReviewService = {
         continue;
       }
       if (evidence.unavailable) continue;
-      const guard = { id: row.id, status: "sending", claimed_at: row.claimed_at };
-      if (evidence.found) {
-        const now = new Date();
-        const done = Number(await db("review_requests").where(guard).update({
-          status: "sent", scheduled_for: null,
-          ...(email ? { sent_at: now } : { sms_sent_at: now, ...(row.sequence_id ? { sent_at: now } : {}) }),
-        }));
-        finished += done;
-        if (done && row.sequence_id) await this._advanceStrandedSequenceStep(row, now);
-        continue;
-      }
-      const freed = Number(await db("review_requests").where(guard).update(row.sequence_id
-        ? { status: "deferred", claimed_at: null }
-        : { status: "pending", scheduled_for: new Date(), claimed_at: null }));
-      released += freed;
-      // The step runner's claim left the owning sequence unscheduled for
-      // the request; the touch retries on the cron's rail at its usual delay.
-      if (freed && row.sequence_id) {
-        await db("review_sequences").where({ id: row.sequence_id, status: "active" }).whereNull("next_run_at")
-          .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
-      }
+      // The guard is the stale claim itself (a re-claimed row carries a
+      // fresh claimed_at past the cutoff), never an equality on a timestamp
+      // that may have lost precision on its way through the driver.
+      const guard = (trx) => trx("review_requests").where({ id: row.id, status: "sending" }).where("claimed_at", "<=", staleBefore);
+      // The touch and its sequence move together: a repair recorded on one
+      // without the other would strand the cadence for good.
+      const outcome = await db.transaction(async (trx) => {
+        if (evidence.found) {
+          const now = new Date();
+          const done = Number(await guard(trx).update({
+            status: "sent", scheduled_for: null,
+            ...(email ? { sent_at: now } : { sms_sent_at: now, ...(row.sequence_id ? { sent_at: now } : {}) }),
+          }));
+          if (done && row.sequence_id) await this._advanceStrandedSequenceStep(row, now, trx);
+          return { finished: done };
+        }
+        // A one-off email has no sender that re-drives it (the scheduler
+        // texts, a sequence owns its touches): it fails, for the operator.
+        const freed = Number(await guard(trx).update(row.sequence_id
+          ? { status: "deferred", claimed_at: null }
+          : email ? { status: "failed", claimed_at: null } : { status: "pending", scheduled_for: new Date(), claimed_at: null }));
+        // The step runner's claim left the owning sequence unscheduled for
+        // the request; the touch retries on the cron's rail at its usual delay.
+        if (freed && row.sequence_id) {
+          await trx("review_sequences").where({ id: row.sequence_id, status: "active" }).whereNull("next_run_at")
+            .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() });
+        }
+        return { released: freed };
+      });
+      finished += outcome.finished || 0;
+      released += outcome.released || 0;
     }
     if (finished || released) logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released})`);
     return { finished, released };
@@ -2763,8 +2773,8 @@ const ReviewService = {
    * completed. Only a sequence still claimed on this very step moves; a
    * parked sequence keeps its status (as advanceSentStep does).
    */
-  async _advanceStrandedSequenceStep(row, now = new Date()) {
-    const seq = await db("review_sequences").where({ id: row.sequence_id }).first();
+  async _advanceStrandedSequenceStep(row, now = new Date(), database = db) {
+    const seq = await database("review_sequences").where({ id: row.sequence_id }).first();
     if (!seq || seq.current_step !== row.sequence_step || seq.next_run_at != null) return false;
     const Summary = require("./visit-completion-summary");
     const parked = seq.status === "stopped" && seq.stop_reason === Summary.PARKED_REVIEW_REASON;
@@ -2776,10 +2786,29 @@ const ReviewService = {
     const updates = nextStep >= plan.length
       ? { ...advance, status: "completed", stop_reason: "completed", next_run_at: null, completed_at: now }
       : { ...advance, next_run_at: nextTouchRunAt({ startedAt: seq.started_at || now, step: plan[nextStep], now }) };
-    const moved = await db("review_sequences").where({ id: seq.id, status: seq.status, current_step: seq.current_step })
+    const moved = await database("review_sequences").where({ id: seq.id, status: seq.status, current_step: seq.current_step })
       .whereNull("next_run_at").update(updates);
     if (moved) logger.info(`[review] stranded touch advanced its sequence (sequenceId=${seq.id} step=${seq.current_step})`);
     return Boolean(Number(moved));
+  },
+
+  /**
+   * An ask refused at the provider boundary because its visit summary is
+   * parked as uncertain. A packet-owned automatic ask is removed, exactly as
+   * the parking operation does (the coordinator re-creates it when the
+   * summary settles); a manual ask keeps its trigger, copy, channel and
+   * timing and waits for a later pass.
+   */
+  async _parkAskAtProviderBoundary(request) {
+    const Summary = require("./visit-completion-summary");
+    if (Summary.PACKET_OWNED_REVIEW_TRIGGERS.includes(request.triggered_by)) {
+      await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id }).del().catch(() => {});
+      logger.info(`[review] Parked request at the provider (requestId=${request.id} reason=visit_summary_bounced)`);
+      return;
+    }
+    await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id })
+      .update({ status: "pending", scheduled_for: new Date(Date.now() + 30 * 60 * 1000), claimed_at: null }).catch(() => {});
+    logger.info(`[review] Deferred manual request at the provider (requestId=${request.id} reason=visit_summary_bounced)`);
   },
 
   async processScheduled() {
@@ -3628,7 +3657,7 @@ const ReviewService = {
       if (summaryVerdict.reason === "summary_state_unavailable") {
         await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
       } else {
-        await db("review_requests").where({ id: request.id, status: "pending" }).del().catch(() => {});
+        await this._parkAskAtProviderBoundary(request);
       }
       return summaryVerdict;
     }
@@ -3815,7 +3844,7 @@ const ReviewService = {
       if (summaryVerdict.reason === "summary_state_unavailable") {
         await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
       } else {
-        await db("review_requests").where({ id: request.id, status: "pending" }).del().catch(() => {});
+        await this._parkAskAtProviderBoundary(request);
       }
       return { ...summaryVerdict, channel: "email" };
     }

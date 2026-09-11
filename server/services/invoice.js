@@ -902,12 +902,31 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, { allowClaimed = f
 // enrolled from the coverage path itself (best-effort; the recovery sweep
 // owns retries through the packet).
 async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
-  if (!packetId) return;
+  if (!packetId) return null;
+  let result = null;
   try {
-    await require("./review-request").enrollForPaidInvoice({ id: invoiceId, visit_completion_packet_id: packetId }, { source: "credit_covered" });
+    result = await require("./review-request").enrollForPaidInvoice({ id: invoiceId, visit_completion_packet_id: packetId }, { source: "credit_covered" });
   } catch (err) {
     logger.warn(`[invoice] review enrollment after credit coverage failed for ${invoiceId}: ${err.message}`);
+    return null;
   }
+  // Credit coverage has no payment webhook to redeliver: an enrollment the
+  // packet could neither record nor reopen for is lost unless someone is
+  // told. The settlement stands; the office enrolls the review by hand.
+  if (result && result.enrolled === false && result.recorded === false) {
+    logger.error(`[invoice] review enrollment after credit coverage unrecorded for ${invoiceId} (packet ${packetId}): ${result.error || result.reason}`);
+    try {
+      await require("./notification-service").notifyAdmin(
+        "alert",
+        "Visit review not enrolled after credit coverage",
+        `Invoice ${invoiceId} was settled by account credit, but the completed visit's review request could not be recorded. Enroll the review from the visit if it is still wanted.`,
+        { link: "/admin/communications", metadata: { dedupeKey: `review-enrollment-unrecorded:${invoiceId}`, invoice_id: invoiceId, packet_id: packetId } },
+      );
+    } catch (err) {
+      logger.warn(`[invoice] unrecorded review enrollment alert failed for ${invoiceId}: ${err.message}`);
+    }
+  }
+  return result;
 }
 
 async function restoreSendClaim(invoiceId, previousStatus, claimed) {

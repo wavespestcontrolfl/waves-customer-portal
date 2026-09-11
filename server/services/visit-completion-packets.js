@@ -593,6 +593,15 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
       }
       continue;
     }
+    const packet = await trx('visit_completion_packets').where({ id: invoice.visit_completion_packet_id }).first('id', 'visit_id', 'status', 'error');
+    // A packet that closed as failed keeps its hold: the office owns that
+    // closeout, and only the payer marker is cleared so the withdrawal is not
+    // found again. The invoice never returns to the send queue from here.
+    if (packet?.status === 'failed') {
+      await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
+        .update({ scheduled_send_error: null, updated_at: trx.fn.now() });
+      continue;
+    }
     const moved = invoice.status === 'draft'
       ? await trx('invoices').where({ id: invoice.id, status: 'draft', scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
         .update({ status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() })
@@ -601,7 +610,6 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
         .update({ scheduled_send_error: null, updated_at: trx.fn.now() });
     if (!moved) continue;
     released += 1;
-    const packet = await trx('visit_completion_packets').where({ id: invoice.visit_completion_packet_id }).first('id', 'visit_id', 'status', 'error');
     await trx('service_visits').where({ id: packet.visit_id }).update({ billing_hold: false, updated_at: trx.fn.now() });
     // Only the payer portion of the office-review state is lifted: an
     // uncertain summary delivery recorded beside it keeps its error and alert.
