@@ -4,6 +4,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { phoneMatchDigits } = require('../utils/phone');
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
@@ -26,7 +27,7 @@ function evaluateNoShow({ visit, promise, now = new Date(), stage1Minutes = 45 }
   const departed = observed(visit.en_route_at);
   const stage = nowMs >= start + 150 * 60000 ? 2 : (!departed && nowMs >= start + stage1Minutes * 60000 ? 1 : null);
   if (!stage) return null;
-  return { stage, evidence: 'missing_tracking', promised_window: { start_at: new Date(start).toISOString(), end_at: new Date(start + 120 * 60000).toISOString() },
+  return { stage, evidence: 'missing_tracking', promised_window: { start_at: new Date(start).toISOString(), end_at: new Date(start + ARRIVAL_WINDOW_MINUTES * 60000).toISOString() },
     message: stage === 2
       ? (departed ? 'En Route was recorded, but no arrival is recorded after the promised window.' : 'The promised window ended over 30 minutes ago; no arrival is recorded.')
       : 'No departure or arrival is recorded for this window yet.',
@@ -161,7 +162,13 @@ async function sweep(conn, { now = new Date() } = {}) {
         stage: live.stage, dedupeKey: `${key}:${recipient}`, message: live.message,
         payload: { ...live, visit_id: card.id, customer_name: customerName, when } });
       const office = live.stage === 2 || !recipient;
-      const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES).whereNull('resolved_at');
+      // Only alerts THIS detector created (matches clearTrackingBells in
+      // dispatch-alerts.js) — a pre-existing tech_late/unassigned_overdue
+      // row from the legacy overdue detectors, or any other future source
+      // of that type, must never be auto-resolved as a side effect of a
+      // tracking-key mismatch it was never party to (codex P1).
+      const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
+        .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'");
       for (const alert of existing) {
         if (!office || alert.payload?.tracking_key !== key) await dispatch.resolveAlert({ id: alert.id, trx });
       }
