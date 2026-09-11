@@ -1647,6 +1647,9 @@ const InvoiceService = {
           token,
           invoice_number: invoiceNumber,
           customer_id: customerId,
+          // Freeze at creation even when the bar is disabled: a primary flip
+          // can commit between this customer read and the invoice INSERT.
+          customer_address_snapshot: require('./invoice-address').invoiceAddressSnapshot(customer),
           title,
           line_items: JSON.stringify(items),
           subtotal,
@@ -2341,7 +2344,7 @@ const InvoiceService = {
     return {
       ...invoice,
       ...updates,
-      customer,
+      customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       annual_prepay,
       // Amount the customer actually pays = total − applied account credit. The
       // pay page renders this (and a credit line) so the displayed amount matches
@@ -3735,7 +3738,7 @@ const InvoiceService = {
     const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
     return {
       ...invoice,
-      customer,
+      customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       active_payment_plan: activePaymentPlan,
       annual_prepay,
       annual_prepay_term: annualPrepayTerm,
