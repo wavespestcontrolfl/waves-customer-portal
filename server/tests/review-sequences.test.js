@@ -1510,6 +1510,60 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
     });
 
+    test('an upstream suppression sentinel suppresses the ask instead of queueing a provider retry', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ss-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-ss1', customer_id: 'ss-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tss1', location_id: 'venice', created_at: new Date() }],
+      });
+      db.mockImplementation(mock);
+      // The kill switch's shape: sent:true, but the sid is a sentinel and no
+      // customer SMS left. No blocked/retryable flag rides along.
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'template-disabled', auditLogId: 'audit-ss' });
+
+      const out = await ReviewService.sendSMS('rr-ss1');
+
+      // Codex #4331 P1: this used to reach the blind five-minute provider
+      // retry, so suppressed rows piled up and would all fire at once the
+      // moment the template was re-enabled.
+      expect(out).toMatchObject({ blocked: true });
+      expect(out.deferred).toBeUndefined();
+      expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    });
+
+    test('a request whose earlier attempt was accepted is repaired and never re-sent', async () => {
+      const acceptedAt = new Date(Date.now() - 80 * 3600000);
+      const mock = makeMock({
+        customers: [{ id: 'ad-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        // Due again: the reservation has aged past the 72-hour window, so
+        // nothing else holds this row back any more.
+        review_requests: [{ id: 'rr-ad1', customer_id: 'ad-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tad1', location_id: 'venice', created_at: acceptedAt, scheduled_for: new Date(Date.now() - 60000) }],
+        // The promoted reservation from that accepted-but-unstamped attempt.
+        sms_log: [{ id: 'res-ad1', customer_id: 'ad-1', direction: 'outbound', status: 'sent', message_body: 'Would you leave us a quick review?', created_at: acceptedAt, updated_at: acceptedAt, metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: 'rr-ad1' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-ad1');
+
+      expect(out).toEqual({ refused: 'already_delivered' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('sent');
+      expect(row.sms_sent_at).toEqual(acceptedAt);
+    });
+
+    test('a resolved reservation belonging to a DIFFERENT request never blocks this one', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'ad-2', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-ad2', customer_id: 'ad-2', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tad2', location_id: 'venice', created_at: new Date() }],
+        sms_log: [{ id: 'res-other', customer_id: 'ad-2', direction: 'outbound', status: 'sent', message_body: 'Would you leave us a quick review?', created_at: new Date(Date.now() - 200 * 3600000), updated_at: new Date(Date.now() - 200 * 3600000), metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: 'rr-someone-else' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-ad2');
+
+      expect(out).not.toMatchObject({ refused: 'already_delivered' });
+    });
+
     test('an accepted ask whose sent stamp fails keeps its reservation as durable delivery evidence', async () => {
       const mock = makeMock({
         customers: [{ id: 'un-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],

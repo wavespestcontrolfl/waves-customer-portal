@@ -14,7 +14,6 @@ const {
   TERMINAL_CODES: CAMPAIGN_TERMINAL_CODES,
   HOLD_CODES: CAMPAIGN_HOLD_CODES,
 } = require('../services/campaign-drafts-gate');
-const { SUPPRESSION_SENTINELS } = require('../services/sms-auto-send');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: every draft MUTATION (approve/send, revise,
@@ -587,20 +586,11 @@ async function guardCampaignSend(draft, req, res, releaseFields = {}) {
   return { blocked: true };
 }
 
-/**
- * sendCustomerMessage reports sent:true for upstream SUPPRESSION paths where
- * no customer SMS actually left — the provider id is a sentinel (e.g. the
- * admin-sms-templates kill switch returns sid 'template-disabled'), not a
- * Twilio sid. Same contract sms-auto-send.js enforces via
- * SUPPRESSION_SENTINELS. Campaign drafts map messageType to
- * 'upsell'/'reactivation', which are real per-template kill-switch keys, so
- * this path is reachable: finalizing would mark the draft sent while the
- * customer received nothing. Returns the sentinel id, or null for a real send.
- */
-function suppressedSendSentinel(smsResult) {
-  const id = smsResult && smsResult.providerMessageId;
-  return id && SUPPRESSION_SENTINELS.has(id) ? id : null;
-}
+// Campaign drafts map messageType to 'upsell'/'reactivation', which are real
+// per-template kill-switch keys, so the sentinel path is reachable here:
+// finalizing would mark the draft sent while the customer received nothing.
+// The predicate itself is shared with sms-auto-send.js.
+const { suppressedSendSentinel } = require('../services/sms-auto-send');
 
 /**
  * Finalize a draft after a REAL provider send. A draft's linked row moves in

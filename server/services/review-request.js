@@ -747,6 +747,34 @@ async function reserveReviewSms({ request, to, body }) {
   return { id: reservation.id, reservedAt, requestId: request.id };
 }
 
+// A resolved review-ask reservation for THIS request is proof the provider
+// accepted that ask, even when the request row never recorded it.
+async function reviewAskDeliveryEvidence(requestId, customerId) {
+  if (!requestId || !customerId) return null;
+  try {
+    const rows = await db("sms_log")
+      .where({ customer_id: customerId, direction: "outbound" })
+      .whereIn("status", ["sent", "delivered"])
+      .whereRaw("metadata->>'review_request_id' = ?", [String(requestId)])
+      .select("id", "created_at", "metadata");
+    // Re-checked in JS: the reservation marker and the request id both have
+    // to match, and a caller must never act on a neighbouring row.
+    return rows.find((row) => {
+      let meta = row.metadata;
+      try { meta = typeof meta === "string" ? JSON.parse(meta) : meta || {}; } catch { return false; }
+      return meta?.review_ask_reservation === true && String(meta.review_request_id) === String(requestId);
+    }) || null;
+  } catch (err) {
+    // An unreadable sms_log is already fail-closed downstream: the ask
+    // spacing lookup a few lines below reads the same table and holds the
+    // send for 30 minutes when it cannot answer. Reporting "no evidence"
+    // here keeps that single, established hold instead of adding a second
+    // refusal shape for the same outage.
+    logger.warn(`[review] delivered-ask evidence lookup failed (requestId=${requestId}): ${err.message}`);
+    return null;
+  }
+}
+
 // Turn an ask reservation into durable delivery evidence: the provider
 // accepted, so this is no longer an unresolved in-flight marker and the
 // expiry sweep must never reclaim it.
@@ -1815,6 +1843,22 @@ const ReviewService = {
     // status here closes the race so the customer doesn't get the old ask AND the
     // cadence's Day-0 touch.
     if (["suppressed", "failed", "deferred"].includes(request.status)) return;
+    // An earlier attempt can have been ACCEPTED by the provider and then
+    // failed to stamp this row; that path promotes its reservation to 'sent'
+    // as the durable evidence (codex #4331 P1). Every retry owner —
+    // processScheduled, a tech resend — reaches the provider through here, so
+    // this is the one place that evidence has to be reconciled. The ask
+    // already went out: repair the row and refuse, rather than text the
+    // customer a second time once the reservation ages past the spacing
+    // window and the row looks due again.
+    const delivered = await reviewAskDeliveryEvidence(requestId, request.customer_id);
+    if (delivered) {
+      await db("review_requests").where({ id: requestId, status: "pending" })
+        .update({ sms_sent_at: delivered.created_at || new Date(), status: "sent" })
+        .catch((err) => logger.warn(`[review] unrecorded-ask repair failed (requestId=${requestId}): ${err.message}`));
+      logger.warn(`[review] ask already delivered on an earlier attempt — resend refused (requestId=${requestId})`);
+      return { refused: "already_delivered" };
+    }
 
     const customer = await db("customers")
       .where({ id: request.customer_id })
@@ -2129,6 +2173,20 @@ const ReviewService = {
             `[review] SMS outcome UNCERTAIN (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) — held, not retried automatically`,
           );
           return { deferred: "provider_uncertain", nextAllowedAt: null };
+        }
+        // A suppression sentinel reports sent:true with no customer SMS
+        // behind it (a closed gate, a disabled template, owner silence).
+        // It is not 'accepted', carries no blocked/retryable flag, and so
+        // fell all the way through to the blind five-minute provider retry
+        // below — accumulating rows that would all fire the moment the gate
+        // reopened (codex #4331 P1). It is a suppression: stop retrying.
+        const sentinel = require("./sms-auto-send").suppressedSendSentinel(result);
+        if (sentinel) {
+          await db("review_requests").where({ id: requestId }).update({ status: "suppressed" }).catch(() => {});
+          logger.warn(
+            `[review] SMS SUPPRESSED upstream (customerId=${customer.id} requestId=${requestId} sentinel=${sentinel})`,
+          );
+          return { blocked: true, code: result.code || sentinel };
         }
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {

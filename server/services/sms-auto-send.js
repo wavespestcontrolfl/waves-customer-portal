@@ -109,6 +109,20 @@ function isRealProviderSend(result) {
  * unresolved? Canonical outcomes are authoritative. The retryable/deferred
  * fallback remains only for callers that have not reached that contract yet.
  */
+/**
+ * sendCustomerMessage reports sent:true for upstream SUPPRESSION paths where
+ * no customer SMS actually left — the provider id is a sentinel (the
+ * admin-sms-templates kill switch returns sid 'template-disabled', a closed
+ * gate returns 'gate-blocked', and so on), not a provider sid. Returns that
+ * sentinel id, or null for a real send. Every owner that decides what a
+ * sent:true means has to make this distinction, so it lives here with
+ * SUPPRESSION_SENTINELS rather than being re-derived per caller.
+ */
+function suppressedSendSentinel(result) {
+  const id = result && result.providerMessageId;
+  return id && SUPPRESSION_SENTINELS.has(id) ? id : null;
+}
+
 function isAmbiguousProviderOutcome(result) {
   if (!result) return false;
   if (result.deliveryOutcome === 'uncertain') return true;
@@ -645,6 +659,7 @@ module.exports = {
   SUPPRESSION_SENTINELS,
   isRealProviderSend,
   isAmbiguousProviderOutcome,
+  suppressedSendSentinel,
   autoSendActionsSafe,
   autoSendPreflight,
   hasActiveAutoSendClaim,
