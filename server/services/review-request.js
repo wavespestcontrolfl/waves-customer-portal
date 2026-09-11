@@ -3643,13 +3643,21 @@ const ReviewService = {
         withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id }),
       });
     } catch (err) {
+      // A row the handoff left `sending` had its provider request made and
+      // the response lost: it stays marked for the stranded-send
+      // reconciliation (which proves or releases it), never reset here into
+      // a row the scheduler or the sequence would send again.
+      if (await this._providerOutcomeUnknown(request.id)) {
+        logger.error(`[review] outreach SMS outcome unknown after dispatch (requestId=${request.id} errType=${err?.name || "Error"})`);
+        return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "sms", requestId: request.id };
+      }
       if (manageRetryVia === "cron") {
         await db("review_requests")
-          .where({ id: request.id })
+          .where({ id: request.id }).whereNot({ status: "sending" })
           .update({ status: "pending", scheduled_for: new Date(Date.now() + 5 * 60 * 1000) })
           .catch(() => {});
       } else {
-        await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+        await db("review_requests").where({ id: request.id }).whereNot({ status: "sending" }).update({ status: "failed" }).catch(() => {});
       }
       logger.error(`[review] outreach SMS send threw (requestId=${request.id} errType=${err?.name || "Error"})`);
       return { ok: false, retryable: true, channel: "sms", requestId: request.id };
@@ -3743,7 +3751,25 @@ const ReviewService = {
    *  • one-off before dispatch → nothing would ever retry it: mark 'failed',
    *    report a hard failure so the caller never says "queued".
    */
+  /**
+   * True when the ask's row is still `sending`: the packet handoff marked
+   * it durably before the provider request and left it so because the
+   * request was made (a refusal or a pre-request throw returns it to
+   * pending in the handoff itself). Such a row belongs to the stranded-send
+   * reconciliation, and no caller may reset it.
+   */
+  async _providerOutcomeUnknown(requestId) {
+    const row = await db("review_requests").where({ id: requestId }).first("status").catch(() => null);
+    return row?.status === "sending";
+  },
+
   async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err }) {
+    // A cadence touch whose request was made stays `sending` for the
+    // reconciliation, which advances or releases the sequence on evidence;
+    // the runner leaves the step claimed rather than retrying it.
+    if (dispatched && manageRetryVia === "sequence" && await this._providerOutcomeUnknown(request.id)) {
+      return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "email", requestId: request.id };
+    }
     // A definite 4xx rejection after dispatch is a plain failure, never an
     // ask — no cooldown stamp for an email nobody received (r16 P2).
     if (dispatched && !isDefiniteProviderRejection(err) && manageRetryVia !== "sequence") {
@@ -3756,7 +3782,7 @@ const ReviewService = {
       // distinct reason says so ("do not send it again"; r13 P2).
       return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: stamped ? "email_uncertain" : "email_uncertain_unrecorded" };
     }
-    await db("review_requests").where({ id: request.id }).update({ status: "failed" }).catch(() => {});
+    await db("review_requests").where({ id: request.id }).whereNot({ status: "sending" }).update({ status: "failed" }).catch(() => {});
     if (manageRetryVia === "sequence") {
       return { ok: false, retryable: true, channel: "email", requestId: request.id };
     }
@@ -4823,6 +4849,10 @@ const ReviewService = {
     }
 
     if (outcome.reason === "visit_summary_parked") return this._parkSequence(seq.id);
+    // The provider may hold this touch: the step stays claimed (next_run_at
+    // null) for reconcileStrandedSends, which advances the sequence on proof
+    // of the send or reschedules it when the provider reports none.
+    if (outcome.uncertain) return { ran: false, uncertain: true, step: seq.current_step };
     if (outcome.terminal || outcome.blocked) {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");

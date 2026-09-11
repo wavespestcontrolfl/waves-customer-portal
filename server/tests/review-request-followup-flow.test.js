@@ -44,6 +44,7 @@ const ReviewService = require('../services/review-request');
 function chain(overrides = {}) {
   return {
     where: jest.fn(function () { return this; }),
+    whereNot: jest.fn(function () { return this; }),
     whereIn: jest.fn(function () { return this; }),
     whereNotIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
@@ -961,7 +962,9 @@ describe('review request follow-up flow', () => {
     test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
       const rrUpdateOneOff = jest.fn().mockResolvedValue(1);
       db.mockImplementation((table) => {
-        if (table === 'review_requests') return chain({ update: rrUpdateOneOff });
+        // The row's status stays 'sent'/'failed' here, never 'sending': these
+        // throws are all a definite provider outcome, not the uncertain hold.
+        if (table === 'review_requests') return chain({ update: rrUpdateOneOff, first: jest.fn().mockResolvedValue({ status: 'sent' }) });
         throw new Error(`Unexpected table query: ${table}`);
       });
       const args = { request: { id: 'rr-7' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };

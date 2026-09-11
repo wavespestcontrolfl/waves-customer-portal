@@ -2302,7 +2302,11 @@ postgres('visit summary recipient recovery', () => {
       });
       const packet = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first();
       expect(JSON.parse(packet.error)).toEqual({ payment: 'payment_needed', delivery: 'delivery_review' });
-      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+      const kept = await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at');
+      expect(kept).toHaveLength(1);
+      // Rewritten to the delivery-only state the packet error holds, so the recovery can resolve it.
+      expect(kept[0].payload).toMatchObject({ payment: 'payment_needed', delivery: 'delivery_review' });
+      expect(kept[0].payload.reason).toBeUndefined();
     } finally {
       await mockPg('invoices').where({ id: invoiceId }).del();
       await mockPg('payers').where({ id: payer.id }).del();
@@ -2900,6 +2904,39 @@ postgres('visit summary recipient recovery', () => {
     } finally {
       gate.mockRestore();
       await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
+    }
+  });
+
+  test('a provider throw after dispatch leaves the ask sending and the sequence step claimed', async () => {
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    const sequenceId = randomUUID();
+    await mockPg('review_sequences').insert({ id: sequenceId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'active',
+      current_step: 0, touches_sent: 0, started_at: new Date(), next_run_at: null, plan: JSON.stringify([{ day: 0, channel: 'email' }, { day: 4 }]) });
+    // The handoff marked the row and the request was made (the mark survives the throw).
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'sending',
+      token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), sequence_id: sequenceId, sequence_step: 0, channel: 'email', triggered_by: 'sequence' });
+    try {
+      const outcome = await Review._outreachEmailThrowOutcome({ request: { id: askId }, manageRetryVia: 'sequence', dispatched: true, err: new Error('socket hang up') });
+      expect(outcome).toMatchObject({ ok: false, uncertain: true, reason: 'provider_uncertain' });
+      expect(await mockPg('review_requests').where({ id: askId }).first()).toMatchObject({ status: 'sending' });
+      // The runner leaves the step claimed for the reconciliation.
+      const touch = jest.spyOn(Review, 'sendOutreachTouch').mockResolvedValue(outcome);
+      const customer = await mockPg('customers').where({ id: fixture.customerId }).first();
+      jest.spyOn(Review, 'manualReviewAskSentRecently').mockResolvedValue(false);
+      const ran = await Review._runSequenceStep(sequenceId).catch((err) => ({ threw: err.message }));
+      touch.mockRestore();
+      expect(ran).toMatchObject({ ran: false, uncertain: true });
+      expect(await mockPg('review_sequences').where({ id: sequenceId }).first()).toMatchObject({ status: 'active', current_step: 0, next_run_at: null });
+      expect(customer.id).toBe(fixture.customerId);
+      // A throw before any request (the row already back to pending) still fails the row.
+      await mockPg('review_requests').where({ id: askId }).update({ status: 'pending', claimed_at: null });
+      expect(await Review._outreachEmailThrowOutcome({ request: { id: askId }, manageRetryVia: 'sequence', dispatched: false, err: new Error('dns') }))
+        .toMatchObject({ ok: false, retryable: true });
+      expect(await mockPg('review_requests').where({ id: askId }).first()).toMatchObject({ status: 'failed' });
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+      await mockPg('review_sequences').where({ id: sequenceId }).del();
     }
   });
 

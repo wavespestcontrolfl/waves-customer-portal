@@ -524,8 +524,9 @@ async function resolvePacketOwnershipLocked(packetId, trx) {
 async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
   const stamp = `payer_billed:${payerId}`;
   // A repeated withdrawal (a second claim on the same draft) keeps the hold
-  // flag the first one recorded.
-  const prior = await trx('invoices').where({ id: invoiceId }).first('scheduled_send_error');
+  // flag the first one recorded: the invoice row is held before the marker
+  // is read, so two withdrawals cannot both read the pre-flag value.
+  const prior = await trx('invoices').where({ id: invoiceId }).forUpdate().first('scheduled_send_error');
   const withdrawn = await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
     .update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: stamp, updated_at: trx.fn.now() });
   // A pay link the homeowner already holds (sent, viewed, overdue) or a
@@ -642,6 +643,13 @@ async function liftPayerOfficeReview(trx, packet) {
     .whereRaw("payload->>'packetId' = ?", [packet.id]).whereRaw("payload->>'reason' = 'payer_assigned'")
     .whereRaw("COALESCE(payload->>'delivery', '') <> 'delivery_review'").select('id');
   for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
+  // An alert that also carries the delivery review stays open, rewritten to
+  // the delivery-only state the packet error now holds, so the summary
+  // recovery can resolve it later (it ignores payer-held payloads).
+  await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+    .whereRaw("payload->>'packetId' = ?", [packet.id]).whereRaw("payload->>'reason' = 'payer_assigned'")
+    .whereRaw("payload->>'delivery' = 'delivery_review'")
+    .update({ payload: trx.raw("(payload - 'reason' - 'payerId') || '{\"payment\":\"payment_needed\"}'::jsonb") });
 }
 
 // The mirror of the reconciliation for ownership-ADDING transitions (a
