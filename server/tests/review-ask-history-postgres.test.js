@@ -129,4 +129,47 @@ postgres('review ask history against migrated PostgreSQL', () => {
       to_phone: '+12025550102', status: 'sent', ...row })));
     expect(await history.lastManualAskAt(customerId, { since: at })).toEqual(confirmedAt);
   });
+
+  test('an enrollment supersedes a queued ask but never one already in flight', async () => {
+    // codex #4331 P1: sendSMS re-asserts 'pending' and opens its reservation
+    // before dialing the provider, but no row lock survives a network call.
+    // Suppressing an in-flight ask did not stop the text — it delivered, the
+    // row stamped back to 'sent', and the cadence that had just superseded it
+    // then read that delivery as an outside ask and stopped itself, costing
+    // the customer every follow-up touch. The unresolved reservation is the
+    // in-flight marker; the unit suite's query mock treats whereNotExists as
+    // a no-op, so this carve-out can only be proved here.
+    const ReviewService = require('../services/review-request');
+    const queued = await request({ status: 'pending', template_key: 'day0_ask', scheduled_for: at });
+    const inFlight = await request({ status: 'pending', template_key: 'day0_ask', scheduled_for: at });
+    await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550101', to_phone: '+12025550102',
+      status: 'sending', message_body: 'Would you leave us a quick review?',
+      metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: inFlight.id }),
+    });
+
+    await ReviewService.supersedeQueuedAsks(customerId);
+
+    const rows = Object.fromEntries((await trx('review_requests').whereIn('id', [queued.id, inFlight.id])
+      .select('id', 'status')).map(row => [row.id, row.status]));
+    expect(rows[queued.id]).toBe('suppressed');
+    expect(rows[inFlight.id]).toBe('pending');
+  });
+
+  test('a SETTLED reservation stops protecting its row from the next enrollment', async () => {
+    // Only 'sending' is in flight. Once the reservation resolves (or the
+    // 72-hour sweep expires it), the row is superseded like any other queued
+    // ask — the carve-out cannot become a permanent shield.
+    const ReviewService = require('../services/review-request');
+    const settled = await request({ status: 'pending', template_key: 'day0_ask', scheduled_for: at });
+    await trx('sms_log').insert({
+      customer_id: customerId, direction: 'outbound', from_phone: '+12025550101', to_phone: '+12025550102',
+      status: 'sent', message_body: 'Would you leave us a quick review?',
+      metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: settled.id }),
+    });
+
+    await ReviewService.supersedeQueuedAsks(customerId);
+
+    expect((await trx('review_requests').where({ id: settled.id }).first('status')).status).toBe('suppressed');
+  });
 });

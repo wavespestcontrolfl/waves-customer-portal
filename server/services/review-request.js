@@ -758,6 +758,24 @@ async function reserveReviewSms({ request, to, body }) {
   return { id: reservation.id, reservedAt, requestId: request.id };
 }
 
+// Queued asks an enrollment replaces. Exported for the PostgreSQL test: the
+// in-flight carve-out is a correlated NOT EXISTS on JSON metadata, which the
+// unit suite's query mock cannot evaluate.
+function supersedeQueuedAsks(customerId) {
+  return db("review_requests")
+    .where({ customer_id: customerId, status: "pending" })
+    .whereNull("sms_sent_at")
+    .whereNotNull("scheduled_for")
+    .whereRaw(ASK_TOUCH_SQL)
+    .whereNotExists(function () {
+      this.select(1).from("sms_log")
+        .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
+        .whereRaw("sms_log.metadata->>'review_ask_reservation' = 'true'")
+        .where("sms_log.status", "sending");
+    })
+    .update({ status: "suppressed" });
+}
+
 // A resolved review-ask reservation for THIS request is proof the provider
 // accepted that ask, even when the request row never recorded it.
 async function reviewAskDeliveryEvidence(requestId, customerId) {
@@ -4817,12 +4835,19 @@ const ReviewService = {
     // queued private no-link check-in (ASK_TOUCH_SQL excludes it) is left alone.
     // Fail CLOSED — if this can't run, abort the start (no .catch → it throws and
     // the route records not-started) rather than risk a stranded duplicate ask.
-    await db("review_requests")
-      .where({ customer_id: customerId, status: "pending" })
-      .whereNull("sms_sent_at")
-      .whereNotNull("scheduled_for")
-      .whereRaw(ASK_TOUCH_SQL)
-      .update({ status: "suppressed" });
+    //
+    // An IN-FLIGHT ask is not supersedable, the same rule this function already
+    // applies to an in-flight opener above. sendSMS re-asserts 'pending' and
+    // opens its sms_log reservation before the provider call, but that no-op
+    // write's row lock is gone by the time the provider is dialed — nothing
+    // outside a transaction can hold a row across a network call. Suppressing
+    // in that window did not stop the text: it delivered anyway, stamped the
+    // row back to 'sent', and this very cadence then read it as an outside ask
+    // and stopped as 'superseded', costing the customer every follow-up touch
+    // (codex #4331 P1). The unresolved reservation IS the in-flight marker, so
+    // skip those rows; they settle within the 72-hour sweep, and a delivered
+    // one is real evidence the spacing and standdown rules then act on.
+    await supersedeQueuedAsks(customerId);
 
     const usePlan = Array.isArray(plan) && plan.length ? plan : OUTREACH.DEFAULT_SEQUENCE_PLAN;
     let svcType = serviceType;
@@ -6300,5 +6325,6 @@ ReviewService.__private = {
 ReviewService.unshortenedReviewUrl = unshortenedReviewUrl;
 ReviewService.REVIEW_TOKEN_RE = REVIEW_TOKEN_RE;
 ReviewService.LEGACY_REVIEW_DELAY_MINUTES = LEGACY_REVIEW_DELAY_MINUTES;
+ReviewService.supersedeQueuedAsks = supersedeQueuedAsks;
 
 module.exports = ReviewService;
