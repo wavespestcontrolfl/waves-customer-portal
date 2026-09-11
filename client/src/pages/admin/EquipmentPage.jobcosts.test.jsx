@@ -39,3 +39,28 @@ it('shows the full read error when the summary request fails', async () => {
  expect(screen.queryByText('Avg Margin')).not.toBeInTheDocument();
  expect(screen.queryByText(/No job costs recorded yet/)).not.toBeInTheDocument();
 });
+it('keeps cached KPIs when a retry hits a transient summary failure', async () => {
+ handler = async url => (route(url) === 'summary' ? ok(summary) : fail());
+ mount();
+ await screen.findByRole('alert');
+ expect(screen.getByText('75.0%')).toBeInTheDocument();
+ handler = async url => (route(url) === 'summary' ? fail() : ok({ job_costs: [] }));
+ fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+ await screen.findByText(/Could not refresh job cost summary/);
+ expect(screen.getByText('75.0%')).toBeInTheDocument();
+ expect(screen.getByText(/No job costs recorded yet/)).toBeInTheDocument();
+ expect(screen.queryByText(/Could not load recent job costs/)).not.toBeInTheDocument();
+ handler = async url => (route(url) === 'summary' ? ok(summary) : ok({ job_costs: [] }));
+ fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+ await screen.findByText(/No job costs recorded yet/);
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+it('renders numeric metrics with tabular numerals', async () => {
+ handler = async url => (route(url) === 'summary' ? ok({ ...summary, by_service_type: [{ service_type: 'Lawn', total_jobs: 2, total_revenue: 400, total_costs: 100, avg_margin: 75 }] }) : ok({ job_costs: [] }));
+ mount();
+ const margins = await screen.findAllByText('75.0%');
+ expect(margins).toHaveLength(2);
+ margins.forEach(el => expect(el).toHaveClass('u-nums'));
+ expect(screen.getByText('2 jobs')).toHaveClass('u-nums');
+ expect(screen.getByText(/^Rev:/)).toHaveClass('u-nums');
+});

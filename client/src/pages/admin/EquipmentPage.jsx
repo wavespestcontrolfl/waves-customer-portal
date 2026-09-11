@@ -674,13 +674,13 @@ function TankMixTab({
                 fontSize: 18,
                 fontWeight: 500,
                 color: m.cost_incomplete ? "#52525B" : "#18181B"
-              }}>
+              }} className="u-nums">
                         {fmt(m.cost_per_tank)}/tank
                       </div>{" "}
                       <div style={{
                 fontSize: 14,
                 color: "#71717A"
-              }}>
+              }} className="u-nums">
                         {fmt(m.cost_per_1000sf)}/1000sf
                       </div>{" "}
                       {m.cost_incomplete && <div style={{
@@ -720,13 +720,13 @@ function TankMixTab({
                 }}>
                             {p.product_name}
                           </TD>
-                          <TD>
+                          <TD nums>
                             {p.rate_per_1000sf} {p.rate_unit}
                           </TD>
-                          <TD>{p.oz_per_tank}</TD>
+                          <TD nums>{p.oz_per_tank}</TD>
                           <TD style={{
                   color: "#18181B"
-                }}>
+                }} nums>
                             {fmt(p.cost)}
                           </TD>
                         </TR>)}
@@ -755,16 +755,15 @@ function JobCostTab() {
     setListError("");
     Promise.allSettled([adminFetch("/admin/equipment/job-costs/summary"), adminFetch("/admin/equipment/job-costs?limit=30")]).then(([s, c]) => {
       if (!active) return;
-      if (s.status === "rejected") {
-        setReadError(s.reason?.message || "Request failed");
-        return;
-      }
-      setSummary(normalizeJobCostSummary(s.value));
-      if (c.status === "rejected") {
-        setCosts([]);
-        setListError(c.reason?.message || "Request failed");
+      if (s.status === "fulfilled") {
+        setSummary(normalizeJobCostSummary(s.value));
       } else {
+        setReadError(s.reason?.message || "Request failed");
+      }
+      if (c.status === "fulfilled") {
         setCosts(c.value.job_costs || c.value.costs || []);
+      } else {
+        setListError(c.reason?.message || "Request failed");
       }
     }).finally(() => {
       if (active) setLoading(false);
@@ -773,7 +772,8 @@ function JobCostTab() {
       active = false;
     };
   }, [attempt]);
-  if (readError) return <ActionFeedback error onRetry={() => setAttempt(v => v + 1)}>
+  const retry = () => setAttempt(v => v + 1);
+  if (readError && !summary) return <ActionFeedback error onRetry={retry}>
         Could not load job costs: {readError}
       </ActionFeedback>;
   if (loading) return <div style={{
@@ -784,6 +784,9 @@ function JobCostTab() {
         Loading job costs...
       </div>;
   return <div>
+      {readError && <ActionFeedback error onRetry={retry} className="mb-3">
+          Could not refresh job cost summary: {readError}. Showing previously loaded figures.
+        </ActionFeedback>}
       {summary && <div style={{
       display: "flex",
       gap: 10,
@@ -817,7 +820,7 @@ function JobCostTab() {
           fontSize: isMobile ? 18 : 22,
           fontWeight: 500,
           color: s.color
-        }}>
+        }} className="u-nums">
                 {s.value}
               </div>{" "}
               <div style={{
@@ -862,30 +865,30 @@ function JobCostTab() {
                 {" "}
                 <span style={{
             color: "#71717A"
-          }}>
+          }} className="u-nums">
                   {stats.count} jobs
                 </span>{" "}
                 <span style={{
             color: "#18181B"
-          }}>
+          }} className="u-nums">
                   Rev: {fmt(stats.avgRevenue)}
                 </span>{" "}
                 <span style={{
             color: "#52525B"
-          }}>
+          }} className="u-nums">
                   Cost: {fmt(stats.avgCost)}
                 </span>{" "}
                 <span style={{
             color: stats.avgMargin >= 50 ? "#18181B" : "#52525B",
             fontWeight: 500
-          }}>
+          }} className="u-nums">
                   {stats.avgMargin?.toFixed(1)}%
                 </span>{" "}
               </div>{" "}
             </div>)}
         </Card>}
 
-      {listError && <ActionFeedback error onRetry={() => setAttempt(v => v + 1)} className="mb-3">
+      {listError && <ActionFeedback error onRetry={retry} className="mb-3">
           Could not load recent job costs: {listError}
         </ActionFeedback>}
       {!listError && costs.length === 0 && <Card style={{
