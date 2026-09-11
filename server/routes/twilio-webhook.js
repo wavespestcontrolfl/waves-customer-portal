@@ -295,9 +295,18 @@ router.post('/sms', async (req, res) => {
     // A failed unified write bypasses screening and keeps the legacy path.
     let solicitation = null;
     let verdictMessage = null;
+    // Enforcement MODE, not this text's enforcement outcome, decides whether a
+    // vendor's own reply footer may be read as the sender's opt-out. Every
+    // fail-open path — confidence under the bar, a non-solicitation verdict, a
+    // failed verdict write, a screen that threw — must still refuse to treat
+    // "Reply STOP to stop messages" as a request from the sender, or the spam
+    // footer earns a real suppression row and an unsubscribe reply from a Waves
+    // line. That is the 2026-07-23 incident this lane exists to stop (codex P0).
+    let solicitationMode = 'off';
     try {
       const screen = require('../services/sms-solicitation-classifier');
-      if (inboundTouchpoint?.message?.id && MessageSid && screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
+      solicitationMode = screen.classifierMode();
+      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
         const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
@@ -313,7 +322,7 @@ router.post('/sms', async (req, res) => {
     const solicitationMeta = solicitation ? { spam_verdict: { ...solicitation, enforced: solicitationEnforced } } : {};
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
-    const optCommand = detectSmsOptCommand(Body, { ignoreReplyInstructions: solicitationEnforced });
+    const optCommand = detectSmsOptCommand(Body, { ignoreReplyInstructions: solicitationMode === 'enforce' });
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);

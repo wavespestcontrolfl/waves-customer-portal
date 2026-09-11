@@ -302,3 +302,37 @@ test.each([
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });
+
+// Codex P0, 2026-09-11: the footer guard hung off `solicitationEnforced`, so
+// every fail-open path in enforcement mode fell back to the legacy detector and
+// read the vendor's own "Reply STOP to stop messages" as the sender's request —
+// a real suppression row plus an unsubscribe reply from a Waves line, which is
+// the 2026-07-23 incident. The guard now follows the MODE.
+test.each([
+  ['a failed verdict write (missing row)', PITCH, () => updateByTwilioSid.mockResolvedValueOnce(null)],
+  ['a failed verdict write (error)', PITCH, () => updateByTwilioSid.mockRejectedValueOnce(new Error('metadata unavailable'))],
+  ['a screen that throws', PITCH, () => knownCallerPhoneExists.mockRejectedValueOnce(new Error('lookup down'))],
+  ['a non-solicitation model verdict', 'Checking in about last week. Reply STOP to stop messages.', () => {}],
+  ['a low-confidence solicitation verdict', 'Checking in about last week. Reply STOP to stop messages.',
+    () => dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.5 } })],
+])('%s never lets a reply footer become the sender\'s opt-out in enforcement mode', async (_label, body, arrange) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  arrange();
+  const res = await receive(body);
+  // The security property: no suppression record, no unsubscribe reply.
+  expect(recordSuppression).not.toHaveBeenCalled();
+  expect(res.body).not.toContain('unsubscribed');
+  expect(sendSMS).not.toHaveBeenCalledWith(expect.objectContaining({ body: expect.stringContaining('unsubscribed') }));
+  // Fail-open means the text stays ordinary and actionable, not enforced.
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.message_type).not.toBe('opt_out');
+  expect(row.is_read).not.toBe(true);
+  expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+});
+
+test('shadow mode still honors a reply footer exactly as before the enforcement stage', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
+  const res = await receive(PITCH);
+  expect(res.body).toContain('unsubscribed');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+});
