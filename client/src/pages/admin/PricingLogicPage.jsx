@@ -111,7 +111,12 @@ export function MarginCalculator() {
   useEffect(() => { fetchMargins(); }, []);
 
   const costSourceLabel = (source) => source === "inventory_cost_per_unit" || source === "inventory_best_price_unit_size" ? "Inventory" : "Fallback";
-  const marginTone = (margin) => margin < 0.35 ? "alert" : margin >= 0.45 ? "strong" : "neutral";
+  // A fallback cost is an estimate, not a measured one — main flagged it amber.
+  const costSourceTone = (source) => costSourceLabel(source) === "Fallback" ? "warn" : "neutral";
+  // Three bands, three tones, as on main: healthy green, the 0.35-0.45
+  // "Acceptable" band amber so a drifting margin is still visible, below-floor
+  // red. Collapsing the middle band to neutral removed the only warning.
+  const marginTone = (margin) => margin < 0.35 ? "alert" : margin >= 0.45 ? "strong" : "warn";
   const marginLabel = (margin) => margin >= 0.45 ? "Healthy" : margin >= 0.35 ? "Acceptable" : "Below floor";
 
   return (
@@ -130,7 +135,7 @@ export function MarginCalculator() {
         {margins?.waveguardTier && <ActionFeedback className={margins.waveguardTierMismatch ? "!text-warn-fg" : undefined}>{margins.waveguardTierMismatch
           ? `Engine priced this bundle as ${margins.waveguardTier.toUpperCase()} (requested ${String(margins.waveguardTierRequested || tier).toUpperCase()}) — tier thresholds are out of line with the engine; margins below are ${margins.waveguardTier.toUpperCase()} margins.`
           : `Margins priced at ${margins.waveguardTier.toUpperCase()} tier discounts.`}</ActionFeedback>}
-        {margins?.services && <Table className="min-w-[840px]" aria-label="Service margins"><THead><TR><TH>Service</TH><TH align="right">Annual price</TH><TH align="right">Est. cost</TH><TH>Cost source</TH><TH align="right">After discount</TH><TH align="right">Margin</TH><TH>Status</TH></TR></THead><TBody>{margins.services.map((service) => <TR key={service.service}><TD className="font-medium capitalize">{service.service.replace(/_/g, " ")}</TD><TD align="right" nums>${service.annual?.toLocaleString() || "—"}</TD><TD align="right" nums className="text-ink-secondary">${service.estimatedCost?.toLocaleString() || "—"}</TD><TD><Badge>{costSourceLabel(service.materialCostSource)}</Badge>{service.materialPerVisit != null ? <span className="ml-2 text-ui-caption text-ink-secondary u-nums">${Number(service.materialPerVisit).toFixed(2)}/visit</span> : ""}</TD><TD align="right" nums>${service.afterDiscount?.toLocaleString() || "—"}</TD><TD align="right" nums className="font-medium">{service.margin != null ? `${(service.margin * 100).toFixed(1)}%` : "—"}</TD><TD>{service.margin != null && <Badge tone={marginTone(service.margin)}>{marginLabel(service.margin)}</Badge>}</TD></TR>)}</TBody></Table>}
+        {margins?.services && <Table className="min-w-[840px]" aria-label="Service margins"><THead><TR><TH>Service</TH><TH align="right">Annual price</TH><TH align="right">Est. cost</TH><TH>Cost source</TH><TH align="right">After discount</TH><TH align="right">Margin</TH><TH>Status</TH></TR></THead><TBody>{margins.services.map((service) => <TR key={service.service}><TD className="font-medium capitalize">{service.service.replace(/_/g, " ")}</TD><TD align="right" nums>${service.annual?.toLocaleString() || "—"}</TD><TD align="right" nums className="text-ink-secondary">${service.estimatedCost?.toLocaleString() || "—"}</TD><TD><Badge tone={costSourceTone(service.materialCostSource)}>{costSourceLabel(service.materialCostSource)}</Badge>{service.materialPerVisit != null ? <span className="ml-2 text-ui-caption text-ink-secondary u-nums">${Number(service.materialPerVisit).toFixed(2)}/visit</span> : ""}</TD><TD align="right" nums>${service.afterDiscount?.toLocaleString() || "—"}</TD><TD align="right" nums className="font-medium">{service.margin != null ? `${(service.margin * 100).toFixed(1)}%` : "—"}</TD><TD>{service.margin != null && <Badge tone={marginTone(service.margin)}>{marginLabel(service.margin)}</Badge>}</TD></TR>)}</TBody></Table>}
         {margins?.error && <ActionFeedback error>{margins.error}</ActionFeedback>}
       </CardBody>
     </Card>
@@ -207,7 +212,8 @@ function PestCalibrationPanel() {
   const sampleHealth = data?.sampleHealth || {};
   const reviewQueue = summary.reviewQueue || [];
   const summaryMetrics = [
-    { label: "Samples", value: summary.count || 0 }, { label: "Avg miss", value: formatMinutes(summary.avgDelta || 0) },
+    { label: "Samples", value: summary.count || 0 },
+    { label: "Avg miss", value: formatMinutes(summary.avgDelta || 0), tone: calibrationDeltaTone(summary.avgDelta || 0) },
     { label: "Avg abs miss", value: formatMinutes(summary.avgAbsDelta || 0) }, { label: "15+ min outliers", value: summary.outlierCount || 0 },
   ];
   const healthMetrics = [
@@ -222,7 +228,7 @@ function PestCalibrationPanel() {
       <CardBody className="space-y-5">
         {error && <ActionFeedback error>{error}</ActionFeedback>}
         {data?.sync?.unavailable && <ActionFeedback>Calibration table is not migrated yet. Run database migrations before collecting samples.</ActionFeedback>}
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{summaryMetrics.map((metric) => <Card key={metric.label}><CardBody><div className="text-18 font-medium text-zinc-900 u-nums">{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></CardBody></Card>)}</div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{summaryMetrics.map((metric) => <Card key={metric.label}><CardBody><div className={`text-18 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></CardBody></Card>)}</div>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">{healthMetrics.map((metric) => <div key={metric.label} className="rounded-md bg-zinc-50 p-3"><div className="text-16 font-medium text-zinc-900 u-nums">{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></div>)}</div>
         <div className="grid gap-3 lg:grid-cols-2"><CalibrationGroup title="By pool cage size" rows={summary.byPoolCageSize || []} /><CalibrationGroup title="By lot band" rows={summary.byLotBand || []} /></div>
         {reviewQueue.length > 0 && <div><div className="mb-2 flex flex-wrap justify-between gap-2"><h3 className="font-medium text-zinc-900">Needs calibration review</h3><Badge tone="alert">{summary.reviewQueueCount || reviewQueue.length} flagged</Badge></div><Table className="min-w-[720px]" aria-label="Calibration review queue"><THead><TR><TH>Date</TH><TH>Customer</TH><TH align="right">Delta</TH><TH align="right">Pool</TH><TH align="right">Lot</TH><TH>Why</TH></TR></THead><TBody>{reviewQueue.slice(0, 8).map((row) => <TR key={`review-${row.id || row.scheduled_service_id}`}><TD nums>{String(row.service_date || "").slice(0, 10) || "-"}</TD><TD className="font-medium">{row.customer_name || row.address_line1 || "Unknown"}</TD><TD align="right" nums className="text-alert-fg">{formatMinutes(row.delta_minutes || 0)}</TD><TD align="right">{row.pool_cage_size || "-"}</TD><TD align="right" nums>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}</TD><TD className="text-ink-secondary">{Array.isArray(row.calibration_review_reasons) ? row.calibration_review_reasons.join(", ") : "-"}</TD></TR>)}</TBody></Table></div>}
