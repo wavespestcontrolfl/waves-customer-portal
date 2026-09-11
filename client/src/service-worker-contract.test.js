@@ -130,6 +130,14 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now } = 
 }
 
 const shellHtml = (assets) => `<html><head>${assets.map(a => `<script src="${a}"></script>`).join('')}</head></html>`;
+// A build's published file list, plus a fetch double that serves it for the
+// named shell. `owns` defaults to exactly the shell's own hashed assets.
+const manifestOf = (cache, buildId) => cache.match(`/__waves/manifest/${buildId}`);
+const serveBuild = (shellAssets, owns = shellAssets) => async (request) => {
+  if (request.url.includes('/build-assets.json')) return fakeResponse(JSON.stringify(owns));
+  if (request.mode === 'navigate') return fakeResponse(shellHtml(shellAssets));
+  return fakeResponse(`asset:${request.url}`);
+};
 const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/')).sort();
 
 describe('customer service-worker update contract', () => {
@@ -702,6 +710,120 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     ]);
   });
 
+  it('claims a chunk firmly for the build whose file list names it', async () => {
+    // With a published file list the worker no longer has to guess which
+    // build a chunk belongs to, so A's claim is firm and survives the
+    // quota prune that drops entries held only by a guess.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, pruneStaleAssets, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    const aaa = buildIdOf(['/assets/index-AAA.js']);
+    setFetch(serveBuild(['/assets/index-AAA.js'], ['/assets/index-AAA.js', '/assets/Route-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    expect(await manifestOf(cache, aaa)).toBeTruthy();
+
+    // B goes live and its own refresh fails, so B publishes no list; an A
+    // tab then loads a route A's list does name.
+    setFetch(async (request) => {
+      if (request.url.includes('/build-assets.json')) return fakeResponse('nope', false);
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' });
+    await dispatchFetch('/assets/Route-AAA.js');
+    expect((await cache.match('/assets/Route-AAA.js')).headers.get('x-waves-build').split(','))
+      .toContain(aaa); // firm: no '~' marker
+
+    await pruneStaleAssets(cache, [aaa], { firmOnly: true });
+    expect(await cachedAssets(cache)).toContain('/assets/Route-AAA.js');
+  });
+
+  it('upgrades a provisional claim once the build publishes a list naming the chunk', async () => {
+    // Pre-push Codex P1: the hit shortcuts compared claim IDS, and a
+    // provisional tag reads as the same id as a firm claim. A chunk cached
+    // before its build's list existed therefore stayed a guess forever, and
+    // the quota prune could drop it even though the list proves it belongs.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, pruneStaleAssets, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    const aaa = buildIdOf(['/assets/index-AAA.js']);
+    const noManifest = async (request) => {
+      if (request.url.includes('/build-assets.json')) return fakeResponse('nope', false);
+      return fakeResponse(`asset:${request.url}`);
+    };
+
+    // A is cached before any list is published.
+    setFetch(noManifest);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    // B goes live with a failed refresh; an A tab loads a route, so A's
+    // claim on it is only the worker's guess.
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return noManifest(request);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' });
+    await dispatchFetch('/assets/Route-AAA.js');
+    expect((await cache.match('/assets/Route-AAA.js')).headers.get('x-waves-build').split(','))
+      .toContain(`~${aaa}`);
+
+    // A refresh now publishes A's list, which names that route.
+    setFetch(serveBuild(['/assets/index-AAA.js'], ['/assets/index-AAA.js', '/assets/Route-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    await dispatchFetch('/assets/Route-AAA.js'); // a hit must upgrade the guess
+
+    const tags = (await cache.match('/assets/Route-AAA.js')).headers.get('x-waves-build').split(',');
+    expect(tags).toContain(aaa);
+    expect(tags).not.toContain(`~${aaa}`);
+    await pruneStaleAssets(cache, [aaa], { firmOnly: true });
+    expect(await cachedAssets(cache)).toContain('/assets/Route-AAA.js');
+  });
+
+  it('does not claim a chunk for a build whose file list leaves it out', async () => {
+    // The guess used to give every chunk the cached build's claim, which
+    // kept chunks that build never owned. A published list settles it.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    const aaa = buildIdOf(['/assets/index-AAA.js']);
+    setFetch(serveBuild(['/assets/index-AAA.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+
+    setFetch(async (request) => {
+      if (request.url.includes('/build-assets.json')) return fakeResponse('nope', false);
+      if (request.mode === 'navigate') return fakeResponse(shellHtml(['/assets/index-BBB.js']));
+      if (request.url.includes('index-BBB.js')) return fakeResponse('boom', false);
+      return fakeResponse(`asset:${request.url}`);
+    });
+    await dispatchFetch('/admin/', { mode: 'navigate' });
+    await dispatchFetch('/assets/Route-BBB.js'); // B's chunk; A's list omits it
+    const tags = (await cache.match('/assets/Route-BBB.js')).headers.get('x-waves-build').split(',');
+    expect(tags).not.toContain(aaa);
+    expect(tags).not.toContain(`~${aaa}`);
+  });
+
+  it('ignores a file list that does not match the shell it was fetched with', async () => {
+    // A deploy landing between the shell fetch and the list fetch would file
+    // the NEXT build's list under this build's id. The shell's own assets are
+    // in its own list by construction, so their absence proves the mismatch.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, setFetch, buildIdOf } = loadWorker(cache);
+    setFetch(serveBuild(['/assets/index-AAA.js'], ['/assets/index-BBB.js', '/assets/Route-BBB.js']));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    expect(await manifestOf(cache, buildIdOf(['/assets/index-AAA.js']))).toBeFalsy();
+  });
+
+  it('drops the file list of a build it stops retaining', async () => {
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, setFetch, buildIdOf } = loadWorker(cache);
+    const [aaa, bbb, ccc] = [['/assets/index-AAA.js'], ['/assets/index-BBB.js'], ['/assets/index-CCC.js']].map(buildIdOf);
+    for (const build of ['AAA', 'BBB', 'CCC']) {
+      setFetch(serveBuild([`/assets/index-${build}.js`]));
+      await cacheCompleteShellResponse(fakeResponse(shellHtml([`/assets/index-${build}.js`])));
+    }
+    expect(await manifestOf(cache, ccc)).toBeTruthy();
+    expect(await manifestOf(cache, bbb)).toBeTruthy(); // the retained previous build
+    expect(await manifestOf(cache, aaa)).toBeFalsy();  // two deploys old
+  });
+
   it('lets a hit claim the cached build for a chunk stored two builds ago', async () => {
     // Pre-push Codex P1: Shared-XYZ.js was stored under Z; the refresh to A
     // never referenced it, so it carries no A tag. B then goes live with a
@@ -786,11 +908,18 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     // (separate instance, same cache and lock) commits a newer build C
     // meanwhile. The installer's non-supersedable commit of B must not
     // then replace C. Holding the lock across the fetch orders them.
+    // Both instances read a FIXED, distinct clock. installCommittedAfter
+    // treats an equal timestamp as superseding (deliberately — see the
+    // equal-timestamp tests below), so on the real clock this test comes
+    // down to whether the installer and the navigation land in the same
+    // millisecond, and the navigation correctly stands down when they do.
+    // That raced ~40% of runs. Pinning the installer strictly earlier keeps
+    // the ordering under test — the lock, not the tie-break — deterministic.
     const cache = fakeCache();
     const locks = fakeLocks();
-    const active = loadWorker(cache, { locks });
+    const active = loadWorker(cache, { locks, now: () => 2000 });
     await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
-    const installer = loadWorker(cache, { locks });
+    const installer = loadWorker(cache, { locks, now: () => 1000 });
     let releaseInstall;
     const installGate = new Promise(resolve => { releaseInstall = resolve; });
     installer.setFetch(async (request) => {

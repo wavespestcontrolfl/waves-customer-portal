@@ -85,6 +85,42 @@ async function loadRun(assessmentId, knex) {
   }
 }
 
+// A pending visit run does not prevent a replacement legacy assessment from
+// becoming the baseline after the feature is turned off. A database still
+// waiting for the run migration retains the legacy count; isolate that failed
+// optional read in a savepoint when the caller already holds a transaction.
+async function priorAssessmentCount(customerId, knex) {
+  const read = (connection) => connection('lawn_assessments as assessment')
+    .leftJoin('lawn_assessment_runs as run', 'run.assessment_id', 'assessment.id')
+    .where('assessment.customer_id', customerId)
+    .where((query) => query.whereNull('run.id').orWhere('assessment.confirmed_by_tech', true))
+    .count('assessment.id as count').first();
+  try {
+    const row = await (knex.isTransaction ? knex.transaction(read) : read(knex));
+    return Number(row.count);
+  } catch (err) {
+    if (err?.code !== '42P01') throw err;
+    const row = await knex('lawn_assessments').where({ customer_id: customerId }).count('id as count').first();
+    return Number(row.count);
+  }
+}
+
+// Staff response from the persisted run. Raw provider output, input hashes,
+// token accounting and prompt context remain internal to the run store.
+function responseForRun(run) {
+  if (!run) return null;
+  const array = (value) => Array.isArray(value) ? value : [];
+  return {
+    runId: run.id, status: run.status, unavailableReason: run.unavailable_reason || null,
+    provider: run.provider, model: run.requested_model, fallbackUsed: !!run.fallback_used,
+    promptVersion: run.prompt_version, findings: array(run.findings), severities: parseObject(run.severities),
+    photoQuality: array(run.photo_quality), observations: run.observations,
+    reviewedFindings: run.reviewed_findings == null ? null : array(run.reviewed_findings),
+    addedDetails: run.added_details == null ? null : array(run.added_details),
+    reconciliation: parseObject(run.reconciliation), reviewedAt: run.reviewed_at || null,
+  };
+}
+
 // Always join the caller's transaction through a savepoint, or open one when
 // called directly. The confirmation caller owns authorization/finalization and
 // takes its customer baseline lock BEFORE this assessment -> run lock order.
@@ -155,4 +191,4 @@ function replayContextForRun(run) {
   return { visionContext: storedContext(context), omitted, exactInputEligible: omitted.length === 0 };
 }
 
-module.exports = { billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, reviewRun, replayContextForRun };
+module.exports = { billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun, reviewRun, replayContextForRun };
