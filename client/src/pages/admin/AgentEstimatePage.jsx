@@ -19,7 +19,7 @@ import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { useIntelligenceBar } from "../../hooks/useIntelligenceBar";
 import { adminFetch } from "../../utils/admin-fetch";
-import { cn, Button, Card, CardHeader, Field, Input, Textarea, UiSurface, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../components/ui";
+import { cn, Button, Card, CardHeader, Input, Textarea, UiSurface, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../components/ui";
 import PendingActionsCard from "../../components/admin/PendingActionsCard";
 import { AttachIcon } from "../../components/admin/IntelligenceBarShell";
 
@@ -554,18 +554,20 @@ export function LearningPanel({ leadId, user, memories, onReload }) {
         <p className="text-ui-body leading-6 text-zinc-600">
           A correction in this chat applies immediately to this estimate. Save repeatable rules here; the agent uses them only after an admin approves them.
         </p>
-        <Field label="Learning rule"><Textarea
+        <Textarea
+          aria-label="Learning rule"
           value={rule}
           onChange={(event) => setRule(event.target.value)}
           placeholder="Example: For this HOA, verify irrigated turf area separately from common-area parcel size."
           className="w-full min-h-24"
-        /></Field>
-        <Field label="Rationale (optional)"><Input
+        />
+        <Input
+          aria-label="Rationale (optional)"
           value={rationale}
           onChange={(event) => setRationale(event.target.value)}
           placeholder="Why this should become a repeatable rule (optional)"
           className="w-full"
-        /></Field>
+        />
         <Button variant="secondary"
           type="button"
           disabled={saving || rule.trim().length < 12}
@@ -971,12 +973,13 @@ export default function AgentEstimatePage() {
                         as customer-supplied context for the selected lead — it still verifies
                         contact and address against the lead record before using them.
                       </div>
-                      <Field label="Customer text"><Textarea
+                      <Textarea
+                        aria-label="Customer text"
                         value={pasteText}
                         onChange={(event) => setPasteText(event.target.value)}
                         placeholder="Paste the customer's email, text message, or notes here…"
                         className="w-full leading-6 min-h-28"
-                      /></Field>
+                      />
                       <div className="flex gap-2">
                         <Button variant="primary"
                           type="button"
@@ -1013,7 +1016,8 @@ export default function AgentEstimatePage() {
                     </div>
                   )}
 
-                  <Field label="Ask AI"><Textarea
+                  <Textarea
+                    aria-label="Ask AI"
                     value={intelligence.prompt}
                     onChange={(event) => intelligence.setPrompt(event.target.value)}
                     onKeyDown={(event) => {
@@ -1021,14 +1025,14 @@ export default function AgentEstimatePage() {
                     }}
                     placeholder="Ask a property question, change scope, or tell AI what to double-check…"
                     className="w-full leading-6 min-h-28"
-                  /></Field>
+                  />
 
                   {intelligence.attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2">
                       {intelligence.attachments.map((attachment, index) => (
                         <div key={`${attachment.name}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-sm border border-zinc-200">
                           <img src={attachment.previewUrl} alt={attachment.name} className="h-full w-full object-cover" />
-                          <Button variant="ghost" type="button" aria-label={`Remove ${attachment.name}`} onClick={() => intelligence.removeAttachment(index)} className="absolute right-1 top-1 flex w-7 items-center justify-center min-w-11">
+                          <Button variant="ghost" type="button" aria-label={`Remove ${attachment.name}`} onClick={() => intelligence.removeAttachment(index)} className="ui-icon-action absolute right-1 top-1 flex w-7 items-center justify-center">
                             <X size={16} aria-hidden="true" />
                           </Button>
                         </div>
@@ -1151,7 +1155,7 @@ export default function AgentEstimatePage() {
       <Dialog open={previewOpen && !!previewUrl} onClose={() => setPreviewOpen(false)} size="lg" className="h-[calc(100dvh-2rem)] max-w-6xl overflow-hidden">
         <DialogHeader className="flex items-center justify-between gap-3">
           <DialogTitle>Customer preview</DialogTitle>
-          <Button variant="secondary" type="button" onClick={() => setPreviewOpen(false)} aria-label="Close preview" className="flex w-11 items-center justify-center"><X size={20} /></Button>
+          <Button variant="secondary" type="button" onClick={() => setPreviewOpen(false)} aria-label="Close preview" className="ui-icon-action flex items-center justify-center"><X size={20} /></Button>
         </DialogHeader>
         <DialogBody className="h-[calc(100%-77px)] p-0">
           {previewUrl && <iframe title="Full customer estimate preview" src={previewUrl} className="h-full w-full bg-white" />}
