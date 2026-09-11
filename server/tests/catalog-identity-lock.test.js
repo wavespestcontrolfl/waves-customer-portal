@@ -141,6 +141,17 @@ describe('lock order: catalog SHARE lock precedes scheduled_services row locks (
     expect(body).toContain("capacityEnabled() || preRow.reservation_policy_version === 2");
   });
 
+  test('the estimate-accept adoption path takes it before the adopted row FOR UPDATE and maps a lock failure to catalog_unavailable', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    const rowLock = src.indexOf(".forUpdate('scheduled_services')");
+    expect(rowLock).toBeGreaterThan(-1);
+    const before = src.slice(Math.max(0, rowLock - 2500), rowLock);
+    const lock = before.lastIndexOf("lockCatalogIdentity(trx)");
+    expect(lock).toBeGreaterThan(-1);
+    expect(before.slice(lock)).toMatch(/catch \(lockErr\) \{\s+throw Object\.assign\(require\('\.\.\/services\/scheduling\/arrival-route'\)\.capacityError\('catalog_unavailable'\)/);
+    expect(before.indexOf('acquireScheduledInvoiceMintLock(trx')).toBeGreaterThan(lock);
+  });
+
   test('convertEstimate takes it right after loading the estimate, before any row lock', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
     const start = src.indexOf('async convertEstimate(estimateId');

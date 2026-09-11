@@ -10855,6 +10855,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // and every scheduled-invoice writer locks advisory-then-row;
           // taking the row first here would ABBA-deadlock against them.
           // Re-acquisition at create() is a same-transaction no-op.
+          // Catalog SHARE lock BEFORE this row's FOR UPDATE, same order as
+          // commitReservation and convertEstimate (pre-push codex P1 on
+          // #4369): adoptedAppointmentCatalogStamp below resolves the catalog
+          // under capacity, and migration 20260902000010 locks `services`
+          // first and then updates scheduled_services rows — reaching the
+          // catalog lock only after this row lock would ABBA-deadlock against
+          // one that targets this very visit. A lock_timeout maps to the same
+          // recoverable catalog_unavailable the resolver raises.
+          {
+            const adoptPolicy = await trx('scheduled_services')
+              .where({ id: existingAppointmentRow.id })
+              .first('reservation_policy_version');
+            if (require('../services/scheduling/policy').capacityEnabled() || adoptPolicy?.reservation_policy_version === 2) {
+              try {
+                await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);
+              } catch (lockErr) {
+                throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause: lockErr });
+              }
+            }
+          }
           {
             const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
             await acquireScheduledInvoiceMintLock(trx, existingAppointmentRow.id);
