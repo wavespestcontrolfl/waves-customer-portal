@@ -4397,7 +4397,10 @@ function ApprovalsTab({ showToast, onUpdate }) {
       // ids selected for a retry.
       const result = await adminFetch("/admin/inventory/approvals/bulk", {
         method: "POST",
-        body: JSON.stringify({ ids: [...selected], action }),
+        body: JSON.stringify({
+          ids: [...selected],
+          action,
+        }),
       });
       const failed = result?.failed || [];
       const skipped = result?.skipped || [];
@@ -4426,63 +4429,32 @@ function ApprovalsTab({ showToast, onUpdate }) {
       else n.add(id);
       return n;
     });
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading approvals...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading approvals…</ActionFeedback>;
   return (
     <div>
       {selected.size > 0 && (
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            marginBottom: 12,
-            padding: "10px 16px",
-            background: D.card,
-            border: `1px solid ${D.teal}`,
-            borderRadius: 10,
-          }}
-        >
+        <Card className="flex gap-[8px] items-center mb-[12px] p-3">
           {" "}
-          <span style={{ fontSize: 13, fontWeight: 500, color: D.teal }}>
+          <span className="text-ui-body font-medium text-zinc-900">
             {selected.size} selected
           </span>{" "}
-          <button
-            onClick={() => handleBulk("approve")}
-            style={sBtn(D.green, D.white)}
-          >
+          <Button onClick={() => handleBulk("approve")} variant="primary">
             Approve All
-          </button>{" "}
-          <button
-            onClick={() => handleBulk("reject")}
-            style={sBtn(D.red, D.white)}
-          >
+          </Button>{" "}
+          <Button onClick={() => handleBulk("reject")} variant="danger">
             Reject All
-          </button>{" "}
-          <button
-            onClick={() => setSelected(new Set())}
-            style={{
-              ...sBtn("transparent", D.muted),
-              border: `1px solid ${D.border}`,
-            }}
-          >
+          </Button>{" "}
+          <Button onClick={() => setSelected(new Set())} variant="secondary">
             Clear
-          </button>{" "}
-        </div>
+          </Button>{" "}
+        </Card>
       )}
       {approvals.length === 0 ? (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
-          <div style={{ fontSize: 24, marginBottom: 8 }}></div>No pending
-          approvals
-        </div>
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
+          No pending approvals
+        </Card>
       ) : (
-        <div style={{ display: "grid", gap: 8 }}>
+        <div className="grid gap-[8px]">
           {approvals.map((a) => {
             const pct =
               a.price_change_pct ||
@@ -4491,91 +4463,62 @@ function ApprovalsTab({ showToast, onUpdate }) {
                 : null);
             const isUp = pct > 0;
             return (
-              <div
+              <Card
                 key={a.id}
-                style={{
-                  ...sCard,
-                  marginBottom: 0,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                }}
+                className="p-5 mb-3 mb-[0px] flex items-center gap-[12px]"
               >
                 {" "}
-                <input
-                  type="checkbox"
+                <Checkbox
+                  aria-label={`Select ${a.product_name} from ${a.vendor_name}`}
                   checked={selected.has(a.id)}
                   onChange={() => toggleSel(a.id)}
-                  style={{ accentColor: D.teal, cursor: "pointer" }}
                 />{" "}
-                <div style={{ flex: 1 }}>
+                <div className="flex-[1]">
                   {" "}
-                  <div
-                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
-                  >
+                  <div className="text-ui-body font-medium text-zinc-900">
                     {a.product_name}
                   </div>{" "}
-                  <div style={{ fontSize: 12, color: D.muted }}>
+                  <div className="text-ui-body text-ink-secondary">
                     {a.vendor_name} · {a.category}
                   </div>
                   {a.notes && (
-                    <div
-                      style={{ fontSize: 11, color: D.purple, marginTop: 2 }}
-                    >
+                    <div className="text-ui-body text-zinc-900 mt-[2px]">
                       {a.notes}
                     </div>
                   )}
                 </div>{" "}
-                <div style={{ textAlign: "center", minWidth: 80 }}>
+                <div className="text-center min-w-[80px]">
                   {a.old_price && (
-                    <div
-                      style={{
-                        fontSize: 12,
-                        color: D.muted,
-                        textDecoration: "line-through",
-                      }}
-                    >
+                    <div className="text-ui-body text-ink-secondary">
                       ${parseFloat(a.old_price).toFixed(2)}
                     </div>
                   )}
-                  <div
-                    style={{
-                      fontSize: 16,
-                      fontWeight: 700,
-                      fontFamily: "'JetBrains Mono', monospace",
-                      color: D.heading,
-                    }}
-                  >
+                  <div className="text-ui-body font-medium text-zinc-900">
                     ${parseFloat(a.new_price).toFixed(2)}
                   </div>{" "}
                 </div>
                 {pct !== null && (
-                  <span
-                    style={sBadge(
-                      isUp ? `${D.red}22` : `${D.green}22`,
-                      isUp ? D.red : D.green,
-                    )}
-                  >
+                  <Badge tone={isUp ? "alert" : "neutral"}>
                     {isUp ? "+" : ""}
                     {pct}%
-                  </span>
+                  </Badge>
                 )}
-                <div style={{ display: "flex", gap: 4 }}>
+                <div className="flex gap-[4px]">
                   {" "}
-                  <button
+                  <Button
                     onClick={() => handleAction(a.id, "approve")}
-                    style={sBtn(D.green, D.white)}
+                    variant="primary"
                   >
                     Approve
-                  </button>{" "}
-                  <button
+                  </Button>{" "}
+                  <Button
                     onClick={() => handleAction(a.id, "reject")}
-                    style={sBtn(D.red, D.white)}
+                    variant="danger"
                   >
                     Reject
-                  </button>{" "}
+                  </Button>{" "}
                 </div>{" "}
-              </div>
+              </Card>
             );
           })}
         </div>
