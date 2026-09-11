@@ -2828,8 +2828,9 @@ describe('completion route wiring (source contracts)', () => {
       '&& !isBackfillCompletion) {',
       // payer AP invoice email
       'invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion',
-      // referral credit
-      'const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;',
+      // referral credit — an issued-invoice closeout is carved out (credits
+      // post quietly, notify: false), so the gate reads the carve-out too
+      'const referralVisitPerformed = closedDealVisitPerformed && (!isBackfillCompletion || !!issuedInvoiceCloseout);',
       // prepaid-credit application (gate lives inside the helper, defined
       // and called after the re-derivation)
       'prepaid credit NOT auto-applied',
