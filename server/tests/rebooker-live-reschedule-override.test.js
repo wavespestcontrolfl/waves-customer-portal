@@ -431,6 +431,9 @@ describe('live-status reschedule override (allowLive)', () => {
       // The child's own move card carries the parent move's actor / suppression.
       noticeActorId: 'admin',
       suppressTechNotice: false,
+      // Out-param: the child's own source/destination days feed the route
+      // refresh, which the parent's two dates do not cover (#4295 r1 P2).
+      report: expect.any(Object),
     });
   });
 

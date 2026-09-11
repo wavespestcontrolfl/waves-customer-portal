@@ -92,6 +92,38 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     expect(await mockConnection('dispatch_alerts').where({ type: 'schedule_route_quality' }).whereNull('resolved_at')).toHaveLength(0);
   });
 
+  test('a busy day cannot flood the Action Queue: per-date cards are capped and the rest summarized', async () => {
+    // GET /api/admin/dispatch/alerts returns 50 rows. Four technicians here
+    // stand in for the nine a real day can carry across six overnight dates.
+    const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
+    const { MAX_CARDS_PER_DATE } = require('../services/scheduling/quality-alerts');
+    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
+    await mockConnection('scheduled_services').where('id', ids[0]).update({ lat: null, lng: null });
+    const extras = [randomUUID(), randomUUID(), randomUUID()];
+    for (const techId of extras) {
+      await mockConnection('technicians').insert({ id: techId, name: `Synthetic routing technician ${techId.slice(0, 4)}`,
+        active: true, employment_status: 'active', field_dispatchable: true });
+      await mockConnection('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, technician_id: techId,
+        scheduled_date: date, status: 'confirmed', service_type: 'Quarterly Pest Control Service',
+        estimated_duration_minutes: 60, lat: null, lng: null, is_recurring: false, window_start: '09:00', window_end: '10:00' });
+    }
+    const open = () => mockConnection('dispatch_alerts').where({ type: 'schedule_route_quality' }).whereNull('resolved_at').orderBy('created_at');
+    expect((await refreshScheduleQualityAlerts({ dates: [date], now }, mockConnection)).created).toBe(MAX_CARDS_PER_DATE);
+    const cards = await open();
+    expect(cards).toHaveLength(MAX_CARDS_PER_DATE);
+    const summary = cards.find(row => row.payload?.overflow);
+    expect(summary.payload.issues).toEqual([expect.stringContaining(`2 more routes on ${date}`)]);
+    expect(summary.tech_id).toBeNull();
+    // The kept cards name their technician, so a socket-delivered card (which
+    // carries the bare row, without the joined tech_name) is not just a date.
+    for (const kept of cards.filter(row => !row.payload?.overflow)) {
+      expect(kept.payload.techName).toEqual(expect.stringContaining('Synthetic routing technician'));
+    }
+    // Idempotent: the same day reconciles to the same rows, not a fresh set.
+    expect(await refreshScheduleQualityAlerts({ dates: [date], now }, mockConnection)).toMatchObject({ created: 0, resolved: 0 });
+    expect((await open()).map(row => row.id)).toEqual(cards.map(row => row.id));
+  }, 30000);
+
   test('a kill during an alert insert rolls back the card and suppresses its broadcast', async () => {
     const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
     const { getIo } = require('../sockets');

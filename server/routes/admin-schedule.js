@@ -43,7 +43,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
-const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
@@ -6711,6 +6711,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
 
     const { transitionJobStatus } = require('../services/job-status');
 
+    // Every date this batch touched, refreshed ONCE after the loop. The
+    // endpoint accepts 100 ids and each refresh repairs and remeasures whole
+    // routes, so a per-row refresh would run up to 100 near-duplicate passes
+    // serially and could time out the response after the rows had already
+    // committed (codex #4295 r1 P2).
+    const qualityDates = new Set();
+
     for (const id of serviceIds) {
       try {
         // Held locally until this row's transaction COMMITS: the CAS below
@@ -6729,7 +6736,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 trx,
               });
             });
-            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId }); } catch {}
+            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId, qualityDates }); } catch {}
             break;
           }
           case 'reschedule': {
@@ -7210,6 +7217,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // shared with the rebooker path; best-effort outside the trx (a
             // failed shift leaves the child where it was; the helper no-ops
             // when the date didn't actually change).
+            const bulkFollowUpReport = {};
             try {
               const shifted = await shiftCallFollowUpsForParentMove({
                 conn: db,
@@ -7217,6 +7225,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 fromDate: callFollowUpShiftFrom,
                 toDate: bulkTargetDate,
                 noticeActorId: req.technicianId || null,
+                // Reported so the route refresh covers the child's own two
+                // days as well as the parent's (codex #4295 r1 P2).
+                report: bulkFollowUpReport,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
@@ -7224,9 +7235,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             } catch (e) {
               logger.error(`[admin-schedule] bulk reschedule call follow-up shift failed for ${id}: ${e.message}`);
             }
-            await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({
-              jobId: id, dates: [callFollowUpShiftFrom, bulkTargetDate],
-            });
+            [callFollowUpShiftFrom, bulkTargetDate,
+              ...(bulkFollowUpReport.shifted || []).flatMap((row) => [row.previousDate, row.date])]
+              .filter(Boolean).forEach((date) => qualityDates.add(date));
             break;
           }
           case 'cancel': {
@@ -7256,6 +7267,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // (notify-or-suppress below per the bulk flag) — the
                 // shared-writer hook must stand down, not race the claim.
                 notifyCustomer: payload?.notifyCustomer === false ? 'caller_suppress' : 'caller',
+                // The batch's shared date set: one route refresh after the
+                // loop instead of a concurrent pass per cancelled row.
+                qualityDates,
               });
             });
             try {
@@ -7351,6 +7365,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       } catch (e) {
         failed.push({ id, reason: e.message });
       }
+    }
+
+    // One pass for the whole batch, after every row settled. Best-effort:
+    // the schedule writes are already committed and the refresh reports its
+    // own failures.
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (e) {
+      logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
     }
 
     res.json({
@@ -10695,6 +10718,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // edit modal moves the primary — shared with the rebooker path; best-effort
     // outside the trx (a failed shift leaves the child where it was; the
     // helper no-ops when the date didn't actually change).
+    const editFollowUpReport = {};
     if (callFollowUpShiftFrom != null && updates.scheduled_date !== undefined) {
       try {
         const shifted = await shiftCallFollowUpsForParentMove({
@@ -10703,6 +10727,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           fromDate: callFollowUpShiftFrom,
           toDate: updates.scheduled_date,
           noticeActorId: req.technicianId || null,
+          // Reported so the route refresh covers the child's own two days as
+          // well as the parent's (codex #4295 r1 P2).
+          report: editFollowUpReport,
         });
         if (shifted > 0) {
           logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);
@@ -10742,6 +10769,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
 
     if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
+      // One refresh for the whole edit: a cadence resize broadcasts every
+      // updated child and booster, and refreshing per broadcast would run
+      // that many near-duplicate route passes concurrently (codex #4295 r1 P2).
+      const qualityDates = new Set((editFollowUpReport.shifted || [])
+        .flatMap((row) => [row.previousDate, row.date]).filter(Boolean));
       try {
         qualityPreviousDates.set(req.params.id, callFollowUpShiftFrom);
         const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
@@ -10750,10 +10782,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
         await Promise.all([...broadcastJobIds].map((jobId) =>
-          emitDispatchJobUpdate({ jobId, actorId: req.technicianId, previousDate: qualityPreviousDates.get(jobId) })
+          emitDispatchJobUpdate({ jobId, actorId: req.technicianId, previousDate: qualityPreviousDates.get(jobId), qualityDates })
         ));
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (e) {
+        logger.error(`[schedule/update-details] route quality refresh failed: ${e.message}`);
       }
     }
 
@@ -10942,12 +10979,20 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
     });
 
     const job = await db('scheduled_services').where({ id: req.params.id }).first();
+    // A series-scoped assignment changes every future occurrence — collect
+    // their dates and refresh once (codex #4295 r1 P2).
+    const qualityDates = new Set();
     for (const jobId of result.changedJobIds || []) {
       try {
-        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId, qualityDates });
       } catch (e) {
         logger.error(`[schedule/assign] dispatch board broadcast failed for ${jobId}: ${e.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (e) {
+      logger.error(`[schedule/assign] route quality refresh failed: ${e.message}`);
     }
 
     if (job?.technician_id === null) {

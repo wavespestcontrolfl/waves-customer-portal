@@ -41,7 +41,7 @@ const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-d
 
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 
-const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { detectServiceLine, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
@@ -4051,6 +4051,9 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     // due windows (and mark the notice sent) only when that SMS actually went
     // out; otherwise leave the 24h/72h reminder pending so the cron still
     // reminds the customer on the new slot.
+    // Dates this rain-out touched, refreshed once after the loop — a route
+    // -scoped rain-out moves a whole day's stops (codex #4295 r1 P2).
+    const qualityDates = new Set();
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
       // A member carried by its visit's unit move (coveredByVisit) had its
@@ -4064,10 +4067,15 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
         }
       }
       try {
-        await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId, qualityDates });
       } catch (err) {
         logger.error(`[dispatch] rain-out board broadcast failed for ${moved.id}: ${err.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[dispatch] rain-out route quality refresh failed: ${err.message}`);
     }
 
     logger.info(
@@ -4311,13 +4319,21 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!synced) allRemindersSynced = false;
       }
       let allBroadcast = true;
+      // A series move broadcasts every future occurrence; one refresh covers
+      // all of their dates (codex #4295 r1 P2).
+      const seriesQualityDates = new Set();
       for (const occurrence of [...occurrences, ...followUps]) {
         try {
-          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId });
+          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId, qualityDates: seriesQualityDates });
         } catch (err) {
           allBroadcast = false;
           logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
         }
+      }
+      try {
+        await flushDispatchQualityDates(seriesQualityDates);
+      } catch (err) {
+        logger.error(`[dispatch] series reschedule route quality refresh failed: ${err.message}`);
       }
       // Completion means EVERY occurrence's reminder synced AND every board
       // broadcast went out — a swallowed failure of either leaves the marker
@@ -4863,12 +4879,18 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       // Grouped siblings moved singly by moveVisitAsUnit are outside the
       // series effects' broadcast scope — other boards need them too
       // (codex #3609 r6).
+      const groupedQualityDates = new Set();
       for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
         try {
-          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates: groupedQualityDates });
         } catch (err) {
           logger.error(`[dispatch] series reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
         }
+      }
+      try {
+        await flushDispatchQualityDates(groupedQualityDates);
+      } catch (err) {
+        logger.error(`[dispatch] series grouped-member route quality refresh failed: ${err.message}`);
       }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
@@ -4895,12 +4917,18 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     }
     // A grouped stop moved as a unit: every sibling that landed is a
     // committed change other open boards must see too (codex #3609 r5).
+    const memberQualityDates = new Set();
     for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
       try {
-        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates: memberQualityDates });
       } catch (err) {
         logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(memberQualityDates);
+    } catch (err) {
+      logger.error(`[dispatch] grouped-member route quality refresh failed: ${err.message}`);
     }
     if (partialVisitMove) {
       const stuck = (result.visitMove.failed || []).map((f) => f.id);

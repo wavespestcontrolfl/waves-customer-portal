@@ -1598,6 +1598,7 @@ class SmartRebooker {
 
     // Keep a call-created follow-up (visit 2) spaced from its parent —
     // shared with the admin schedule-edit path; best-effort outside the trx.
+    const followUpReport = {};
     try {
       const shifted = await shiftCallFollowUpsForParentMove({
         conn: db,
@@ -1607,6 +1608,9 @@ class SmartRebooker {
         // Same actor and suppression as the parent's own notice above.
         noticeActorId: options.actorId || initiatedBy || null,
         suppressTechNotice: options.suppressTechNotice === true,
+        // Reported so the route refresh below covers the child's own two
+        // days, not just the parent's (codex #4295 r1 P2).
+        report: followUpReport,
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -1663,7 +1667,8 @@ class SmartRebooker {
     }
 
     await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
-      jobId: serviceId, dates: [originalDate, newDateStr],
+      jobId: serviceId,
+      dates: [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])],
     });
 
     if (overlapWarned) {
@@ -1866,6 +1871,9 @@ class SmartRebooker {
     let committedResult = null;
     let skippedCount = 0;
     const moveRows = [];
+    // Source/destination days of the call-booked follow-ups this move
+    // shifted — outside the cadence set, and outside this trx's scope.
+    const seriesFollowUpDates = [];
     const preservedOccurrences = [];
     const failedMoveFields = {
       operation_key: operationKey,
@@ -2802,6 +2810,7 @@ class SmartRebooker {
       // pass syncs THEIR reminder rows too (codex r19 P1) — never part of
       // the cadence set (counts, ack, close, text).
       const followUpOccurrences = (followUpReport.shifted || []).map((k) => ({ id: k.id, date: k.date, windowStart: k.windowStart, windowEnd: k.windowEnd }));
+      seriesFollowUpDates.push(...(followUpReport.shifted || []).flatMap((k) => [k.previousDate, k.date]));
       const followUpWarnings = (followUpReport.skipped || []).map((k) => (
         `The call-booked follow-up visit on ${k.day} kept its date — its shifted slot on ${k.newDay} is already booked; set it from dispatch`
       ));
@@ -3001,7 +3010,13 @@ class SmartRebooker {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
     }
     await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
-      jobId: serviceId, dates: moveRows.flatMap(row => [row.before?.scheduled_date, row.after?.scheduled_date]),
+      jobId: serviceId,
+      dates: [
+        ...moveRows.flatMap(row => [row.before?.scheduled_date, row.after?.scheduled_date]),
+        // Call-booked follow-ups shifted with the anchor move onto days no
+        // series occurrence names (codex #4295 r1 P2).
+        ...seriesFollowUpDates,
+      ],
     });
     return { ...committedResult, originalDate: service.scheduled_date, seriesMoveId };
   }

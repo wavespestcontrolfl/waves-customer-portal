@@ -177,12 +177,17 @@ function GenericBody({ alert }) {
 }
 
 function RouteQualityBody({ alert }) {
-  const { date, issues = [], departureMinutes } = alert.payload || {};
+  const { date, issues = [], departureMinutes, techName } = alert.payload || {};
   const departure = Number.isFinite(departureMinutes)
     ? `${String(Math.floor(departureMinutes / 60)).padStart(2, '0')}:${String(departureMinutes % 60).padStart(2, '0')}` : null;
+  // The dispatch:alert broadcast carries the bare row, so a live card has no
+  // joined tech_name — the generator puts the name in the payload and this
+  // renderer prefers it, keeping same-day route cards distinguishable
+  // without waiting for the next board hydration.
+  const tech = techName || alert.tech_name;
   return (
     <div className="text-14 text-ink-primary space-y-2">
-      <p className="font-medium">{date}{alert.tech_name ? ` · ${alert.tech_name}` : ''}</p>
+      <p className="font-medium">{date}{tech ? ` · ${tech}` : ''}</p>
       {issues.map(issue => <p key={issue}>{issue}</p>)}
       {departure && <p className="text-ink-secondary">Timing assumes departure from base at {departure} ET. This is a forecast.</p>}
       {date && (

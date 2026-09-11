@@ -17,6 +17,7 @@ jest.mock('../services/appointment-reminders', () => ({
 }));
 jest.mock('../services/dispatch-assignment', () => ({
   emitDispatchJobUpdate: jest.fn().mockResolvedValue(undefined),
+  flushDispatchQualityDates: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn().mockResolvedValue('rendered body'),
