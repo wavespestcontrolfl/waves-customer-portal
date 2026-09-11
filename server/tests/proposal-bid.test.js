@@ -372,3 +372,24 @@ describe('bid form original integrity beyond the content streams', () => {
     await expect(build(swapped)).rejects.toThrow(/does not match/);
   });
 });
+
+describe('publicExpiresAt (GH codex P1 r3 on #4309)', () => {
+  const { publicExpiresAt, proposalExpiry } = require('../services/proposal-bid');
+  const fixed = (validThrough) => ({ estimate_data: JSON.stringify({ proposal: { enabled: true, validThrough } }) });
+  test('shows the authored fixed date when the entry expiry was widened past it', () => {
+    const estimate = { ...fixed('2030-03-10'), expires_at: '2030-04-01T03:59:59.999Z' };
+    expect(publicExpiresAt(estimate)).toEqual(proposalExpiry(estimate));
+  });
+  test('keeps the entry expiry when it is the earlier date, and when there is no fixed date', () => {
+    expect(publicExpiresAt({ ...fixed('2030-03-10'), expires_at: '2030-03-01T03:59:59.999Z' })).toBe('2030-03-01T03:59:59.999Z');
+    expect(publicExpiresAt({ estimate_data: '{}', expires_at: '2030-03-01T03:59:59.999Z' })).toBe('2030-03-01T03:59:59.999Z');
+    expect(publicExpiresAt({ ...fixed('2030-03-10'), expires_at: null })).toEqual(proposalExpiry(fixed('2030-03-10')));
+    expect(publicExpiresAt({ estimate_data: '{}', expires_at: null })).toBeNull();
+  });
+  test('both public renderers show that deadline (the SSR page and the /data response)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src.match(/expiresAt: publicExpiresAt\(estimate\)/g)).toHaveLength(1);
+    expect(src.match(/expiresAt: docRenderPin\?\.validThrough \|\| publicExpiresAt\(estimate\)/g)).toHaveLength(1);
+    expect(src.match(/expiresAt: estimate\.expires_at\b/g)).toBeNull();
+  });
+});

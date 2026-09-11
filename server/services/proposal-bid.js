@@ -14,6 +14,19 @@ function proposalExpiry(estimate) {
   if (!validDateOnly(proposal.validThrough)) throw Object.assign(new Error('The proposal validity date is invalid. Review it in the proposal builder.'), { statusCode: 400 });
   return new Date(parseETDateTime(`${proposal.validThrough}T23:59:59`).getTime() + 999);
 }
+// The date a customer is SHOWN as the estimate's expiration. A grouped
+// anchor's expires_at may be widened to a sibling's later fixed hold so the
+// delivered entry link stays viewable, but this property's own bid is only
+// honored through its authored validThrough (manual acceptance enforces
+// exactly that), so the public renderers show the earlier of the two
+// (GH codex P1 r3 on #4309). Access itself still keys off expires_at.
+function publicExpiresAt(estimate) {
+  const shown = estimate?.expires_at ?? null;
+  const authored = proposalExpiry(estimate);
+  if (!authored) return shown;
+  if (!shown) return authored;
+  return authored < new Date(shown) ? authored : shown;
+}
 function hasFixedBidValidity(estimate) { return Boolean(dataOf(estimate).proposal?.validThrough); }
 function assertBidSendDate(estimate, at = new Date()) {
   const expiry = proposalExpiry(estimate);
@@ -78,4 +91,4 @@ function normalizeProjectCosting(raw) {
     })),
   };
 }
-module.exports = { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields, normalizeProjectCosting };
+module.exports = { proposalExpiry, publicExpiresAt, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, SCHEDULED_SEND_TICK_MS, FIXED_BID_VALIDITY_ABSENT_SQL, validateBidFields, normalizeProjectCosting };

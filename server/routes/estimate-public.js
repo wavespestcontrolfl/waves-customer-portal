@@ -20,6 +20,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+const { publicExpiresAt } = require('../services/proposal-bid');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -8675,7 +8676,9 @@ async function handleEstimateView(req, res, next) {
       onetimeTotal: parseFloat(estimate.onetime_total || 0),
       tier: estimate.waveguard_tier,
       createdAt: estimate.created_at,
-      expiresAt: estimate.expires_at,
+      // Shown deadline = this property's own fixed date when that is earlier
+      // than the (possibly group-widened) entry expiry — see publicExpiresAt.
+      expiresAt: publicExpiresAt(estimate),
       satelliteUrl: estimate.satellite_url || null,
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
@@ -25744,7 +25747,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         category: estimate.category || 'RESIDENTIAL',
         createdAt: estimate.created_at,
         // Pinned override only on a signed pdf render pass — see docRenderPin.
-        expiresAt: docRenderPin?.validThrough || estimate.expires_at,
+        expiresAt: docRenderPin?.validThrough || publicExpiresAt(estimate),
         status: estimate.status,
         // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
         // so it must be a known-good public imagery host — satellite_url is
