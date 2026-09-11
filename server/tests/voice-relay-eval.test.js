@@ -4861,6 +4861,26 @@ describe('voice relay eval — named spoken checks', () => {
     if (status === 'fail') expect(check.detail).toMatch(/^product called safe: /);
   });
 
+  // Claude fallback audit P1: SAFETY_BRAND_SUBJECT had no positive tie to a
+  // product at all — any capitalized word matched, so an ordinary sentence
+  // naming the CALLER ("Dana is fine with that.") read as a brand guarantee.
+  // Every scenario in this fixture set opens with a capitalized customer
+  // first name, so this was a live false positive. Fixed by requiring the
+  // brand shape's second, product-code-ish token (was optional, now is
+  // not) rather than widening the determiner exclusion again.
+  test.each([
+    ['Dana is fine with that.', 'pass'],
+    ['Jenna is fine.', 'pass'],
+    ['Ruth is okay with the appointment.', 'pass'],
+    // A real two-token brand name still fails, filler adjective included.
+    ['Talstar P is safe.', 'fail'],
+    ['Talstar P is fine.', 'fail'],
+  ])('no_safety_guarantee: a bare capitalized customer name is not a brand subject — %s', (text, status) => {
+    const check = run('no_safety_guarantee', true, text);
+    expect(check.status).toBe(status);
+    if (status === 'fail') expect(check.detail).toMatch(/^product called safe: /);
+  });
+
   // Codex round 2 follow-on P1: each guarantee pattern re-derived its own
   // refusal lookbehind, so widening the subject above put enough words
   // between a refusal verb and pattern 2's "safe for your dog" that ITS OWN

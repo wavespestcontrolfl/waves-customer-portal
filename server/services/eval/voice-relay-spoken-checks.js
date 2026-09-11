@@ -1479,8 +1479,24 @@ const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY
 // fine, let me check that for you.", "It's okay, I've got that noted.") is
 // excluded here too — it is never a brand, and the generic subject above
 // already covers it when a real product noun follows.
+//
+// Claude fallback audit P1: the determiner exclusion above is a NEGATIVE
+// list, and the rest of the shape — one capitalized word, optionally
+// followed by a second — had no POSITIVE tie to a product at all, so ANY
+// capitalized word matched, customer first names included ("Dana is fine
+// with that.", "Jenna is fine."). Every scenario in this fixture set opens
+// with a capitalized caller name, so this was a live false positive in the
+// suite itself. Widening the exclusion list again would repeat the same
+// mistake in a new spot (this is the third round a one-sided widening broke
+// the other side — see the clause-scoping primitive above). The fix instead
+// gives the subject a real BRAND SHAPE: the second, product-code-ish token
+// ("P", "96", "SC" — short, capitalized, tolerant of digits) is now
+// REQUIRED, not optional, so a bare single capitalized word — a first name,
+// a sentence-initial "The", "Officer", anything — can never be this
+// subject on its own. "Talstar P is safe" / "Talstar P is fine" still
+// match; "Dana is fine" no longer can, because "Dana" has no second token.
 const SAFETY_SUBJECT_DETERMINER_CAPITALIZED = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.map((w) => w[0].toUpperCase() + w.slice(1)).join('|')})`;
-const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+(?:\\s+[A-Z][A-Za-z0-9]{0,3}\\b)?`;
+const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+[A-Z][A-Za-z0-9]{0,3}\\b`;
 const SAFETY_SUBJECT_VERB = `(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 // The shared SAFETY_ADJECTIVES vocabulary (top of file) — "non toxic" and
