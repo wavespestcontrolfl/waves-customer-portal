@@ -135,6 +135,10 @@ describe("KnowledgePage embedded navigation", () => {
 
       if (mutation === "compile") {
         const compile = await screen.findByRole("button", { name: "Compile" });
+        // Spec §5.7: Sources is table-first, one row per source document.
+        const table = screen.getByRole("table", { name: "Source documents" });
+        expect(table).toContainElement(compile);
+        expect(table.querySelectorAll("tbody tr")).toHaveLength(1);
         fireEvent.click(compile);
         fireEvent.click(compile);
       } else {

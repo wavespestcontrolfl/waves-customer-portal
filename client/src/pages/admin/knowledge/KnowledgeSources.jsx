@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActionFeedback, Badge, Button, Card, CardBody, CardHeader, CardTitle,
-  Field, Input, Select, UiSurface,
+  Field, Input, Select, Table, TBody, TD, TH, THead, TR, UiSurface,
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
 
@@ -187,34 +187,57 @@ export default function KnowledgeSources() {
           </CardBody>
         </Card>
       ) : (
-        <div className="grid gap-3 lg:grid-cols-2">
-          {sources.map((source) => {
-            const compiling = compilingIds.has(source.id);
-            return (
-              <Card key={source.id} className="min-w-0">
-                <CardBody className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <CardTitle className="break-words">{source.filename}</CardTitle>
-                    <p className="mt-1 break-words text-ui-caption text-ink-secondary">
-                      {source.description || "No description"} • {source.file_type}
-                    </p>
-                  </div>
-                  {source.processed ? (
-                    <Badge>Compiled</Badge>
-                  ) : (
-                    <Button
-                      variant="secondary"
-                      loading={compiling}
-                      onClick={() => handleCompile(source.id)}
-                    >
-                      Compile
-                    </Button>
-                  )}
-                </CardBody>
-              </Card>
-            );
-          })}
-        </div>
+        <Card>
+          <CardBody className="p-0">
+            {/* Spec §5.7: Sources is table-first; layout="records" collapses to
+                labelled records under 1100px so phones keep the same rows. */}
+            <Table layout="records" aria-label="Source documents">
+              <THead>
+                <TR>
+                  <TH>File</TH>
+                  <TH>Description</TH>
+                  <TH>Type</TH>
+                  <TH>Status</TH>
+                  <TH className="text-right">Compile</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {sources.map((source) => {
+                  const compiling = compilingIds.has(source.id);
+                  return (
+                    <TR key={source.id}>
+                      <TD className="break-words font-medium text-zinc-900">{source.filename}</TD>
+                      <TD data-label="Description" className="break-words text-ink-secondary">
+                        {source.description || "No description"}
+                      </TD>
+                      <TD data-label="Type" className="text-ink-secondary">{source.file_type}</TD>
+                      <TD data-label="Status">
+                        {source.processed ? (
+                          <Badge tone="strong">Compiled</Badge>
+                        ) : (
+                          <Badge>Not compiled</Badge>
+                        )}
+                      </TD>
+                      <TD align="right" data-label="Compile">
+                        {source.processed ? (
+                          <span className="text-ink-tertiary">—</span>
+                        ) : (
+                          <Button
+                            variant="secondary"
+                            loading={compiling}
+                            onClick={() => handleCompile(source.id)}
+                          >
+                            Compile
+                          </Button>
+                        )}
+                      </TD>
+                    </TR>
+                  );
+                })}
+              </TBody>
+            </Table>
+          </CardBody>
+        </Card>
       )}
     </UiSurface>
   );
