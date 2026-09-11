@@ -260,13 +260,20 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(next.id)).pipeline_completed_at).toBeInstanceOf(Date);
   });
 
-  test('migration lag cannot authorize delivery and a missing table is a quiet recovery skip', async () => {
+  test('migration lag cannot authorize delivery and a missing table is a logged recovery skip', async () => {
     const assessment = await seed();
     const deps = dependencies();
+    const logger = require('../services/logger');
+    const cron = { schedule: jest.fn((expression, tick) => ({ tick })) };
+    const job = scheduleRecovery(cron, { sweep: () => sweepAbandonedDeliveries({ knex: db.knex }) });
     await db.knex.schema.renameTable('lawn_assessment_runs', 'fixture_hidden_runs');
     try {
       await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: '42P01' });
       expect(await sweepAbandonedDeliveries({ knex: db.knex })).toMatchObject({ skipped: 'schema_unavailable' });
+      // Every silent tick would hide disabled recovery; the skip must leave a signal.
+      logger.warn.mockClear();
+      await job.tick();
+      expect(logger.warn).toHaveBeenCalledWith('[lawn-visit-delivery] recovery sweep skipped', expect.objectContaining({ skipped: 'schema_unavailable' }));
     } finally { await db.knex.schema.renameTable('fixture_hidden_runs', 'lawn_assessment_runs'); }
     expect(deps.LawnIntel.attachWeather).not.toHaveBeenCalled();
     expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();

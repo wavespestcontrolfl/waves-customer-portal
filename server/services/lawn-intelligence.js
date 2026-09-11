@@ -177,10 +177,12 @@ const LawnIntelligence = {
   // SUPERSEDED, twice over: the lawn score was folded into the single
   // completion service-report SMS, and that fold-in was itself retired
   // 2026-08-01 (owner ruling — the completion text is a short link to the
-  // report; the score lives ON the report). Retained for manual re-send /
-  // backfill; not invoked from the confirm or completion pipelines.
-  // options.beforeSend runs right before the dispatcher call; delivery recovery
-  // passes its lease check so a worker that lost ownership mid-step never sends.
+  // report; the score lives ON the report). Still sent for STANDALONE
+  // assessments only (service_id null — no completion text ever follows), by
+  // the confirm route and by delivery recovery (lawn-visit-delivery.js); never
+  // for a service-linked assessment. options.beforeSend runs right before the
+  // dispatcher call; recovery passes its lease check so a worker that lost
+  // ownership mid-step never sends.
   async sendAssessmentNotification(assessmentId, options) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();

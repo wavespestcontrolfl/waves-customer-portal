@@ -107,7 +107,8 @@ function scheduleRecovery(cron, { sweep = sweepAbandonedDeliveries } = {}) {
   return cron.schedule('*/10 * * * *', async () => {
     try {
       const result = await sweep();
-      if (result.candidates) logger.info('[lawn-visit-delivery] recovery sweep', result);
+      if (result.skipped) logger.warn('[lawn-visit-delivery] recovery sweep skipped', result);
+      else if (result.candidates) logger.info('[lawn-visit-delivery] recovery sweep', result);
     } catch (err) {
       logger.error('[lawn-visit-delivery] recovery sweep failed', { code: err?.code || 'DELIVERY_FAILED' });
     }
