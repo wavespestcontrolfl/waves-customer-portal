@@ -2885,28 +2885,49 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   // expiry so the cell actually falls back to the Refresh action (Codex
   // #3853 r20 P2).
   useEffect(() => {
-    const next = Math.min(...Object.values(evidence).map((e) => e.expiresAt).filter((t) => Number.isFinite(t)));
+    const next = Math.min(
+      ...Object.values(evidence)
+        .map((e) => e.expiresAt)
+        .filter((t) => Number.isFinite(t)),
+    );
     if (!Number.isFinite(next)) return undefined;
-    const timer = setTimeout(() => {
-      setEvidence((e) => Object.fromEntries(Object.entries(e).filter(([, v]) => v.expiresAt > Date.now())));
-    }, Math.max(0, next - Date.now()) + 50);
+    const timer = setTimeout(
+      () => {
+        setEvidence((e) =>
+          Object.fromEntries(
+            Object.entries(e).filter(([, v]) => v.expiresAt > Date.now()),
+          ),
+        );
+      },
+      Math.max(0, next - Date.now()) + 50,
+    );
     return () => clearTimeout(timer);
   }, [evidence]);
   const loadEvidence = async (requestId) => {
     try {
-      const data = await adminFetch(`/admin/inventory/restock-requests/${requestId}/order-evidence`);
+      const data = await adminFetch(
+        `/admin/inventory/restock-requests/${requestId}/order-evidence`,
+      );
       const screenshots = data.screenshots || [];
-      setEvidence((e) => ({ ...e, [requestId]: { screenshots, expiresAt: Date.now() + EVIDENCE_LINK_TTL_MS } }));
-      if (!screenshots.length) showToast?.("No screenshots were captured for this order");
+      setEvidence((e) => ({
+        ...e,
+        [requestId]: {
+          screenshots,
+          expiresAt: Date.now() + EVIDENCE_LINK_TTL_MS,
+        },
+      }));
+      if (!screenshots.length)
+        showToast?.("No screenshots were captured for this order");
     } catch (e) {
       showToast?.(`Failed: ${e.message}`);
     }
   };
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(status)}`);
+      const data = await adminFetch(
+        `/admin/inventory/restock-requests?status=${encodeURIComponent(status)}`,
+      );
       setRequests(data.requests || []);
     } catch (err) {
       showToast(`Failed to load restock requests: ${err.message}`);
@@ -2914,31 +2935,34 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
       setLoading(false);
     }
   }, [status, showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   async function runAction(request, action) {
     setReceivingId(request.id);
     try {
       const draft = receiveDrafts[request.id] || {};
-      await adminFetch(`/admin/inventory/restock-requests/${request.id}/action`, {
-        method: "POST",
-        body: JSON.stringify({
-          action,
-          // Only what the admin actually typed: with no draft the server's locked read picks the
-          // figure the automatic order actually bought (packages round up), else the requested
-          // amount — a row loaded before the order placed must not send a stale quantity.
-          quantity: draft.quantity || null,
-          unit: draft.unit || null,
-          note: draft.note || null,
-        }),
-      });
+      await adminFetch(
+        `/admin/inventory/restock-requests/${request.id}/action`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            action,
+            // Only what the admin actually typed: with no draft the server's locked read picks the
+            // figure the automatic order actually bought (packages round up), else the requested
+            // amount — a row loaded before the order placed must not send a stale quantity.
+            quantity: draft.quantity || null,
+            unit: draft.unit || null,
+            note: draft.note || null,
+          }),
+        },
+      );
       if (action === "receive") {
         showToast("Stock received.");
       } else {
-        showToast(action === "mark_ordered" ? "Marked ordered" : "Request cancelled");
+        showToast(
+          action === "mark_ordered" ? "Marked ordered" : "Request cancelled",
+        );
       }
       await load();
       onUpdate && onUpdate();
@@ -2948,20 +2972,19 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
       setReceivingId("");
     }
   }
-
   return (
-    <div style={sCard}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>Restock requests</h3>
-          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+          <h3 className="m-0 text-zinc-900">Restock requests</h3>
+          <p className="text-ink-secondary text-ui-body">
             Product requests for inventory needs.
           </p>
         </div>
-        <select
+        <Select
           value={status}
           onChange={(e) => setStatus(e.target.value)}
-          style={{ ...sInput, width: 160 }}
+          className="w-[160px]"
         >
           <option value="active">Open + Ordered</option>
           <option value="open">Open</option>
@@ -2969,133 +2992,207 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
           <option value="received">Received</option>
           <option value="cancelled">Cancelled</option>
           <option value="all">All</option>
-        </select>
+        </Select>
       </div>
       {loading ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>Loading restock requests...</div>
+        <ActionFeedback>Loading restock requests…</ActionFeedback>
       ) : requests.length === 0 ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>No restock requests in this view.</div>
+        <div className="text-ink-secondary text-ui-body">
+          No restock requests in this view.
+        </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {["Product", "Need", "Source", "Status", "Receive"].map((h) => (
-                  <th key={h} style={thS}>{h}</th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {requests.map((request) => {
                 const draft = receiveDrafts[request.id] || {};
                 return (
-                  <tr key={request.id}>
-                    <td style={tdS}>
+                  <TR key={request.id}>
+                    <TD>
                       <strong>{request.productName}</strong>
-                      <div style={{ color: D.muted, fontSize: 12 }}>
-                        {request.productCategory || "Product"} · live stock {request.liveStock ?? "—"} {request.inventoryUnit || request.unit || ""}
+                      <div className="text-ink-secondary text-ui-body">
+                        {request.productCategory || "Product"} · live stock{" "}
+                        {request.liveStock ?? "—"}{" "}
+                        {request.inventoryUnit || request.unit || ""}
                       </div>
-                    </td>
-                    <td style={tdS}>
-                      <strong>{request.requestedQuantity ?? "—"} {request.unit || ""}</strong>
-                      <div style={{ color: D.muted, fontSize: 12 }}>
-                        Needed {request.neededBy || "as soon as possible"} · {request.priority}
+                    </TD>
+                    <TD>
+                      <strong>
+                        {request.requestedQuantity ?? "—"} {request.unit || ""}
+                      </strong>
+                      <div className="text-ink-secondary text-ui-body">
+                        Needed {request.neededBy || "as soon as possible"} ·{" "}
+                        {request.priority}
                       </div>
-                      {request.vendor && <div style={{ color: D.muted, fontSize: 12 }}>Vendor: {request.vendor}{request.vendorSku ? ` · SKU ${request.vendorSku}` : ""}</div>}
+                      {request.vendor && (
+                        <div className="text-ink-secondary text-ui-body">
+                          Vendor: {request.vendor}
+                          {request.vendorSku
+                            ? ` · SKU ${request.vendorSku}`
+                            : ""}
+                        </div>
+                      )}
                       {safeExternalHref(request.vendorProductUrl) && (
                         <a
                           href={safeExternalHref(request.vendorProductUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          style={{ color: D.text, fontSize: 12, textDecoration: "underline" }}
+                          className="text-zinc-900 text-ui-body"
                         >
                           Open order page ↗
                         </a>
                       )}
-                    </td>
-                    <td style={tdS}>
-                      <div>{request.customerName || (request.source === "auto_reorder" ? "Auto-reorder sweep" : request.source)}</div>
-                      <div style={{ color: D.muted, fontSize: 12 }}>
-                        {request.scheduledDate || request.createdAt?.slice?.(0, 10)} · {request.serviceType || "inventory"}
+                    </TD>
+                    <TD>
+                      <div>
+                        {request.customerName ||
+                          (request.source === "auto_reorder"
+                            ? "Auto-reorder sweep"
+                            : request.source)}
                       </div>
-                      <div style={{ color: D.muted, fontSize: 12 }}>{request.reason}</div>
-                    </td>
-                    <RestockStatusCell request={request} receivingId={receivingId} runAction={runAction} canAuthor={canAuthor} evidence={evidence[request.id]} loadEvidence={loadEvidence} />
-                    <RestockActionCell request={request} draft={draft} setReceiveDrafts={setReceiveDrafts} receivingId={receivingId} runAction={runAction} />
-                  </tr>
+                      <div className="text-ink-secondary text-ui-body">
+                        {request.scheduledDate ||
+                          request.createdAt?.slice?.(0, 10)}{" "}
+                        · {request.serviceType || "inventory"}
+                      </div>
+                      <div className="text-ink-secondary text-ui-body">
+                        {request.reason}
+                      </div>
+                    </TD>
+                    <RestockStatusCell
+                      request={request}
+                      receivingId={receivingId}
+                      runAction={runAction}
+                      canAuthor={canAuthor}
+                      evidence={evidence[request.id]}
+                      loadEvidence={loadEvidence}
+                    />
+                    <RestockActionCell
+                      request={request}
+                      draft={draft}
+                      setReceiveDrafts={setReceiveDrafts}
+                      receivingId={receivingId}
+                      runAction={runAction}
+                    />
+                  </TR>
                 );
               })}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
 // How an automatic order's outcome reads on the Restock tab: colour + label.
 function autoOrderSummary(order) {
   if (order.status === "placed") {
-    const number = order.externalOrderNumber ? ` · #${order.externalOrderNumber}` : "";
-    const total = order.amountCents != null ? ` · $${(order.amountCents / 100).toFixed(2)}` : "";
-    return { color: D.green, label: `Ordered automatically${number}${total}` };
+    const number = order.externalOrderNumber
+      ? ` · #${order.externalOrderNumber}`
+      : "";
+    const total =
+      order.amountCents != null
+        ? ` · $${(order.amountCents / 100).toFixed(2)}`
+        : "";
+    return {
+      label: `Ordered automatically${number}${total}`,
+    };
   }
-  if (order.status === "placing") return { color: D.muted, label: "Auto-order in progress" };
-  return { color: D.amber, label: `Auto-order ${order.status === "failed" ? "failed" : "needs review"}` };
+  if (order.status === "placing")
+    return {
+      label: "Auto-order in progress",
+    };
+  return {
+    label: `Auto-order ${order.status === "failed" ? "failed" : "needs review"}`,
+  };
 }
 
 // Restock tab — the request's status pill, its automatic-order outcome and
 // the Mark Ordered action, in one cell.
-function RestockStatusCell({ request, receivingId, runAction, canAuthor = false, evidence = null, loadEvidence = null }) {
-  const pillColor = request.status === "received" ? D.green : request.status === "cancelled" ? D.red : D.amber;
+function RestockStatusCell({
+  request,
+  receivingId,
+  runAction,
+  canAuthor = false,
+  evidence = null,
+  loadEvidence = null,
+}) {
   const order = request.order;
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
-  const liveShots = evidence && evidence.expiresAt > Date.now() ? evidence.screenshots : [];
+  const liveShots =
+    evidence && evidence.expiresAt > Date.now() ? evidence.screenshots : [];
   const evidenceButton = (label) => (
-    <button type="button" onClick={() => loadEvidence?.(request.id)} style={{ ...sBtn("transparent", D.muted), padding: "2px 6px", fontSize: 12 }}>
+    <Button
+      type="button"
+      onClick={() => loadEvidence?.(request.id)}
+      variant="secondary"
+    >
       {label}
-    </button>
+    </Button>
   );
   return (
-    <td style={tdS}>
-      <span style={{ padding: "4px 8px", borderRadius: 999, border: `1px solid ${pillColor}`, color: pillColor, fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>
+    <TD>
+      <Badge
+        tone={
+          ["cancelled", "failed"].includes(request.status) ? "alert" : "neutral"
+        }
+      >
         {request.status}
-      </span>
+      </Badge>
       {order && (
-        <div style={{ marginTop: 6, fontSize: 12, color: summary.color }}>
+        <div className="mt-[6px] text-ui-body">
           {summary.label}
           {order.status !== "placed" && order.error && (
-            <div style={{ color: D.muted, marginTop: 2, maxWidth: 260 }}>{order.error}</div>
+            <div className="text-ink-secondary mt-[2px] max-w-[260px]">
+              {order.error}
+            </div>
           )}
           {/* Owner-only: the screenshots show the billing account + totals; the route is requireAdmin. */}
           {canAuthor && (
-            <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <div className="mt-[4px] flex gap-[8px] flex-wrap items-center">
               {liveShots.length ? (
                 <>
                   {liveShots.map((s) => (
-                    <a key={s.label} href={s.url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, textDecoration: "underline" }}>
+                    <a
+                      key={s.label}
+                      href={s.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-zinc-900"
+                    >
                       {s.label} ↗
                     </a>
                   ))}
                   {evidenceButton("Refresh")}
                 </>
-              ) : evidenceButton("Screenshots")}
+              ) : (
+                evidenceButton("Screenshots")
+              )}
             </div>
           )}
         </div>
       )}
       {request.status === "open" && order?.status !== "placing" && (
-        <button
+        <Button
           onClick={() => runAction(request, "mark_ordered")}
           disabled={receivingId === request.id}
-          style={{ ...sBtn(D.card, D.text), marginTop: 8, display: "block" }}
+          variant="secondary"
+          className="mt-[8px] block"
         >
           Mark Ordered
-        </button>
+        </Button>
       )}
-    </td>
+    </TD>
   );
 }
 
@@ -3104,45 +3201,93 @@ function RestockStatusCell({ request, receivingId, runAction, canAuthor = false,
 // is neither received nor revoked cannot be cancelled (the server 409s both).
 // A received request whose automatic order landed after that receipt gets
 // ONE more receive — the late order's own (the server admits exactly that).
-function RestockActionCell({ request, draft, setReceiveDrafts, receivingId, runAction }) {
-  const setDraft = (patch) => setReceiveDrafts((prev) => ({ ...prev, [request.id]: { ...(prev[request.id] || {}), ...patch } }));
-  if (request.order?.status === "placing") return <td style={tdS}><span style={{ color: D.muted }}>Auto-order in progress</span></td>;
-  const lateOrderReceive = request.status === "received" && !!request.order?.landedAfterReceive;
-  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive) return <td style={tdS}><span style={{ color: D.muted }}>Closed</span></td>;
+function RestockActionCell({
+  request,
+  draft,
+  setReceiveDrafts,
+  receivingId,
+  runAction,
+}) {
+  const setDraft = (patch) =>
+    setReceiveDrafts((prev) => ({
+      ...prev,
+      [request.id]: {
+        ...(prev[request.id] || {}),
+        ...patch,
+      },
+    }));
+  if (request.order?.status === "placing")
+    return (
+      <TD>
+        <span className="text-ink-secondary">Auto-order in progress</span>
+      </TD>
+    );
+  const lateOrderReceive =
+    request.status === "received" && !!request.order?.landedAfterReceive;
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive)
+    return (
+      <TD>
+        <span className="text-ink-secondary">Closed</span>
+      </TD>
+    );
   const orderOut = !!request.order?.placedAt && !request.order?.revokedAt;
   return (
-    <td style={tdS}>
-      <div style={{ display: "grid", gap: 6, minWidth: 220 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 6 }}>
-          <input
-            value={draft.quantity ?? request.order?.orderedQuantity ?? request.requestedQuantity ?? ""}
-            onChange={(e) => setDraft({ quantity: e.target.value })}
-            style={sInput}
+    <TD>
+      <div className="grid gap-[6px] min-w-[220px]">
+        <div className="grid gap-[6px]">
+          <Input
+            value={
+              draft.quantity ??
+              request.order?.orderedQuantity ??
+              request.requestedQuantity ??
+              ""
+            }
+            onChange={(e) =>
+              setDraft({
+                quantity: e.target.value,
+              })
+            }
             placeholder="Qty"
           />
-          <input
+
+          <Input
             value={draft.unit ?? request.unit ?? request.inventoryUnit ?? ""}
-            onChange={(e) => setDraft({ unit: e.target.value })}
-            style={sInput}
+            onChange={(e) =>
+              setDraft({
+                unit: e.target.value,
+              })
+            }
             placeholder="Unit"
           />
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={() => runAction(request, "receive")} disabled={receivingId === request.id} style={sBtn(D.green, D.white)}>
+        <div className="flex gap-[6px]">
+          <Button
+            onClick={() => runAction(request, "receive")}
+            disabled={receivingId === request.id}
+            variant="primary"
+          >
             Receive
-          </button>
+          </Button>
           {lateOrderReceive ? (
-            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Late auto-order — receive it, or revoke</span>
+            <span className="text-ink-secondary text-ui-body self-center">
+              Late auto-order — receive it, or revoke
+            </span>
           ) : orderOut ? (
-            <span style={{ color: D.muted, fontSize: 12, alignSelf: "center" }}>Order out — receive, or revoke first</span>
+            <span className="text-ink-secondary text-ui-body self-center">
+              Order out — receive, or revoke first
+            </span>
           ) : (
-            <button onClick={() => runAction(request, "cancel")} disabled={receivingId === request.id} style={sBtn(D.card, D.red)}>
+            <Button
+              onClick={() => runAction(request, "cancel")}
+              disabled={receivingId === request.id}
+              variant="danger"
+            >
               Cancel
-            </button>
+            </Button>
           )}
         </div>
       </div>
-    </td>
+    </TD>
   );
 }
 
