@@ -1,11 +1,11 @@
-const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
+const { buildLawnCompletionDefaults, lawnCompletionDefaultsEnabled, archivedLawnRecipeMatches, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 
 function fixture() {
   return {
     context: { isLawn: true, propertyId: 'property', propertyMatchesProfile: true, history: { rows: [] } },
     plan: {
       serviceId: 'visit', appointmentAssignment: {},
-      propertyGate: { serviceTier: 'Silver', trackKey: 'st_augustine', blocks: [] },
+      propertyGate: { serviceTier: 'Silver', trackKey: 'st_augustine', blocks: [], propertyMatchesProfile: true },
       protocol: { structured: {
         status: 'active', grassTrack: 'st_augustine', protocolKey: 'protocol', version: '1', window: { key: 'june' },
         products: [{ productId: 'product', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' }],
@@ -81,7 +81,7 @@ test('a live window whose defaults name none of the recipe products explains the
   expect(partial.message).toBeNull();
 });
 
-test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'nonlawn'])('%s mismatch cannot invent an eligible plan', (reason) => {
+test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'nonmember_lane', 'nonlawn'])('%s mismatch cannot invent an eligible plan', (reason) => {
   const { plan, context } = fixture();
   if (reason === 'property') context.propertyMatchesProfile = false;
   if (reason === 'grass') plan.propertyGate.trackKey = 'zoysia';
@@ -89,16 +89,71 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   if (reason === 'version') plan.appointmentAssignment.protocolVersion = 'missing';
   if (reason === 'archived') plan.protocol.structured.status = 'archived';
   if (reason === 'nonmember') plan.propertyGate.serviceTier = null;
+  // A legacy tier lingering on an explicit per_visit / one_time customer is
+  // not a program (Codex #4113 batch 12 follow-up); the assignment is also
+  // withdrawn so the tier is the only claim.
+  if (reason === 'nonmember_lane') { plan.propertyGate.billingMode = 'one_time'; plan.appointmentAssignment = {}; }
   if (reason === 'nonlawn') context.isLawn = false;
   expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
 });
 
-test('a nonmember can use an explicitly assigned window; a spot default stays spot work', () => {
+test('every option carries the protocol row\'s application mode, so an added herbicide records the prescribed broadcast, not the catalog\'s spot default', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push(
+    { productId: 'speedzone', defaultInPlan: false, gates: { weeds_present: true }, applicationMode: 'broadcast' },
+    { productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+  );
+  plan.mixCalculator.conditionalOptions = [
+    // The line parse tags every SpeedZone line SPOT_ALLOWANCE; the protocol row's explicit broadcast mode wins (Codex r13 P1).
+    { role: 'conditional', selected: false, scope: 'SPOT_ALLOWANCE', product: { id: 'speedzone', name: 'SpeedZone', category: 'herbicide', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', category: 'herbicide', formulation: 'Water-dispersible granule (WG)', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'unlisted', name: 'Not in this protocol', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options).toEqual([
+    { product: { id: 'product', name: 'Fixture product' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'speedzone', name: 'SpeedZone' }, applicationMethod: 'broadcast_spray' },
+    { product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' },
+  ]);
+});
+
+test('a protocol row without an explicit mode still lets the parsed spot scope decide', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'celsius', defaultInPlan: false, gates: {} });
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, scope: 'SPOT_ALLOWANCE', product: { id: 'celsius', name: 'Celsius WG', active: true } },
+  ];
+  expect(buildLawnCompletionDefaults(plan, context).options.at(-1)).toEqual({ product: { id: 'celsius', name: 'Celsius WG' }, applicationMethod: 'spot_treatment' });
+});
+
+test('a deactivated catalog product is offered neither as a default nor under "Additional work"', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push({ productId: 'retired', defaultInPlan: false, gates: {}, applicationMode: 'broadcast' });
+  plan.mixCalculator.items[0].product.active = false;
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, product: { id: 'retired', name: 'Retired herbicide', active: false } },
+  ];
+  const result = buildLawnCompletionDefaults(plan, context);
+  // The completion writer rejects an inactive product row, so the option would
+  // be an action that cannot be completed (Codex r12 P2).
+  expect(result.items).toEqual([]);
+  expect(result.options).toEqual([]);
+});
+
+test('a nonmember can use a complete explicit assignment; a spot default stays spot work', () => {
   const { plan, context } = fixture();
   plan.propertyGate.serviceTier = null;
-  plan.appointmentAssignment.windowKey = 'june';
+  plan.appointmentAssignment = { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' };
   plan.protocol.structured.products[0].applicationMode = 'spot';
   expect(buildLawnCompletionDefaults(plan, context).items[0].applicationMethod).toBe('spot_treatment');
+});
+
+test('a nonmember with a partial assignment (window only) has no program: the calendar-resolved protocol is not adopted', () => {
+  const { plan, context } = fixture();
+  plan.propertyGate.serviceTier = null;
+  plan.appointmentAssignment = { windowKey: 'june' };
+  const defaults = buildLawnCompletionDefaults(plan, context);
+  expect(defaults.items).toEqual([]);
+  expect(defaults.message).toBe('No assigned lawn plan for this visit. Add the products actually applied.');
 });
 
 test.each(['WDG', 'WG', 'WP', 'liquid', 'granular', 'G', 'Granule (G)', 'Granule (restricted-use)', 'Granular pre-emergent on fertilizer', 'Granular bait', 'Water-dispersible granule (WDG)', 'Water-soluble granule (WSG)', 'Water-dispersible granule (WG)', 'Suspension concentrate (SC)'])('formulation %s determines the default application method, not its weight unit', formulation => {
@@ -158,4 +213,33 @@ test('an archived recipe accepts derived-rate defaults only inside the archived 
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'oz', rateSource: 'catalog_default_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: 0, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ratePer1000: null, rateUnit: 'fl oz', gates: {} }), item({ ratePer1000: null, rateUnit: 'fl oz', rateSource: 'missing_rate' }))).toBe(false);
+});
+
+test.each([
+  ['member without an assignment', {}, 'Silver', true],
+  ['nonmember without a program', {}, null, false],
+  ['nonmember whose assignment the plan resolved', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true],
+  ['nonmember with a partial assignment (window only, key/version wildcards)', { windowKey: 'june' }, null, false],
+  ['nonmember with a partial assignment (key + window, no version)', { protocolKey: 'protocol', windowKey: 'june' }, null, false],
+  ['member whose assignment the plan did NOT resolve (defaults gate off → calendar protocol)', { protocolKey: 'protocol', protocolVersion: '2', windowKey: 'september' }, 'Silver', false],
+  ['assignment on a plan with no structured window', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'no-window'],
+  ['member whose turf profile does NOT prove this property', {}, 'Silver', 'unproven'],
+  ['member with the property proof never evaluated (defaults gates off)', {}, 'Silver', 'unevaluated'],
+  ['legacy tier on an explicit one_time customer, no assignment', {}, 'Silver', 'one_time'],
+  ['legacy tier on an explicit per_visit customer, no assignment', {}, 'Silver', 'per_visit'],
+  ['legacy tier on an explicit per_application customer (membership lane)', {}, 'Silver', 'per_application'],
+  ['legacy tier on an explicit annual_prepay customer (membership lane)', {}, 'Silver', 'annual_prepay'],
+  ['explicit one_time customer whose appointment carries a COMPLETE assignment', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'one_time_assigned'],
+])('ledger attribution — %s', (_label, assignment, tier, expected) => {
+  const { plan } = fixture();
+  plan.appointmentAssignment = assignment;
+  plan.propertyGate.serviceTier = tier;
+  if (expected === 'no-window') { plan.protocol.structured = null; expected = false; }
+  if (expected === 'unproven') { plan.propertyGate.propertyMatchesProfile = false; expected = false; }
+  if (expected === 'unevaluated') { plan.propertyGate.propertyMatchesProfile = null; expected = false; }
+  if (['one_time', 'per_visit'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = false; }
+  if (['per_application', 'annual_prepay'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = true; }
+  if (expected === 'one_time_assigned') { plan.propertyGate.billingMode = 'one_time'; expected = true; }
+  expect(lawnPlanAttributesVisit(plan)).toBe(expected);
+  expect(lawnPlanAttributesVisit(null)).toBe(false);
 });

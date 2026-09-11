@@ -129,8 +129,11 @@ describe('POST /payment-notices/:id/apply', () => {
     // Every later write on the notice is fenced by that token.
     expect(calls[closeAt - 1]).toEqual(['where', { id: 'notice-1', status: 'processing', claim_token: updates[0].claim_token }]);
     expect(updates[1]).toMatchObject({ status: 'applied', match_method: 'manual', matched_invoice_id: 'inv-1', matched_customer_id: 'cust-1', applied_by: 'Adam' });
+    // The operator who tapped Apply rides along as recordedByTechnicianId:
+    // the invoice-issued closeout (GATE_INVOICE_ISSUED_CLOSES_VISIT) writes
+    // them up as the actor of the visit transition, never the system.
     expect(recordManualPayment).toHaveBeenCalledWith('inv-1', {
-      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, settlementFence: expect.any(Function),
+      method: 'zelle', reference: 'Pat Doe', note: 'Zelle memo: Quarterly Service Pat D', recordedBy: 'Adam', recordedByTechnicianId: 'admin-1', sendReceipt: true, via: 'both', expectedAmountCents: 11700, requireSelfPay: true, settlementFence: expect.any(Function),
     });
     const fenceTrx = jest.fn(() => ({ where: jest.fn((w) => { fenceTrx.where = w; return { forUpdate: jest.fn(() => ({ first: jest.fn(async () => null) })) }; }) }));
     expect(await recordManualPayment.mock.calls[0][1].settlementFence(fenceTrx)).toBe(false);

@@ -558,7 +558,8 @@ describe('admin communications SMS route', () => {
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl, { body: STMT_BODY });
         expect(res.status).toBe(200);
-        expect(markStatementSent).toHaveBeenCalledWith(31);
+        // The operator behind the composer send is the child closeouts' actor (GitHub r10 P2 #4127).
+        expect(markStatementSent).toHaveBeenCalledWith(31, expect.anything(), { actorTechnicianId: 'admin-1', actorRole: 'admin' });
       });
       markStatementSent.mockClear();
       sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, suppressed: true });
@@ -1100,7 +1101,8 @@ describe('admin communications SMS route', () => {
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl, { body: STMT_BODY });
         expect(res.status).toBe(500);
-        expect(markStatementSent).toHaveBeenCalledWith(31);
+        // The operator behind the composer send is the child closeouts' actor (GitHub r10 P2 #4127).
+        expect(markStatementSent).toHaveBeenCalledWith(31, expect.anything(), { actorTechnicianId: 'admin-1', actorRole: 'admin' });
       });
       markStatementSent.mockClear();
       sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));

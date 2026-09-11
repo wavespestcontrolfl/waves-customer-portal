@@ -67,12 +67,6 @@ function pickCustomerMatch(rows, extraction) {
   return { customer: byName[0] || rows[0], ambiguous: true };
 }
 
-// How fresh a row must be to count as the Twilio webhook's first-contact
-// shell. The webhook inserts it seconds before the estimator runs in the
-// same request; the generous window only has to survive queue/retry delay,
-// while staying far short of any real lead's age.
-const WEBHOOK_SHELL_MAX_AGE_MS = 15 * 60 * 1000;
-
 // opts (both consumed by the scope-guards triage; composer callers omit
 // them and keep today's behavior exactly):
 //  - timeoutMs: knex cancel-timeout so the triage deadline bounds the WORK.
@@ -89,9 +83,8 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
         // active: consumed by the scope-guards triage (an inactive/former
         // customer texting a NEW quote must read as a prospect there).
-        // created_at: the webhook-shell recency marker below.
-        // created_via: the webhook shell's PROVENANCE stamp (below).
-        'property_type', 'company_name', 'active', 'created_at', 'created_via')
+        // created_at: orders the limited candidate rows most-recent-first.
+        'property_type', 'company_name', 'active', 'created_at')
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .limit(5);
@@ -108,56 +101,6 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
     }
     if (timeoutMs) q = q.timeout(timeoutMs, { cancel: true });
     const rows = await q;
-    // Prospect-shell resolution — includeServiceContacts callers ONLY (the
-    // scope-guards triage and the gate-on SMS context build; the call path
-    // and every ungated caller skip this entirely and keep today's
-    // behavior byte-for-byte). When an on-file service contact first texts
-    // a domain/van tracking number, the Twilio webhook does not recognize
-    // contact-slot phones and mints a NEW primary-phone row. The combined
-    // lookup then returns that shell alongside the real customer's
-    // contact-slot match, pickCustomerMatch calls it ambiguous, and the SMS
-    // build red-lanes a perfectly valid add-on request.
-    //
-    // The shortcut applies ONLY to rows the webhook itself STAMPED as that
-    // placeholder (customers.created_via, written by the domain/van
-    // tracking branch moments before this runs). Row shape is not proof: a
-    // phone can legitimately carry an established customer AND a real
-    // separate lead, and silently handing that lead's quote the
-    // established customer's id, saved property, and membership pricing is
-    // exactly the failure this guard must not create. Anything unstamped
-    // keeps today's ambiguity.
-    if (includeServiceContacts && rows.length > 1) {
-      const { CUSTOMER_STAGES, CREATED_VIA } = require('../customer-stages');
-      const isReal = (r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage);
-      // PROVENANCE, not row shape. The shell is identified by the stamp the
-      // Twilio webhook writes on the row it mints (customers.created_via —
-      // see routes/twilio-webhook.js domain/van branch and the CREATED_VIA
-      // constant). Shape cannot carry this decision: routes/lead-webhook.js
-      // creates an active new_lead with a blank address_line1 AND blank zip
-      // when a form arrives without an address, so an address-less recent
-      // new_lead is NOT proof of a webhook shell — and misreading a genuine
-      // lead as one discards real ambiguity and attaches the established
-      // customer's id, property, and membership pricing to the lead's quote.
-      // The remaining conditions are not provenance tests, they are
-      // conservatism: an unstamped row (created before the stamp shipped,
-      // or by any other path) never qualifies, a row that has since become
-      // a real customer or acquired an address/ZIP is no longer a bare
-      // placeholder, and the recency window keeps the shortcut to the
-      // webhook's own request. Anything else keeps today's ambiguity, which
-      // red-lanes for a human.
-      const isWebhookShell = (r) => r.created_via === CREATED_VIA.TWILIO_TRACKING_SHELL
-        && !isReal(r)
-        && !CUSTOMER_STAGES.includes(r.pipeline_stage)
-        && !String(r.address_line1 || '').trim()
-        && !String(r.zip || '').trim()
-        && !!r.created_at
-        && Date.now() - new Date(r.created_at).getTime() <= WEBHOOK_SHELL_MAX_AGE_MS;
-      const real = rows.filter(isReal);
-      const others = rows.filter((r) => !isReal(r));
-      if (real.length === 1 && others.every(isWebhookShell)) {
-        return { customer: real[0], ambiguous: false };
-      }
-    }
     return pickCustomerMatch(rows, extraction);
   } catch (err) {
     logger.warn(`[estimator-engine] customer load failed: ${err.message}`);

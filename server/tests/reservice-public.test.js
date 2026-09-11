@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({
 // flipping this map flips the gate per test.
 const gateState = { reserviceSelfServe: true, selfBooking: true, bookingCustomersOnly: false };
 jest.mock('../config/feature-gates', () => ({
+  gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
   isEnabled: jest.fn((name) => (name in gateState ? gateState[name] : true)),
 }));
 
@@ -27,6 +28,7 @@ const listResults = {};
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
+    let callbackOnly = false;
     const passthrough = [
       'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
       'whereRaw', 'andWhere', 'orWhere', 'orWhereIn', 'orWhereRaw', 'orderBy',
@@ -34,8 +36,13 @@ jest.mock('../models/db', () => {
       'count', 'modify',
     ];
     for (const m of passthrough) q[m] = () => q;
+    q.where = (key, value) => {
+      if (typeof key === 'function') key.call(q, q);
+      if (key === 's.is_callback' && value === true) callbackOnly = true;
+      return q;
+    };
     q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
-    q.then = (onOk, onErr) => Promise.resolve(listResults[table] || []).then(onOk, onErr);
+    q.then = (onOk, onErr) => Promise.resolve(callbackOnly ? [] : (listResults[table] || [])).then(onOk, onErr);
     q.catch = (fn) => Promise.resolve(listResults[table] || []).catch(fn);
     return q;
   };
@@ -350,5 +357,104 @@ describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
     expect(helperIdx).toBeGreaterThan(-1);
     expect(carveOutIdx).toBeGreaterThan(helperIdx);
     expect(carveOutIdx).toBeLessThan(helperUpdateIdx);
+  });
+});
+
+
+test.each([[['pest'], 'pest_control'], [['lawn'], 'lawn_care'], [['pest', 'lawn'], 'pest_control+lawn_care']])(
+  're-service availability forwards requested lanes %j to capability filtering', async (lanes, serviceKey) => {
+    const booking = require('../routes/booking')._internals;
+    const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({ days: [] });
+    try {
+      await reservicePublicRouter._test.buildAvailabilityForCustomer({ latitude: 27.4, longitude: -82.4 }, {
+        rangeFrom: '2027-05-20', rangeTo: '2027-05-20', config: {}, duration: 30, lanes,
+      });
+      expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey }));
+    } finally { build.mockRestore(); }
+  },
+);
+
+
+describe('selected-lane availability for a customer with both plans', () => {
+  let build;
+  let config;
+  const oldGate = process.env.GATE_SCHEDULING_CAPACITY;
+  beforeEach(() => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    firstResults.customers = { id: CUST_ID, latitude: 27.4, longitude: -82.4 };
+    listResults.services = [
+      { id: 'pest-service', service_key: 'pest_re_service', default_duration_minutes: 20 },
+      { id: 'lawn-service', service_key: 'lawn_re_service', default_duration_minutes: 30 },
+    ];
+    listResults['scheduled_services as s'] = [
+      { category: 'pest_control', service_type: 'General Pest Control' },
+      { category: 'lawn_care', service_type: 'Monthly Lawn Care Program' },
+    ];
+    const booking = require('../routes/booking')._internals;
+    config = jest.spyOn(booking, 'loadBookingConfig').mockResolvedValue({});
+    build = jest.spyOn(booking, 'buildBookingAvailability').mockImplementation(async ({ serviceKey }) => ({
+      slots: [], days: [{ date: '2027-05-20', slots: [{ technician_id: serviceKey === 'pest_control' ? 'pest-only' : 'lawn-only' }] }],
+    }));
+  });
+  afterEach(() => {
+    config.mockRestore(); build.mockRestore();
+    if (oldGate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+    else process.env.GATE_SCHEDULING_CAPACITY = oldGate;
+  });
+  async function browse(query) {
+    const handler = reservicePublicRouter.stack.find(layer => layer.route?.path === '/:token' && layer.route.methods.get).route.stack[0].handle;
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+    const next = jest.fn();
+    await handler({ params: { token: 'a'.repeat(64) }, query }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    return res;
+  }
+  test('waits for selection instead of requiring a technician eligible for both plans', async () => {
+    const res = await browse({});
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'bookable', availability: null }));
+    expect(build).not.toHaveBeenCalled();
+  });
+  test.each([['pest', 'pest_control', 20, 'pest-only'], ['lawn', 'lawn_care', 30, 'lawn-only']])(
+    'offers the %s lane with its own duration and technician capability', async (lane, serviceKey, duration, technician) => {
+      const res = await browse({ lane });
+      expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey, duration }));
+      expect(res.json.mock.calls[0][0].availability.days[0].slots[0].technician_id).toBe(technician);
+    },
+  );
+  test('legacy browse keeps shared longest-duration behavior with capacity disabled', async () => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'false';
+    await browse({});
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ duration: 30 }));
+  });
+  test('search requires a lane for dual-plan capacity and forwards the selected lane', async () => {
+    const parser = require('../services/scheduling/parse-when');
+    const parse = jest.spyOn(parser, 'parseWhen').mockResolvedValue({ dateFrom: '2027-05-20', dateTo: '2027-05-20', timeOfDay: 'afternoon' });
+    const summary = jest.spyOn(parser, 'summarizeWindow').mockReturnValue('Available times');
+    const handler = reservicePublicRouter.stack.find(layer => layer.route?.path === '/:token/find-slots').route.stack.at(-1).handle;
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() };
+    const next = jest.fn();
+    try {
+      await handler({ params: { token: 'a'.repeat(64) }, body: { query: 'afternoon' } }, res, next);
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(parse).not.toHaveBeenCalled();
+      await handler({ params: { token: 'a'.repeat(64) }, body: { query: 'afternoon', lane: 'lawn' } }, res, next);
+      expect(next).not.toHaveBeenCalled();
+      expect(build).toHaveBeenCalledWith(expect.objectContaining({ duration: 30, serviceKey: 'lawn_care', timeOfDay: 'afternoon' }));
+    } finally { parse.mockRestore(); summary.mockRestore(); }
+  });
+  test('a stale selected lane refreshes eligibility and the remaining lane can be browsed', async () => {
+    listResults['scheduled_services as s'] = [{ category: 'lawn_care', service_type: 'Monthly Lawn Care Program' }];
+    const stale = await browse({ lane: 'pest' });
+    expect(stale.status).not.toHaveBeenCalled();
+    expect(stale.json).toHaveBeenCalledWith(expect.objectContaining({ state: 'bookable', availability: null,
+      lanes: [expect.objectContaining({ key: 'lawn', alreadyBooked: null })] }));
+    expect(build).not.toHaveBeenCalled();
+    await browse({});
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ serviceKey: 'lawn_care', duration: 30 }));
+  });
+  test('rejects an unavailable service without building offers', async () => {
+    const res = await browse({ lane: 'termite' });
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(build).not.toHaveBeenCalled();
   });
 });

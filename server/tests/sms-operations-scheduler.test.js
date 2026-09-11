@@ -23,6 +23,8 @@ jest.mock('../utils/cron-lock', () => ({
 jest.mock('../services/sms-operational-actions', () => ({
   runSmsOperationalActions: jest.fn(), refreshSmsCommitments: jest.fn(),
 }));
+jest.mock('../services/callback-cards', () => ({ enabled: jest.fn(() => true) }));
+jest.mock('../services/call-commitments-watchdog', () => ({ runCallCommitmentsWatchdog: jest.fn() }));
 jest.mock('../services/time-tracking-crons', () => ({ initTimeTrackingCrons: jest.fn() }));
 jest.mock('../services/equipment-crons', () => ({ initEquipmentCrons: jest.fn() }));
 jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons: jest.fn() }));
@@ -96,5 +98,26 @@ describe('scheduled SMS intake and fulfillment failure isolation', () => {
     expect(recordJobStart).not.toHaveBeenCalled();
     expect(recordJobEnd).not.toHaveBeenCalled();
     expect(logger.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('callback-card scheduler health', () => {
+  let tick;
+  beforeAll(() => {
+    initScheduledJobs();
+    tick = cron.schedule.mock.calls.find(([, task]) => String(task).includes("require('./callback-cards').enabled()"))[1];
+  });
+  beforeEach(() => jest.clearAllMocks());
+
+  test.each(['no_connection', 'lease_held'])('records a skipped %s run only when work was missed', async (reason) => {
+    require('../services/call-commitments-watchdog').runCallCommitmentsWatchdog.mockResolvedValueOnce({ skipped: true, reason });
+    await tick();
+    expect(require('../services/call-commitments-watchdog').runCallCommitmentsWatchdog).toHaveBeenCalledTimes(1);
+    if (reason === 'lease_held') {
+      expect(recordJobStart).not.toHaveBeenCalled();
+      expect(recordJobEnd).not.toHaveBeenCalled();
+    } else {
+      expect(logger.error).toHaveBeenCalledWith('[callback-cards] tick failed (Error)');
+    }
   });
 });

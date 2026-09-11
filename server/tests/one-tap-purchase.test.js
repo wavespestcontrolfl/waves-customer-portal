@@ -13,7 +13,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 // (converter, engine, notifiers) — the assertions are about the calls.
 
 jest.mock('../models/db', () => {
-  const state = { tables: {} };
+  const state = { tables: {}, events: [] };
   const clone = (r) => ({ ...r });
   const builder = (table) => {
     const filters = [];
@@ -47,7 +47,7 @@ jest.mock('../models/db', () => {
       },
       whereNotNull(col) { filters.push((r) => r[col] != null); return q; },
       orderBy() { return q; },
-      forUpdate() { return q; },
+      forUpdate() { state.events.push({ type: 'row', table }); return q; },
       _rows() { return (state.tables[table] || []).filter((r) => filters.every((f) => f(r))); },
       async first() { const r = q._rows()[0]; return r ? clone(r) : undefined; },
       update(patch) {
@@ -84,7 +84,7 @@ jest.mock('../models/db', () => {
     const trx = (table) => builder(table);
     trx.fn = dbFn.fn;
     trx.isTransaction = true;
-    trx.raw = async () => {};
+    trx.raw = async (_sql, bindings) => { state.events.push({ type: 'advisory', bindings }); };
     return fn(trx);
   };
   dbFn.__state = state;
@@ -113,6 +113,7 @@ jest.mock('../services/estimate-converter', () => ({
 }));
 jest.mock('../services/slot-reservation', () => ({
   reserveSlot: jest.fn(),
+  prepareReservationCommit: jest.fn(async () => null),
   releaseReservation: jest.fn(async () => ({ released: true })),
   commitReservation: jest.fn(),
 }));
@@ -634,6 +635,29 @@ describe('confirm', () => {
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('voided');
   });
 
+  test('capacity acceptance pre-acquires its technician-day fence before locking rows', async () => {
+    const prepared = { options: { technicianId: 'tech-1' } };
+    slotReservation.prepareReservationCommit.mockResolvedValueOnce(prepared);
+    db.__state.tables.scheduled_services[0].technician_id = 'tech-1';
+    db.__state.events.length = 0;
+    require('../services/scheduling/occupancy').acquireOccupancyLock.mockImplementationOnce(async (_trx, date) => {
+      db.__state.events.push({ type: 'advisory', bindings: ['slot-reserve', `occupancy:${date}`] });
+    });
+    await oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true });
+    const events = db.__state.events;
+    const dateLock = events.findIndex(event => event.bindings?.[1] === 'occupancy:2026-08-20');
+    const techLock = events.findIndex(event => event.bindings?.[1] === 'tech-1:2026-08-20');
+    const unassignedLock = events.findIndex(event => event.bindings?.[1] === 'unassigned:2026-08-20');
+    const rowLock = events.findIndex(event => event.type === 'row');
+    expect(dateLock).toBeGreaterThanOrEqual(0);
+    expect(techLock).toBeGreaterThan(dateLock);
+    expect(unassignedLock).toBeGreaterThan(techLock);
+    expect(rowLock).toBeGreaterThan(unassignedLock);
+    expect(slotReservation.commitReservation.mock.calls[0][0]).toMatchObject({
+      preLockedDate: '2026-08-20', preLockedTechId: 'tech-1', preparedCapacity: prepared,
+    });
+  });
+
   test('happy path: accept + commit + convert in one transaction, then email + bell + push (NO SMS)', async () => {
     const out = await oneTap.confirm({
       customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true, ip: '1.2.3.4', userAgent: 'jest',
@@ -692,12 +716,13 @@ describe('confirm', () => {
     expect(sendNewRecurringWelcome).not.toHaveBeenCalled();
   });
 
-  test('an expired hold mid-confirm 409s and returns the purchase to pick-a-time', async () => {
+  test.each([['commitReservation', 'RESERVATION_EXPIRED'], ['prepareReservationCommit', 'SLOT_UNAVAILABLE']])('%s failure returns the purchase to pick-a-time', async (method, code) => {
     const err = new Error('reservation expired');
-    err.code = 'RESERVATION_EXPIRED';
-    slotReservation.commitReservation.mockRejectedValue(err);
+    err.code = code;
+    if (method === 'prepareReservationCommit') err.status = 409;
+    slotReservation[method].mockRejectedValueOnce(err);
     await expect(oneTap.confirm({ customerId: 'cust-1', purchaseId: 'p-1', termsAccepted: true }))
-      .rejects.toMatchObject({ status: 409, code: 'RESERVATION_EXPIRED' });
+      .rejects.toMatchObject({ status: 409, code });
     expect(db.__state.tables.one_tap_purchases[0].status).toBe('initiated');
     expect(db.__state.tables.one_tap_purchases[0].scheduled_service_id).toBeNull();
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
