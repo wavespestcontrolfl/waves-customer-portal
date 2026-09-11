@@ -127,6 +127,9 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: future.id, date: '2040-03-05' }), { today: TODAY })).reason).toBe('visit_in_future');
     const done = await visit({ status: 'completed', date: '2040-02-01' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: done.id, date: '2040-02-01' }), { today: TODAY })).reason).toBe('visit_completed');
+    // A legacy NULL-status row is live (the picker links to it) — it closes out too (Codex P2 r8).
+    const legacy = await visit({ status: null, date: '2040-02-25' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: legacy.id, date: '2040-02-25' }), { today: TODAY, trigger: 'paid' })).svc.id).toBe(legacy.id);
     const dead = await visit({ status: 'cancelled', date: '2040-02-02' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: dead.id, date: '2040-02-02' }), { today: TODAY })).reason).toBe('visit_cancelled');
   });

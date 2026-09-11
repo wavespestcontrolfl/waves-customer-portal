@@ -786,6 +786,41 @@ describe('POST /admin/invoices/:id/send on a pre-completion linked invoice (Code
     });
   });
 
+  test('a FIRST delivery finding the completion\'s QUEUED text (queued_pay_link) is the same no-op success; the operator\'s own send still surfaces it (Codex P2 r8)', async () => {
+    linkage = { scheduled_service_id: VISIT, service_record_id: null };
+    const queued = () => Object.assign(new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window; it delivers then'), { code: 'queued_pay_link' });
+    sendSpy.mockRejectedValueOnce(queued());
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { firstDelivery: true, requestReview: false });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, queued_delivery: true, sms: { ok: false, code: 'queued_pay_link' }, email: { ok: false, code: 'queued_pay_link' } });
+    });
+    sendSpy.mockRejectedValueOnce(queued());
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { requestReview: false });
+      expect(res.status).toBe(409); // not a first delivery: the refusal surfaces to the operator as before
+      expect(await res.json()).not.toMatchObject({ queued_delivery: true });
+    });
+  });
+
+  test('a linkage lookup that FAILS fails closed on the review ask: refused (409 linkage_unverifiable) with an ask, proceeds without one (Codex P1 r8)', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return qb({ first: jest.fn(async () => { throw new Error('connection reset'); }) });
+      throw new Error(`unexpected table ${table}`);
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { requestReview: true, reviewDelayMinutes: 120 });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'linkage_unverifiable' });
+      expect(sendSpy).not.toHaveBeenCalled();
+    });
+    await withServer(async (baseUrl) => {
+      const res = await send(baseUrl, { requestReview: false });
+      expect(res.status).toBe(200);
+      expect(sendSpy).toHaveBeenCalledWith(INVOICE, expect.objectContaining({ requestReview: false }));
+    });
+  });
+
   test('keeps the operator\'s review ask for a standalone or completion-linked invoice', async () => {
     linkage = { scheduled_service_id: null, service_record_id: null };
     await withServer(async (baseUrl) => {

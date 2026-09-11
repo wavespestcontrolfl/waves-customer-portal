@@ -351,6 +351,11 @@ describe("AdminInvoicesPage deposit credit chip", () => {
 });
 
 describe("AdminInvoicesPage create-path send toasts", () => {
+  it("a first delivery the completion already owns is a no-op in both shapes: delivered, or queued for the send window (Codex P2 r8)", () => {
+    expect(invoiceCreatedSendToast("WPC-2026-0001", { ok: true, already_delivered: true, sms: { ok: false }, email: { ok: false } })).toMatch(/already delivered by the visit's completion, not sent again/);
+    expect(invoiceCreatedSendToast("WPC-2026-0001", { ok: true, queued_delivery: true, sms: { ok: false, code: "queued_pay_link" }, email: { ok: false, code: "queued_pay_link" } })).toMatch(/already queued the text for the send window, not sent again/);
+  });
+
   it("reports both channels when the send fully succeeds", () => {
     expect(
       invoiceCreatedSendToast("WPC-2026-0001", {

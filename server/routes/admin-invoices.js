@@ -1848,9 +1848,19 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
     try {
       linkage = await db('invoices').where({ id }).first('scheduled_service_id', 'service_record_id');
     } catch (err) {
-      // Lookup outage: keep the legacy behaviour (the operator's ask stands)
-      // rather than fail the send — sendViaSMSAndEmail re-reads the row anyway.
+      // Lookup outage (Codex P1 r8 #4131): fail CLOSED on the one thing this
+      // read decides. With a review ask on the request we cannot tell a
+      // standalone invoice from a pre-completion open-visit one, and
+      // forwarding the ask would enrol it days before the service — refuse
+      // the send (retryable) instead. Without an ask there is nothing to
+      // decide and the send proceeds (sendViaSMSAndEmail re-reads the row).
       logger.warn(`[admin-invoices] linkage read failed before send for ${id}: ${err.message}`);
+      if (requestReview) {
+        return res.status(409).json({
+          error: 'Could not verify whether this invoice is linked to an open visit, so the review request could not be confirmed — retry the send',
+          code: 'linkage_unverifiable',
+        });
+      }
     }
     const preCompletionLinked = !!(linkage?.scheduled_service_id && !linkage?.service_record_id);
     if (preCompletionLinked && requestReview) {
@@ -1867,6 +1877,21 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         actorTechnicianId: req.technicianId || null,
       });
     } catch (err) {
+      // A FIRST delivery finding the visit's completion already owning it is
+      // a no-op success in both shapes: delivered (already_delivered), or
+      // queued for the send window (queued_pay_link — the completion's held
+      // text is live and delivers at 8 AM; Codex P2 r8 #4131). A 409 here
+      // made the client re-read the still-draft row and offer Resend on top
+      // of a scheduled customer text.
+      if (err?.code === 'queued_pay_link' && firstDeliveryOnly) {
+        logger.info(`[admin-invoices] first delivery of invoice ${id} skipped — the completion's queued text owns it: ${err.message}`);
+        return res.json({
+          ok: true,
+          queued_delivery: true,
+          sms: { ok: false, code: 'queued_pay_link' },
+          email: { ok: false, code: 'queued_pay_link' },
+        });
+      }
       if (err?.code !== 'already_delivered') throw err;
       logger.info(`[admin-invoices] first delivery of invoice ${id} skipped: ${err.message}`);
       return res.json({

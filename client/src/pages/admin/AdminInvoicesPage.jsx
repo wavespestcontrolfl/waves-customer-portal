@@ -504,6 +504,11 @@ export function invoiceCreatedSendToast(invoiceNumber, res) {
   if (res?.already_delivered) {
     return `Invoice created: ${invoiceNumber} — already delivered by the visit's completion, not sent again`;
   }
+  // …or queued it for the send window (quiet hours): the text is live and
+  // delivers at 8 AM — also a no-op, never a Resend prompt (Codex P2 r8).
+  if (res?.queued_delivery) {
+    return `Invoice created: ${invoiceNumber} — the visit's completion already queued the text for the send window, not sent again`;
+  }
   const sent = [
     res?.sms?.ok && "SMS",
     res?.email?.ok &&
@@ -6282,6 +6287,19 @@ function CreateInvoice({
           setSaving(false);
           return;
         }
+      }
+      if (sendTiming === "now" && invoice.id && invoice.payer_statement_id) {
+        // A per-job NET-terms payer accrued this invoice to its monthly
+        // statement (GATE_PAYER_STATEMENTS): statement children are never
+        // sent individually — the send endpoint would refuse and the
+        // recovery re-read would offer a Resend that always fails (Codex P2 r8).
+        showToast(
+          `Invoice created: ${invoice.invoice_number} — accrued to the payer's monthly statement, not sent individually`,
+        );
+        onCreated();
+        savingRef.current = false;
+        setSaving(false);
+        return;
       }
       if (sendTiming === "now" && invoice.id && (invoice.settledByDeposit || invoice.deliveryHeld)) {
         // The linked visit's estimate deposit covered the whole invoice: the

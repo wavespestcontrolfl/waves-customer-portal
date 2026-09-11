@@ -94,7 +94,10 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
   const { svc } = linked;
   const leaveOpen = (reason) => ({ svc: null, reason, visit: svc });
-  if (!OPEN_VISIT_STATUSES.includes(String(svc.status))) return leaveOpen(`visit_${svc.status}`);
+  // A NULL status is a live visit (the repository's live-visit convention;
+  // the picker links invoices to such legacy rows — Codex P2 r8 #4131), so it
+  // closes out like pending/confirmed instead of being refused as visit_null.
+  if (svc.status != null && !OPEN_VISIT_STATUSES.includes(String(svc.status))) return leaveOpen(`visit_${svc.status}`);
   const day = dateOnly(svc.scheduled_date);
   if (!day || day > today) return leaveOpen('visit_in_future');
   // A SEND proves nothing about a visit scheduled for today: the office
@@ -217,7 +220,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where('ps.status', 'paid')
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
       .where((q) => q
-        .where((open) => open.whereIn('s.status', OPEN_VISIT_STATUSES).where('s.scheduled_date', '<=', today))
+        .where((open) => open.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<=', today))
         .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy(['ps.id', 'i.id'])
       .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
