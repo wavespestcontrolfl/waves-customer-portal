@@ -25,8 +25,8 @@
 //
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
-import { useEffect, useRef, useState } from 'react';
-import { stopPropertyAlerts } from './routeStops';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -50,7 +50,7 @@ const DARK = {
 };
 
 const sectionLabelStyle = {
-  fontSize: 12,
+  fontSize: 14,
   fontWeight: 700,
   color: DARK.muted,
   textTransform: 'uppercase',
@@ -82,12 +82,13 @@ function MemberLabel({ service, show }) {
 function LinkBtn({ href, icon, label, onClick, disabled = false }) {
   const base = {
     flex: 1,
+    minHeight: 48,
     padding: '10px 4px',
     borderRadius: 8,
     border: `1px solid ${DARK.border}`,
     background: 'transparent',
     color: DARK.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: 600,
     textDecoration: 'none',
     display: 'flex',
@@ -467,12 +468,12 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
   );
 }
 
-// The pre-existing per-service action buttons, moved verbatim from the
-// old ServiceRow (labels + terminal logic + trace-eligibility guard
-// unchanged) — one row per member service on a grouped stop.
+// Per-service actions keep terminal reports read-only and preserve the
+// trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead }) {
+  const reportDisabled = TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status);
   const btn = {
-    padding: '8px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+    minHeight: 48, minWidth: 48, padding: '8px 10px', borderRadius: 6, fontSize: 14, fontWeight: 600,
     border: `1px solid ${DARK.border}`, background: 'transparent',
     color: DARK.teal, cursor: 'pointer',
   };
@@ -490,7 +491,11 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
         </p>
       )}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button onClick={() => onProject(service)} style={btn}>
+        <button
+          disabled={reportDisabled}
+          onClick={(event) => { event.currentTarget.focus(); onProject(service); }}
+          style={{ ...btn, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}
+        >
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
@@ -500,7 +505,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
               ? '🗂️ Completed'
               : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
         </button>
-        <button onClick={() => onPhotos(service)} style={btn}>📷 Photos</button>
+        <button onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}>📷 Photos</button>
         {/* Hidden when the schedule feed marks the service trace-ineligible
             (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
             inspection stops. Absent flag keeps the button — the write route
@@ -549,13 +554,13 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
         placeholder="On my way — about 15 minutes out."
         rows={3}
         aria-label="Message"
-        style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${DARK.border}`, background: DARK.card, color: DARK.text, fontSize: 15, resize: 'vertical' }}
+        style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${DARK.border}`, background: DARK.card, color: DARK.text, fontSize: 16, resize: 'vertical' }}
       />
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: DARK.teal, color: '#0b1220', fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
+        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ minHeight: 48, padding: '8px 14px', borderRadius: 8, border: 'none', background: DARK.teal, color: '#0b1220', fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
           {state.busy ? 'Sending…' : 'Send'}
         </button>
-        <button type="button" onClick={onClose} disabled={state.busy} style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
+        <button type="button" onClick={onClose} disabled={state.busy} style={{ minHeight: 48, padding: '8px 12px', borderRadius: 8, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
         <span style={{ ...factMutedStyle, margin: 0, marginLeft: 'auto' }}>{body.length}/{LINE_TEXT_MAX}</span>
       </div>
       {state.sent && <p role="status" style={{ ...factMutedStyle, color: '#10b981', marginTop: 6 }}>Sent.</p>}
@@ -600,7 +605,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   if (busy) { if (!heldLine.current) heldLine.current = liveLine; } else heldLine.current = null;
   const line = busy ? heldLine.current : liveLine;
   const lineUnknown = busy ? false : liveLineUnknown;
-  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  // Publish the lock before a swipe can follow the Sending paint.
+  useLayoutEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   // A dispatch refresh can remove or reassign the stop while its action is
   // in flight; the panel then unmounts without ever reporting false, and
   // the list's busy lock would refuse every header for the rest of the
@@ -756,7 +762,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
             onClick={onRetry}
             style={{
               border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted,
-              borderRadius: 6, padding: '6px 10px', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              borderRadius: 6, padding: '6px 10px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
             }}
           >
             Couldn't load estimate & access details — retry

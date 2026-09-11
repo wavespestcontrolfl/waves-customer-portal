@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 import { adminFetch } from '../../lib/adminFetch';
 import WdoIntelligenceBar from './WdoIntelligenceBar';
 import WdoSignaturePad from './WdoSignaturePad';
@@ -330,6 +331,8 @@ export default function CreateProjectModal({
   const P = PALETTES[theme] || PALETTES.dark;
   const isEstimateStyle = theme === 'light';
   const isSheet = presentation === 'sheet';
+  const isMobile = useIsMobile();
+  const isFullHeight = isSheet || isMobile;
   // V2 zinc restricts admin type to weights 400/500; the tech-portal dark
   // theme keeps its heavier Montserrat-era weights.
   const wStrong = isEstimateStyle ? 500 : 800;
@@ -1813,7 +1816,7 @@ export default function CreateProjectModal({
       aria-modal="true"
       aria-labelledby="create-project-modal-title"
       data-official-document-flow={isOfficialDocument ? projectType : undefined}
-      style={isSheet ? {
+      style={isFullHeight ? {
         // Complete Service frame: scrim + full-height sheet docked right
         // (100% width on phones via maxWidth), body scrolls inside.
         position: 'fixed', inset: 0, zIndex: 200,
@@ -1841,13 +1844,15 @@ export default function CreateProjectModal({
       {isOfficialDocument && (
         <style>{`[data-official-document-flow] *, [data-official-document-flow] input, [data-official-document-flow] select, [data-official-document-flow] textarea, [data-official-document-flow] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
       )}
-      <div style={isSheet ? {
-        width: '100%', maxWidth: 640, height: '100dvh', maxHeight: '100dvh', margin: 0,
+      <div style={isFullHeight ? {
+        width: '100%', maxWidth: isMobile ? 'none' : 640, height: '100%', maxHeight: '100%', margin: 0,
         background: isEstimateStyle ? P.bg : P.card,
         borderLeft: `1px solid ${P.border}`,
         display: 'flex', flexDirection: 'column',
         overflow: 'hidden',
         paddingTop: 'env(safe-area-inset-top, 0px)',
+        paddingLeft: 'env(safe-area-inset-left, 0px)',
+        paddingRight: 'env(safe-area-inset-right, 0px)',
         boxSizing: 'border-box',
       } : {
         width: '100%', maxWidth: isEstimateStyle ? 720 : 520, margin: '0 12px',
@@ -1860,6 +1865,7 @@ export default function CreateProjectModal({
       }}>
         {/* Header */}
         <div style={{
+          flexShrink: 0,
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: isEstimateStyle ? '18px 22px' : '14px 16px',
           borderBottom: `1px solid ${P.border}`,
@@ -1941,7 +1947,7 @@ export default function CreateProjectModal({
           <div style={{
             padding: isEstimateStyle ? 22 : 16,
             display: 'flex', flexDirection: 'column', gap: 12,
-            ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
+            ...(isFullHeight ? { flex: 1, minHeight: 0, overflowY: 'auto' } : {}),
           }}>
             <div style={{ fontSize: 14, fontWeight: wStrong, color: P.heading, fontFamily: P.bodyFont }}>
               {signStep.requiresSignature === false ? '✓ Certificate saved' : '✓ Report draft saved'}
@@ -2010,7 +2016,7 @@ export default function CreateProjectModal({
             borderTop: `1px solid ${P.border}`,
             background: P.card,
             display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'stretch',
-            ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
+            ...(isFullHeight ? { flexShrink: 0, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
           }}>
             {signStep.requiresSignature !== false && !signStep.signature?.signed && (
               <span style={{ fontSize: 12, color: P.muted, fontFamily: P.bodyFont }}>
@@ -2157,7 +2163,7 @@ export default function CreateProjectModal({
           style={{
             padding: isEstimateStyle ? 22 : 16,
             display: 'flex', flexDirection: 'column', gap: isEstimateStyle ? 16 : 16,
-            ...(isSheet ? { flex: 1, overflowY: 'auto' } : {}),
+            ...(isFullHeight ? { flex: 1, minHeight: 0, overflowY: 'auto' } : {}),
           }}
         >
           {/* Restore saved draft */}
@@ -2656,11 +2662,7 @@ export default function CreateProjectModal({
             </>
           )}
 
-          {error && (
-            <div style={{ padding: '8px 12px', background: `${P.red}22`, border: `1px solid ${P.red}`, borderRadius: 8, color: P.red, fontSize: 13 }}>
-              {error}
-            </div>
-          )}
+
 
           {saving && uploadProgress.total > 0 && (
             <div style={{ fontSize: 12, color: P.muted }}>
@@ -2674,9 +2676,14 @@ export default function CreateProjectModal({
           padding: isEstimateStyle ? '16px 24px 20px' : '12px 16px',
           borderTop: `1px solid ${P.border}`,
           background: P.card,
-          display: 'flex', gap: 10, justifyContent: 'flex-end',
-          ...(isSheet ? { paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
+          display: 'flex', flexWrap: 'wrap', gap: 10, justifyContent: 'flex-end',
+          ...(isFullHeight ? { flexShrink: 0, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))' } : {}),
         }}>
+          {error && (
+            <div role="alert" style={{ flexBasis: '100%', boxSizing: 'border-box', padding: '8px 12px', background: `${P.red}22`, border: `1px solid ${P.red}`, borderRadius: 8, color: P.red, fontSize: 13 }}>
+              {error}
+            </div>
+          )}
           <button
             type="button"
             onClick={() => !saving && onClose?.()}

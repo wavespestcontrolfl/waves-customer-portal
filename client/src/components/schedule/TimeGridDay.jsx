@@ -1,3 +1,4 @@
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // Square-style day-view time grid for Dispatch.
 // Tech columns × 30-min time rows from 6 AM → 8 PM. Drag a block to a new (tech, time)
 // to reschedule + reassign. Click a block to open the existing edit modal.
@@ -500,7 +501,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         {service.prepaidAmount != null && Number(service.prepaidAmount) > 0 && effectiveHeight >= SLOT_HEIGHT * 2 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium"
-            style={{ height: 14, padding: '0 5px', background: '#DCFCE7', color: '#166534', fontSize: 9 }}
+            style={{ height: 18, padding: '0 6px', background: '#DCFCE7', color: '#166534', fontSize: 11 }}
             title="Prepaid"
           >$</span>
         )}
@@ -511,7 +512,10 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
         {service.visit && Number(service.visit.serviceCount) > 1 && (
           <span
             className="inline-flex items-center shrink-0 rounded-full uppercase tracking-label font-medium bg-zinc-200 text-zinc-800"
-            style={{ height: 14, padding: '0 5px', fontSize: 9 }}
+            // One-slot (30 min) blocks are 32px with overflow-hidden: keep the
+            // compact pill there so the chip is not clipped; grow it when the
+            // block has a second row of room.
+            style={effectiveHeight >= SLOT_HEIGHT * 2 ? { height: 18, padding: '0 6px', fontSize: 11 } : { height: 14, padding: '0 5px', fontSize: 11, lineHeight: 1 }}
             title={`Visit of ${service.visit.serviceCount} services: ${(service.visit.serviceTypes || []).join(' + ')}`}
             data-testid="visit-chip"
           >Visit · {service.visit.serviceCount}</span>
@@ -1282,12 +1286,12 @@ export default function TimeGridDay({
           body: JSON.stringify(body),
         }).then((result) => {
           if (notifyCustomer && result?.notificationSent === false) {
-            alert(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
+            showScheduleSaveNotice(`Appointment moved, but SMS notification failed: ${result.notificationError || 'customer was not notified'}`);
           }
           // Advisory schedule-overlap notes — the move committed (conflicts
           // no longer block staff saves); say what now stacks.
           if (Array.isArray(result?.warnings) && result.warnings.length) {
-            alert(`Moved.\n\n${result.warnings.join('\n\n')}`);
+            showScheduleSaveNotice(`Moved.\n\n${result.warnings.join('\n\n')}`);
           }
           return result;
         });
@@ -1343,7 +1347,7 @@ export default function TimeGridDay({
       });
       // Advisory schedule-overlap notes — the widened block committed.
       if (Array.isArray(resizeResult?.warnings) && resizeResult.warnings.length) {
-        alert(`Resized.\n\n${resizeResult.warnings.join('\n\n')}`);
+        showScheduleSaveNotice(`Resized.\n\n${resizeResult.warnings.join('\n\n')}`);
       }
       setOptimistic(null);
       onChange?.();
@@ -1435,7 +1439,7 @@ export default function TimeGridDay({
         (result) => result.status === 'fulfilled' && Array.isArray(result.value?.warnings) && result.value.warnings.length,
       ).length;
       if (overlapCount > 0) {
-        alert(`${overlapCount} moved visit(s) now overlap another appointment on the schedule — all are kept on the calendar.`);
+        showScheduleSaveNotice(`${overlapCount} moved visit(s) now overlap another appointment on the schedule — all are kept on the calendar.`);
       }
       clearSelection();
     } catch (err) {

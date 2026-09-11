@@ -22,7 +22,7 @@
 //   - Programs (/programs) and product labels — deep drilldowns that
 //     deserve their own surface.
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { etParts } from '../../lib/timezone';
 
@@ -64,6 +64,8 @@ const SERVICE_FILTERS = [
 
 export default function TechProtocolsPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const visit = searchParams.get('visit');
   const [activeTab, setActiveTab] = useState('photos');
   const [serviceFilter, setServiceFilter] = useState('');
   const [items, setItems] = useState([]);
@@ -133,7 +135,7 @@ export default function TechProtocolsPage() {
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button onClick={() => navigate('/tech')} style={{
+        <button onClick={() => navigate(visit ? `/tech?visit=${encodeURIComponent(visit)}` : '/tech')} style={{
           background: 'transparent', border: `1px solid ${DARK.border}`,
           color: DARK.text, padding: '6px 10px', borderRadius: 8,
           fontSize: 12, cursor: 'pointer',
