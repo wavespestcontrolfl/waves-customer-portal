@@ -116,7 +116,7 @@ export function MarginCalculator() {
 
   return (
     <Card>
-      <CardHeader className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-16">Margin calculator</CardTitle><p className="mt-1 text-ui-body text-ink-secondary">Estimate annual price, cost source, bundle discount, and margin by property size.</p></div><Button onClick={fetchMargins} loading={loading}>{loading ? "Calculating..." : "Calculate"}</Button></CardHeader>
+      <CardHeader className="flex flex-wrap items-start justify-between gap-3"><CardTitle className="text-16">Margin calculator</CardTitle><Button onClick={fetchMargins} loading={loading}>{loading ? "Calculating..." : "Calculate"}</Button></CardHeader>
       <CardBody className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <Field label="Lot SqFt"><Input type="number" value={lotSqFt} onChange={(event) => setLotSqFt(Number(event.target.value))} className="u-nums" /></Field>
@@ -125,7 +125,9 @@ export function MarginCalculator() {
           <Field label="Bed area"><Input type="number" value={bedArea} onChange={(event) => setBedArea(Number(event.target.value))} className="u-nums" /></Field>
           <Field label="WaveGuard"><Select value={tier} onChange={(event) => setTier(event.target.value)}><option value="bronze">Bronze</option><option value="silver">Silver</option><option value="gold">Gold</option><option value="platinum">Platinum</option></Select></Field>
         </div>
-        {margins?.waveguardTier && <ActionFeedback>{margins.waveguardTierMismatch
+        {/* Main painted the mismatch branch amber and the normal status muted;
+            one neutral ActionFeedback for both made a tier drift look routine. */}
+        {margins?.waveguardTier && <ActionFeedback className={margins.waveguardTierMismatch ? "!text-warn-fg" : undefined}>{margins.waveguardTierMismatch
           ? `Engine priced this bundle as ${margins.waveguardTier.toUpperCase()} (requested ${String(margins.waveguardTierRequested || tier).toUpperCase()}) — tier thresholds are out of line with the engine; margins below are ${margins.waveguardTier.toUpperCase()} margins.`
           : `Margins priced at ${margins.waveguardTier.toUpperCase()} tier discounts.`}</ActionFeedback>}
         {margins?.services && <Table className="min-w-[840px]" aria-label="Service margins"><THead><TR><TH>Service</TH><TH align="right">Annual price</TH><TH align="right">Est. cost</TH><TH>Cost source</TH><TH align="right">After discount</TH><TH align="right">Margin</TH><TH>Status</TH></TR></THead><TBody>{margins.services.map((service) => <TR key={service.service}><TD className="font-medium capitalize">{service.service.replace(/_/g, " ")}</TD><TD align="right" nums>${service.annual?.toLocaleString() || "—"}</TD><TD align="right" nums className="text-ink-secondary">${service.estimatedCost?.toLocaleString() || "—"}</TD><TD><Badge>{costSourceLabel(service.materialCostSource)}</Badge>{service.materialPerVisit != null ? <span className="ml-2 text-ui-caption text-ink-secondary u-nums">${Number(service.materialPerVisit).toFixed(2)}/visit</span> : ""}</TD><TD align="right" nums>${service.afterDiscount?.toLocaleString() || "—"}</TD><TD align="right" nums className="font-medium">{service.margin != null ? `${(service.margin * 100).toFixed(1)}%` : "—"}</TD><TD>{service.margin != null && <Badge tone={marginTone(service.margin)}>{marginLabel(service.margin)}</Badge>}</TD></TR>)}</TBody></Table>}

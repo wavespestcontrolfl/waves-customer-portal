@@ -165,7 +165,7 @@ function MoneyModelTab({ dashboard, loading }) {
             <div key={stage.stage} className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4 text-center">
               <div className="font-medium text-zinc-900">{stage.stage}</div>
               <div className="mt-1 text-ui-caption text-ink-secondary">{stage.desc}</div>
-              <div className="mt-3 text-20 font-medium text-zinc-900 u-nums">{formatMoney(stage.value)}</div>
+              <div className="mt-3 text-22 font-medium text-zinc-900 u-nums">{formatMoney(stage.value)}</div>
             </div>
           ))}
         </CardBody>
@@ -252,7 +252,7 @@ function ValueEquationTab() {
         <Card>
           <CardHeader><CardTitle className="text-16">Value score</CardTitle></CardHeader>
           <CardBody className="text-center">
-            <div className="text-32 font-medium text-zinc-900 u-nums">{result?.valueScore ?? "—"}</div>
+            <div className="text-28 font-medium text-zinc-900 u-nums">{result?.valueScore ?? "—"}</div>
             <Badge tone="strong" className="mt-3">{result?.priceRecommendation || "Calculating"}</Badge>
             {result?.positioning && <p className="mt-3 text-ui-body text-ink-secondary">{result.positioning}</p>}
           </CardBody>
