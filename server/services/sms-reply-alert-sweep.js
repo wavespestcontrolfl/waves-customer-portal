@@ -34,13 +34,20 @@ const logger = require('./logger');
 async function findCandidatePhones() {
   const rows = await db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
-    .leftJoin('sms_log as l', function join() {
+    // Required, not left-joined (codex #4210 round-9 P1): a message with no
+    // matching sms_log row, or one that was never stamped eligible by
+    // dispatchUnknownSenderAlert, is NOT a recovery candidate — it means
+    // the webhook itself decided no sms_reply alert was owed (an AI reply
+    // that answered it, a tracking-line first-contact routed to new_lead
+    // instead, a quiet reaction, ...), not that one was lost.
+    .join('sms_log as l', function join() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
     .whereNull('c.customer_id')
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
-    .select(db.raw('DISTINCT COALESCE(l.from_phone, c.contact_phone) as phone'));
+    .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
+    .select(db.raw('DISTINCT l.from_phone as phone'));
   return rows.map((r) => r.phone).filter(Boolean);
 }
 
@@ -66,13 +73,17 @@ async function findLiveBell(phone) {
 }
 
 async function earliestUnreadFor(phone) {
+  // Same eligibility requirement as findCandidatePhones — the earliest
+  // unread message THIS SWEEP is allowed to re-alert for, not merely the
+  // earliest unread message overall (which could be an AI-answered one
+  // sitting unread for entirely unrelated, non-urgent reasons).
   return db('messages as m')
     .join('conversations as c', 'c.id', 'm.conversation_id')
-    .leftJoin('sms_log as l', function join() {
+    .join('sms_log as l', function join() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
-    .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
-    .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ?', [phone])
+    .where({ 'm.channel': 'sms', 'm.direction': 'inbound', 'l.from_phone': phone })
+    .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereNotNull('m.twilio_sid')
     .orderBy('m.created_at', 'asc')

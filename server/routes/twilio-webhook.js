@@ -2078,6 +2078,20 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 // fall through to the internal_alert owner forward regardless, ringing a
 // second alert on top of a dispatch that already succeeded).
 async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
+  // Persist SID-scoped recovery eligibility (codex #4210 round-9 P1): both
+  // call sites into this function already gate on everything that decides
+  // an sms_reply alert is owed — not AI-answered, not a tracking number
+  // (those get new_lead instead), not a quiet reaction, not the Adam-phone
+  // self-loop. Stamping that durably on the sms_log row, unconditionally on
+  // ENTRY (before the claim race, so both a winner and a loser carry it),
+  // lets the recovery sweep (sms-reply-alert-sweep.js) restrict itself to
+  // messages that actually passed this webhook's own eligibility instead of
+  // re-deriving — and inevitably drifting from — that logic. Best-effort:
+  // a failed stamp just means this one message doesn't get sweep coverage,
+  // not that the claim/dispatch below is skipped.
+  await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid })
+    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_eligible: true })]) })
+    .catch((err) => logger.warn('[twilio-webhook] sms_reply eligibility stamp failed', { code: err.code || 'unknown' }));
   // Claim the window atomically FIRST — no transaction held across the
   // check or the dispatch (codex #4210 head-round P1). Losing the claim
   // means another delivery already owns this sender's window. `token` is
