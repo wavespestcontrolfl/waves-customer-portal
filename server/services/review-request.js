@@ -1807,6 +1807,25 @@ const ReviewService = {
     // cooldown). Here we just make sure the channel is permitted at
     // send time — sms_enabled, suppression list, segment count, no
     // emoji / customer voice policy.
+    // The pending row is the only durable in-flight marker, and it stays
+    // DUE through the provider call. Fence it BEFORE the call: push
+    // scheduled_for past the ask-spacing window while status stays
+    // 'pending'. Every definitive branch below rewrites scheduled_for or
+    // status, so the fence only survives when THAT write fails after an
+    // accepted or uncertain handoff — and then it keeps processScheduled
+    // from resending a text the customer may already hold (codex #4338
+    // P1, round 4). A fence that cannot be stored refuses the send: nothing
+    // left, so the due row retries on its own. The mock/knex row object is
+    // captured before the fence so the definitive writes restore it.
+    const fencedFrom = request.scheduled_for || null;
+    let fenced = 0;
+    try {
+      fenced = await db("review_requests").where({ id: requestId, status: "pending" })
+        .update({ scheduled_for: new Date(Date.now() + ASK_HISTORY.ASK_SPACING_MS) });
+    } catch (fenceErr) {
+      logger.warn(`[review] pre-send fence failed (requestId=${requestId} errType=${fenceErr?.name || "Error"})`);
+    }
+    if (!fenced) return { refused: "send_fence_unstored" };
     try {
       const {
         sendCustomerMessage,
@@ -1822,10 +1841,20 @@ const ReviewService = {
       });
 
       if (result.sent) {
-        await db("review_requests").where({ id: requestId }).update({
-          sms_sent_at: new Date(),
-          status: "sent",
-        });
+        // The provider ACCEPTED; a thrown stamp must never reach the outer
+        // catch's generic 5-minute retry (which would re-due the fenced row
+        // and duplicate the text). Retry the stamp once, then report the
+        // send as unrecorded — the pre-send fence keeps the row out of
+        // processScheduled for the spacing window (codex #4338 P1, round 4).
+        const stamped = await stampWithRetry(
+          () => db("review_requests").where({ id: requestId }).update({
+            sms_sent_at: new Date(),
+            status: "sent",
+            scheduled_for: fencedFrom,
+          }),
+          `SMS sent stamp (requestId=${requestId})`,
+        );
+        if (!stamped) return { sent: true, unrecorded: true };
         // PII: ID-only per AGENTS.md.
         logger.info(
           `[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"})`,
@@ -1840,13 +1869,15 @@ const ReviewService = {
         try {
           await db("review_requests").where({ id: requestId }).update({
             status: "deferred",
+            scheduled_for: fencedFrom,
           });
         } catch (bookErr) {
           // The provider outcome is known (uncertain) regardless of
           // whether this write landed — never let a bookkeeping failure
           // here fall into the OUTER catch's generic 5-minute retry,
           // which would risk a duplicate text over an outcome already
-          // known to be ambiguous (codex #4338 P1, round 3).
+          // known to be ambiguous (codex #4338 P1, round 3). The row is
+          // still fenced 72h out by the pre-send write above (round 4).
           logger.error(
             `[review] SMS uncertain-status bookkeeping failed (customerId=${customer.id} requestId=${requestId} errType=${bookErr?.name || "Error"})`,
           );
@@ -1935,6 +1966,7 @@ const ReviewService = {
           await db("review_requests").where({ id: requestId }).update({
             sms_sent_at: new Date(),
             status: "sent",
+            scheduled_for: fencedFrom,
           });
           logger.error(
             `[review] SMS accepted but its audit write failed (requestId=${requestId} errType=${err?.name || "Error"})`,
@@ -1948,7 +1980,7 @@ const ReviewService = {
       }
       if (isExplicitlyUncertainOutcome(providerOutcome)) {
         try {
-          await db("review_requests").where({ id: requestId }).update({ status: "deferred" });
+          await db("review_requests").where({ id: requestId }).update({ status: "deferred", scheduled_for: fencedFrom });
           logger.error(
             `[review] SMS outcome UNCERTAIN after a thrown post-handoff error (requestId=${requestId} errType=${err?.name || "Error"}) — held, not retried automatically`,
           );
@@ -3073,6 +3105,26 @@ const ReviewService = {
         continue;
       }
 
+      // Mark the follow-up attempted BEFORE the provider handoff and reopen
+      // it only on a definite not-sent outcome. A post-handoff bookkeeping
+      // failure then leaves the row fenced (a missed follow-up at worst)
+      // instead of eligible for the next run to send twice (codex #4338 P1,
+      // round 4). A marker that cannot be stored is skipped: nothing left.
+      const marked = await db("review_requests").where({ id: request.id, followup_sent: false })
+        .update({ followup_sent: true, followup_sent_at: new Date() })
+        .catch((markErr) => {
+          logger.warn(`[review] Follow-up pre-send marker failed (requestId=${request.id} errType=${markErr?.name || "Error"})`);
+          return 0;
+        });
+      if (!marked) continue;
+      const reopenFollowup = async () => {
+        try {
+          await db("review_requests").where({ id: request.id }).update({ followup_sent: false, followup_sent_at: null });
+        } catch (reopenErr) {
+          // Stays marked: conservative (a skipped follow-up, never a duplicate).
+          logger.error(`[review] Follow-up reopen failed (requestId=${request.id} errType=${reopenErr?.name || "Error"})`);
+        }
+      };
       try {
         const result = await sendCustomerMessage({
           to: contact.phone,
@@ -3094,12 +3146,9 @@ const ReviewService = {
           );
           if (isExplicitlyUncertainOutcome(result)) {
             // The handoff never confirmed accept/reject — the customer may
-            // already hold this follow-up. Mark it attempted so the next
-            // run does not risk a duplicate text (codex #4338 P1).
-            await db("review_requests").where({ id: request.id }).update({
-              followup_sent: true,
-              followup_sent_at: new Date(),
-            });
+            // already hold this follow-up. The pre-send marker stays, and
+            // the customer is closed for this batch too (codex #4338 P1).
+            sentThisRun.add(request.customer_id);
             suppressed++;
             continue;
           }
@@ -3109,19 +3158,15 @@ const ReviewService = {
             !result.retryable &&
             !result.deferred
           ) {
-            await db("review_requests").where({ id: request.id }).update({
-              followup_sent: true,
-              followup_sent_at: new Date(),
-            });
+            // Terminal block: the marker stays as the "handled" stamp.
             suppressed++;
+            continue;
           }
+          // Definite not-sent, retryable: hand the row back for a later run.
+          await reopenFollowup();
           continue;
         }
 
-        await db("review_requests").where({ id: request.id }).update({
-          followup_sent: true,
-          followup_sent_at: new Date(),
-        });
         sentThisRun.add(request.customer_id);
         sent++;
       } catch (err) {
@@ -3131,24 +3176,18 @@ const ReviewService = {
         // NEXT run's candidate query stays eligible and re-sends this follow-up
         // (codex #4338 P1). Mark it attempted, same as the returned-result branch
         // above, instead of retrying blind.
+        // The pre-send marker already fences the row; nothing to write here.
         const providerOutcome = err?.providerOutcome || null;
         if (providerOutcome?.sent === true || isExplicitlyUncertainOutcome(providerOutcome)) {
-          try {
-            await db("review_requests").where({ id: request.id }).update({
-              followup_sent: true,
-              followup_sent_at: new Date(),
-            });
-          } catch (dbErr) {
-            logger.error(`[review] Follow-up SMS post-handoff bookkeeping failed (requestId=${request.id} errType=${dbErr?.name || "Error"})`);
-          }
-          if (providerOutcome.sent === true) {
-            sentThisRun.add(request.customer_id);
-            sent++;
-          } else {
-            suppressed++;
-          }
+          sentThisRun.add(request.customer_id);
+          if (providerOutcome.sent === true) sent++;
+          else suppressed++;
           continue;
         }
+        // Only a DEFINITE not-sent hands the row back; a bare throw is
+        // ambiguous and keeps the marker (a skipped follow-up, never a
+        // duplicate).
+        if (providerOutcome?.deliveryOutcome === "not_sent") await reopenFollowup();
         logger.error(`[review] Follow-up SMS failed: ${err.message}`);
       }
     }
