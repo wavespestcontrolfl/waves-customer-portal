@@ -4673,13 +4673,18 @@ router.get('/month', async (req, res, next) => {
 // conflict identically to the client (same code, same existingSeries shape).
 function duplicateSeriesConflictBody(existingSeries) {
   return {
-    error: `This customer already has an active recurring series for this service: ${existingSeries.map((s) => `${s.service_type} (series #${s.id}${s.next_upcoming_date ? `, next visit ${s.next_upcoming_date}` : ', ongoing'})`).join('; ')}. Extend or edit the existing series instead — or pass allowDuplicateSeries to intentionally run a second program.`,
+    error: 'An active recurring program already exists for this service. Open the existing program to edit or extend it.',
     code: 'duplicate_recurring_series',
+    canCreateSeparateProgram: isEnabled('separateRecurringProgram'),
     existingSeries: existingSeries.map((s) => ({
       id: s.id,
       serviceType: s.service_type,
       pattern: s.recurring_pattern,
       nextUpcomingDate: s.next_upcoming_date || null,
+      appointmentId: s.next_upcoming_id || s.id,
+      appointmentDate: s.next_upcoming_date || dateOnly(s.scheduled_date),
+      propertyId: s.property_id || null,
+      recordedAddress: [s.service_address_line1, s.service_address_line2, s.service_address_city, s.service_address_zip].filter(Boolean).join(', ') || null,
       // Provenance for idempotent retries (codex r21 P0): a client that lost
       // its partial-save state can recover ONLY when the existing series
       // demonstrably came from the same linked estimate it is booking.
@@ -4707,6 +4712,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
     } = req.body;
+
+    const separateProgram = req.body.duplicateSeriesOverride;
+    if (separateProgram !== undefined) {
+      if (!isEnabled('separateRecurringProgram')) return res.status(409).json({ error: 'Separate recurring programs are not enabled.' });
+      if (!isRecurring || typeof separateProgram?.reason !== 'string'
+        || separateProgram.reason.trim().length < 5 || separateProgram.reason.trim().length > 500
+        || !Array.isArray(separateProgram.existingSeriesIds) || !separateProgram.existingSeriesIds.length
+        || separateProgram.existingSeriesIds.length > 100
+        || separateProgram.existingSeriesIds.some((id) => !/^[a-zA-Z0-9-]{1,80}$/.test(String(id)))) {
+        return res.status(400).json({ error: 'Review the existing programs and provide a reason (5–500 characters) for a separate program.' });
+      }
+    }
 
     // Window intake by explicit presence (windowIntakeFromBody, shared with
     // update-details): both absent / both cleared = a windowless booking;
@@ -4776,14 +4793,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
           serviceType,
           serviceAddressScope: bookingSeriesScope,
         });
-        if (existingSeries.length > 0) {
-          if (req.body.allowDuplicateSeries === true) {
-            logger.warn(`[schedule] allowDuplicateSeries override: booking a second active "${serviceType}" series for customer ${customerId} alongside existing parent(s) ${existingSeries.map((s) => s.id).join(', ')}`);
-          } else {
-            return res.status(409).json(duplicateSeriesConflictBody(existingSeries));
-          }
+        const canCreate = separateProgram
+          ? RecurringAppointmentSeeder.separateProgramMatches(existingSeries, separateProgram.existingSeriesIds)
+          : req.body.allowDuplicateSeries === true || existingSeries.length === 0;
+        if (!canCreate) return res.status(409).json(duplicateSeriesConflictBody(existingSeries));
+        if (!separateProgram && existingSeries.length > 0 && req.body.allowDuplicateSeries === true) {
+          logger.warn(`[schedule] allowDuplicateSeries override: booking a second active "${serviceType}" series for customer ${customerId} alongside existing parent(s) ${existingSeries.map((s) => s.id).join(', ')}`);
         }
       } catch (guardErr) {
+        if (separateProgram) throw guardErr;
         logger.warn(`[schedule] duplicate-series guard failed (booking proceeds): ${guardErr.message}`);
       }
     }
@@ -5504,7 +5522,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // its savepoint keeps a failed guard query from aborting this
       // transaction). A hit throws a tagged error the route catch maps to
       // the same 409 the preflight returns.
-      if (isRecurring && req.body.allowDuplicateSeries !== true) {
+      if (isRecurring && (req.body.allowDuplicateSeries !== true || separateProgram)) {
         const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
         const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
           customerId,
@@ -5512,8 +5530,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
           serviceType,
           serviceAddressScope: bookingSeriesScope,
         });
+        if (separateProgram && guardError) throw guardError;
         if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
-        if (matches.length > 0) {
+        const canCreate = separateProgram
+          ? RecurringAppointmentSeeder.separateProgramMatches(matches, separateProgram.existingSeriesIds)
+          : matches.length === 0;
+        if (!canCreate) {
           const dupErr = new Error('duplicate_recurring_series');
           dupErr.duplicateRecurringSeries = matches;
           throw dupErr;
@@ -5640,6 +5662,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         trx, cols, source: { sourceAction: 'admin_manual' },
       });
       [svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');
+      if (separateProgram) {
+        await trx('activity_log').insert({
+          admin_user_id: req.technicianId || null,
+          customer_id: customerId,
+          action: 'separate_recurring_program_created',
+          description: `Series ${svc.id}; reviewed series ${separateProgram.existingSeriesIds.join(', ')}. Reason: ${separateProgram.reason.trim()}`,
+        });
+      }
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
