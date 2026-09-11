@@ -161,6 +161,7 @@ async function main() {
         await desktop.getByText(expected, { exact: true }).first().waitFor();
         await assertFoundation(desktop);
         assert.equal(await desktop.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${tab} overflows desktop`);
+        if (tab === 'usage') await shot(desktop, 'settings-usage-desktop-1440');
       }
       await desktop.goto(`${server.baseUrl}/admin/settings?tab=general`);
       await desktop.getByText('Company info', { exact: true }).waitFor();
@@ -173,6 +174,10 @@ async function main() {
       await desktop.getByRole('button', { name: 'Refresh checks' }).click();
       await desktop.getByRole('button', { name: 'Refresh checks' }).waitFor();
       assert.ok(report.requests.some((request) => request.path === '/admin/token-health/check' && request.method === 'POST'));
+      await shot(desktop, 'settings-health-desktop-1440');
+      await desktop.setViewportSize({ width: 390, height: 900 });
+      await shot(desktop, 'settings-health-mobile-390');
+      await desktop.setViewportSize({ width: 1440, height: 1000 });
     });
 
     await scenario('settings mutations retain endpoint methods and payloads', async () => {
