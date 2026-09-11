@@ -327,16 +327,36 @@ describe("Pay & Growth gate", () => {
     expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/admin/timetracking?tab=pay-growth");
   });
 
-  it("hides the Score tab from a technician viewing a colleague's service, even with availability on", async () => {
+  it("hides the Score tab from a technician the score service does not recognise on a colleague's service", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
     fetch.mockImplementation((url) => {
       const path = new URL(url, "http://localhost").pathname;
       if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ error: "Service not found." }, 404);
       return reply(fixture(url));
     });
     render(<ProtocolPanel service={{ ...service, technician_id: "tech-2" }} onClose={() => {}} />);
     await screen.findByText("Current mix product");
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toBe(true));
     expect(screen.queryByRole("button", { name: "Score" })).not.toBeInTheDocument();
+  });
+
+  it("shows the Score tab to a retained participant who is not the assignee, reusing the probe's score", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ id: "tech-1", role: "technician" }));
+    const entry = { id: "row-1", service_label: "Crew stop · Fixture account", service_date: "2026-04-05", revision: 1, service_key: "pest_general_quarterly", workweek_start: "2026-03-30",
+      calculation: { status: "simulated", amount_cents: 600, value_cents: 10000, rate_bps: 600, reason: null },
+      facts: { participants: [{ technician_id: "tech-1", share_bps: 5000 }], source_reference: "visit-fixture-a", complete_at_cutoff: true, cutoff_at: null } };
+    fetch.mockImplementation((url) => {
+      const path = new URL(url, "http://localhost").pathname;
+      if (path.endsWith("/pay-growth/availability")) return reply({ available: true });
+      if (path.endsWith(`/pay-growth/services/${service.id}/score`)) return reply({ entries: [entry], can_manage: false });
+      return reply(fixture(url));
+    });
+    render(<MemoryRouter><ProtocolPanel service={{ ...service, technician_id: "tech-2" }} onClose={() => {}} /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole("button", { name: "Score" }));
+    expect(await screen.findByText("Crew stop · Fixture account")).toBeVisible();
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes(`/pay-growth/services/${service.id}/score`))).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "Open Pay & Growth" })).toHaveAttribute("href", "/tech/pay-growth");
   });
 
   it("shows the Score tab, with the tech-portal link, for a technician viewing their own service", async () => {

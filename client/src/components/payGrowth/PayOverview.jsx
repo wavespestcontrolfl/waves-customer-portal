@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { Button } from '../ui/Button';
-import { money, date, words, Status, EvidenceRow, request } from './common';
+import { money, date, words, Status, EvidenceRow, request, withVisit } from './common';
 import BusinessEditor from './BusinessEditor';
 
 function Outcome({ title, result, maximum, detail }) {
@@ -13,6 +13,7 @@ function Outcome({ title, result, maximum, detail }) {
 }
 
 export default function PayOverview({ view, manage: canManage, onSaved }) {
+  const { search } = useLocation();
   const [editor, setEditor] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -29,7 +30,7 @@ export default function PayOverview({ view, manage: canManage, onSaved }) {
   return <>{error && <p role="alert" className="pg-error">{error}</p>}
 
     <div className="pg-summary-grid">
-      <section className="pg-card"><p className="pg-eyebrow">Recorded hourly rate</p><strong className="pg-number">{view.person.pay_rate == null ? 'Not recorded' : money(Math.round(Number(view.person.pay_rate) * 100))}<small>{view.person.pay_rate != null && ' / hour'}</small></strong><p>{view.person.job_title || 'No job title recorded'}</p><p className="pg-muted">The profile rate is separate from the modeled package. Refer to your issued terms.</p><Link to={canManage ? '/admin/timetracking?tab=documents' : '/tech/documents'}>Staff documents</Link></section>
+      <section className="pg-card"><p className="pg-eyebrow">Recorded hourly rate</p><strong className="pg-number">{view.person.pay_rate == null ? 'Not recorded' : money(Math.round(Number(view.person.pay_rate) * 100))}<small>{view.person.pay_rate != null && ' / hour'}</small></strong><p>{view.person.job_title || 'No job title recorded'}</p><p className="pg-muted">The profile rate is separate from the modeled package. Refer to your issued terms.</p><Link to={canManage ? '/admin/timetracking?tab=documents' : withVisit('/tech/documents', search)}>Staff documents</Link></section>
       <section className="pg-card pg-emphasis"><p className="pg-eyebrow">Simulated production</p><strong className="pg-number">{money(view.simulation.production.amount_cents)}</strong><p>{view.simulation.production.calculated} calculated services · {view.simulation.production.needs_evidence} need evidence</p><p className="pg-muted">{role ? `Simulation level for ${view.month}: ${role.title}` : `No simulation level in effect for ${view.month}`}. Incentives are added to hourly pay in the model.</p></section>
       <section className="pg-card"><p className="pg-eyebrow">Existing review payouts</p><strong className="pg-number">{money(view.reviews.reduce((sum, row) => sum + row.amount_cents, 0))}</strong><p>Recorded in the existing review program</p><p className="pg-muted">Shown once from its authoritative payout record. Separate from these simulations.</p></section>
     </div>
