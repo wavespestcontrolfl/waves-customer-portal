@@ -5032,8 +5032,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // requires an exact current-status match — carrying the stale
             // svc.status rolled a delivered invoice's closeout back with
             // "not in state" and left an eligible visit open until another
-            // send or payment retried it.
-            fromStatus = String(lockedSvcRow.status);
+            // send or payment retried it. Never String()-coerced — r16 P2
+            // #4131: String(null) 0-rowed a legacy row's atomic guard.
+            fromStatus = lockedSvcRow.status;
             // Identity and assignment drift refuses too (GitHub r11 P2
             // #4127): the record, service line and technician attribution
             // below are built from the PRE-lock svc — an /update-details

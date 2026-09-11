@@ -144,13 +144,13 @@ describe('source contracts', () => {
     const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     expect(webhook).toMatch(/if \(settledNow\) \{[\s\S]{0,400}?closeOutVisitsForStatement\(statementId, \{ trigger: 'paid' \}\)/);
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,3200}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,3350}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'project_required_completion' && issuedInvoiceCloseout\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
     // The office-only status set is re-checked on the locked row, ahead of the profile re-resolve.
     // Codex round 16 P2 #4131: the string-only check was replaced by the
     // shared null-tolerant isLiveVisitStatus predicate (a legacy NULL-status
     // visit the resolver had just admitted used to throw here instead).
-    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,900}?if \(!isLiveVisitStatus\(lockedSvcRow\?\.status\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2200}?const lockedProfile = await resolveLockedProfile/);
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,900}?if \(!isLiveVisitStatus\(lockedSvcRow\?\.status\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2350}?const lockedProfile = await resolveLockedProfile/);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -170,7 +170,12 @@ describe('source contracts', () => {
   test('GitHub r10: the locked status is the transition source; the zero-price conversion takes the mint advisory lock after the occupancy rung and before any row lock; the settled-statement retry runs on the daily statement tick', () => {
     const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     expect(completion).toMatch(/let fromStatus = svc\.status;/);
-    expect(completion).toMatch(/\{ code: 'issued_visit_in_progress' \}\);\s*\}[\s\S]{0,800}?fromStatus = String\(lockedSvcRow\.status\);[\s\S]{0,2600}?const \{ resolveCompletionProfileForScheduledService: resolveLockedProfile \}/);
+    // Codex round 16 P2 #4131: fromStatus keeps the locked row's ACTUAL
+    // value (never String()-coerced) — a legacy NULL-status row's null
+    // must reach transitionJobStatus's atomic `{ status: fromStatus }`
+    // guard as real null (which Knex compiles to `status IS NULL`), not
+    // the literal text "null", which no row's status column ever holds.
+    expect(completion).toMatch(/\{ code: 'issued_visit_in_progress' \}\);\s*\}[\s\S]{0,800}?fromStatus = lockedSvcRow\.status;[\s\S]{0,2600}?const \{ resolveCompletionProfileForScheduledService: resolveLockedProfile \}/);
     const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const detailsTrxAt = schedule.indexOf("const commsPeek = await trx('scheduled_services')");
     const occupancyAt = schedule.indexOf('await acquireOccupancyLock(trx, occupancyDateKey);', detailsTrxAt);
@@ -183,7 +188,7 @@ describe('source contracts', () => {
     expect(firstRowLockAt).toBeGreaterThan(mintAt);
     expect(conversionVoidAt).toBeGreaterThan(firstRowLockAt);
     // r11: identity / assignment drift under the lock refuses; the quiet closeout writes no tech-attributed activity or job_complete push.
-    expect(completion).toMatch(/fromStatus = String\(lockedSvcRow\.status\);[\s\S]{0,1200}?const driftedField = ISSUED_CLOSEOUT_IDENTITY_FIELDS\.find\([\s\S]{0,300}?\{ code: 'issued_visit_identity_changed' \}\);/);
+    expect(completion).toMatch(/fromStatus = lockedSvcRow\.status;[\s\S]{0,1200}?const driftedField = ISSUED_CLOSEOUT_IDENTITY_FIELDS\.find\([\s\S]{0,300}?\{ code: 'issued_visit_identity_changed' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'issued_visit_identity_changed'\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
     expect(completion).toMatch(/if \(\(!resumingCommittedCompletion \|\| packetEffects\) && !issuedInvoiceCloseout\) \{\s*try \{\s*const writeActivity = async/);
     // r12: a settled issued invoice releases a live card hold instead of parking it; the referral credit posts quietly; the card mint runs on the silent backfill path.
