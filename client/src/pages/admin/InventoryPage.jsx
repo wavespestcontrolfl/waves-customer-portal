@@ -1,3 +1,4 @@
+import { ActionFeedback, Button, UiSurface } from "../../components/ui";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -217,17 +218,18 @@ export default function InventoryPage() {
   // Server-verified role from the shell's Outlet context (never localStorage).
   const outletContext = useOutletContext();
   const isAdminRole = outletContext?.user?.role === "admin";
-  const visibleGroups = TAB_GROUPS
-    .map((g) => ({
-      ...g,
-      tabs: g.tabs.filter((t) => isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(t)),
-    }))
-    .filter((g) => g.tabs.length > 0);
+  const visibleGroups = TAB_GROUPS.map((g) => ({
+    ...g,
+    tabs: g.tabs.filter(
+      (t) => isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(t),
+    ),
+  })).filter((g) => g.tabs.length > 0);
   const requestedTab = searchParams.get("tab");
-  const initialTab = ALL_LEAF_TABS.includes(requestedTab)
-    && (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
-    ? requestedTab
-    : "products";
+  const initialTab =
+    ALL_LEAF_TABS.includes(requestedTab) &&
+    (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
+      ? requestedTab
+      : "products";
   const [tab, setTab] = useState(initialTab);
 
   // Usage beacon for the tab that actually RENDERS. The URL only SEEDS
@@ -241,7 +243,6 @@ export default function InventoryPage() {
   const [toast, setToast] = useState("");
   const [productFilter, setProductFilter] = useState("all");
   const [showAddForm, setShowAddForm] = useState(false);
-
   const loadStats = () =>
     adminFetch("/admin/inventory/stats")
       .then(setStats)
@@ -253,13 +254,13 @@ export default function InventoryPage() {
     setToast(m);
     setTimeout(() => setToast(""), 3500);
   };
-
   const activeGroup =
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
   const groupSections = visibleGroups.map((g) => {
     let pending = 0;
     if (g.tabs.includes("approvals")) pending += stats?.approvals?.pending || 0;
-    if (g.tabs.includes("restock")) pending += stats?.restockRequests?.open || 0;
+    if (g.tabs.includes("restock"))
+      pending += stats?.restockRequests?.open || 0;
     return {
       key: g.key,
       label: pending > 0 ? `${g.label} (${pending})` : g.label,
@@ -273,11 +274,14 @@ export default function InventoryPage() {
       return `Restock (${stats.restockRequests.open})`;
     return LEAF_META[key].label;
   };
-
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1300px] text-ui-body text-ink-primary"
+    >
       {" "}
       <AdminCommandHeader
+        variant="workspace"
         title="Inventory"
         icon={Package}
         sections={groupSections}
@@ -300,154 +304,110 @@ export default function InventoryPage() {
         }
       />
       {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
+        <div className="flex flex-wrap gap-[8px] mb-[16px]">
           {activeGroup.tabs.map((key) => {
             const active = tab === key;
             const LeafIcon = LEAF_META[key].Icon;
             return (
-              <button
+              <Button
                 key={key}
                 type="button"
                 onClick={() => setTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
+                variant={active ? "primary" : "secondary"}
               >
                 <LeafIcon size={14} strokeWidth={1.9} />
                 {leafLabel(key)}
-              </button>
+              </Button>
             );
           })}
         </div>
       )}
       {stats && (
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            marginBottom: 20,
-            flexWrap: "wrap",
-          }}
-        >
+        <div className="flex gap-[10px] mb-[20px] flex-wrap">
           {[
             {
               label: "Products",
               value: stats.products?.total,
-              color: D.heading,
               filter: "all",
             },
             {
               label: "Priced",
               value: stats.products?.priced,
-              color: D.green,
               filter: "priced",
             },
             {
               label: "Needs Price",
               value: stats.products?.needsPrice,
-              color: D.amber,
               filter: "needs_price",
             },
             {
               label: "Low Stock",
               value: stats.products?.lowStock,
-              color: stats.products?.lowStock > 0 ? D.red : D.green,
+              alert: stats.products?.lowStock > 0,
               filter: "low_stock",
             },
             {
               label: "Vendors",
               value: stats.vendors?.total,
-              color: D.teal,
               action: () => setTab("vendors"),
               adminOnly: true,
             },
             {
               label: "Pending Approvals",
               value: stats.approvals?.pending,
-              color: stats.approvals?.pending > 0 ? D.amber : D.green,
+              alert: stats.approvals?.pending > 0,
               action: () => setTab("approvals"),
               adminOnly: true,
             },
             {
               label: "Restock",
               value: stats.restockRequests?.open,
-              color: stats.restockRequests?.open > 0 ? D.amber : D.green,
+              alert: stats.restockRequests?.open > 0,
               action: () => setTab("restock"),
             },
             {
               label: "Scrape Jobs",
               value: stats.scrapeJobs?.completed,
-              color: D.purple,
               action: () => setTab("scrape"),
               adminOnly: true,
             },
             // Shortcut cards into owner-only tabs are hidden for techs —
             // clicking them would land on a tab the role can't open.
-          ].filter((s) => isAdminRole || !s.adminOnly).map((s) => (
-            <button type="button"
-              key={s.label}
-              onClick={() => {
-                if (s.action) s.action();
-                else if (s.filter) {
-                  setTab("products");
-                  setProductFilter(s.filter);
+          ]
+            .filter((s) => isAdminRole || !s.adminOnly)
+            .map((s) => (
+              <Button
+                type="button"
+                key={s.label}
+                onClick={() => {
+                  if (s.action) s.action();
+                  else if (s.filter) {
+                    setTab("products");
+                    setProductFilter(s.filter);
+                  }
+                }}
+                variant="secondary"
+                className={
+                  s.alert
+                    ? "flex-[1_1_120px] min-w-[120px] min-h-20 flex-col border-alert-fg text-center"
+                    : "flex-[1_1_120px] min-w-[120px] min-h-20 flex-col text-center"
                 }
-              }}
-              style={{
-                ...sCard,
-                flex: "1 1 120px",
-                minWidth: 120,
-                marginBottom: 0,
-                textAlign: "center",
-                cursor: "pointer",
-                font: "inherit",
-                color: "inherit",
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 22,
-                  fontWeight: 700,
-                  color: s.color,
-                }}
               >
-                {s.value ?? 0}
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  textTransform: "uppercase",
-                  letterSpacing: 1,
-                  marginTop: 2,
-                }}
-              >
-                {s.label}
-              </div>{" "}
-            </button>
-          ))}
+                {" "}
+                <div
+                  className={
+                    s.alert
+                      ? "text-22 font-medium text-alert-fg u-nums"
+                      : "text-22 font-medium text-zinc-900 u-nums"
+                  }
+                >
+                  {s.value ?? 0}
+                </div>{" "}
+                <div className="text-ui-body text-ink-secondary mt-[2px]">
+                  {s.label}
+                </div>{" "}
+              </Button>
+            ))}
         </div>
       )}
       {tab === "products" && (
@@ -479,37 +439,26 @@ export default function InventoryPage() {
           }
         />
       )}
-      {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />}
+      {tab === "forecast" && (
+        <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />
+      )}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
-      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} canAuthor={isAdminRole} />}
+      {tab === "restock" && (
+        <RestockRequestsTab
+          showToast={showToast}
+          onUpdate={loadStats}
+          canAuthor={isAdminRole}
+        />
+      )}
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
-      <div
-        style={{
-          position: "fixed",
-          bottom: 20,
-          right: 20,
-          background: D.card,
-          border: `1px solid ${D.green}`,
-          borderRadius: 8,
-          padding: "10px 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          boxShadow: "0 8px 32px rgba(0,0,0,.4)",
-          zIndex: 300,
-          fontSize: 12,
-          transform: toast ? "translateY(0)" : "translateY(80px)",
-          opacity: toast ? 1 : 0,
-          transition: "all .3s",
-          pointerEvents: "none",
-        }}
-      >
-        {" "}
-        <span style={{ color: D.green }}></span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
-      </div>{" "}
-    </div>
+      {toast && (
+        <ActionFeedback className="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] right-[calc(20px+env(safe-area-inset-right,0px))] z-[300] max-w-[calc(100vw-40px)]">
+          {" "}
+          {toast}
+        </ActionFeedback>
+      )}
+    </UiSurface>
   );
 }
 
