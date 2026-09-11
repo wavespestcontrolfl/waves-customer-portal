@@ -21,7 +21,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { lockCatalogIdentity, lockCatalogForWrite, CATALOG_SHARE_LOCK_SQL, CATALOG_WRITE_LOCK_SQL } = require('../services/scheduling/catalog-lock');
+const { lockCatalogIdentity, lockCatalogForWrite, CATALOG_SHARE_LOCK_SQL, CATALOG_WRITE_LOCK_SQL, CATALOG_LOCK_WAIT_MS } = require('../services/scheduling/catalog-lock');
 const { _internals } = require('../services/slot-reservation');
 
 const { catalogLinkForProfile } = _internals;
@@ -43,8 +43,9 @@ describe('lockCatalogIdentity', () => {
   test('issues the services table SHARE lock (conflicts with ROW EXCLUSIVE writers, not with other SHARE readers)', async () => {
     const trx = fakeTrx();
     await lockCatalogIdentity(trx);
-    expect(trx.raw).toHaveBeenCalledTimes(1);
-    expect(trx.raw).toHaveBeenCalledWith('LOCK TABLE services IN SHARE MODE');
+    // One LOCK, bracketed by the transaction-local lock_timeout (codex #4369 r5).
+    const locks = trx.raw.mock.calls.map((c) => String(c[0])).filter((sql) => sql.startsWith('LOCK TABLE'));
+    expect(locks).toEqual(['LOCK TABLE services IN SHARE MODE']);
     expect(CATALOG_SHARE_LOCK_SQL).toBe('LOCK TABLE services IN SHARE MODE');
   });
 });
@@ -72,9 +73,10 @@ describe('catalogLinkForProfile — table SHARE lock replaces catalog row locks'
     const { conn, events } = absentConn();
     const link = await catalogLinkForProfile(conn, profile, { preserveCapacity: true, validateAllowance: true });
     expect(link).toBeNull();
-    expect(conn.raw).toHaveBeenCalledTimes(1);
     expect(conn.raw).toHaveBeenCalledWith(CATALOG_SHARE_LOCK_SQL);
-    expect(events.slice(0, 2)).toEqual(['savepoint', 'share-lock']);
+    // The acquisition (its lock_timeout bracket included) is the first thing
+    // inside the savepoint; the first catalog read comes after it.
+    expect(events.slice(0, 5)).toEqual(['savepoint', "SELECT current_setting('lock_timeout') AS value", `SET LOCAL lock_timeout = '${CATALOG_LOCK_WAIT_MS}ms'`, 'share-lock', "SET LOCAL lock_timeout = '0'"]);
     expect(events.indexOf('share-lock')).toBeLessThan(events.indexOf('services-read'));
     expect(events).not.toContain('FOR SHARE');
   });
@@ -226,5 +228,43 @@ describe('the one row-prelocking catalog writer takes its table lock first (code
     const pre = src.indexOf(".first('scheduled_date', 'technician_id', 'reservation_policy_version')");
     const decision = src.indexOf('preRow.reservation_policy_version === 2', pre);
     expect(decision).toBeGreaterThan(pre);
+  });
+});
+
+describe('the reader waits a bounded time for the catalog lock (codex #4369 r5)', () => {
+  test('a transaction-local lock_timeout brackets the SHARE acquisition and is restored afterwards', async () => {
+    const trx = fakeTrx();
+    trx.raw.mockImplementation(async (sql) => (String(sql).includes("current_setting('lock_timeout')") ? { rows: [{ value: '0' }] } : undefined));
+    await lockCatalogIdentity(trx);
+    const calls = trx.raw.mock.calls.map((c) => String(c[0]));
+    expect(calls).toEqual([
+      "SELECT current_setting('lock_timeout') AS value",
+      `SET LOCAL lock_timeout = '${CATALOG_LOCK_WAIT_MS}ms'`,
+      CATALOG_SHARE_LOCK_SQL,
+      "SET LOCAL lock_timeout = '0'",
+    ]);
+    expect(CATALOG_LOCK_WAIT_MS).toBeLessThanOrEqual(5000);
+  });
+
+  test('a caller that already had a budget gets it back; a garbage setting falls back to unlimited', async () => {
+    const trx = fakeTrx();
+    trx.raw.mockImplementation(async (sql) => (String(sql).includes('current_setting') ? { rows: [{ value: '5s' }] } : undefined));
+    await lockCatalogIdentity(trx);
+    expect(trx.raw.mock.calls.map((c) => String(c[0]))[3]).toBe("SET LOCAL lock_timeout = '5s'");
+    const odd = fakeTrx();
+    odd.raw.mockImplementation(async (sql) => (String(sql).includes('current_setting') ? { rows: [{ value: "1'; DROP" }] } : undefined));
+    await lockCatalogIdentity(odd);
+    expect(odd.raw.mock.calls.map((c) => String(c[0]))[3]).toBe("SET LOCAL lock_timeout = '0'");
+  });
+
+  test('a timed-out acquisition propagates (the callers map it to catalog_unavailable) and does not restore into the aborted transaction', async () => {
+    const trx = fakeTrx();
+    trx.raw.mockImplementation(async (sql) => {
+      if (String(sql).includes('current_setting')) return { rows: [{ value: '0' }] };
+      if (sql === CATALOG_SHARE_LOCK_SQL) throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+      return undefined;
+    });
+    await expect(lockCatalogIdentity(trx)).rejects.toMatchObject({ code: '55P03' });
+    expect(trx.raw.mock.calls).toHaveLength(3);
   });
 });

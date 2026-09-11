@@ -34,11 +34,33 @@
 // the exact race this exists to close.
 const CATALOG_SHARE_LOCK_SQL = 'LOCK TABLE services IN SHARE MODE';
 
+// Bounded wait (codex #4369 r5 P1): PostgreSQL's default lock_timeout is
+// unlimited and no application transaction sets one, so a reader queued
+// behind a long catalog writer — the pre-deploy migration scanning and
+// updating visits — would hold its transaction and pool connection until
+// the writer finished, and the catalog_unavailable catches in the
+// reservation, adoption and conversion paths would never see a lock error
+// to translate. The timeout is transaction-local (SET LOCAL) and restored
+// right after the acquisition so the caller's later statements keep their
+// own budget; a timed-out LOCK aborts the (sub)transaction, which the
+// callers already map to the recoverable 409.
+const CATALOG_LOCK_WAIT_MS = 2000;
+const LOCK_TIMEOUT_VALUE = /^[0-9]+(ms|s|min|h|d)?$/;
+
+async function withLockWait(conn, ms, acquire) {
+  const prior = await conn.raw("SELECT current_setting('lock_timeout') AS value");
+  const previousRaw = String(prior?.rows?.[0]?.value ?? '0').trim();
+  const previous = LOCK_TIMEOUT_VALUE.test(previousRaw) ? previousRaw : '0';
+  await conn.raw(`SET LOCAL lock_timeout = '${ms}ms'`);
+  await acquire();
+  await conn.raw(`SET LOCAL lock_timeout = '${previous}'`);
+}
+
 async function lockCatalogIdentity(conn) {
   if (!conn?.isTransaction) {
     throw Object.assign(new Error('lockCatalogIdentity requires an open transaction'), { code: 'TRANSACTION_REQUIRED' });
   }
-  await conn.raw(CATALOG_SHARE_LOCK_SQL);
+  await withLockWait(conn, CATALOG_LOCK_WAIT_MS, () => conn.raw(CATALOG_SHARE_LOCK_SQL));
 }
 
 // Writer side of the same scheme, for the ONE writer that pre-locks a
@@ -61,4 +83,4 @@ async function lockCatalogForWrite(conn) {
   await conn.raw(CATALOG_WRITE_LOCK_SQL);
 }
 
-module.exports = { lockCatalogIdentity, lockCatalogForWrite, CATALOG_SHARE_LOCK_SQL, CATALOG_WRITE_LOCK_SQL };
+module.exports = { lockCatalogIdentity, lockCatalogForWrite, CATALOG_SHARE_LOCK_SQL, CATALOG_WRITE_LOCK_SQL, CATALOG_LOCK_WAIT_MS };
