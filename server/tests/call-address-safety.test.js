@@ -215,6 +215,23 @@ describe('finding 3 — address fragments and on-file restatements', () => {
     expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: onFile })).toBe(true);
   });
 
+  // codex r9 P1: a DIFFERENT ZIP in the raw phrase is a contradiction the
+  // caller voiced — the digits must not be stripped away behind the city.
+  test('a locality phrase carrying a non-matching ZIP is NOT treated as a restatement', () => {
+    const ex = v2({ property: { service_address: { city: 'Parrish', raw_text: '34203 Parrish' } } });
+    expect(statesNewAddress(ex, onFile)).toBe(true);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: onFile })).toBe(false);
+  });
+
+  // codex r9 P2: a spoken directional ("North") and the saved abbreviation
+  // ("N") name the same street.
+  test('an expanded directional still restates the on-file street', () => {
+    const saved = { ...onFile, addressLine1: '1234 N Sample Palm Dr' };
+    const ex = v2({ property: { service_address: { street_line_1: '1234 North Sample Palm Drive', city: 'Parrish' } } });
+    expect(statesNewAddress(ex, saved)).toBe(false);
+    expect(dispatchesToOnFileAddress(ex, { failOpen: true, knownCustomer: saved })).toBe(true);
+  });
+
   test('a locality phrase with an extra unmatched word is NOT treated as a restatement', () => {
     const ex = v2({ property: { service_address: { raw_text: 'Parrish Heights FL' } } });
     expect(statesNewAddress(ex, onFile)).toBe(true);

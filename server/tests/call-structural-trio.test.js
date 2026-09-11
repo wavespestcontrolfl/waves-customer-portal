@@ -472,9 +472,10 @@ describe('resolveOnFileAddressAuthority — proof binds to the CANONICAL custome
     expect(customersRead).toBe(false);
   });
 
-  // proofRejected but the extraction DOES carry its own line1 → not a
-  // fallback situation at all; the caller's own street is used as before.
-  test('proofRejected + extraction has its own line1 → uses the extraction address, not held', async () => {
+  // codex r9 P1: proofRejected with a street still in the extraction is
+  // ALSO held — that street was the restatement compared against the other
+  // customer's saved address, never validated on its own for this one.
+  test('proofRejected + extraction has its own line1 → still held, no customers-table read', async () => {
     const authority = resolveOnFileAddressAuthority({
       usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
     });
@@ -489,8 +490,9 @@ describe('resolveOnFileAddressAuthority — proof binds to the CANONICAL custome
     const out = await resolveCallBookingPropertyLinkage('cust-B', {
       address_line1: '77 Palm Ave', city: 'Venice', state: 'FL', zip: '34285',
     }, trx, authority);
-    expect(out.holdReason).toBeUndefined();
-    expect(out.address.line1).toBe('77 Palm Ave');
+    expect(out).toEqual({
+      propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
+    });
   });
 });
 

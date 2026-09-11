@@ -4061,20 +4061,20 @@ async function resolveOnFileAddressForBooking(customerId, trx, onFileAddressSnap
 // saved address before matching; partial extraction must not lose its key.
 async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db, { useOnFileAddress = false, onFileAddressSnapshot = null, proofRejected = false } = {}) {
   let address = cleanBookingAddressFields(extracted);
+  // codex P1 (r7/r9): proofRejected means the fail-open proof was computed
+  // against a DIFFERENT customer than the one booking resolved to
+  // (resolveOnFileAddressAuthority). Everything that proof vouched for —
+  // the restated street in the extraction included — was compared against
+  // the OTHER customer's saved address and never positively validated on
+  // its own, so neither a customers-table fallback nor the extraction's
+  // street may be stamped onto this customer. Hold for human review
+  // (holdReason) instead of guessing, whether or not a street remains.
+  if (proofRejected) {
+    return {
+      propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
+    };
+  }
   if (useOnFileAddress || !address.line1) {
-    // codex P1: proofRejected means the fail-open proof was computed
-    // against a DIFFERENT customer than the one booking resolved to
-    // (resolveOnFileAddressAuthority). With no line1 of the extraction's
-    // own to fall back on, there is nothing left that either side actually
-    // vouches for — falling through to a fresh customers-table read here
-    // would stamp the CANONICAL customer's on-file address from proof that
-    // was never compared against it. Hold instead of guessing; the caller
-    // holds the appointment for human review (holdReason).
-    if (proofRejected && !address.line1) {
-      return {
-        propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
-      };
-    }
     // The caller omitted or restated the saved address. Dispatch to their on-file,
     // Google-verified address instead of leaving the visit address blank —
     // never book a location-less appointment. Falls THROUGH to the exact

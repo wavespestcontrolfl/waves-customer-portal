@@ -1580,10 +1580,13 @@ function rawIsPureLocalityPhrase(raw, savedCity, savedZip) {
   if (!raw || !savedCity) return false;
   const stripped = String(raw).trim()
     .replace(/^(?:i\s*'?m\s+|i\s+am\s+|we\s*'?re\s+|we\s+are\s+)?in\s+/i, '')
-    .replace(/[.,]/g, ' ')
     .trim();
-  if (!stripped) return false;
-  const tokens = stripped.toLowerCase().split(/\s+/).filter(Boolean);
+  // Tokenize on anything that is not a letter, digit or ZIP+4 hyphen so
+  // punctuation never hides a token — and NEVER strip digits: a ZIP that
+  // is not the saved one ("34203 Parrish" against 34219) is a contradiction
+  // the caller voiced, not noise (codex r9 P1).
+  const tokens = stripped.toLowerCase().split(/[^a-z0-9-]+/).filter(Boolean);
+  if (!tokens.length) return false;
   let consumedLocalityToken = false;
   const cityWords = [];
   for (const token of tokens) {
@@ -1591,8 +1594,9 @@ function rawIsPureLocalityPhrase(raw, savedCity, savedZip) {
       consumedLocalityToken = true;
       continue;
     }
-    const zipHead = token.replace(/-\d{4}$/, '');
-    if (savedZip && zipHead === savedZip) {
+    if (/\d/.test(token)) {
+      const zipHead = token.replace(/-\d{4}$/, '');
+      if (!savedZip || zipHead !== savedZip) return false;
       consumedLocalityToken = true;
       continue;
     }
@@ -1601,9 +1605,17 @@ function rawIsPureLocalityPhrase(raw, savedCity, savedZip) {
   if (!cityWords.length) return consumedLocalityToken;
   return cityKey(cityWords.join(' ')) === savedCity;
 }
+// Spoken directionals ("North Main Street") and the saved abbreviation
+// ("N Main St") are the same street (codex r9 P2) — canonicalize both sides
+// the way suffixes already are, so an AV-incomplete known-customer booking
+// still recognizes its own saved address.
+const DIRECTIONAL_ALIASES = {
+  north: 'n', south: 's', east: 'e', west: 'w',
+  northeast: 'ne', northwest: 'nw', southeast: 'se', southwest: 'sw',
+};
 function restatementStreetParts(line) {
   const tokens = normalizeStreetLine(line).toLowerCase().split(/\s+/).filter(Boolean)
-    .map(token => String(STREET_SUFFIX_ALIASES[token] || token).toLowerCase());
+    .map(token => String(STREET_SUFFIX_ALIASES[token] || DIRECTIONAL_ALIASES[token] || token).toLowerCase());
   const house = /^\d+$/.test(tokens[0]) ? tokens.shift() : '';
   const name = tokens.join(' ');
   if (STREET_SUFFIX_WORDS.has(tokens[tokens.length - 1])) tokens.pop();
@@ -1637,8 +1649,10 @@ function restatesOnFileAddress(sa, knownCustomer) {
   // Ignore only positive locality restatements or a short acknowledgment.
   // Every other raw phrase is compared as street evidence, including names
   // with no house number or suffix; unknown words cannot disappear behind a city.
-  const localityPhrase = cityKey(raw).replace(/^(?:i m |i am |we re |we are )?in /, '');
-  const rawIsLocality = [raw === savedZip, localityPhrase === savedCity, rawIsPureLocalityPhrase(raw, savedCity, savedZip)].some(Boolean);
+  // Whole-phrase check only (codex r9 P1): cityKey() drops digits, so a
+  // "compare the letters to the city" shortcut let "34203 Parrish" pass as
+  // a plain "Parrish" — the contradictory ZIP vanished.
+  const rawIsLocality = raw === savedZip || rawIsPureLocalityPhrase(raw, savedCity, savedZip);
   const acknowledgment = /^(?:yes|(?:the )?same (?:place|address|as before|as always))\.?$/i.test(raw);
   const rawCity = cityKey(parsed.city);
   const cityIsUnit = Boolean(rawUnit) && unitKey(parsed.city) === unitKey(rawUnit);
