@@ -5,15 +5,14 @@ import { BarChart3, Truck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 const API = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
-// stay distinct from green/amber/red/muted in their respective scopes.
-// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
-
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
-// stay distinct from green/amber/red/muted in their respective scopes.
-// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
+// Alert severity → shared Badge tone. Critical and high are genuine alerts
+// (alert tone); medium stays prominent (strong); low is informational (neutral).
+const SEVERITY_TONES = {
+  critical: "alert",
+  high: "alert",
+  medium: "strong",
+  low: "neutral"
+};
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, {
@@ -408,7 +407,7 @@ function FleetTab({
         borderBottom: `1px solid ${"#E4E4E7"}`
       }}>
               {" "}
-              <Badge tone="neutral">{a.severity}</Badge>{" "}
+              <Badge tone={SEVERITY_TONES[a.severity] || "neutral"}>{a.severity}</Badge>{" "}
               <span style={{
           flex: 1,
           minWidth: 0,
