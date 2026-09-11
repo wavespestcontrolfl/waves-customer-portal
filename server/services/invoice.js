@@ -1197,10 +1197,13 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     // chokepoint — rather than a copy: the adoptable shape (this send's own
     // earlier held leg) is consumed silently and delivery proceeds; any
     // OTHER live queue (a completion-deferred text, say) still refuses.
-    // Its claim-restoration calls are inert here: claimed is false below,
-    // so restoreSendClaim's invoice-status leg no-ops (current.status IS
-    // already 'sending' — the caller's own preclaim — so "restoring" it
-    // only re-stamps the row the caller already owns).
+    // Its claim-restoration calls must not touch the invoice row here:
+    // current.status IS already 'sending' — the caller's own preclaim —
+    // and restoreSendClaim skips the status UPDATE for a 'sending'
+    // previousStatus (Codex round 16 P1 #4131: a re-stamp of updated_at
+    // would invalidate the caller's claim token, so its own restore after
+    // the throw below would match zero rows and strand the row under
+    // 'sending'). Only the consumed queue rows, if any, are restored.
     const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
     return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
   }
@@ -1258,9 +1261,20 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
 // wake in that gap and see an unclaimed invoice with NO queued delivery
 // at all. Every existing caller that never adopts a queue keeps working
 // unchanged — the default is a no-op.
+//
+// A previousStatus of 'sending' is a row someone ELSE preclaimed
+// (processScheduledSends flips 'scheduled' → 'sending' itself, then calls in
+// with allowClaimed): there is no status to restore, and the UPDATE would
+// still rewrite updated_at — that caller's claim token. Its own restore
+// matches on status='sending' AND the exact updated_at its flip wrote, so a
+// re-stamp here would make it match zero rows and leave the invoice stuck
+// under 'sending' until stale recovery parked it for manual review instead
+// of retrying (Codex round 16 P1 #4131). Skipping the write keeps the token
+// intact; the preclaimer owns the row and restores it on its own exit.
 async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows = []) {
   await restoreConsumedQueuedSend(consumedQueuedSendRows);
   if (!claimed || !previousStatus) return;
+  if (previousStatus === "sending") return; // preclaimed elsewhere — never touch its token
   await db("invoices")
     .where({ id: invoiceId, status: "sending" })
     .update({ status: previousStatus, updated_at: new Date() })

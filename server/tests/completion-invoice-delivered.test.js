@@ -409,11 +409,13 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);[\s\S]{0,600}?if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\) \{\s*await InvoiceServiceForClaim\.restoreSendClaim\(invoice\.id, claim\.previousStatus, claim\.claimed\);[\s\S]{0,300}?reusedInvoiceClaimedElsewhere = true;\s*\} else \{\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
     // The claim is attempted only when every other pay-link gate already passes.
     // …including a decline notice that already delivered the link (GitHub r6 P1): report-only, no claim.
-    // Codex r12 P1 #4131: preMintedInvoice alone misses a concurrently
-    // ADOPTED invoice (the mint's own attempt lost the race to an office
-    // create and adopted the row it committed) — preMintedInvoice stays
-    // null there, so the gate now also fires on adoptedConcurrentInvoice.
-    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id\s*(?:\/\/[^\n]*\n\s*)*&& !paymentFailedNoticeSent;[\s\S]{0,1600}?if \(linkOtherwiseEligible && invoice\?\.id\s*&& \(\(preMintedInvoice && String\(invoice\.id\) === String\(preMintedInvoice\.id\)\) \|\| adoptedConcurrentInvoice\)\) \{/);
+    // Codex r16 P1 #4131: the claim is taken for EVERY collectible invoice —
+    // the one this completion minted itself included (the mint commits
+    // before the delivery lane, so an admin send can claim the fresh draft
+    // in between). The earlier reused-only keys (preMintedInvoice /
+    // adoptedConcurrentInvoice, r4 + r12) no longer gate it.
+    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id\s*(?:\/\/[^\n]*\n\s*)*&& !paymentFailedNoticeSent;[\s\S]{0,2200}?if \(linkOtherwiseEligible && invoice\?\.id\) \{/);
+    expect(completion).not.toMatch(/if \(linkOtherwiseEligible && invoice\?\.id\s*&& \(\(preMintedInvoice/);
     expect(completion).toMatch(/const allowCompletionInvoiceLink = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;/);
     expect(completion).not.toMatch(/allowCompletionInvoiceLinkBase/);
     // A refused claim is classified: settled/gone → report-only; in-flight send or transient failure → the resumable 503 (retryable delivery).

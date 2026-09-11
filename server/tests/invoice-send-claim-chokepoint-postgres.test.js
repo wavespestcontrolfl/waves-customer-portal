@@ -1,0 +1,235 @@
+/**
+ * The ONE shared send claim, driven against a migrated database (Codex round
+ * 16 P1 ×2 #4131).
+ *
+ *  1. Every collectible invoice is delivered under claimInvoiceForSend —
+ *     including one the completion minted ITSELF. The mint commits before
+ *     sendCustomerMessage runs, so an admin "send now" can claim and deliver
+ *     the fresh draft in that gap; the completion must then go report-only
+ *     instead of texting the same pay link a second time, and must never
+ *     touch the admin's claim.
+ *  2. A preclaimed row (processScheduledSends flips 'scheduled' → 'sending'
+ *     itself, then sends with allowClaimed) keeps its claim token
+ *     (updated_at) through a nested pre-claimed refusal: a transient throw
+ *     from the queued-pay-link lookup must not re-stamp the row, or the
+ *     scheduler's own token-matched restore finds nothing and the invoice is
+ *     stranded under 'sending' until stale recovery parks it for manual
+ *     review — the send is retried, never parked.
+ */
+jest.mock('../models/db', () => {
+  const db = (table, ...args) => {
+    if (table === 'sms_log' && mockFault.smsLogOnce) {
+      mockFault.smsLogOnce = false;
+      // Rejects a few ms later, not synchronously: the claim token is a
+      // millisecond timestamp, so a same-instant re-stamp would be
+      // indistinguishable from the original and hide the very bug under
+      // test.
+      const failing = {
+        whereRaw() { return failing; },
+        first: () => new Promise((_, reject) => setTimeout(() => reject(new Error('transient sms_log lookup failure (injected)')), 5)),
+      };
+      return failing;
+    }
+    return mockPg(table, ...args);
+  };
+  for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
+  for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
+jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
+jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
+jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+jest.mock('../services/invoice-email', () => ({ sendInvoiceEmail: jest.fn(async () => ({ ok: false, error: 'email disabled in test' })) }));
+jest.mock('../services/review-request', () => {
+  const actual = jest.requireActual('../services/review-request');
+  return { ...actual, enrollPostService: jest.fn(async () => null) };
+});
+jest.mock('../services/completion-recap', () => {
+  const actual = jest.requireActual('../services/completion-recap');
+  return { ...actual, generateRecap: jest.fn(async () => null) };
+});
+// Race injection for the completion: the pay-URL shortener is the first
+// call the completion makes with the freshly minted invoice's id AFTER the
+// mint committed and BEFORE the delivery lane — exactly the gap an admin
+// send can land in.
+const mockRace = { afterMint: null };
+jest.mock('../services/short-url', () => {
+  const actual = jest.requireActual('../services/short-url');
+  return {
+    ...actual,
+    shortenOrPassthrough: async (url, opts = {}) => {
+      if (mockRace.afterMint && opts.kind === 'invoice' && opts.entityType === 'invoices') {
+        const hook = mockRace.afterMint; mockRace.afterMint = null; await hook(opts.entityId);
+      }
+      return url;
+    },
+  };
+});
+
+const knex = require('knex');
+const { randomUUID } = require('crypto');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const InvoiceService = require('../services/invoice');
+const { completeScheduledService } = require('../services/complete-scheduled-service');
+const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
+const postgres = connection ? describe : describe.skip;
+const mockFault = { smsLogOnce: false };
+let database;
+let mockPg; // the per-test transaction while a test runs; the pool between tests
+jest.setTimeout(90000);
+
+postgres('the shared send claim on a migrated database', () => {
+  let f;
+  beforeAll(async () => {
+    const url = new URL(connection);
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
+    database = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
+    mockPg = database;
+  });
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    mockFault.smsLogOnce = false;
+    mockRace.afterMint = null;
+    sendCustomerMessage.mockImplementation(async () => ({ sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
+    mockPg = await database.transaction();
+  });
+  afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
+  afterAll(async () => { if (database) await database.destroy(); });
+
+  const readInvoice = (id) => mockPg('invoices').where({ id }).first();
+
+  // A confirmed pest visit dated yesterday with NO invoice yet: the
+  // completion mints one itself (create_invoice_on_complete).
+  async function visitFixture() {
+    f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), key: `fixture_${randomUUID().slice(0, 8)}` };
+    const serviceType = 'Fixture Quarterly Pest Control Service';
+    const day = etDateString(addETDays(new Date(), -1));
+    await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Claim', phone: '+12025550123',
+      email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application' });
+    await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
+    await mockPg('services').insert({ id: f.catalogId, name: serviceType, service_key: f.key, category: 'pest_control', is_active: true });
+    await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
+      service_type: serviceType, scheduled_date: day, window_start: '09:00', window_end: '10:00', status: 'confirmed',
+      estimated_price: 117, estimated_duration_minutes: 60, create_invoice_on_complete: true });
+    return f;
+  }
+
+  function complete() {
+    return completeScheduledService({
+      serviceId: f.serviceId,
+      idempotencyKey: randomUUID(),
+      body: { visitOutcome: 'completed', sendCompletionSms: true, requestReview: false, products: [], areasTreated: [],
+        customerRecap: 'The scheduled service was completed.', idempotencyKey: randomUUID() },
+      actor: { techRole: 'technician', technicianId: f.techId, technician: { id: f.techId, name: 'Fixture Technician' } },
+    });
+  }
+
+  const payLinkTexts = () => sendCustomerMessage.mock.calls.filter(([input]) => /\/pay\//.test(String(input?.body || input?.message || '')));
+
+  describe('the completion claims the invoice it minted itself (round 16 P1)', () => {
+    test('control: with nobody racing, the completion claims its own fresh draft, texts ONE pay link and finalizes it sent', async () => {
+      await visitFixture();
+      const result = await complete();
+      expect(result.status).toBe(200);
+      const [invoice] = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoice).toBeTruthy();
+      expect(payLinkTexts()).toHaveLength(1);
+      expect(invoice.status).toBe('sent');
+      expect(invoice.sms_sent_at).not.toBeNull();
+    });
+
+    test('an admin send that claims the fresh draft between the mint commit and the completion delivery owns it: the completion goes report-only, texts no second pay link, and leaves the admin claim untouched', async () => {
+      await visitFixture();
+      let adminClaim = null;
+      mockRace.afterMint = async (invoiceId) => {
+        // The admin "send now" claims the row the mint just committed…
+        adminClaim = await InvoiceService.claimInvoiceForSend(invoiceId, { operatorInitiated: true });
+        expect(adminClaim).toMatchObject({ previousStatus: 'draft', claimed: true });
+        expect((await readInvoice(invoiceId)).status).toBe('sending');
+      };
+
+      const result = await complete();
+      expect(adminClaim).not.toBeNull();
+      // The completion's own claim lost, so its text carries no pay link —
+      // and it is NOT the resumable 503: a live send holding the claim is
+      // "delivery owned elsewhere" only once it delivers, so the completion
+      // keeps a retryable obligation. Either outcome is acceptable to the
+      // customer; what is NOT acceptable is a second pay-link text.
+      expect(payLinkTexts()).toHaveLength(0);
+      expect([200, 503]).toContain(result.status);
+
+      // The admin's claim is intact — still 'sending', never restored to
+      // draft by the completion's release (its claim was refused, so it
+      // holds nothing to give back) and never finalized to sent by it.
+      const invoice = await readInvoice(adminClaim.invoice.id);
+      expect(invoice.status).toBe('sending');
+      expect(invoice.sent_at).toBeNull();
+      expect(invoice.sms_sent_at).toBeNull();
+      // …and the admin send finishes its delivery exactly once.
+      await InvoiceService.markDeliverySent(adminClaim.invoice.id, { sms: true, source: 'admin_send_now' });
+      expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
+    });
+  });
+
+  describe('a preclaimed scheduled send keeps its claim token through a nested pre-claimed refusal (round 16 P1)', () => {
+    async function scheduledInvoice() {
+      f = { customerId: randomUUID(), invoiceId: randomUUID() };
+      await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Scheduled', phone: '+12025550124',
+        email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application' });
+      await mockPg('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, invoice_number: `TST-${f.invoiceId.slice(0, 8)}`,
+        token: randomUUID().replace(/-/g, ''), status: 'scheduled', total: 117, subtotal: 117,
+        scheduled_send_at: new Date(Date.now() - 60 * 1000), scheduled_send_attempts: 0,
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', amount: 117, quantity: 1, unit_price: 117 }]) });
+      return f;
+    }
+
+    test('a transient throw from the queued-pay-link lookup under allowClaimed: the row returns to scheduled with its due time kept (retried), not stranded under sending', async () => {
+      await scheduledInvoice();
+      // The first sms_log lookup after the scheduler's own claim is the
+      // pre-claimed branch's queued-obligation check — make it throw once.
+      mockFault.smsLogOnce = true;
+
+      const summary = await InvoiceService.processScheduledSends({ limit: 5 });
+      expect(mockFault.smsLogOnce).toBe(false); // the fault fired
+      expect(summary).toMatchObject({ sent: 0, failed: 1 });
+
+      const invoice = await readInvoice(f.invoiceId);
+      // The scheduler's token-matched restore found its own row: the
+      // invoice is back to 'scheduled', still due, one attempt consumed,
+      // the failure recorded — NOT left under 'sending' for the 10-minute
+      // stale sweep to park with scheduled_send_at cleared.
+      expect(invoice.status).toBe('scheduled');
+      expect(invoice.scheduled_send_at).not.toBeNull();
+      expect(invoice.scheduled_send_attempts).toBe(1);
+      expect(invoice.scheduled_send_error).toMatch(/transient sms_log lookup failure/);
+      expect(invoice.scheduled_send_error).not.toMatch(/Recovered from stale sending claim/);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      // The next pass, with the lookup healthy, delivers it.
+      const again = await InvoiceService.processScheduledSends({ limit: 5 });
+      expect(again).toMatchObject({ sent: 1 });
+      expect((await readInvoice(f.invoiceId)).status).toBe('sent');
+      expect(payLinkTexts()).toHaveLength(1);
+    });
+
+    test('restoreSendClaim never writes the invoice row for a previousStatus of sending — the preclaimer owns that token', async () => {
+      await scheduledInvoice();
+      const [claimed] = await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'sending', updated_at: new Date() }).returning(['id', 'updated_at']);
+      await new Promise((resolve) => setTimeout(resolve, 5)); // a re-stamp must land on a later millisecond to be visible
+      await InvoiceService.restoreSendClaim(f.invoiceId, 'sending', true);
+      const after = await readInvoice(f.invoiceId);
+      expect(after.status).toBe('sending');
+      expect(new Date(after.updated_at).getTime()).toBe(new Date(claimed.updated_at).getTime());
+      // A real previous status still restores exactly as before.
+      await InvoiceService.restoreSendClaim(f.invoiceId, 'scheduled', true);
+      expect((await readInvoice(f.invoiceId)).status).toBe('scheduled');
+    });
+  });
+});

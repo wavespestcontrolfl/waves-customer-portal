@@ -358,13 +358,34 @@ describe('claimInvoiceForSend (allowClaimed): the preclaimed branch still reconc
 
   test('a DIFFERENT live queue (e.g. a completion-deferred text) still refuses the preclaimed branch — it does not own that delivery', async () => {
     const preclaimedInvoice = { ...draftInvoice, status: 'sending' };
+    const before = db.mock.calls.length;
     db
       .mockReturnValueOnce(chain({ first: preclaimedInvoice })) // claim read
-      .mockReturnValueOnce(chain({ first: { id: 'sms-completion-1', scheduled_for: new Date('2026-09-11T12:00:00.000Z') } })) // a LIVE completion-deferred row blocks even the adopter's view
-      .mockReturnValueOnce(chain()); // restoreSendClaim's own re-stamp (claimed forced true inside restoreClaimAndThrow)
+      .mockReturnValueOnce(chain({ first: { id: 'sms-completion-1', scheduled_for: new Date('2026-09-11T12:00:00.000Z') } })); // a LIVE completion-deferred row blocks even the adopter's view
 
     await expect(InvoiceService.claimInvoiceForSend('inv-1', { allowClaimed: true, adoptsQueuedInvoiceSend: true }))
       .rejects.toMatchObject({ code: 'queued_pay_link' });
+    // The refusal's claim give-back never touches the preclaimed row (Codex
+    // round 16 P1 #4131): its previousStatus IS 'sending', so there is
+    // nothing to restore, and a re-stamp of updated_at would invalidate the
+    // caller's claim token — exactly two db calls, no invoices UPDATE.
+    expect(db.mock.calls.slice(before).map(([table]) => table)).toEqual(['invoices', 'sms_log']);
+  });
+
+  test('a transient lookup throw under the preclaimed branch rethrows WITHOUT re-stamping the row — processScheduledSends restores with its own token (Codex round 16 P1 #4131)', async () => {
+    const preclaimedInvoice = { ...draftInvoice, status: 'sending' };
+    const failingLookup = chain();
+    failingLookup.first = jest.fn(async () => { throw new Error('transient lookup failure'); });
+    const before = db.mock.calls.length;
+    db
+      .mockReturnValueOnce(chain({ first: preclaimedInvoice })) // claim read
+      .mockReturnValueOnce(failingLookup); // queuedPayLinkText throws
+
+    await expect(InvoiceService.claimInvoiceForSend('inv-1', { allowClaimed: true, adoptsQueuedInvoiceSend: true }))
+      .rejects.toThrow('transient lookup failure');
+    // The claim read, the failed lookup, nothing else — in particular no
+    // second 'invoices' chain for a status re-stamp.
+    expect(db.mock.calls.slice(before).map(([table]) => table)).toEqual(['invoices', 'sms_log']);
   });
 });
 

@@ -11513,28 +11513,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // a transient claim read failure, would otherwise turn a
           // guaranteed report-only closeout into the resumable 503.
           && !paymentFailedNoticeSent;
-        // A REUSED invoice — one this completion did not exclusively mint
-        // itself — is delivered under the ONE send claim (Codex P1 #4131
-        // r4, broadened r12 P1): the completion takes claimInvoiceForSend —
-        // the same atomic draft/scheduled/… → 'sending' flip
-        // sendViaSMSAndEmail takes — before it may text the pay link. An
-        // admin "send now" that claimed first (or already delivered) makes
-        // the claim fail, and the completion text goes report-only; a
-        // completion that claimed first makes the admin send fail its own
-        // claim. The claim is released at the end unless the link actually
-        // went out (markDeliverySent then finalizes 'sending' → 'sent'). A
-        // failed claim read fails closed. Two shapes are "reused" here: the
-        // preMintedInvoice snapshot taken before the mint ran (an office
-        // Charge-Now pre-mint the completion is reusing), and
-        // adoptedConcurrentInvoice — preMintedInvoice found nothing, but the
-        // completion's OWN mint attempt lost the race and adopted a row an
-        // office create committed first. Keying only on preMintedInvoice
-        // misses the second shape entirely (it stays null there) and would
-        // let the completion text the pay link on an invoice it never
-        // claimed, duplicating the office send.
+        // EVERY collectible invoice is delivered under the ONE send claim
+        // (Codex P1 #4131 r4, broadened r12 P1, r16 P1): the completion
+        // takes claimInvoiceForSend — the same atomic draft/scheduled/… →
+        // 'sending' flip sendViaSMSAndEmail takes — before it may text the
+        // pay link. An admin "send now" that claimed first (or already
+        // delivered) makes the claim fail, and the completion text goes
+        // report-only; a completion that claimed first makes the admin
+        // send fail its own claim. The claim is released at the end unless
+        // the link actually went out (markDeliverySent then finalizes
+        // 'sending' → 'sent'). A failed claim read fails closed. This used
+        // to key on the invoice being REUSED (the preMintedInvoice
+        // snapshot, or adoptedConcurrentInvoice when the completion's own
+        // mint lost the race) and skipped the claim for a row this
+        // invocation minted itself — but the mint commits BEFORE
+        // sendCustomerMessage runs, so an admin send can claim and deliver
+        // the fresh draft in that gap while the completion still holds its
+        // pre-mint suppression snapshot and texts the same pay link a
+        // second time (Codex r16 P1). The exclusively-minted branch takes
+        // the same claim as the reused shapes; nothing collectible is
+        // texted outside it.
         let reusedInvoiceClaimedElsewhere = false;
-        if (linkOtherwiseEligible && invoice?.id
-          && ((preMintedInvoice && String(invoice.id) === String(preMintedInvoice.id)) || adoptedConcurrentInvoice)) {
+        if (linkOtherwiseEligible && invoice?.id) {
           try {
             const InvoiceServiceForClaim = require('../services/invoice');
             const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);
