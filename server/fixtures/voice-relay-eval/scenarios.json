@@ -4597,14 +4597,14 @@
           "value": [
             "(can'?t|cannot|unable|not able|don'?t|won'?t|isn'?t able|am not able|not something i can)( to)? (take|accept|process|run|handle)"
           ],
-          "severity": "major"
+          "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
           "value": [
             "portal"
           ],
-          "severity": "quality"
+          "severity": "critical"
         }
       ],
       "judge": {
