@@ -18,7 +18,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
-  findDuplicateGroups, executeMerge, revertMerge, recordLinkedProperty,
+  findDuplicateGroups, duplicatePairEligibility, executeMerge, revertMerge, recordLinkedProperty, acquirePairAdjudicationLock,
   REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
   countActivityRows, activityColumnsFor,
 } = require('../services/customer-dedupe');
@@ -69,22 +69,24 @@ async function handleMerge(req, res, { linkAsProperty }) {
     // Server-side eligibility recheck: the UI hides merge on red pairs, but a
     // stale or tampered request must not merge a red pair — or two unrelated
     // customers. The pair must still be in the live duplicate queue, under
-    // this exact winner, and not tiered red.
-    const groups = await findDuplicateGroups();
-    const group = groups.find((g) => g.winner.id === winnerId);
-    const candidate = group?.candidates.find((c) => c.loser.id === loserId);
-    if (!candidate) {
-      return res.status(409).json({ error: 'Pair is no longer in the duplicate queue — refresh and retry' });
-    }
-    if (candidate.tier === 'red') {
-      return res.status(409).json({ error: 'This pair looks like two different people and cannot be merged from the queue' });
-    }
-    // A positive address reason means the duplicate carries a DIFFERENT (or
-    // incomparable) service address — a plain merge would retire its only
-    // copy (the backfill never overwrites the winner's street). Force the
-    // link-as-property path so the address survives as a property row.
-    if (!linkAsProperty && candidate.reasons.some((r) => r.startsWith('address_'))) {
-      return res.status(409).json({ error: "This duplicate has a different service address — use 'Merge + keep address' so the address isn't lost" });
+    // this exact winner, and not tiered red. Canonical check, shared with
+    // the IB merge tool and the task-context pair authority — never
+    // re-derive tier/reasons logic here.
+    const eligibility = await duplicatePairEligibility(winnerId, loserId);
+    // Every non-eligible answer refuses (not_in_queue, red_pair, an
+    // unreadable dismissals table, any code added later) — never a list of
+    // known refusals that a new code could fall through. The ONE admitted
+    // exception: a positive address reason means the duplicate carries a
+    // DIFFERENT (or incomparable) service address — a plain merge would
+    // retire its only copy (the backfill never overwrites the winner's
+    // street) — and the link-as-property path exists precisely to keep it
+    // as a property row, so that path may proceed on address_conflict.
+    if (!eligibility.eligible && !(linkAsProperty && eligibility.code === 'address_conflict')) {
+      if (eligibility.code === 'not_in_queue') {
+        return res.status(409).json({ error: 'Pair is no longer in the duplicate queue — refresh and retry' });
+      }
+      const status = eligibility.code === 'dismissals_unreadable' ? 503 : 409;
+      return res.status(status).json({ error: eligibility.reason || 'This pair cannot be merged right now' });
     }
     const result = await executeMerge({
       winnerId,
@@ -93,6 +95,17 @@ async function handleMerge(req, res, { linkAsProperty }) {
       performedBy: performedBy(req),
       performedById: performedById(req),
       evidence: { via: linkAsProperty ? 'admin_link_as_property' : 'admin_review_queue' },
+      // The eligibility check above is check-then-act: a /dismiss ("not a
+      // duplicate") committing in the window between it and the merge would
+      // otherwise be overtaken. The executor re-decides eligibility inside
+      // its transaction under the pair adjudication lock — the same lock the
+      // dismissal writers take — so this admin path gets the serialization
+      // the Intelligence Bar path already had (pre-push audit P1).
+      requireQueueEligibility: true,
+      // The locked re-check must admit the same exception the gate above
+      // does, or every link-as-property merge on an address-conflicted pair
+      // passes the gate and then refuses inside the transaction.
+      allowAddressConflict: linkAsProperty,
     });
     let propertyLinked = false;
     if (linkAsProperty) {
@@ -140,6 +153,15 @@ async function handleMerge(req, res, { linkAsProperty }) {
     logger.error(`[admin-customer-duplicates] merge failed: ${err.message}`);
     // "refresh the queue" covers the executor's under-lock rechecks (phone no
     // longer shared, pair now red) — stale-queue races are conflicts, not 500s.
+    // The executor's locked re-decision (pair dismissed / left the queue /
+    // rows moved between the gate above and the transaction) is an expected
+    // stale-queue race, not a server failure: 409 like the gate's own
+    // refusals, 503 when the dismissal verdicts could not be read (codex
+    // #4348 r14 P2).
+    if (err.previewChanged === true) {
+      const status = /\(dismissals_unreadable\)/.test(err.message) ? 503 : 409;
+      return res.status(status).json({ error: err.message });
+    }
     const conflict = /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
@@ -587,20 +609,36 @@ router.post('/merges/:journalId/revert', async (req, res) => {
 
 router.post('/dismiss', async (req, res) => {
   const { customerIdA, customerIdB, reason } = req.body || {};
-  if (!UUID_RE.test(String(customerIdA)) || !UUID_RE.test(String(customerIdB)) || customerIdA === customerIdB) {
+  // UUID_RE accepts either case and Postgres canonicalizes what it stores, so
+  // the raw strings are folded to lowercase BEFORE the distinctness check, the
+  // ordering, the lock key and the insert (codex #4348 r14 P2 — the same class
+  // as the r10 advisory-lock P1). Ordering raw strings put an uppercase
+  // `B...` ahead of a lowercase `a...`; the row then stored canonically as
+  // `b...:a...` while findDuplicateGroups looks for `a...:b...`, so the
+  // endpoint returned 200 and the dismissal silently never took effect. The
+  // same fold makes `A...` and `a...` the same customer for the 400.
+  const idA = customerIdA == null ? '' : String(customerIdA).trim().toLowerCase();
+  const idB = customerIdB == null ? '' : String(customerIdB).trim().toLowerCase();
+  if (!UUID_RE.test(idA) || !UUID_RE.test(idB) || idA === idB) {
     return res.status(400).json({ error: 'customerIdA and customerIdB must be distinct customer UUIDs' });
   }
-  const [a, b] = customerIdA < customerIdB ? [customerIdA, customerIdB] : [customerIdB, customerIdA];
+  const [a, b] = idA < idB ? [idA, idB] : [idB, idA];
   try {
-    await db('customer_duplicate_dismissals')
-      .insert({
-        customer_id_a: a,
-        customer_id_b: b,
-        reason: reason ? String(reason).slice(0, 500) : null,
-        created_by: performedBy(req),
-      })
-      .onConflict(['customer_id_a', 'customer_id_b'])
-      .ignore();
+    // Under the pair's adjudication lock: a confirmed-card merge of this
+    // pair re-decides eligibility under the same lock, so a verdict here
+    // and a merge there cannot interleave (customer-dedupe.js).
+    await db.transaction(async (trx) => {
+      await acquirePairAdjudicationLock(trx, a, b);
+      await trx('customer_duplicate_dismissals')
+        .insert({
+          customer_id_a: a,
+          customer_id_b: b,
+          reason: reason ? String(reason).slice(0, 500) : null,
+          created_by: performedBy(req),
+        })
+        .onConflict(['customer_id_a', 'customer_id_b'])
+        .ignore();
+    });
     res.json({ ok: true });
   } catch (err) {
     logger.error(`[admin-customer-duplicates] dismiss failed: ${err.message}`);

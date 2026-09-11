@@ -125,6 +125,37 @@ test('call returned_count excludes internal calls omitted from the response', as
   expect(result.returned_count).toBe(1);
 });
 
+test('find_duplicates keeps queue an array when the canonical queue read fails, and names the failure in queue_error', async () => {
+  const dedupe = require('../services/customer-dedupe');
+  const spy = jest.spyOn(dedupe, 'findDuplicateGroups').mockRejectedValue(new Error('relation "customer_dedupe_dismissals" does not exist'));
+  try {
+    db.__rows = () => [{ phone: '5555550100', count: '2', names: 'A Example, B Example' }];
+    const result = await executeTool('find_duplicates', { match_on: 'phone' });
+    expect(result.error).toBeUndefined();
+    expect(Array.isArray(result.queue)).toBe(true);
+    expect(result.queue).toEqual([]);
+    expect(result.queue_error).toMatch(/duplicate queue unavailable: relation "customer_dedupe_dismissals"/);
+    expect(result.duplicates).toHaveLength(1);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('find_duplicates omits queue_error when the canonical queue reads cleanly', async () => {
+  const dedupe = require('../services/customer-dedupe');
+  const spy = jest.spyOn(dedupe, 'findDuplicateGroups').mockResolvedValue([
+    { phone10: '5555550100', winner: { id: 'w1', first_name: 'A', last_name: 'Example' }, candidates: [{ loser: { id: 'l1', first_name: 'B', last_name: 'Example' }, tier: 'green', reasons: ['same_phone'] }] },
+  ]);
+  try {
+    db.__rows = () => [];
+    const result = await executeTool('find_duplicates', { match_on: 'phone' });
+    expect(result.queue_error).toBeUndefined();
+    expect(result.queue).toEqual([{ phone: '5555550100', winner: { customer_id: 'w1', name: 'A Example' }, candidates: [{ customer_id: 'l1', name: 'B Example', tier: 'green', reasons: ['same_phone'] }] }]);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 test('customer list and duplicate readers skip soft-deleted rows', async () => {
   // A website stub was soft-deleted minutes after intake, yet query_customers
   // and find_duplicates kept listing it while get_customer_detail and
@@ -144,5 +175,54 @@ test('customer list and duplicate readers skip soft-deleted rows', async () => {
     const result = await executeTool('find_duplicates', { match_on });
     expect(result.error).toBeUndefined();
     expect(db.__queries[0].sql).toContain('"deleted_at" is null');
+  }
+});
+
+
+test('find_duplicates caps each group\'s candidates too, and says so on the group (Codex r14 P2)', async () => {
+  const dedupe = require('../services/customer-dedupe');
+  const wide = {
+    phone10: '5550001111',
+    winner: { id: 'w', first_name: 'Biz', last_name: 'Main' },
+    candidates: Array.from({ length: 27 }, (_, i) => ({ loser: { id: `l${i}`, first_name: 'Site', last_name: `${i}` }, tier: 'yellow', reasons: ['same_phone'] })),
+  };
+  const narrow = { ...wide, phone10: '5550002222', winner: { id: 'w2', first_name: 'A', last_name: 'B' }, candidates: wide.candidates.slice(0, 10) };
+  const spy = jest.spyOn(dedupe, 'findDuplicateGroups').mockResolvedValue([wide, narrow]);
+  try {
+    db.__rows = () => [];
+    const result = await executeTool('find_duplicates', { match_on: 'phone' });
+    expect(result.queue).toHaveLength(2);
+    expect(result.queue[0].candidates).toHaveLength(10);
+    expect(result.queue[0].candidates[0].customer_id).toBe('l0');
+    expect(result.queue[0].candidates_truncated).toMatchObject({ returned: 10, total: 27 });
+    expect(result.queue[0].candidates_truncated.note).toMatch(/Showing the first 10 of 27 candidates in this group/);
+    // At the cap exactly → no notice on that group.
+    expect(result.queue[1].candidates).toHaveLength(10);
+    expect(result.queue[1].candidates_truncated).toBeUndefined();
+    expect(result.queue_truncated).toBeUndefined();
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('find_duplicates caps the canonical queue and says so, instead of handing the model the whole customer base (Codex r11 P2)', async () => {
+  const dedupe = require('../services/customer-dedupe');
+  const groups = Array.from({ length: 63 }, (_, i) => ({
+    phone10: `555000${String(i).padStart(4, '0')}`,
+    winner: { id: `w${i}`, first_name: 'A', last_name: `Example${i}` },
+    candidates: [{ loser: { id: `l${i}`, first_name: 'B', last_name: `Example${i}` }, tier: 'green', reasons: ['same_phone'] }],
+  }));
+  const spy = jest.spyOn(dedupe, 'findDuplicateGroups').mockResolvedValue(groups);
+  try {
+    db.__rows = () => [];
+    const result = await executeTool('find_duplicates', { match_on: 'phone' });
+    expect(result.queue).toHaveLength(50);
+    expect(result.queue_truncated).toMatchObject({ returned: 50, total: 63 });
+    expect(result.queue_truncated.note).toMatch(/Showing the first 50 of 63 duplicate groups/);
+    // At the cap exactly → no truncation notice.
+    spy.mockResolvedValue(groups.slice(0, 50));
+    expect((await executeTool('find_duplicates', { match_on: 'phone' })).queue_truncated).toBeUndefined();
+  } finally {
+    spy.mockRestore();
   }
 });
