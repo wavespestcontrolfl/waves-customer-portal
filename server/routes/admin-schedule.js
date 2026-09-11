@@ -1860,6 +1860,40 @@ function addonOnlyTotal(lines) {
   return Math.round(total * 100) / 100;
 }
 
+// A recurring child or booster occurrence prices its OWN add-on mix
+// (calculateVisitFinancialsForAddons, over filterAddonLinesForDate's
+// subset) — but filterAddonLinesForDate hands back the SAME line objects
+// the parent (and every sibling occurrence) shares, unmutated. Cloning and
+// restating each line from the occurrence's own recomputed financials
+// before it is totaled (addonOnlyTotal) or inserted
+// (insertScheduledServiceAddons) is required, not optional: without it,
+// every child/booster bills the PARENT's stamped price/discount-dollars/
+// appointment-share regardless of its own mix or its own share of a
+// pro-rata appointment credit — a child that drops one add-on still
+// invoices at the parent's total-with-that-add-on price, and two
+// occurrences with different mixes would otherwise clobber each other's
+// stamps by mutating the same shared objects (Codex #4405 escalated P0:
+// the stored per-line rows must replay to the SAME total the occurrence
+// was just saved and billed at).
+function restateOccurrenceAddonLines(addonLines, financials) {
+  return (addonLines || []).map((line, i) => {
+    const restated = financials?.lines?.[i + 1];
+    if (!restated) return line;
+    const cloned = { ...line };
+    if (cloned.discount) {
+      cloned.discount = {
+        ...cloned.discount,
+        discountDollars: restated.lineDiscountDollars > 0 ? restated.lineDiscountDollars : null,
+      };
+    }
+    if (cloned.base != null) {
+      cloned.price = restated.net;
+      cloned.appointmentDiscountDollars = restated.appointmentDiscountDollars || 0;
+    }
+    return cloned;
+  });
+}
+
 // The catalog fields assertStackGroups reads, off a discounts row, plus the
 // lane it lands on: a per-line slot names its line, a document-wide slot
 // (the appointment discount) sets spansAll.
@@ -2855,14 +2889,38 @@ function moneyValuesDiffer(a, b) {
 // fixed-dollar back-out of line_discount_dollars, unchanged — with the gate
 // off staff can never post a line discount type at all (see the 409 above
 // it), so the stored slot was always a plain dollar credit.
-function reconstructPrimaryLineSlot({ stacking, existing }) {
+//
+// A reconstructed percentage/variable term is INCOMPLETE without its cap —
+// scheduled_services has no line_discount_max_dollars column, so the cap
+// can only come from the catalog row the stored line_discount_id names.
+// Re-read it (no eligibility check: nothing about this slot changed, so
+// nothing needs re-validating — the same principle addonDiscountStampPreserved
+// already applies to add-ons) and trust its cap ONLY when its type/amount
+// still match what's stored, so an edited-since preset can't have its NEW
+// terms silently substituted into an untouched slot. No id, no row, or
+// drifted terms: the cap can't be confirmed, so fall back to the frozen
+// dollar credit instead of reconstructing a term that might be uncapped
+// when it shouldn't be (Codex #4405 r1 P2, escalated to P0 — an uncapped
+// reconstruction is a straight overcharge).
+async function reconstructPrimaryLineSlot({ stacking, existing, conn = db }) {
   if (stacking && existing?.line_discount_type
     && existing.line_discount_amount != null && existing.line_discount_amount !== ''
     && Number(existing.line_discount_amount) > 0) {
-    return {
-      discountType: existing.line_discount_type,
-      discountAmount: Number(existing.line_discount_amount),
-    };
+    const catalogRow = existing.line_discount_id
+      ? await conn('discounts').where({ id: existing.line_discount_id })
+        .first('discount_type', 'amount', 'max_discount_dollars')
+        .catch(() => null)
+      : null;
+    const capConfirmed = !!(catalogRow
+      && catalogRow.discount_type === existing.line_discount_type
+      && !moneyValuesDiffer(catalogRow.amount, existing.line_discount_amount));
+    if (capConfirmed) {
+      return {
+        discountType: existing.line_discount_type,
+        discountAmount: Number(existing.line_discount_amount),
+        maxDiscountDollars: catalogRow.max_discount_dollars != null ? Number(catalogRow.max_discount_dollars) : null,
+      };
+    }
   }
   const storedDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
     ? Math.max(0, Number(existing.line_discount_dollars))
@@ -5780,9 +5838,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const boosterDateSet = new Set(plannedBoosterDates);
       const floorForDate = (targetDate) => {
         const lines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, targetDate, seriesBlackoutDates, skipWeekendsEffective);
+        // Recompute for THIS date's own add-on mix — lines carries the
+        // PARENT's stamped price/discount/appointment-share, and a date
+        // with fewer (or differently-discounted) add-ons must not gate on
+        // the parent's total (same shape as the child/booster stamp bug
+        // above — Codex #4405 escalated P0, applied here for consistency
+        // even though this is a validation floor, not a stored stamp).
+        const dateFinancials = calculateVisitFinancialsForAddons(pricing, lines);
         return memberSeriesCovered && !boosterDateSet.has(targetDate)
-          ? addonOnlyTotal(lines)
-          : (calculateVisitFinancialsForAddons(pricing, lines).price || 0);
+          ? addonOnlyTotal(restateOccurrenceAddonLines(lines, dateFinancials))
+          : (dateFinancials.price || 0);
       };
       const recurringFloorPrice = zeroCallbackPrice
         ? 0
@@ -6118,8 +6183,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
         // maybeGroupRow call below forever.
         copyStampedServiceAddressFields(childData, svc, cols);
         if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(childData, cols, trx);
-        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
-        const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
+        const rawChildAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
+        const childFinancials = calculateVisitFinancialsForAddons(pricing, rawChildAddonLines);
+        // Cloned + restated from THIS child's own financials before either
+        // totaling (addonOnlyTotal below) or inserting — never the raw
+        // (parent-priced) lines (Codex #4405 escalated P0).
+        const childAddonLines = restateOccurrenceAddonLines(rawChildAddonLines, childFinancials);
         // Carry callback status + suppression onto recurring children: if an
         // operator turns a re-service into a repeating cadence, every future
         // visit must stay free and report as a callback (not bill monthly dues).
@@ -6198,8 +6267,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
           copyStampedServiceAddressFields(boosterData, svc, cols);
           if (!propertyOwnedByEstimateLinkage) await anchorSoleProperty(boosterData, cols, trx);
-          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
-          const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
+          const rawBoosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
+          const boosterFinancials = calculateVisitFinancialsForAddons(pricing, rawBoosterAddonLines);
+          // Same as the child loop above — restate before inserting
+          // (Codex #4405 escalated P0).
+          const boosterAddonLines = restateOccurrenceAddonLines(rawBoosterAddonLines, boosterFinancials);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
           // Booster rows are is_recurring:false — completion treats them as
@@ -8872,7 +8944,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const primaryLineDiscountProvided = primaryLineDiscount !== undefined;
         let primaryLineSlot = null;
         if (!primaryLineDiscountProvided) {
-          primaryLineSlot = reconstructPrimaryLineSlot({ stacking, existing });
+          primaryLineSlot = await reconstructPrimaryLineSlot({ stacking, existing });
         } else if (primaryLineDiscount && (primaryLineDiscount.discountId || primaryLineDiscount.id)) {
           const { customerRow, recurringMembershipBooking } = await editEligibilityContext();
           primaryLineSlot = await resolveLineDiscount(primaryLineDiscount, primaryGross || 0, customerRow || {}, {
@@ -8954,16 +9026,33 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           },
           ...normalizedAddons.map((l) => ({ amount: l.price || 0, serviceKey: l.serviceKey, serviceCategory: l.serviceCategory })),
         ], appointmentDiscountScopeKey);
-        if (primaryLineDiscountProvided) {
+        {
           const restatedPrimary = financials.lines[0];
           const slotDollars = primaryLineSlot && restatedPrimary && restatedPrimary.lineDiscountDollars > 0
             ? restatedPrimary.lineDiscountDollars
             : null;
-          if (cols.line_discount_id) updates.line_discount_id = slotDollars != null ? (primaryLineSlot.discountId || null) : null;
-          if (cols.line_discount_name) updates.line_discount_name = slotDollars != null ? String(primaryLineSlot.discountName || '').slice(0, 200) || null : null;
-          if (cols.line_discount_type) updates.line_discount_type = slotDollars != null ? String(primaryLineSlot.discountType).slice(0, 30) : null;
-          if (cols.line_discount_amount) updates.line_discount_amount = slotDollars != null ? Number(primaryLineSlot.discountAmount) : null;
-          if (cols.line_discount_dollars) updates.line_discount_dollars = slotDollars;
+          if (primaryLineDiscountProvided) {
+            // Posted: identity (id/name/type/amount) AND dollars all come
+            // from this save's picked/cleared slot.
+            if (cols.line_discount_id) updates.line_discount_id = slotDollars != null ? (primaryLineSlot.discountId || null) : null;
+            if (cols.line_discount_name) updates.line_discount_name = slotDollars != null ? String(primaryLineSlot.discountName || '').slice(0, 200) || null : null;
+            if (cols.line_discount_type) updates.line_discount_type = slotDollars != null ? String(primaryLineSlot.discountType).slice(0, 30) : null;
+            if (cols.line_discount_amount) updates.line_discount_amount = slotDollars != null ? Number(primaryLineSlot.discountAmount) : null;
+            if (cols.line_discount_dollars) updates.line_discount_dollars = slotDollars;
+          } else if (cols.line_discount_dollars) {
+            // Untouched: the slot's identity (id/name/type/amount) is left
+            // exactly as stored — but the DOLLARS must always be restated.
+            // This save can add or change ANOTHER discount that compounds
+            // with this untouched one (reconstructPrimaryLineSlot), and a
+            // stale stamp here would make the invoice replay a different
+            // total than the one just saved: a $100 line with an unchanged
+            // 10% discount plus a newly-added $30 appointment credit saves
+            // estimated_price=$63 (below), and this stamp must read $7 (10%
+            // of the $70 that's left after the credit), not the stale $10
+            // (Codex #4405 r1 P1, escalated to P0 — the stamp and the total
+            // must always replay to the same number).
+            updates.line_discount_dollars = slotDollars;
+          }
         }
         if (cols.estimated_price) updates.estimated_price = financials.price;
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
@@ -18655,6 +18744,7 @@ router._test = {
   buildAppointmentPricing,
   resolveServiceLine,
   addonOnlyTotal,
+  restateOccurrenceAddonLines,
   resolveAppointmentDiscountLineScope,
   stackRowOf,
   loadStackRows,

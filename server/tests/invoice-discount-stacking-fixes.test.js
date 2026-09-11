@@ -207,6 +207,136 @@ describe('invoice-level discounts stack with line-item discounts (finding 1, P1)
   });
 });
 
+// Codex pre-push P0: stackInvoiceDocumentDiscounts used to seed its line
+// pool only from lines a negative discount ITEM points at — an undiscounted
+// service line, or an invoice whose only pick is invoice-level, never
+// entered the pool at all, so a document-level discount resolved to $0 (or
+// a mixed invoice's pool was short every undiscounted line's gross). Fixed
+// by seeding one group per POSITIVE service line, discounted or not.
+describe('the document-level pool includes every positive service line (pre-push P0)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('a $100 line with NO line discount and a 10% invoice-level discount takes $10 off, not $0', async () => {
+    const INVOICE_10 = {
+      id: 'invoice10-id', name: 'Loyalty 10%', discount_type: 'percentage', amount: 10,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    setupDb({ customer: CUSTOMER, discounts: [INVOICE_10] });
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [line],
+      discountIds: [INVOICE_10.id],
+    });
+
+    expect(invoice.discount_amount).toBe(10);
+    expect(invoice.total).toBe(90);
+  });
+
+  test('the same line with a fixed $30 invoice-level credit takes $30 off, not $0', async () => {
+    const CREDIT_30 = {
+      id: 'credit30-id', name: 'Office Credit', discount_type: 'fixed_amount', amount: 30,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    setupDb({ customer: CUSTOMER, discounts: [CREDIT_30] });
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [line],
+      discountIds: [CREDIT_30.id],
+    });
+
+    expect(invoice.discount_amount).toBe(30);
+    expect(invoice.total).toBe(70);
+  });
+
+  test('a mixed invoice: the undiscounted line is in the pool and takes its pro-rata share of a fixed credit', async () => {
+    const CREDIT_30 = {
+      id: 'credit30-id', name: 'Office Credit', discount_type: 'fixed_amount', amount: 30,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    const LINE_20 = {
+      id: 'line20-id', name: 'Line 20%', discount_type: 'percentage', amount: 20,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    const line1 = { client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 100, amount: 100 };
+    const line2NoDiscount = { client_id: 'line-2', description: 'Mosquito', quantity: 1, unit_price: 50, amount: 50 };
+    const line1Discount = {
+      client_id: 'd-line20', _kind: 'discount', discount_id: LINE_20.id, discount_for: 'line-1',
+      description: LINE_20.name, quantity: 1, unit_price: -1, amount: -1,
+    };
+    setupDb({ customer: CUSTOMER, discounts: [CREDIT_30, LINE_20] });
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [line1, line1Discount, line2NoDiscount],
+      discountIds: [CREDIT_30.id],
+    });
+
+    // Pool = $100 (line1) + $50 (line2, undiscounted but still in the
+    // pool) = $150. $30 fixed credit spreads pro rata: line1 gets $20
+    // (100/150 of $30), leaving $80 -> 20% line discount = $16. line2 (no
+    // line discount of its own) gets the remaining $10 share, leaving $40
+    // untouched — its presence in the pool is what SHRINKS line1's own
+    // share of the credit from a wrongly-exclusive $30 down to $20.
+    // Total removed = $20 (line1's credit share) + $16 (line1 20%) + $10
+    // (line2's credit share) = $46. A pool that wrongly excluded line2
+    // would give line1 the full $30 credit, 20% of the remaining $70 =
+    // $14, for $44 off / $106 total instead.
+    expect(invoice.discount_amount).toBe(46);
+    expect(invoice.total).toBe(104);
+  });
+
+  test('the $63/$37 fixed-credit-before-percent case still holds after the pool fix', async () => {
+    const CREDIT_30 = {
+      id: 'credit30-id', name: 'Office Credit', discount_type: 'fixed_amount', amount: 30,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    const LINE_10 = {
+      id: 'line10-id', name: 'Line 10%', discount_type: 'percentage', amount: 10,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    setupDb({ customer: CUSTOMER, discounts: [CREDIT_30, LINE_10] });
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [line, pick(LINE_10)],
+      discountIds: [CREDIT_30.id],
+    });
+
+    expect(invoice.discount_amount).toBe(37);
+    expect(invoice.total).toBe(63);
+  });
+
+  test('the 14.5% compounding-percentages case still holds after the pool fix', async () => {
+    const INVOICE_10 = {
+      id: 'invoice10-id', name: 'Loyalty 10%', discount_type: 'percentage', amount: 10,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    const LINE_5 = {
+      id: 'line5-id', name: 'Referral 5%', discount_type: 'percentage', amount: 5,
+      is_active: true, show_in_invoices: true, is_stackable: true,
+    };
+    setupDb({ customer: CUSTOMER, discounts: [INVOICE_10, LINE_5] });
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [line, pick(LINE_5)],
+      discountIds: [INVOICE_10.id],
+    });
+
+    expect(invoice.discount_amount).toBe(14.5);
+    expect(invoice.total).toBe(85.5);
+  });
+});
+
 describe('retired stored-discount stack-group metadata (finding 2, P2)', () => {
   beforeEach(() => {
     jest.clearAllMocks();

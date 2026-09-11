@@ -152,4 +152,31 @@ describe('gate off: invoice-level + line-item discount stays additive (pre-lane 
     expect(invoice.discount_amount).toBe(40);
     expect(invoice.total).toBe(60);
   });
+
+  test('an undiscounted line plus an invoice-level discount was never broken under the gate — pins the pre-push P0 comparison', async () => {
+    const INVOICE_10 = {
+      id: 'invoice10-id', name: 'Loyalty 10%', discount_type: 'percentage', amount: 10,
+      is_active: true, show_in_invoices: true,
+    };
+    setupDb({
+      customer: { id: 'customer-1', waveguard_tier: 'Bronze', property_type: 'residential' },
+      discounts: [INVOICE_10],
+    });
+    const line = { client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 100, amount: 100 };
+
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [line],
+      discountIds: [INVOICE_10.id],
+    });
+
+    // Pre-lane math never grouped by parent at all — the manual discount
+    // always resolved against the full subtotal regardless of which lines
+    // carry their own picks, so this path was never susceptible to the
+    // gate-on pool bug. Pinned here so a future refactor can't quietly
+    // reintroduce it on the dark side too.
+    expect(invoice.discount_amount).toBe(10);
+    expect(invoice.total).toBe(90);
+  });
 });

@@ -501,17 +501,27 @@ function stackLineItemDiscounts(entries, compound) {
 // ONLY for GATE_DISCOUNT_STACKING on; the gate-off path keeps
 // stackLineItemDiscounts + the independent-against-subtotal manual math,
 // unchanged, in create() itself — see the `stackingEnabled` branch there.
+//
+// serviceLines: EVERY positive service line, discounted or not (Codex
+// pre-push P0: seeding groups only from lines a negative discount item
+// points at drops every undiscounted line from the document-level pool —
+// an invoice whose only pick is invoice-level then has an EMPTY pool and
+// takes $0 off, and a mixed invoice shorts the pool by every undiscounted
+// line's gross). A line with no discount terms of its own still occupies a
+// group here, contributes its full amount to the pool, and gets a
+// pro-rata share of any fixed document credit like every other line.
 // Returns { lineItemMap: Map(item -> {amount, dollars}), manualDiscounts:
 // [{row, dollars}] }.
-function stackInvoiceDocumentDiscounts(entries, manualDiscountRows) {
-  const byParent = new Map();
+function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows) {
+  const entriesByParent = new Map();
   for (const entry of entries) {
     const key = String(entry.parent.client_id);
-    if (!byParent.has(key)) byParent.set(key, []);
-    byParent.get(key).push(entry);
+    if (!entriesByParent.has(key)) entriesByParent.set(key, []);
+    entriesByParent.get(key).push(entry);
   }
-  const groups = [...byParent.values()].map((group) => {
-    const parentAmount = Math.max(0, Number(group[0].parent.amount) || 0);
+  const groups = serviceLines.map((line) => {
+    const group = entriesByParent.get(String(line.client_id)) || [];
+    const parentAmount = Math.max(0, Number(line.amount) || 0);
     // Frozen stamps first, so the operator's new pick stacks on the rest.
     const ordered = [
       ...group.filter((entry) => entry.stored),
@@ -1570,6 +1580,7 @@ const InvoiceService = {
     let manualDiscounts;
     if (stackingEnabled) {
       const stacked = stackInvoiceDocumentDiscounts(
+        [...serviceLineByClientId.values()],
         lineItemDiscountEntries,
         manualDiscountRows,
       );
