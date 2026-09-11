@@ -75,10 +75,7 @@ function adminFetch(path, options = {}) {
   });
 }
 function adminPost(path, body) {
-  return adminFetch(path, {
-    method: "POST",
-    body,
-  });
+  return adminFetch(path, { method: "POST", body });
 }
 function isAdminUser() {
   try {
@@ -570,9 +567,7 @@ function AdvisorTab() {
     if (!canRunSeoActions) return;
     setGenerating(true);
     try {
-      await adminPost("/admin/seo/sync", {
-        daysBack: 28,
-      }).catch(() => {});
+      await adminPost("/admin/seo/sync", { daysBack: 28 }).catch(() => {});
       const r = await adminPost("/admin/seo/advisor/generate", {});
       if (r.report) setReport(r.report);
     } catch {
@@ -832,11 +827,7 @@ function GeoGridTab() {
     try {
       const r = await adminFetch("/admin/seo/geo-grid/run", {
         method: "POST",
-        body: {
-          officeId: office,
-          keyword,
-          gridSize: scanGridSize,
-        },
+        body: { officeId: office, keyword, gridSize: scanGridSize },
       });
       if (r?.started === false) {
         setRunning(false);
@@ -868,11 +859,7 @@ function GeoGridTab() {
     try {
       const res = await fetch(
         `${API_BASE}/admin/seo/geo-grid/export?office=${encodeURIComponent(office)}&keyword=${encodeURIComponent(keyword)}`,
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-          },
-        },
+        { headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` } },
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();
@@ -907,9 +894,7 @@ function GeoGridTab() {
     try {
       const r = await adminFetch("/admin/seo/geo-grid/keywords", {
         method: "POST",
-        body: {
-          keywords: list,
-        },
+        body: { keywords: list },
       });
       const saved = r?.keywords || list;
       setCfg((c) => ({
@@ -946,14 +931,14 @@ function GeoGridTab() {
   return (
     <div>
       <div className="flex [gap:12px] items-center flex-wrap [margin-bottom:16px]">
-        <Select value={office} onChange={(e) => setOffice(e.target.value)}>
+        <Select className="!w-auto" value={office} onChange={(e) => setOffice(e.target.value)}>
           {cfg.offices.map((o) => (
             <option key={o.id} value={o.id}>
               {o.name}
             </option>
           ))}
         </Select>
-        <Select value={keyword} onChange={(e) => setKeyword(e.target.value)}>
+        <Select className="!w-auto" value={keyword} onChange={(e) => setKeyword(e.target.value)}>
           {cfg.keywords.map((k) => (
             <option key={k} value={k}>
               {k}
@@ -968,6 +953,7 @@ function GeoGridTab() {
           Edit keywords
         </Button>
         <Select
+          className="!w-auto"
           value={scanGridSize}
           onChange={(e) => setScanGridSize(Number(e.target.value))}
           title="Grid size for the next scan (N×N pins per office)"
@@ -2641,6 +2627,7 @@ function LinkBuildingBoard({ canRun }) {
             className="[flex:1_1_160px]"
           />
           <Select
+            className="!w-auto"
             value={form.link_type}
             onChange={(e) =>
               setForm({
@@ -2664,6 +2651,7 @@ function LinkBuildingBoard({ canRun }) {
             ))}
           </Select>
           <Select
+            className="!w-auto"
             value={form.priority}
             onChange={(e) =>
               setForm({
@@ -3014,10 +3002,7 @@ function OutreachApprovals({ canRun, onChange }) {
           }
         : {}),
     };
-    const { ok, data: r } = await outreachPost(
-      `/admin/backlink-agent/prospects/${id}/outreach/send`,
-      body,
-    );
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/send`, body);
     setMsg({
       ok,
       text: ok
@@ -3036,17 +3021,7 @@ function OutreachApprovals({ canRun, onChange }) {
     const id = p.id;
     setBusyId(id);
     setMsg(null);
-    const { ok, data: r } = await outreachPost(
-      `/admin/backlink-agent/prospects/${id}/outreach/reconcile`,
-      {
-        outcome,
-        ...(p.follow_up
-          ? {
-              follow_up: true,
-            }
-          : {}),
-      },
-    );
+    const { ok, data: r } = await outreachPost(`/admin/backlink-agent/prospects/${id}/outreach/reconcile`, { outcome, ...(p.follow_up ? { follow_up: true } : {}) });
     setMsg({
       ok,
       text: ok
@@ -3272,14 +3247,7 @@ function OutreachDraftModal({ prospect, onClose, onSaved }) {
   const save = async () => {
     setBusy(true);
     setErr(null);
-    const { ok, data } = await outreachPost(
-      `/admin/backlink-agent/prospects/${prospect.id}/outreach/draft`,
-      {
-        to,
-        subject,
-        body,
-      },
-    );
+    const { ok, data } = await outreachPost(`/admin/backlink-agent/prospects/${prospect.id}/outreach/draft`, { to, subject, body });
     setBusy(false);
     if (ok) onSaved();
     else
@@ -3458,9 +3426,7 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     try {
       await adminFetch(`/admin/backlink-agent/registry/${id}`, {
         method: "PATCH",
-        body: {
-          action,
-        },
+        body: { action },
       });
       // refresh with the CURRENT controls — this closure's stateFilter/
       // search/page are from the render the action started on
@@ -3486,10 +3452,7 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     setError(null);
     setRunResult(null);
     try {
-      const r = await adminPost(
-        `/admin/backlink-agent/registry/${id}/acquire-anyway`,
-        {},
-      );
+      const r = await adminPost(`/admin/backlink-agent/registry/${id}/acquire-anyway`, {});
       setRunResult({
         acquireAnyway: true,
         text: `${r.domain}: waived ${(r.floors || []).map((f) => `${f.floor} ${f.value} vs ${f.threshold}`).join(", ")} — ${r.bridge?.gated ? "recorded; GATE_LINK_AUTHORITY is off, so the bridge decides it when the gate is on" : r.bridge?.skipped ? "recorded; the nightly bridge decides it" : r.summary_unavailable ? "recorded; the Owner queue below shows what now awaits your decision" : `${r.awaiting} step${r.awaiting === 1 ? "" : "s"} now await your decision in the Owner queue`}`,
@@ -3511,12 +3474,7 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
     setRunBusy(true);
     setRunResult(null);
     try {
-      const r = await adminPost(
-        "/admin/backlink-agent/registry/jobs/investigate",
-        {
-          dryRun,
-        },
-      );
+      const r = await adminPost("/admin/backlink-agent/registry/jobs/investigate", { dryRun });
       setRunResult(r);
       if (!dryRun) {
         const c = controlsRef.current;
@@ -3592,6 +3550,7 @@ function BacklinkRegistryCard({ refreshKey = 0, onMutated } = {}) {
       )}
       <div className="flex [gap:8px] [margin-bottom:10px] flex-wrap">
         <Select
+          className="!w-auto"
           value={stateFilter}
           onChange={(e) => {
             setStateFilter(e.target.value);
@@ -3956,15 +3915,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     try {
       await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          submission_verdict: verdict,
-          submission_attempt_id: card.submission_ambiguity.id,
-          ...(verdict === "placed"
-            ? {
-                live_url: displayedSubmissionUrl(card),
-              }
-            : {}),
-        }),
+        body: JSON.stringify({ submission_verdict: verdict, submission_attempt_id: card.submission_ambiguity.id, ...(verdict === "placed" ? { live_url: displayedSubmissionUrl(card) } : {}) }),
       });
       refresh();
     } catch (e) {
@@ -4014,13 +3965,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     }
     if (notes[card.domain.id]) body.note = notes[card.domain.id];
     try {
-      const r = await adminFetch(
-        `/admin/backlink-agent/owner-queue/rows/${row.id}/approve`,
-        {
-          method: "POST",
-          body,
-        },
-      );
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/approve`, { method: "POST", body });
       setResult({
         tone: "#15803D",
         text: `Approved ${DIMENSION_LABELS[row.dimension] || row.dimension} on ${card.domain.domain}${r.attached?.length > 1 ? ` (${r.attached.length} locations share the fee)` : ""} — ${bridgeNote(r.bridge)}`,
@@ -4040,16 +3985,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setError(null);
     setResult(null);
     try {
-      await adminFetch(
-        `/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`,
-        {
-          method: "POST",
-          body: {
-            outcome: "skip",
-            follow_up: true,
-          },
-        },
-      );
+      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/outreach/reconcile`, { method: "POST", body: { outcome: "skip", follow_up: true } });
       setResult({
         tone: "#71717A",
         text: `Skipped the follow-up on ${card.domain.domain} — the conversation settles without it`,
@@ -4079,13 +4015,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
         : {}),
     };
     try {
-      const r = await adminFetch(
-        `/admin/backlink-agent/owner-queue/rows/${row.id}/send`,
-        {
-          method: "POST",
-          body,
-        },
-      );
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/rows/${row.id}/send`, { method: "POST", body });
       setResult({
         tone: "#15803D",
         text: `Sent the ${row.action === "outreach_followup" ? "follow-up" : "pitch"} to ${row.draft?.to || "the recipient"} on ${card.domain.domain}${r.authority ? ` (${r.authority.level})` : ""}`,
@@ -4111,15 +4041,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setError(null);
     setResult(null);
     try {
-      const r = await adminFetch(
-        `/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`,
-        {
-          method: "POST",
-          body: {
-            note: notes[card.domain.id] || null,
-          },
-        },
-      );
+      const r = await adminFetch(`/admin/backlink-agent/owner-queue/domains/${card.domain.id}/${action}`, { method: "POST", body: { note: notes[card.domain.id] || null } });
       setResult({
         tone: "#27272A",
         text: `${card.domain.domain} → ${String(r.agent_state).replace(/_/g, " ")}${r.watch_recheck_at ? `, rechecked ${formatETDate(r.watch_recheck_at)}` : ""}`,
@@ -4135,15 +4057,7 @@ function OwnerQueuePanel({ refreshKey = 0, onMutated } = {}) {
     setBusy(card.domain.id);
     setError(null);
     try {
-      await adminFetch(
-        `/admin/backlink-agent/prospects/${card.placement.id}/reconcile-backlink`,
-        {
-          method: "POST",
-          body: {
-            backlink_id: card.backlink_match.id,
-          },
-        },
-      );
+      await adminFetch(`/admin/backlink-agent/prospects/${card.placement.id}/reconcile-backlink`, { method: "POST", body: { backlink_id: card.backlink_match.id } });
       setResult({
         tone: "#27272A",
         text: "Link matched to this placement. Verification will confirm whether it is live.",
@@ -4730,10 +4644,7 @@ function LinkPolicyPanel() {
       patch[k] = draft[k];
     });
     try {
-      const r = await adminFetch("/admin/backlink-agent/policy", {
-        method: "PATCH",
-        body: patch,
-      });
+      const r = await adminFetch("/admin/backlink-agent/policy", { method: "PATCH", body: patch });
       setSaved(
         r?.changed?.length
           ? `${r.changed.length} field${r.changed.length === 1 ? "" : "s"} changed`
@@ -4974,9 +4885,7 @@ function BacklinkAgentPanel() {
       .filter(Boolean)
       .map((u) => (u.startsWith("http") ? u : `https://${u}`));
     if (urls.length === 0) return;
-    const result = await adminPost("/admin/backlink-agent/queue", {
-      urls,
-    });
+    const result = await adminPost("/admin/backlink-agent/queue", { urls });
     setAddResult(result);
     setUrlInput("");
     loadData();
@@ -5003,9 +4912,7 @@ function BacklinkAgentPanel() {
   const handleProcess = async () => {
     setProcessing(true);
     try {
-      await adminPost("/admin/backlink-agent/process", {
-        limit: 3,
-      });
+      await adminPost("/admin/backlink-agent/process", { limit: 3 });
       setTimeout(() => {
         setProcessing(false);
         loadData();
@@ -5616,13 +5523,7 @@ function RefreshAuditTab() {
     try {
       // publishedOnly: the audit only ranks published pages — don't spend the
       // batch on unscored drafts that never appear here.
-      await adminFetch("/admin/seo/qa/batch", {
-        method: "POST",
-        body: {
-          limit: 100,
-          publishedOnly: true,
-        },
-      });
+      await adminFetch("/admin/seo/qa/batch", { method: "POST", body: { limit: 100, publishedOnly: true } });
       load(); // re-rank with fresh QA scores
     } catch {
       /* non-critical */
@@ -5638,9 +5539,7 @@ function RefreshAuditTab() {
     try {
       const r = await adminFetch("/admin/seo/refresh-audit/enqueue", {
         method: "POST",
-        body: {
-          blogPostId: c.blogPostId,
-        },
+        body: { blogPostId: c.blogPostId },
       });
       if (r && r.queued === false) {
         // Page already has a claimed/done/in-review opportunity — the upsert
@@ -6294,9 +6193,7 @@ function AnalyticsTab() {
           error: e.message,
         }),
       ),
-      adminFetch(
-        `/admin/analytics/data-manager/readiness?period=${days}`,
-      ).catch((e) => ({
+      adminFetch(`/admin/analytics/data-manager/readiness?period=${days}`).catch((e) => ({
         error: e.message,
       })),
     ])
@@ -7350,13 +7247,9 @@ function UrlIntelTab({ domain }) {
     }
   }, [subTab, diagnosisFilter, scanPage, domain]);
   function handleRefresh() {
-    adminPost("/admin/seo/url-intelligence/refresh", {
-      domain,
-    })
+    adminPost("/admin/seo/url-intelligence/refresh", { domain })
       .then(() => {
-        adminFetch(
-          `/admin/seo/url-intelligence/dashboard?domain=${domain}`,
-        ).then(setData);
+        adminFetch(`/admin/seo/url-intelligence/dashboard?domain=${domain}`).then(setData);
       })
       .catch(() => {});
   }
@@ -7561,6 +7454,7 @@ function UrlIntelTab({ domain }) {
             <div className="[margin-bottom:16px] flex [gap:8px] items-center">
               <span className="text-ui-body text-ink-secondary">Filter:</span>
               <Select
+                className="!w-auto"
                 value={diagnosisFilter}
                 onChange={(e) => {
                   setDiagnosisFilter(e.target.value);
@@ -7683,9 +7577,7 @@ function DuplicatesSubTab({ domain }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    adminFetch(
-      `/admin/seo/url-intelligence/duplicate-clusters?domain=${domain}`,
-    )
+    adminFetch(`/admin/seo/url-intelligence/duplicate-clusters?domain=${domain}`)
       .then(setData)
       .catch(() => setData([]))
       .finally(() => setLoading(false));
@@ -7748,9 +7640,7 @@ function IntentSubTab({ domain }) {
   const [severityFilter, setSeverityFilter] = useState("");
   useEffect(() => {
     const qs = severityFilter ? `&severity=${severityFilter}` : "";
-    adminFetch(
-      `/admin/seo/url-intelligence/intent-routes?domain=${domain}${qs}&limit=50`,
-    )
+    adminFetch(`/admin/seo/url-intelligence/intent-routes?domain=${domain}${qs}&limit=50`)
       .then(setData)
       .catch(() => setData([]))
       .finally(() => setLoading(false));
@@ -7774,6 +7664,7 @@ function IntentSubTab({ domain }) {
           Intent Routing — Query → Page Alignment
         </div>
         <Select
+          className="!w-auto"
           value={severityFilter}
           onChange={(e) => setSeverityFilter(e.target.value)}
         >
@@ -7854,35 +7745,19 @@ function ActionsTab({ domain }) {
     Promise.all([
       adminFetch(`/admin/seo/actions/summary?domain=${domain}`),
       subTab === "drafts"
-        ? adminFetch(
-            `/admin/seo/actions?domain=${domain}&type=rewrite_title_meta&limit=50`,
-          )
+        ? adminFetch(`/admin/seo/actions?domain=${domain}&type=rewrite_title_meta&limit=50`)
         : subTab === "progress"
-          ? adminFetch(
-              `/admin/seo/actions?domain=${domain}&execution_status=in_progress&limit=50`,
-            ).then((d) =>
-              d.length > 0
-                ? d
-                : adminFetch(
-                    `/admin/seo/actions?domain=${domain}&execution_status=done&limit=25`,
-                  ),
-            )
-          : subTab === "experiments"
-            ? adminFetch("/admin/seo/url-intelligence/experiments?limit=50")
-            : adminFetch(
-                `/admin/seo/actions?domain=${domain}&approval_status=pending&limit=50`,
-              ),
+        ? adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=in_progress&limit=50`)
+          .then((d) => d.length > 0 ? d : adminFetch(`/admin/seo/actions?domain=${domain}&execution_status=done&limit=25`))
+        : subTab === "experiments"
+        ? adminFetch(`/admin/seo/url-intelligence/experiments?limit=50`)
+        : adminFetch(`/admin/seo/actions?domain=${domain}&approval_status=pending&limit=50`),
     ])
-      .then(([s, a]) => {
-        setSummary(s);
-        setActions(Array.isArray(a) ? a : []);
-      })
-      .catch(() => {
-        setSummary(null);
-        setActions([]);
-      })
+      .then(([s, a]) => { setSummary(s); setActions(Array.isArray(a) ? a : []); })
+      .catch(() => { setSummary(null); setActions([]); })
       .finally(() => setLoading(false));
   };
+
   useEffect(loadData, [domain, subTab]);
   function handleAction(id, verb) {
     adminPost(`/admin/seo/actions/${id}/${verb}`, {})
@@ -7929,18 +7804,14 @@ function ActionsTab({ domain }) {
           <div className="[margin-left:auto] flex [gap:8px]">
             <Button
               onClick={() =>
-                adminPost("/admin/seo/actions/generate", {
-                  domain,
-                }).then(loadData)
+                adminPost("/admin/seo/actions/generate", { domain }).then(loadData)
               }
             >
               Generate Actions
             </Button>
             <Button
               onClick={() =>
-                adminPost("/admin/seo/actions/auto-approve", {
-                  domain,
-                }).then(loadData)
+                adminPost("/admin/seo/actions/auto-approve", { domain }).then(loadData)
               }
               variant="secondary"
             >
@@ -8322,17 +8193,13 @@ function IndexationTab({ domain }) {
         .finally(() => setLoading(false));
     } else if (subTab === "conflicts") {
       setLoading(true);
-      adminFetch(
-        `/admin/seo/url-intelligence/canonical-conflicts?domain=${domain}`,
-      )
+      adminFetch(`/admin/seo/url-intelligence/canonical-conflicts?domain=${domain}`)
         .then(setConflictsData)
         .catch(() => setConflictsData(null))
         .finally(() => setLoading(false));
     } else if (subTab === "crawled") {
       setLoading(true);
-      adminFetch(
-        `/admin/seo/url-intelligence/scan?diagnosis=indexation_problem&domain=${domain}&limit=50`,
-      )
+      adminFetch(`/admin/seo/url-intelligence/scan?diagnosis=indexation_problem&domain=${domain}&limit=50`)
         .then(setCrawledNotIndexed)
         .catch(() => setCrawledNotIndexed(null))
         .finally(() => setLoading(false));
@@ -8342,9 +8209,7 @@ function IndexationTab({ domain }) {
     if (!inspectUrl.trim()) return;
     setInspectLoading(true);
     setInspectData(null);
-    adminFetch(
-      `/admin/seo/url-intelligence/inspect?url=${encodeURIComponent(inspectUrl.trim())}`,
-    )
+    adminFetch(`/admin/seo/url-intelligence/inspect?url=${encodeURIComponent(inspectUrl.trim())}`)
       .then(setInspectData)
       .catch(() =>
         setInspectData({

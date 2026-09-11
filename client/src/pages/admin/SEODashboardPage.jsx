@@ -444,9 +444,7 @@ export default function WavesSEODashboard() {
     try {
       await adminFetch("/admin/seo/sync", {
         method: "POST",
-        body: {
-          daysBack: 28,
-        },
+        body: { daysBack: 28 },
       });
       setSyncMsg("GSC synced. Running rank tracking...");
       await adminFetch("/admin/seo/rankings/track", {
