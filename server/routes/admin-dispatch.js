@@ -2787,6 +2787,7 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
   try {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     let found = true;
+    let reorderedDay = null;
     await db.transaction(async (trx) => {
       const prov = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
@@ -2799,7 +2800,18 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
         .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
         .update({ route_order: req.body.routeOrder });
       if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+      reorderedDay = prov.day;
     });
+    // A manual reorder writes route_order directly, outside the batched
+    // dispatch/rebooker paths — without this the day's card stays stale
+    // after an operator fixes the route (codex #4295 r2 P2).
+    if (reorderedDay) {
+      try {
+        await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [reorderedDay] });
+      } catch (e) {
+        logger.error(`[dispatch] reorder route quality refresh failed: ${e.message}`);
+      }
+    }
     res.json({ success: true, ...(found ? {} : { updated: 0 }) });
   } catch (err) {
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
@@ -2817,6 +2829,7 @@ router.put('/reorder/bulk', async (req, res, next) => {
   try {
     const { order } = req.body;
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const reorderedDays = new Set();
     await db.transaction(async (trx) => {
       const rows = await trx('scheduled_services')
         .whereIn('id', (order || []).map((i) => i.serviceId))
@@ -2832,8 +2845,19 @@ router.put('/reorder/bulk', async (req, res, next) => {
           .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
           .update({ route_order: item.routeOrder });
         if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+        reorderedDays.add(prov.day);
       }
     });
+    // One refresh for every date this bulk reorder touched — a manual
+    // reorder writes route_order directly, outside the batched
+    // dispatch/rebooker paths (codex #4295 r2 P2).
+    if (reorderedDays.size) {
+      try {
+        await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [...reorderedDays] });
+      } catch (e) {
+        logger.error(`[dispatch] bulk reorder route quality refresh failed: ${e.message}`);
+      }
+    }
     res.json({ success: true });
   } catch (err) {
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
@@ -4052,8 +4076,11 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     // out; otherwise leave the 24h/72h reminder pending so the cron still
     // reminds the customer on the new slot.
     // Dates this rain-out touched, refreshed once after the loop — a route
-    // -scoped rain-out moves a whole day's stops (codex #4295 r1 P2).
-    const qualityDates = new Set();
+    // -scoped rain-out moves a whole day's stops (codex #4295 r1 P2). Seeded
+    // with the dates commit()'s own per-job rebooker calls already collected
+    // (their shared qualityDates Set, codex #4295 r2 P2) so this one flush
+    // covers those too instead of each rebooker call refreshing inline.
+    const qualityDates = new Set(result.qualityDates || []);
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
       // A member carried by its visit's unit move (coveredByVisit) had its
@@ -4111,7 +4138,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // `notify` is explicit and suppresses ONLY the immediate customer text —
 // reminder re-sync, tracker refresh and board broadcasts always run.
 const SERIES_EFFECTS_LEASE_MS = 5 * 60 * 1000;
-async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText }) {
+async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
   // The text is driven by the intent the OPERATION was recorded with
   // (result.notifyRequested — set by the move, carried by a replay, read
@@ -4320,8 +4347,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       }
       let allBroadcast = true;
       // A series move broadcasts every future occurrence; one refresh covers
-      // all of their dates (codex #4295 r1 P2).
-      const seriesQualityDates = new Set();
+      // all of their dates (codex #4295 r1 P2). A caller that already
+      // collected the rebooker's own move dates (codex #4295 r2 P2) hands
+      // its Set in so this reuses it instead of flushing twice; a caller
+      // with none (the reconciler, replaying an already-committed row) gets
+      // its own.
+      const seriesQualityDates = qualityDates || new Set();
       for (const occurrence of [...occurrences, ...followUps]) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId, qualityDates: seriesQualityDates });
@@ -4708,6 +4739,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       const observedAnchor = {};
       await resolveRescheduleWindow(req.params.serviceId, newWindow, observedAnchor);
       await ensureObservedAnchor(req.params.serviceId, observedAnchor);
+      // Shared with applySeriesMoveEffects below: the rebooker collects its
+      // own before/after (+ shifted follow-up) dates into this Set instead
+      // of running its own repair/measurement pass, and the effects call
+      // flushes everything once (codex #4295 r2 P2).
+      const qualityDates = new Set();
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
@@ -4727,6 +4763,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         ...(rescheduleExpectPredicate(observedAnchor)
           ? { expectAnchor: rescheduleExpectPredicate(observedAnchor) }
           : {}),
+        qualityDates,
       });
       const effects = await applySeriesMoveEffects({
         result,
@@ -4736,6 +4773,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         notify: notifyCustomer !== false,
         actorId: req.technicianId,
         reasonText,
+        qualityDates,
       });
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
@@ -4752,7 +4790,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // rewinds the tracker lifecycle and frees the tech. Terminal states
     // (completed / cancelled / skipped) still 409. The customer-SMS
     // self-serve path (reschedule-sms.js) does NOT get this override.
-    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null };
+    // Shared by every quality refresh below (the rebooker's own move dates,
+    // the primary job's board broadcast, and any grouped sibling) so one
+    // flush covers the whole request instead of the rebooker running its
+    // own repair/measurement pass and emitDispatchJobUpdate running another
+    // right after it (codex #4295 r2 P2).
+    const qualityDates = new Set();
+    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null, qualityDates };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
@@ -4875,6 +4919,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         notify: notifyCustomer !== false,
         actorId: req.technicianId,
         reasonText,
+        qualityDates,
       });
       // Grouped siblings moved singly by moveVisitAsUnit are outside the
       // series effects' broadcast scope — other boards need them too
@@ -4911,22 +4956,28 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     const willNotify = notifyCustomer !== false && !partialVisitMove;
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
-      await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
+      // qualityDates: the same Set already passed to the rebooker above —
+      // this just adds the primary job's before/after dates to it instead
+      // of running its own refresh right after the rebooker's (codex #4295
+      // r2 P2); the flush below (shared with the grouped-member loop) is
+      // the one refresh for all of it.
+      await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId, qualityDates });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
     }
     // A grouped stop moved as a unit: every sibling that landed is a
     // committed change other open boards must see too (codex #3609 r5).
-    const memberQualityDates = new Set();
+    // Reuses the same qualityDates Set as the rebooker call and the primary
+    // job's broadcast above — one flush below covers all three.
     for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
       try {
-        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates: memberQualityDates });
+        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates });
       } catch (err) {
         logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
       }
     }
     try {
-      await flushDispatchQualityDates(memberQualityDates);
+      await flushDispatchQualityDates(qualityDates);
     } catch (err) {
       logger.error(`[dispatch] grouped-member route quality refresh failed: ${err.message}`);
     }

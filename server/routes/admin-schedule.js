@@ -10339,6 +10339,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 windowStart: parent.window_start,
                 serviceType: childIdentity.service_type,
               });
+              // Same batching contract as the visit-count spawn branches
+              // below: without this, converting a one-time visit to a
+              // series gets its new children's dates NO measurement/alert
+              // reconciliation — only the edited parent's (codex #4295 r2 P2).
+              recurringUpdatedJobIds.push(childRow.id);
             }
             if (parentAddons.length > 0 && childRow?.id) {
               try {
@@ -13257,6 +13262,14 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         }
       });
     }
+    // A manual reorder writes route_order directly, never through the
+    // batched dispatch/rebooker paths — without this the day's card stays
+    // stale after an operator fixes the route (codex #4295 r2 P2).
+    try {
+      await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [dateStr] });
+    } catch (e) {
+      logger.error(`[schedule/optimize] route quality refresh failed: ${e.message}`);
+    }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
     const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
@@ -13367,6 +13380,12 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
           }
         }
       });
+    }
+    // Same after-commit refresh as /optimize above (codex #4295 r2 P2).
+    try {
+      await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [dateStr] });
+    } catch (e) {
+      logger.error(`[schedule/optimize-route] route quality refresh failed: ${e.message}`);
     }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
@@ -17759,7 +17778,10 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
     const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
       .sort((a, b) => a - b);
-    const { WEEKLY_DAYS_OFF_KEY } = require('../services/scheduling/blackout-dates');
+    const { WEEKLY_DAYS_OFF_KEY, getWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+    // Read before the write: only the weekdays that toggle need a
+    // route-quality refresh (codex #4295 r2 P2).
+    const previousDays = [...(await getWeeklyDaysOff(db))];
     await db('system_settings')
       .insert({
         key: WEEKLY_DAYS_OFF_KEY,
@@ -17771,6 +17793,7 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
       .merge({ value: JSON.stringify(days), updated_at: db.fn.now() });
     logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days));
     res.json({ success: true, weeklyDaysOff: days });
   } catch (err) { next(err); }
 });
@@ -17793,15 +17816,20 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange([date]);
     res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
   } catch (err) { next(err); }
 });
 
 router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
+    // The date is read first: once the row is gone nothing else says which
+    // day's closure card to reconcile (codex #4295 r2 P2).
+    const row = await db('schedule_blackout_dates').where({ id: req.params.id }).first('date');
     const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange([blackoutDateString(row && row.date)]);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -17818,7 +17846,46 @@ function flushEstimateSlotCaches() {
   }
 }
 
+// A blackout write changes `day.closed` for the affected date(s), and the
+// route-quality reconciler only notices when something refreshes those
+// dates — so refresh them here, after the write, best-effort like the cache
+// flush above (codex #4295 r2 P2). With the quality gates off this returns
+// immediately.
+async function refreshQualityForBlackoutChange(dates) {
+  const list = [...new Set((dates || []).filter(Boolean))];
+  if (!list.length) return;
+  try {
+    await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: list });
+  } catch (err) {
+    logger.error(`[schedule] blackout route quality refresh failed: ${err.message}`);
+  }
+}
+
+// A weekly days-off change touches every future occurrence of the weekdays
+// that toggled — bounded to the reconciler's 30-day horizon, tomorrow
+// onward (today's closure is already in effect). Pure; exported for tests.
+function weeklyBlackoutRefreshDates(previousDays, nextDays, now = new Date()) {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const { expandWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+  const previous = new Set((previousDays || []).map(Number));
+  const next = new Set((nextDays || []).map(Number));
+  const toggled = new Set([...previous, ...next].filter((day) => previous.has(day) !== next.has(day)));
+  return expandWeeklyDaysOff(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled);
+}
+
+// schedule_blackout_dates.date is a DATE column: pg hands it back as a
+// local-midnight Date unless a parser is installed. Either way, YYYY-MM-DD.
+function blackoutDateString(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.slice(0, 10);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 router._test = {
+  weeklyBlackoutRefreshDates,
+  blackoutDateString,
   registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,

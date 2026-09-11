@@ -336,6 +336,14 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
     throw e;
   }
+  // A manual reorder writes route_order directly, outside the batched
+  // dispatch/rebooker paths — without this the day's card stays stale
+  // after an operator applies the approved plan (codex #4295 r2 P2).
+  try {
+    await require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [date] });
+  } catch (e) {
+    logger.error(`[intelligence-bar:schedule] route quality refresh failed for ${date}: ${e.message}`);
+  }
   logger.info(`[intelligence-bar:schedule] Applied approved route order for ${date}: ${approvedIds.length} stops`);
   return {
     success: true,

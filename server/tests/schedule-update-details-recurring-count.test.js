@@ -882,6 +882,48 @@ describe('update-details wiring (source guards)', () => {
     expect((src.match(/CUSTOMER_CHANGED_RETRY/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 
+  test('a make-this-recurring spawn adds its new children to the quality-refresh batch (codex #4295 r2 P2)', () => {
+    // This is the spawn branch that converts a one-time visit into a series
+    // (not the visit-count top-up branches, which already do both pushes).
+    // It used to record new child ids only in spawnedRecurringChildren, never
+    // in recurringUpdatedJobIds — so the batching block below collected only
+    // the edited parent and the new children's dates got no measurement/
+    // alert reconciliation.
+    const start = src.indexOf('spawnedRecurringChildren.push({');
+    const end = src.indexOf('recurringCreated++;', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const spawnBlock = src.slice(start, end);
+    expect(spawnBlock).toContain('recurringUpdatedJobIds.push(childRow.id);');
+  });
+
+  test('every blackout write refreshes route quality for the dates it changes (codex #4295 r2 P2)', () => {
+    const handler = (route) => {
+      const start = src.indexOf(route);
+      expect(start).toBeGreaterThan(-1);
+      return src.slice(start, src.indexOf('\n});', start));
+    };
+    expect(handler("router.put('/blackout-dates/weekly'")).toContain('refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days))');
+    expect(handler("router.post('/blackout-dates'")).toContain('refreshQualityForBlackoutChange([date])');
+    const del = handler("router.delete('/blackout-dates/:id'");
+    expect(del).toContain("first('date')");
+    expect(del.indexOf("first('date')")).toBeLessThan(del.indexOf('.del()'));
+    expect(del).toContain('refreshQualityForBlackoutChange([blackoutDateString(row && row.date)])');
+  });
+
+  test('a weekly days-off change refreshes only the toggled weekdays inside the 30-day horizon', () => {
+    const { weeklyBlackoutRefreshDates, blackoutDateString } = adminScheduleRouter._test;
+    // Thursday 2026-08-13 04:10 ET: horizon = 2026-08-14 .. 2026-09-12.
+    const now = new Date('2026-08-13T08:10:00Z');
+    expect(weeklyBlackoutRefreshDates([0], [0, 6], now)).toEqual(['2026-08-15', '2026-08-22', '2026-08-29', '2026-09-05', '2026-09-12']);
+    expect(weeklyBlackoutRefreshDates([0, 6], [0], now)).toEqual(['2026-08-15', '2026-08-22', '2026-08-29', '2026-09-05', '2026-09-12']);
+    expect(weeklyBlackoutRefreshDates(['0'], [0], now)).toEqual([]);
+    expect(weeklyBlackoutRefreshDates([], [], now)).toEqual([]);
+    expect(blackoutDateString('2026-08-20T00:00:00.000Z')).toBe('2026-08-20');
+    expect(blackoutDateString(new Date(2026, 7, 20))).toBe('2026-08-20');
+    expect(blackoutDateString(null)).toBeNull();
+  });
+
   test('top-up visits get the post-registration terminal re-check (Codex #3337 r2 P1)', () => {
     // A series cancel landing between this commit and the reminder insert
     // would otherwise leave an armed reminder on a cancelled visit.

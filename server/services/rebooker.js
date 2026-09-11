@@ -1666,10 +1666,20 @@ class SmartRebooker {
       }
     }
 
-    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
-      jobId: serviceId,
-      dates: [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])],
-    });
+    // A caller that mutates several visits in one pass (rain-out's per-job
+    // loop, a future batch) passes a shared Set here and flushes it once
+    // itself instead of every row awaiting its own repair/measurement pass
+    // (codex #4295 r2 P2) — a caller with no batch of its own keeps the
+    // inline refresh.
+    const changeDates = [originalDate, newDateStr, ...(followUpReport.shifted || []).flatMap(row => [row.previousDate, row.date])];
+    if (options.qualityDates) {
+      for (const date of changeDates) if (date) options.qualityDates.add(date);
+    } else {
+      await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+        jobId: serviceId,
+        dates: changeDates,
+      });
+    }
 
     if (overlapWarned) {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
@@ -3009,15 +3019,23 @@ class SmartRebooker {
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
     }
-    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
-      jobId: serviceId,
-      dates: [
-        ...moveRows.flatMap(row => [row.before?.scheduled_date, row.after?.scheduled_date]),
-        // Call-booked follow-ups shifted with the anchor move onto days no
-        // series occurrence names (codex #4295 r1 P2).
-        ...seriesFollowUpDates,
-      ],
-    });
+    // Same shared-Set convention as the single-visit path above: a caller
+    // batching several series moves (rain-out's collective-anchor branch)
+    // passes qualityDates and flushes it once itself (codex #4295 r2 P2).
+    const seriesChangeDates = [
+      ...moveRows.flatMap(row => [row.before?.scheduled_date, row.after?.scheduled_date]),
+      // Call-booked follow-ups shifted with the anchor move onto days no
+      // series occurrence names (codex #4295 r1 P2).
+      ...seriesFollowUpDates,
+    ];
+    if (options.qualityDates) {
+      for (const date of seriesChangeDates) if (date) options.qualityDates.add(date);
+    } else {
+      await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+        jobId: serviceId,
+        dates: seriesChangeDates,
+      });
+    }
     return { ...committedResult, originalDate: service.scheduled_date, seriesMoveId };
   }
 

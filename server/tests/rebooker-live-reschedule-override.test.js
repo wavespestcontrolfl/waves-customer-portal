@@ -437,6 +437,39 @@ describe('live-status reschedule override (allowLive)', () => {
     });
   });
 
+  // A batch caller (rain-out's per-job loop, an admin-dispatch board move)
+  // passes a shared qualityDates Set instead of letting each row's move run
+  // its own repair/measurement pass (codex #4295 r2 P2).
+  test('a caller-supplied qualityDates Set collects the move dates instead of refreshing inline', async () => {
+    const quality = require('../services/scheduling/quality-after-change');
+    const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+    wireRescheduleMocks(liveService('confirmed'));
+
+    const qualityDates = new Set();
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true, qualityDates },
+    )).resolves.toMatchObject({ success: true });
+
+    expect([...qualityDates].sort()).toEqual([BASE, TARGET].sort());
+    expect(refreshSpy).not.toHaveBeenCalled();
+    refreshSpy.mockRestore();
+  });
+
+  test('without qualityDates the reschedule still refreshes inline (unchanged default)', async () => {
+    const quality = require('../services/scheduling/quality-after-change');
+    const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+    wireRescheduleMocks(liveService('confirmed'));
+
+    await expect(SmartRebooker.reschedule(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'admin',
+      { allowLive: true },
+    )).resolves.toMatchObject({ success: true });
+
+    expect(refreshSpy).toHaveBeenCalledWith({ jobId: 'svc-1', dates: [BASE, TARGET] });
+    refreshSpy.mockRestore();
+  });
+
   test('a failed follow-up shift is swallowed — the reschedule still succeeds', async () => {
     const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
     shiftCallFollowUpsForParentMove.mockRejectedValueOnce(new Error('boom'));
@@ -686,6 +719,42 @@ describe('live-status reschedule override (allowLive)', () => {
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, null, 'weather_rain', 'system', { allowLive: true });
     expect(result.success).toBe(true);
     expect(updates[0].update.mock.calls[0][0]).toMatchObject({ window_start: '07:00:00', window_end: '08:00:00' });
+  });
+
+  // A batch caller (rain-out's per-job loop) passes its own qualityDates Set
+  // into rescheduleSeries the same way it does into reschedule() below —
+  // the series writer collects its before/after dates into it instead of
+  // running its own repair/measurement pass (codex #4295 r2 P2).
+  test('rescheduleSeries with a caller-supplied qualityDates Set collects dates instead of refreshing inline', async () => {
+    const quality = require('../services/scheduling/quality-after-change');
+    const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+    wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '07:00:00', window_end: '08:00:00' },
+    ]);
+
+    const qualityDates = new Set();
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, null, 'weather_rain', 'system', {
+      allowLive: true, qualityDates,
+    });
+
+    expect(result.success).toBe(true);
+    expect([...qualityDates].sort()).toEqual([BASE, TARGET].sort());
+    expect(refreshSpy).not.toHaveBeenCalled();
+    refreshSpy.mockRestore();
+  });
+
+  test('rescheduleSeries without qualityDates still refreshes inline (unchanged default)', async () => {
+    const quality = require('../services/scheduling/quality-after-change');
+    const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+    wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '07:00:00', window_end: '08:00:00' },
+    ]);
+
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, null, 'weather_rain', 'system', { allowLive: true });
+
+    expect(result.success).toBe(true);
+    expect(refreshSpy).toHaveBeenCalledWith({ jobId: 'svc-1', dates: [BASE, TARGET] });
+    refreshSpy.mockRestore();
   });
 
   test('rescheduleSeries with allowLive still skips a live NON-anchor sibling', async () => {

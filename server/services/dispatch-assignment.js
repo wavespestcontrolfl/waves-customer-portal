@@ -138,6 +138,10 @@ async function emitDispatchJobUpdate({ jobId, actorId, previousDate, qualityDate
 async function flushDispatchQualityDates(qualityDates) {
   const dates = [...(qualityDates || [])].filter(Boolean);
   if (!dates.length) return null;
+  // A flushed set is spent: a request that shares one Set between the
+  // rebooker, a series-effects pass and its own final flush must not refresh
+  // the same dates twice (codex #4295 r2 P2).
+  if (typeof qualityDates.clear === 'function') qualityDates.clear();
   return require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates });
 }
 

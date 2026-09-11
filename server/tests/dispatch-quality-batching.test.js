@@ -48,6 +48,12 @@ test('a batch caller collects both days per row and triggers no refresh of its o
   expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
   expect(refreshScheduleQualityAfterChange.mock.calls[0][0].dates.sort())
     .toEqual(['2040-09-10', '2040-09-11', '2040-09-12']);
+  // A flushed set is spent: a request that shares one Set between the
+  // rebooker, a series-effects pass and its own final flush refreshes each
+  // date once (codex #4295 r2 P2).
+  expect(qualityDates.size).toBe(0);
+  expect(await flushDispatchQualityDates(qualityDates)).toBeNull();
+  expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(1);
 });
 
 test('a single-row caller still refreshes inline', async () => {
