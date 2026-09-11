@@ -219,10 +219,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   // On the single-column mobile layout the editor renders below the template
   // list, so selecting a template or starting a new one updates content that
   // sits off-screen ("nothing happens" from the top of the page). Bring the
-  // editor into view on narrow viewports; on lg+ it's already beside the list.
+  // editor into view on narrow viewports; on xl+ it's already beside the list.
   const focusEditor = useCallback(() => {
     if (typeof window === "undefined") return;
-    if (window.matchMedia?.("(min-width: 1024px)").matches) return;
+    if (window.matchMedia?.("(min-width: 1280px)").matches) return;
     requestAnimationFrame(() => {
       editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });

@@ -22,6 +22,7 @@ async function main() {
       const context = await browser.newContext({ viewport: { width, height: width === 1024 ? 700 : 1000 }, hasTouch: width !== 1440, timezoneId: 'America/New_York', serviceWorkers: 'block' });
       const page = await context.newPage();
       page.setDefaultTimeout(15000);
+      await page.routeWebSocket("**/*", socket => socket.close());
       page.on('pageerror', e => report.pageErrors.push(e.message));
       await page.addInitScript(() => {
         localStorage.setItem('waves_admin_token', 'synthetic-local-token');
@@ -38,7 +39,7 @@ async function main() {
         else if (key === 'GET /api/admin/feature-flags') body = { flags: {} };
         else if (url.pathname.endsWith('/unread-count')) body = { count: 0, conversations: 0 };
         else if (key === 'POST /api/admin/usage/track') body = { ok: true };
-        else if (key === 'GET /api/admin/document-templates') body = { templates: [template] };
+        else if (key === 'GET /api/admin/document-templates') body = { templates: [template, ...Array.from({ length: 12 }, (_, index) => ({ ...template, templateKey: `qa.extra-${index}`, name: `Additional fixture ${index}` }))] };
         else if (key === 'GET /api/admin/document-templates/qa.agreement') body = { template };
         else if (key === 'PUT /api/admin/document-templates/qa.agreement') {
           if (failSave) { body = { error: 'Synthetic save failure' }; status = 503; }
@@ -63,6 +64,14 @@ async function main() {
       failSave = false;
       await page.getByRole('button', { name: 'Save metadata', exact: true }).click();
       await page.getByRole('status').filter({ hasText: 'Template saved' }).waitFor();
+      if (width === 1024) {
+        await page.locator('main').evaluate(el => { el.scrollTop = 0; });
+        await page.getByRole('button').filter({ has: page.getByText('Revised example agreement', { exact: true }) }).click();
+        await page.waitForFunction(() => {
+          const label = [...document.querySelectorAll('input')].find(el => el.value === 'Revised example agreement');
+          return label && label.getBoundingClientRect().top >= 0 && label.getBoundingClientRect().top < innerHeight;
+        });
+      }
       await waitForFonts(page);
       await page.evaluate(() => window.scrollTo(0, 0));
       const templatesShot = path.join(output, `templates-${width}.png`);
