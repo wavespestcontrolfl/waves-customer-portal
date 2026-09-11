@@ -369,7 +369,9 @@ function LTVAnalysisTab() {
   const summary = data.summary || {};
   const channels = data.channelPerformance || [];
   const ltvCacRatio = summary.avgCAC > 0 ? summary.avgLTV / summary.avgCAC : null;
-  const bestChannel = channels[0]?.source;
+  // The route happens to sort channelPerformance by roi desc, but the tile should
+  // not depend on response ordering to name the top performer.
+  const bestChannel = channels.reduce((best, channel) => (channel.roi || 0) > (best?.roi || 0) ? channel : best, null)?.source;
   const retention12mo = data.retentionCurve?.["12mo"]?.pct;
   const metrics = [
     { label: "Avg LTV", value: formatMoney(summary.avgLTV) }, { label: "Avg CAC", value: formatMoney(summary.avgCAC) },
