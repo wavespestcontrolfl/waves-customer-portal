@@ -12,7 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
-const { authenticate, generateToken, generateRefreshToken } = require('../middleware/auth');
+const { authenticate, generateToken, generateRefreshToken, _test: authTest } = require('../middleware/auth');
 
 const CUSTOMER = { id: 'cust-1', active: true, account_id: 'acct-1', deleted_at: null };
 const PROPERTY = { id: 'prop-2', customer_id: 'cust-1', active: true, is_primary: false, label: 'Family - Oak Ave' };
@@ -115,5 +115,10 @@ describe('saved-property session claim', () => {
     expect(next).toHaveBeenCalledTimes(1);
     expect(db).toHaveBeenCalledTimes(1);
     expect(req.propertyId).toBeNull();
+  });
+
+  test('a cancelled read-only session may read the per-property summary, but never switch', () => {
+    expect(authTest.cancelledReadRoute({ method: 'GET', baseUrl: '/api/schedule', path: '/properties-next' })).toBe(true);
+    expect(authTest.cancelledReadRoute({ method: 'POST', baseUrl: '/api/auth', path: '/select-property' })).toBe(false);
   });
 });

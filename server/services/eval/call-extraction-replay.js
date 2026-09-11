@@ -84,16 +84,19 @@ function failureLines(run) {
   return lines;
 }
 
-async function attemptReplay(runReplay, options) {
+// One attempt of any fixture replay. `isFailed` decides pass/fail from the
+// run record (this module's isFailedRun by default; the voice relay eval
+// passes its own), `lane` names the switchboard lane being replayed.
+async function attemptReplay(runReplay, options, { isFailed = isFailedRun, lane = null } = {}) {
   try {
     // Replay drives the LIVE v2 extractor over a fixed fixture. Tag its LLM
     // dispatches as replay traffic so the deliberately-hard fixture cases
     // can't dilute the live callExtraction lane's fallback/failure rates or
     // keep it looking active after real call processing stops.
     const { runAsReplay } = require('../llm-dispatch-metrics');
-    const run = await runAsReplay(() => runReplay(options));
+    const run = await runAsReplay(() => runReplay(options), lane);
     return {
-      status: isFailedRun(run) ? 'fail' : 'pass',
+      status: isFailed(run) ? 'fail' : 'pass',
       run,
     };
   } catch (err) {
@@ -139,29 +142,31 @@ async function defaultSendEmail(message) {
   return require('../email').send(message);
 }
 
-async function emailFailure({ sendEmail, subject, textBody }) {
+// `key` / `heading` name the eval in the ops digest and the email; the
+// call-extraction defaults keep this module's own callers unchanged.
+async function emailFailure({ sendEmail, subject, textBody, key = 'call-extraction-eval', heading = 'Call extraction replay eval' }) {
   const recipient = process.env.EVAL_REGRESSION_EMAIL || DEFAULT_EVAL_EMAIL;
   if (recipient === 'off') return;
   try {
     // The eval_regression bell from notifyFailure / notifyInconclusive
     // stays; in-app mode adds the ops_digest row the Activity feed lists.
     const result = await deliverOpsDigest({
-      key: 'call-extraction-eval',
+      key,
       subject,
       text: textBody,
       link: '/admin/communications',
       sendEmail: () => sendEmail({
         to: recipient,
         subject,
-        heading: 'Call extraction replay eval',
+        heading,
         body: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap;margin:0;">${escapeHtml(textBody)}</pre>`,
       }),
     });
     if (result && result.ok === false) {
-      logger.warn(`[call-replay-eval] failure email not sent: ${result.error || 'unknown error'}`);
+      logger.warn(`[${key}] failure email not sent: ${result.error || 'unknown error'}`);
     }
   } catch (err) {
-    logger.warn(`[call-replay-eval] failure email not sent: ${err?.message || err}`);
+    logger.warn(`[${key}] failure email not sent: ${err?.message || err}`);
   }
 }
 
@@ -252,12 +257,16 @@ async function runCallExtractionReplayEval(opts = {}) {
     || ((options) => require('../../scripts/replay-call-extraction-variance').runReplayVariance(options));
   const notify = opts.notify || defaultNotify;
   const sendEmail = opts.sendEmail || defaultSendEmail;
+  // notifyOnFailure: false = a manual run — no bell, no email and no ops
+  // digest (emailFailure's deliverOpsDigest writes an in-app notification
+  // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
+  const notifyOnFailure = opts.notifyOnFailure !== false;
   const fixturePath = opts.fixturePath || DEFAULT_FIXTURE_PATH;
   const replayOptions = {
     fixturePath,
     jsonl: true,
     includeValues: false,
-    ...(opts.replayOptions || {}),
+    ...opts.replayOptions,
   };
 
   const firstAttempt = await attemptReplay(runReplay, replayOptions);
@@ -275,13 +284,16 @@ async function runCallExtractionReplayEval(opts = {}) {
     }
   }
 
-  if (finalAttempt.status === 'fail') {
+  if (!notifyOnFailure) {
+    logger.info(`[call-replay-eval] manual run — ${finalAttempt.status}, no notification`);
+  } else if (finalAttempt.status === 'fail') {
     await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   } else if (finalAttempt.status === 'inconclusive') {
     await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
   }
 
-  const summary = finalAttempt.run?.summary || {};
+  const run = finalAttempt.run || {};
+  const summary = run.summary || {};
   const result = {
     status: finalAttempt.status,
     flaky,
@@ -291,7 +303,7 @@ async function runCallExtractionReplayEval(opts = {}) {
     fixtureExpectations: summary.fixtureExpectations || { checked: 0, passed: 0, failed: 0, failedCallIds: [] },
     goldAccuracy: compactGoldAccuracy(summary.goldAccuracy),
     attempts: attempts.map(compactAttempt),
-    results: finalAttempt.run?.results || [],
+    results: run.results || [],
   };
 
   logger.info(`[call-replay-eval] done: status=${result.status}${result.flaky ? ' flaky=true' : ''} checked=${result.checked} replayErrors=${result.replayErrors} failedExpectations=${result.fixtureExpectations.failed || 0} | ${goldAccuracyLine(result.goldAccuracy)}`);
@@ -301,6 +313,13 @@ async function runCallExtractionReplayEval(opts = {}) {
 module.exports = {
   runCallExtractionReplayEval,
   goldAccuracyLine,
+  // The retry-once / notify plumbing, reused by the voice relay eval
+  // (services/eval/voice-relay-replay.js) so both weekly evals fail and
+  // page the same way.
+  attemptReplay,
+  emailFailure,
+  defaultNotify,
+  defaultSendEmail,
   _internals: {
     DEFAULT_FIXTURE_PATH,
     MANUAL_RERUN,

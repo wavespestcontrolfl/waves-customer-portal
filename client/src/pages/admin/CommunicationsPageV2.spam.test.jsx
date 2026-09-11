@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { SmsTab } from "./CommunicationsPageV2";
@@ -29,4 +29,44 @@ it.each([
   expect(await screen.findByText("Please quote pest control")).toBeInTheDocument();
   expect(screen.queryByText("Blocked vendor pitch")).not.toBeInTheDocument();
   expect(screen.getByRole("option", { name: "Unanswered (1)" })).toBeInTheDocument();
+});
+
+// codex #4213 P2: a failed /messages/read after a successful block must not
+// be reported as a mark-spam failure — the block already stood, and the
+// confirmation must not claim the thread was marked read when it wasn't.
+it("reports a read failure separately after the block itself succeeds", async () => {
+  localStorage.setItem("waves_admin_token", "synthetic-token");
+  const spammer = "+15557654321";
+  const messages = [
+    { id: "m1", conversationId: "conv1", from: spammer, to: line, channel: "sms", direction: "inbound", body: "Unsolicited pitch", createdAt: "2024-01-01T12:00:00Z", isRead: false },
+  ];
+  let blockPosted = false;
+  vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+    const path = new URL(String(url), "http://localhost").pathname;
+    if (path.endsWith("/blocked-numbers") && options.method === "POST") {
+      blockPosted = true;
+      return new Response(JSON.stringify({ success: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (path.endsWith("/messages/read")) {
+      return new Response(JSON.stringify({ error: "read service unavailable" }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
+    const data = path.endsWith("/log") ? { messages }
+      : path.endsWith("/blocked-numbers") ? { numbers: blockPosted ? [{ number: spammer }] : [] }
+      : {};
+    return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+  }));
+  vi.stubGlobal("confirm", vi.fn(() => true));
+  const alertSpy = vi.fn();
+  vi.stubGlobal("alert", alertSpy);
+
+  render(<SmsTab active />, { wrapper: MemoryRouter });
+  fireEvent.click(await screen.findByText("Unsolicited pitch"));
+  fireEvent.click(await screen.findByRole("button", { name: /Mark spam/ }));
+
+  await vi.waitFor(() => expect(blockPosted).toBe(true));
+  await vi.waitFor(() => expect(alertSpy).toHaveBeenCalledTimes(1));
+  const [message] = alertSpy.mock.calls[0];
+  expect(message).toMatch(/blocked/i);
+  expect(message).toMatch(/marking the thread read failed/i);
+  expect(message).not.toMatch(/could not mark spam/i);
 });

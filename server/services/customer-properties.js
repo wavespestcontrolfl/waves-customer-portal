@@ -433,7 +433,7 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
  * corrupt the primary's identity and make the later secondary insert dedup against
  * the now-mutated primary. The unit-bearing call is handled by recordCallProperty.
  */
-async function completePrimaryFromCall(customerId, call = {}, { claimFence = null } = {}) {
+async function completePrimaryFromCall(customerId, call = {}, { claimFence = null, conn = null } = {}) {
   if (!customerId || !String(call.address_line1 || '').trim()) return undefined;
   // Optional processing-claim fence (#3418 r18): same shape as
   // recordCallProperty's — FOR UPDATE on the call_log row inside one
@@ -456,7 +456,9 @@ async function completePrimaryFromCall(customerId, call = {}, { claimFence = nul
       return completePrimaryCore(customerId, call, trx);
     });
   }
-  return completePrimaryCore(customerId, call, db);
+  // Office review already owns the customer lock; its completion and property
+  // insert must commit together on that same transaction connection.
+  return completePrimaryCore(customerId, call, conn || db);
 }
 
 async function completePrimaryCore(customerId, call, conn) {
@@ -578,6 +580,85 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
 }
 
 /**
+ * Daily backstop for the lazily-created PRIMARY row. The primary is
+ * created on first READ (properties tab, call pipeline, estimate linkage),
+ * and none of the customer-insert paths (website quote, web-form / GBP
+ * lead, Twilio, proposal win, …) create one — prod 2026-09-07: 144 live,
+ * addressed customers had no property row, and every booking anchored for
+ * them fell to NULL. This sweep fills the gap within the day so no later
+ * consumer has to assume the row exists (once #4115 lands the booking
+ * anchor backfills its own at booking time and this catches customers
+ * nothing read; until then it is the only backstop). Per customer, one transaction:
+ * customers row FOR UPDATE, re-check (still live, still addressed, still
+ * no row — a concurrent read may have backfilled it), then the same core
+ * every lazy read uses. Newest first (a fresh lead is the one about to be
+ * booked). Best-effort per row: a
+ * failure is counted and logged by code only (a knex error message embeds
+ * the SQL bindings, i.e. the address) and the sweep moves on.
+ */
+async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 } = {}) {
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  // Batches until nothing is eligible (or maxRows, a runaway guard): a
+  // daily run must drain the whole backlog, not the newest 100. A created
+  // row leaves the candidate set by itself; a failed or skipped-but-still-
+  // row-less id is excluded from later batches so it cannot be re-selected
+  // forever within one run.
+  const seen = new Set();
+  let cappedOut = false;
+  while (results.checked < maxRows) {
+    const rows = await db('customers as c')
+      .whereNull('c.deleted_at')
+      .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
+      .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
+      .modify((q) => { if (seen.size) q.whereNotIn('c.id', Array.from(seen)); })
+      .orderBy('c.created_at', 'desc')
+      .limit(Math.min(batchSize, maxRows - results.checked))
+      .select('c.id');
+    if (!rows.length) break;
+    for (const row of rows) {
+      seen.add(row.id);
+      results.checked += 1;
+      try {
+        const r = await db.transaction(async (trx) => {
+          const customer = await trx('customers').where({ id: row.id }).forUpdate().first();
+          if (!customer || customer.deleted_at || !String(customer.address_line1 || '').trim()) return { created: false };
+          const any = await trx('customer_properties').where({ customer_id: row.id }).first('id');
+          if (any) return { created: false };
+          return ensurePrimaryCore(customer, { source: 'backfill' }, trx);
+        });
+        if (r.created) results.created += 1; else results.skipped += 1;
+      } catch (err) {
+        results.failed += 1;
+        logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
+      }
+    }
+    // Stopped on the guard, not on an empty candidate set: whatever is left
+    // waits for the next run, and the doc's "within a day" does not hold for
+    // it. A clean resolve alone would read as fully drained.
+    if (results.checked >= maxRows) cappedOut = true;
+  }
+  if (results.checked > 0) {
+    logger.info(
+      `[customer-properties] primary backstop sweep: checked=${results.checked}, ` +
+      `created=${results.created}, skipped=${results.skipped}, failed=${results.failed}`,
+    );
+  }
+  if (cappedOut) {
+    logger.warn(`[customer-properties] primary backstop stopped at the maxRows guard (${maxRows}); a backlog may remain for the next run`);
+  }
+  // Every row was attempted; now surface the failures to job_health (the
+  // scheduler runs this under runExclusive, which records success on a
+  // resolved promise) — counts only, never an address or SQL text.
+  if (results.failed > 0) {
+    throw Object.assign(
+      new Error(`primary backstop sweep: ${results.failed} of ${results.checked} row(s) failed`),
+      { results },
+    );
+  }
+  return results;
+}
+
+/**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
  * visit-group stamp needs a property anchor, and the estimate-linkage
@@ -696,6 +777,7 @@ async function anchorSoleProperty(target, cols, conn = db) {
 }
 
 module.exports = {
+  sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,

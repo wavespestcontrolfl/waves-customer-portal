@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody } from '../ui/Sheet';
 import { cn } from '../ui/cn';
 import { Badge } from '../ui/Badge';
+import { Button } from '../ui/Button';
+import { Input } from '../ui/Input';
 import PrepGuideForm, { PREP_GUIDE_LINKS } from './PrepGuideForm';
 
 // The composers' Quick Links picker: one searchable sheet over links and prep
@@ -134,23 +136,23 @@ export default function InsertLinkSheet({
     <Sheet open={open} onClose={close} width="sm" ariaLabel="Quick Links" layer={layer} keepMounted={!!prepGuide}>
       <SheetHeader>
         <span className="text-14 font-medium text-zinc-900">Quick Links</span>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           onClick={close}
           disabled={prepSending}
           aria-label="Close"
-          className="w-8 h-8 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 u-focus-ring text-13"
+          className="ui-icon-action"
         >
-          ✕
-        </button>
+          <span aria-hidden>✕</span>
+        </Button>
       </SheetHeader>
       {prepGuide ? (
         <SheetBody>
-          <button type="button" disabled={prepSending}
+          <Button variant="ghost" disabled={prepSending}
             onClick={() => setPrepGuide(null)}
-            className="border-0 bg-transparent p-0 text-14 text-zinc-600 underline mb-4 u-focus-ring disabled:opacity-50">
+            className="mb-4">
             Back to Quick Links
-          </button>
+          </Button>
           <PrepGuideForm active={open} guide={prepGuide} initialSearch={recipientSearch}
             initialChannel={prepChannel} onSendingChange={setPrepSending} />
         </SheetBody>
@@ -165,7 +167,7 @@ export default function InsertLinkSheet({
             <circle cx="11" cy="11" r="7" />
             <line x1="21" y1="21" x2="16.5" y2="16.5" />
           </svg>
-          <input
+          <Input
             ref={searchRef}
             type="search"
             value={query}
@@ -175,27 +177,22 @@ export default function InsertLinkSheet({
             aria-label="Search links"
             className={cn(
               "w-full h-11 bg-white border-hairline border-zinc-300 rounded-sm",
-              "text-16 md:text-13 text-zinc-900 pl-9 pr-3",
+              "text-16 text-zinc-900 pl-9 pr-3",
               "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
             )}
           />
         </div>
         <div className="flex gap-1.5 overflow-x-auto py-2.5 [scrollbar-width:none]">
           {[["all", "All"], ...LINK_GROUP_ORDER].map(([key, label]) => (
-            <button
+            <Button
               key={key}
-              type="button"
+              variant={activeCategory === key ? "primary" : "secondary"}
               aria-pressed={activeCategory === key}
               onClick={() => setActiveCategory(key)}
-              className={cn(
-                "shrink-0 text-12 font-medium rounded-full px-3 py-1.5 border-hairline u-focus-ring",
-                activeCategory === key
-                  ? "bg-zinc-900 border-zinc-900 text-white"
-                  : "bg-white border-zinc-300 text-ink-secondary hover:bg-zinc-50",
-              )}
+              className="shrink-0 rounded-full"
             >
               {label}
-            </button>
+            </Button>
           ))}
         </div>
       </div>
@@ -206,11 +203,11 @@ export default function InsertLinkSheet({
             inserts down with it. The library's own state renders below. */}
         {groups.map(({ key, label, rows }) => (
             <div key={key}>
-              <div className="px-5 pt-3.5 pb-1 text-11 uppercase tracking-label font-medium text-ink-tertiary">
+              <div className="px-5 pt-3.5 pb-1 text-ui-label font-medium text-ink-secondary">
                 {label}
               </div>
               {!hasQuery && groupCaptions[key] && (
-                <div className="px-5 pb-1 text-11 text-ink-disabled leading-snug">
+                <div className="px-5 pb-2 text-ui-caption text-ink-secondary leading-normal">
                   {groupCaptions[key]}
                 </div>
               )}
@@ -230,7 +227,7 @@ export default function InsertLinkSheet({
                     title={link.title || link.name}
                     aria-expanded={link.channels ? chooserOpen : undefined}
                     className={cn(
-                      "w-full flex items-center gap-3 text-left px-5 py-2.5 u-focus-ring",
+                      "w-full min-h-11 appearance-none border-0 bg-white flex items-center gap-3 text-left px-5 py-3 text-ui-body u-focus-ring",
                       "hover:bg-zinc-50 disabled:opacity-60",
                       chooserOpen && "bg-zinc-50",
                     )}
@@ -239,8 +236,8 @@ export default function InsertLinkSheet({
                       {ICONS[link.category === "customer" ? "customer" : link.category === "reviews" ? "reviews" : "link"]}
                     </span>
                     <span className="flex-1 min-w-0">
-                      <span className="block text-13 font-medium text-zinc-900 truncate">{link.name}</span>
-                      <span className="block text-11 text-ink-tertiary truncate">
+                      <span className="block text-ui-body font-medium text-zinc-900 truncate">{link.name}</span>
+                      <span className="block text-ui-caption text-ink-secondary truncate">
                         {link.description || displayUrl(link.url) || "Personal link — looked up on insert"}
                       </span>
                     </span>
@@ -263,12 +260,12 @@ export default function InsertLinkSheet({
                           onClick={() => onPick(link, value)}
                           disabled={busyKey != null}
                           className={cn(
-                            "flex items-baseline gap-2 text-left rounded-sm px-3 py-1.5 border-hairline border-zinc-300 bg-white u-focus-ring",
+                            "flex min-h-11 items-baseline gap-2 text-left rounded-sm px-3 py-2 border-hairline border-zinc-300 bg-white text-ui-body u-focus-ring",
                             "hover:bg-zinc-100 disabled:opacity-60",
                           )}
                         >
-                          <span className="text-13 font-medium text-zinc-900 w-11 shrink-0">{label}</span>
-                          <span className="text-12 text-ink-secondary">{hint}</span>
+                          <span className="text-ui-body font-medium text-zinc-900 w-11 shrink-0">{label}</span>
+                          <span className="text-ui-caption text-ink-secondary">{hint}</span>
                         </button>
                       ))}
                     </div>
@@ -279,20 +276,20 @@ export default function InsertLinkSheet({
             </div>
           ))}
         {loading && (
-          <div className="px-5 py-4 text-13 text-ink-secondary">Loading the link library…</div>
+          <div className="px-5 py-4 text-ui-body text-ink-secondary">Loading the link library…</div>
         )}
         {!loading && error && (
-          <div className="px-5 py-4 text-13">
+          <div className="px-5 py-4 text-ui-body">
             <span className="text-alert-fg">{error}</span>{" "}
             {onRetry && (
-              <button type="button" onClick={onRetry} className="underline text-zinc-900 u-focus-ring">
+              <Button variant="ghost" onClick={onRetry} className="underline">
                 Retry
-              </button>
+              </Button>
             )}
           </div>
         )}
         {!loading && !error && !groups.length && (
-          <div className="px-5 py-6 text-13 text-ink-secondary leading-relaxed">
+          <div className="px-5 py-6 text-ui-body text-ink-secondary leading-relaxed">
             No links match &ldquo;{query.trim()}&rdquo;.
             <br />
             Add it under Settings &rsaquo; Link Library and it shows up here.
