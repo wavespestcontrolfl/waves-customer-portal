@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { evaluateNoShow, latestPromises } = require('../services/no-show-detector');
+const { evaluateNoShow, latestPromises, trackingKey } = require('../services/no-show-detector');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
 describe('missing tracking stages', () => {
@@ -42,4 +42,27 @@ describe('missing tracking stages', () => {
     for (const result of report.thresholds) expect(result.alerts).toMatchObject([{ stage: 1, at: '2026-09-10T14:10:00.000Z' }]);
   });
 
+});
+
+describe('tracking key (reassignment refreshes the office alert)', () => {
+  const base = { visitId: 'visit', startAt: '2026-09-10T13:00:00.000Z', stage: 2, type: 'tech_late' };
+  test('a different recipient tech changes the key, even with promise/stage/type unchanged', () => {
+    const keyForA = trackingKey({ ...base, recipient: 'tech-a' });
+    const keyForB = trackingKey({ ...base, recipient: 'tech-b' });
+    expect(keyForA).not.toBe(keyForB);
+    // Same reason: the sweep's `alert.payload?.tracking_key !== key` branch
+    // (no-show-detector.js sweep()) resolves the alert holding keyForA once
+    // the live key is keyForB, so a reassigned stage-2 visit gets its office
+    // alert resolved and recreated instead of sitting stale under the old
+    // tech_id — /admin/dispatch/alerts joins tech_name off that stale
+    // tech_id otherwise (codex P1).
+  });
+  test('an unassigned visit and a same-visit assigned visit never collide on the "unassigned" placeholder', () => {
+    const unassigned = trackingKey({ ...base, type: 'unassigned_overdue', recipient: null });
+    const assigned = trackingKey({ ...base, recipient: 'tech-a' });
+    expect(unassigned).not.toBe(assigned);
+  });
+  test('identical inputs are stable (no spurious resolve/recreate churn on an unchanged visit)', () => {
+    expect(trackingKey({ ...base, recipient: 'tech-a' })).toBe(trackingKey({ ...base, recipient: 'tech-a' }));
+  });
 });

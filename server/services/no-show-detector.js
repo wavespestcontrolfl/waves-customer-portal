@@ -146,6 +146,17 @@ function trackingIdentityFields(recipientTech, card) {
     customer_first_name: card.first_name || null, customer_last_name: card.last_name || null };
 }
 
+// Pure, exported for tests. The recipient tech rides in the key (not just
+// the type) so a reassignment between two active/dispatchable techs — which
+// leaves promise/stage/type unchanged — still changes the key: the sweep's
+// existing `payload.tracking_key !== key` branch then resolves the stale
+// office alert (still joining tech_name via the old tech_id) and creates a
+// fresh one for the new recipient, and the tech-notice reconcile keys off
+// the same value (codex P1).
+function trackingKey({ visitId, startAt, stage, type, recipient }) {
+  return `tracking:${visitId}:${startAt}:${stage}:${type}:${recipient || 'unassigned'}`;
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -163,7 +174,7 @@ async function sweep(conn, { now = new Date() } = {}) {
         employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;
       const recipient = recipientTech?.id || null;
       const type = recipient ? 'tech_late' : 'unassigned_overdue';
-      const key = `tracking:${card.id}:${live.promised_window.start_at}:${live.stage}:${type}`;
+      const key = trackingKey({ visitId: card.id, startAt: live.promised_window.start_at, stage: live.stage, type, recipient });
       // Identify the visit on the card itself (codex P1) — a tech with more
       // than one stop can't tell which one a bare stage message is about.
       // Same "who/when" a visit_* card shows, not a second formatter. Built
@@ -174,7 +185,7 @@ async function sweep(conn, { now = new Date() } = {}) {
       const customerName = techNotices.customerLabel({ cust_last_name: card.last_name, cust_first_name: card.first_name });
       const when = techNotices.formatPromisedWindow(live.promised_window.start_at, live.promised_window.end_at);
       const notice = await techNotices.recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
-        stage: live.stage, dedupeKey: `${key}:${recipient}`, message: live.message,
+        stage: live.stage, dedupeKey: key, message: live.message,
         payload: { ...live, visit_id: card.id, customer_name: customerName, when } });
       const office = live.stage === 2 || !recipient;
       // Only alerts THIS detector created (matches clearTrackingBells in
@@ -253,4 +264,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep };
+module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey };
