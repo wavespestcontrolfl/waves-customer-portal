@@ -132,6 +132,33 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // Fired by call-recording-processor.js right after it creates a customer
+  // row from a call whose on-file phone resolves to a non-mobile line
+  // (landline / fixed-VoIP) — the 2026-09-10 incident: a caller-ID landline
+  // became customers.phone, and the customer's real cell (only ever texted
+  // in from later) could never receive the SMS login code. allowContactDetails
+  // so the office has a dialable number to call and ask for a cell.
+  //
+  // Own dedicated category, deliberately NOT 'alert' (codex review, PR #4341
+  // r1 P1): the shared 'alert' bucket default-denies under
+  // GATE_ADMIN_BELL_POLICY, which would silently drop this trigger. This
+  // category is instead on notification-bell-policy.js's DEFAULT_ON_CATEGORIES
+  // (rings unless the owner turns it off in Settings — same treatment as
+  // estimate_change_request), so it also has to be added there, not just here.
+  customer_landline_from_call: {
+    label: 'New customer created with a landline number',
+    category: 'customer_landline_from_call',
+    priority: 'normal',
+    group: 'Leads & Sales',
+    allowContactDetails: true,
+    build: (p) => ({
+      title: `Landline on file: ${p.name || 'New customer'}`,
+      body: `Created from a caller-ID landline${p.phone ? ` (${p.phone})` : ''} — SMS login codes and texts won't reach it. Call to collect a mobile number.`,
+      link: p.customerId
+        ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}`
+        : '/admin/customers',
+    }),
+  },
   new_lead: {
     label: 'New lead submitted',
     category: 'new_lead',
@@ -147,11 +174,11 @@ const TRIGGER_REGISTRY = {
       ];
       if (p.service) bodyParts.push(`Wants ${p.service}`);
       if (p.phone) bodyParts.push(`Phone: ${maskPhone(p.phone)}`);
-      if (p.message) bodyParts.push('Message included on lead record');
+      if (p.message) bodyParts.push(p.leadId ? 'Message included on lead record' : 'Message in the SMS inbox');
       return {
         title: p.title || 'New lead',
         body: bodyParts.join(' - '),
-        link: p.leadId ? `/admin/leads?lead=${p.leadId}` : '/admin/leads',
+        link: p.leadId ? `/admin/leads?lead=${p.leadId}` : (p.link || '/admin/leads'),
       };
     },
   },
@@ -784,6 +811,9 @@ const PRIORITY_VIBRATE = {
 };
 
 function pushTagFor(triggerKey, payload = {}) {
+  if (triggerKey === 'new_lead' && payload.twilioSid) {
+    return `waves-new_lead-${payload.twilioSid}`;
+  }
   if (triggerKey === 'sms_reply') {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
@@ -807,6 +837,13 @@ function pushTagFor(triggerKey, payload = {}) {
     // silently swallow the first. Stable per call — a reprocess re-push for
     // the SAME call may replace itself.
     return `waves-customer_voicemail_callback-${payload.callLogId || 'unknown-call'}`;
+  }
+  if (triggerKey === 'customer_landline_from_call') {
+    // Per-customer tag: two call-created customers classified as landlines
+    // before the office opens the first alert must not collapse into one
+    // push (renotify:false in the service worker replaces same-tag pushes).
+    // Stable per customer — a re-run for the SAME customer may replace itself.
+    return `waves-customer_landline_from_call-${payload.customerId || 'unknown-customer'}`;
   }
   if (triggerKey === 'appointment_reschedule_intent') {
     // Per-customer tag: two customers texting reschedule requests before
@@ -1057,7 +1094,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               priority: trigger.priority,
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
-              renotify: triggerKey === 'sms_reply',
+              renotify: triggerKey === 'sms_reply' || (triggerKey === 'new_lead' && Boolean(payload.twilioSid)),
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           },

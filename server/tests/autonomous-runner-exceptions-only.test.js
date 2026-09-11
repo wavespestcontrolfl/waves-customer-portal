@@ -235,3 +235,86 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
     expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 });
+
+describe('agent stream EOF retry (session_stream_eof)', () => {
+  const makeBriefBuilder = () => ({
+    compose: jest.fn().mockResolvedValue({
+      id: 'brief_eof', action_type: 'new_supporting_blog', page_type: 'supporting-blog', human_review_required: false,
+    }),
+  });
+  const eof = (session, duration_ms = 240000) => ({ ok: false, code: 'session_stream_eof', reason: `streaming_failed: session ${session} stream ended without a terminal event`, session_id: session, duration_ms });
+
+  afterEach(() => { delete process.env.AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES; });
+
+  test('re-dispatches the same brief once after a provider stream EOF and uses the second result', async () => {
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+    const queue = makeQueue({ id: 'opp_eof', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = {
+      runWithBrief: jest.fn()
+        .mockResolvedValueOnce(eof('sesn_1'))
+        .mockResolvedValueOnce({ ok: true, session_id: 'sesn_2', duration_ms: 300000, draft: { url: '/blog/eof-retry/', title: 'EOF Retry Post', body: 'Benign copy about seasonal ant pressure in Southwest Florida homes.' } }),
+    };
+    const { runner } = loadRunner({
+      queue, briefBuilder: makeBriefBuilder(), dispatcher,
+      uniquenessGate: { evaluateBlog: jest.fn().mockReturnValue({ ok: true }), evaluate: jest.fn().mockReturnValue({ ok: true }) },
+      qualityGate: { evaluate: jest.fn().mockReturnValue({ ok: false, hard_failures: ['word_count'], soft_failures: [], total_score: 40, min_total_score: 80 }) },
+    });
+
+    const result = await runner.runNext();
+
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(2);
+    expect(dispatcher.runWithBrief.mock.calls[0][0]).toBe(dispatcher.runWithBrief.mock.calls[1][0]);
+    // The draft reached the gates (a quality MISS, not failed_agent) — the
+    // retry delivered a draft where the first attempt had none.
+    expect(result.outcome).not.toBe('failed_agent');
+    expect(result.agent_session_id).toBe('sesn_2');
+    // agent_ms is the "Write draft" stage duration — it spans BOTH sessions.
+    expect(result.agent_ms).toBe(540000);
+  });
+
+  test('a second EOF files failed_agent; deadline timeouts are never retried', async () => {
+    const queue = makeQueue({ id: 'opp_eof2', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue(eof('sesn_x')) };
+    const { runner } = loadRunner({ queue, briefBuilder: makeBriefBuilder(), dispatcher });
+    const result = await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(2);
+    expect(result.outcome).toBe('failed_agent');
+    expect(result.failure_message).toMatch(/stream ended without a terminal event/);
+    expect(queue.release).toHaveBeenCalledWith('opp_eof2', { claimToken: claimedAt });
+
+    const timeoutDispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: false, code: 'session_timeout', reason: 'streaming_failed: session sesn_t timed out at its deadline' }) };
+    const { runner: runner2 } = loadRunner({ queue: makeQueue({ id: 'opp_to', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} }), briefBuilder: makeBriefBuilder(), dispatcher: timeoutDispatcher });
+    const result2 = await runner2.runNext();
+    expect(timeoutDispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(result2.outcome).toBe('failed_agent');
+  });
+
+  test('a retry that dies before creating a session keeps the first session pointer (Codex r3)', async () => {
+    const queue = makeQueue({ id: 'opp_eof_nc', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = {
+      runWithBrief: jest.fn()
+        .mockResolvedValueOnce({ ...eof('sesn_real'), agent_id: 'agent_1' })
+        .mockResolvedValueOnce({ ok: false, code: 'session_create_failed', reason: 'session_create_failed: 503', duration_ms: 1200 }),
+    };
+    const { runner } = loadRunner({ queue, briefBuilder: makeBriefBuilder(), dispatcher });
+    const result = await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(2);
+    expect(result.outcome).toBe('failed_agent');
+    expect(result.failure_message).toBe('session_create_failed: 503');
+    // The only session that ever existed must stay correlatable.
+    expect(result.agent_session_id).toBe('sesn_real');
+    expect(result.agent_id).toBe('agent_1');
+    expect(result.agent_ms).toBe(241200);
+  });
+
+  test('AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES=0 disarms the retry', async () => {
+    process.env.AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES = '0';
+    const queue = makeQueue({ id: 'opp_eof0', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue(eof('sesn_0')) };
+    const { runner } = loadRunner({ queue, briefBuilder: makeBriefBuilder(), dispatcher });
+    const result = await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(1);
+    expect(result.outcome).toBe('failed_agent');
+  });
+});

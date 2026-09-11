@@ -114,12 +114,18 @@ function buildProposalFirstInvoice(proposal) {
         ? ` (${FIRST_PERIOD_LABEL[item.frequency] || 'first period'})`
         : '';
       const prefix = isMultiBuilding && buildingName ? `${buildingName} — ` : '';
-      const description = cleanStr(`${prefix}${item.description || 'Service'}${periodNote}`, 300);
+      // Invoice displays format rates in cents. Preserve a fractional bid's
+      // exact basis in the description and bill its reviewed extended amount.
+      const fractionalBasis = !Number.isInteger(num(item.quantity, 1)) || roundMoney(item.unitPrice) !== Number(item.unitPrice);
+      const basis = (fractionalBasis || item.unit) ? ` (${require('../../shared/proposal-bid.cjs').formatLineBasis(item)})` : '';
+      const description = basis
+        ? cleanStr(`${prefix}${item.description || 'Service'}`, Math.max(1, 300 - basis.length - periodNote.length)) + basis + periodNote
+        : cleanStr(`${prefix}${item.description || 'Service'}${periodNote}`, 300);
 
       lineItems.push({
         description,
-        quantity: Math.max(1, Math.round(num(item.quantity, 1))),
-        unit_price: roundMoney(item.unitPrice),
+        quantity: fractionalBasis ? 1 : Math.max(1, num(item.quantity, 1)),
+        unit_price: fractionalBasis ? amount : roundMoney(item.unitPrice),
       });
       subtotal = roundMoney(subtotal + amount);
       if (item.taxable === true) {

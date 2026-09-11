@@ -1008,7 +1008,7 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // it would forge a $99 waiver, so it is stripped like the rest; the admin
 // save re-supplies its own ACCOUNT-wide server-derived list (codex #3591
 // r15 P1 / r34 P1).
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'palmAnnualRounding', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
+const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'termitePricingKnobs', 'palmAnnualRounding', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
 function sanitizeClientIdentityFields(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
@@ -1177,6 +1177,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     const tsKnobs = require('./estimate-tree-shrub-knob-replay')
       .treeShrubKnobSignalForReplay(estimateData);
     if (tsKnobs) v1Input.treeShrubPricingKnobs = tsKnobs;
+    // Termite station-cost snapshot (plan 2026-09-03 §A1) — same reader the
+    // public replay uses, so the authoritative recompute (membership
+    // reconcile, opt-out, admin re-save) keeps a sent install at its quoted
+    // hardware cost instead of persisting the live one over it.
+    const termiteKnobs = require('./estimate-tree-shrub-knob-replay')
+      .termiteKnobSignalForReplay(estimateData);
+    if (termiteKnobs) v1Input.termitePricingKnobs = termiteKnobs;
     // v4.8 palm provenance (pre-push r2 P0): a translator-based replay of a
     // persisted engineRequest whose stored T&S line priced no service-line
     // palms must not adopt the new property-palm promotion — same

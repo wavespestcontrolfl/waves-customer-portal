@@ -36,6 +36,7 @@ const catalogServiceIdForProfile = async (conn, profile) => {
   const link = await catalogLinkForProfile(conn, profile);
   return link ? link.id : null;
 };
+const selectable = (read) => ({ modify: async () => read() });
 
 // The 2026-08-25 coverage expansion seeds ride on top of the original four
 // rows; the alias appends (wasp, pre_slab_termidor) join their parent
@@ -243,7 +244,7 @@ describe('resolveEstimateSlotProfile carries the RAW engine key', () => {
     const conn = () => ({
       whereRaw: (_sql, b) => {
         bindings = b;
-        return { andWhere: () => ({ limit: () => ({ select: async () => [] }) }) };
+        return { andWhere: () => ({ limit: () => ({ select: () => selectable(() => []) }) }) };
       },
     });
     conn.transaction = async (cb) => cb(conn);
@@ -259,8 +260,8 @@ describe('catalogLinkForProfile — verified catalog key on the line', () => {
   // falls through to containment on a miss (codex #3842 r3 P1).
   const makeKeyConn = (rowsByKey, onContainment) => {
     const builder = () => ({
-      where: (w) => ({ limit: () => ({ select: async () => rowsByKey(w) }) }),
-      whereRaw: (_sql, b) => { onContainment(b); return { andWhere: () => ({ limit: () => ({ select: async () => [] }) }) }; },
+      where: (w) => ({ limit: () => ({ select: () => selectable(() => rowsByKey(w)) }) }),
+      whereRaw: (_sql, b) => { onContainment(b); return { andWhere: () => ({ limit: () => ({ select: () => selectable(() => []) }) }) }; },
     });
     builder.transaction = async (cb) => cb(builder);
     return builder;
@@ -290,6 +291,16 @@ describe('catalogLinkForProfile — verified catalog key on the line', () => {
     await catalogLinkForProfile(makeKeyConn(() => [], (b) => { bindings = b; }), profile());
     expect(bindings).toEqual([JSON.stringify(['pest_initial_roach'])]);
   });
+  test('exact-key read errors fail open for identity but rethrow for strict allowance reads', async () => {
+    const readError = new Error('catalog key read failed');
+    const conn = makeKeyConn(() => { throw readError; }, () => {});
+    await expect(catalogLinkForProfile(
+      conn, profile({ catalogServiceKey: 'cockroach_control' }),
+    )).resolves.toBeNull();
+    await expect(catalogLinkForProfile(
+      conn, profile({ catalogServiceKey: 'cockroach_control' }), { strictAllowanceRead: true },
+    )).rejects.toBe(readError);
+  });
   test('the one-time profile carries the frozen key off the breakdown line', () => {
     const { oneTimeProfileServices } = require('../services/estimate-slot-availability')._internals;
     const rows = oneTimeProfileServices({}, { result: { oneTime: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', price: 250, catalogServiceKey: 'cockroach_control' }] } } });
@@ -312,7 +323,7 @@ describe('catalogServiceIdForProfile', () => {
   const makeConn = (onQuery) => {
     const builder = () => ({
       whereRaw: (_sql, b) => ({
-        andWhere: (w) => ({ limit: () => ({ select: async () => onQuery(b, w) }) }),
+        andWhere: (w) => ({ limit: () => ({ select: () => selectable(() => onQuery(b, w)) }) }),
       }),
     });
     builder.transaction = async (cb) => cb(builder);
@@ -346,7 +357,7 @@ describe('catalogServiceIdForProfile', () => {
     let where = null;
     const conn = () => ({
       whereRaw: () => { throw new Error('family key must not be containment-queried'); },
-      where: (cond) => { where = cond; return { limit: () => ({ select: async () => [{ id: 'svc-pest', name: 'Monthly Pest Control Service', service_key: cond.service_key }] }) }; },
+      where: (cond) => { where = cond; return { limit: () => ({ select: () => selectable(() => [{ id: 'svc-pest', name: 'Monthly Pest Control Service', service_key: cond.service_key }]) }) }; },
     });
     conn.transaction = async (cb) => cb(conn);
     await catalogServiceIdForProfile(
@@ -385,10 +396,10 @@ describe('catalogServiceIdForProfile', () => {
   describe('cadence-keyed fallback', () => {
     const makeCadenceConn = (keyRows, capture = {}) => {
       const builder = () => ({
-        whereRaw: () => ({ andWhere: () => ({ limit: () => ({ select: async () => [] }) }) }),
+        whereRaw: () => ({ andWhere: () => ({ limit: () => ({ select: () => selectable(() => []) }) }) }),
         where: (cond) => {
           capture.where = cond;
-          return { limit: () => ({ select: async () => keyRows }) };
+          return { limit: () => ({ select: () => selectable(() => keyRows) }) };
         },
       });
       builder.transaction = async (cb) => cb(builder);
@@ -459,8 +470,8 @@ describe('catalogServiceIdForProfile', () => {
       // must not stamp a 12-visit monthly accept (codex #3485 r13 P1).
       let containmentQueried = false;
       const conn = () => ({
-        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-quarterly' }] }) }) }; },
-        where: (cond) => ({ limit: () => ({ select: async () => [{ id: 'svc-monthly', name: 'Monthly Pest Control Service', service_key: cond.service_key }] }) }),
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: () => selectable(() => [{ id: 'svc-quarterly' }]) }) }) }; },
+        where: (cond) => ({ limit: () => ({ select: () => selectable(() => [{ id: 'svc-monthly', name: 'Monthly Pest Control Service', service_key: cond.service_key }]) }) }),
       });
       conn.transaction = async (cb) => cb(conn);
       const link = await catalogLinkForProfile(conn, {
@@ -477,8 +488,8 @@ describe('catalogServiceIdForProfile', () => {
       // row's identity (pre-push P1). They stay unlinked instead.
       let containmentQueried = false;
       const conn = () => ({
-        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-admin-mapped' }] }) }) }; },
-        where: () => ({ limit: () => ({ select: async () => [] }) }),
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: () => selectable(() => [{ id: 'svc-admin-mapped' }]) }) }) }; },
+        where: () => ({ limit: () => ({ select: () => selectable(() => []) }) }),
       });
       conn.transaction = async (cb) => cb(conn);
       for (const services of [
@@ -507,8 +518,8 @@ describe('catalogServiceIdForProfile', () => {
       // otherwise stamp the RESIDENTIAL bait row (pre-push P1).
       let containmentQueried = false;
       const conn = () => ({
-        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: async () => [{ id: 'svc-resi-bait' }] }) }) }; },
-        where: () => ({ limit: () => ({ select: async () => [] }) }),
+        whereRaw: () => { containmentQueried = true; return { andWhere: () => ({ limit: () => ({ select: () => selectable(() => [{ id: 'svc-resi-bait' }]) }) }) }; },
+        where: () => ({ limit: () => ({ select: () => selectable(() => []) }) }),
       });
       conn.transaction = async (cb) => cb(conn);
       expect(await catalogLinkForProfile(conn, {
@@ -534,6 +545,15 @@ describe('catalogServiceIdForProfile', () => {
       makeConn(() => { throw new Error('column "engine_keys" does not exist'); }),
       { services: [{ service: 'pre_slab_termiticide' }] },
     )).resolves.toBeNull();
+  });
+
+  test('containment read errors rethrow for strict allowance reads', async () => {
+    const readError = new Error('engine key read failed');
+    await expect(catalogLinkForProfile(
+      makeConn(() => { throw readError; }),
+      { services: [{ service: 'pre_slab_termiticide' }] },
+      { strictAllowanceRead: true },
+    )).rejects.toBe(readError);
   });
 
   test('never queries on a connection that cannot open a savepoint', async () => {

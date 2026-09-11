@@ -734,6 +734,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:20 AM ET — primary-property backstop. The same customer-create
+  // paths never create the lazily-backfilled primary customer_properties
+  // row, so a booking for a fresh lead anchored to NULL (prod 2026-09-07:
+  // 144 rows missing). Daily is enough (owner 2026-09-07) once #4115
+  // lands: from then on the booking anchor backfills a missing primary at
+  // booking time and this only has to catch customers nothing read in
+  // between. Until #4115 merges this sweep is the only backstop, so #4115
+  // merges first. Own job_health name so the watchdog reports it apart
+  // from the geocode sweep.
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepMissingPrimaryProperties } = require('./customer-properties');
+      await runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties());
+    } catch (err) {
+      logger.error(`[customer-properties] primary backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
@@ -1429,6 +1448,25 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2463,6 +2501,19 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Stripe webhook events purge failed: ${err.message}`);
     }
+    // Same 90-day sweep for property_text_decisions (the ruling-R5 shadow
+    // log for appointment texts by saved property): the review window is a
+    // week; 90 days keeps the flip's evidence around.
+    try {
+      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const db = require('../models/db');
+      if (await db.schema.hasTable('property_text_decisions')) {
+        const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
+        if (purged > 0) logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
+      }
+    } catch (err) {
+      logger.error(`property_text_decisions purge failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3217,6 +3268,10 @@ function initScheduledJobs() {
         const StatementFollowups = require('./payer-statement-followups');
         const result = await StatementFollowups.runPending();
         logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
+        // Settled-statement child closeouts that failed or never ran have no
+        // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
+        const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
+        if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
@@ -3706,6 +3761,10 @@ function initScheduledJobs() {
               ? claimMeta.stamp_receipt_invoice_id
               : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
+            // The visit a deferred appointment notice is about: the consent
+            // validator resolves the per-property toggles from it (app
+            // property scope, PR 3) exactly like the immediate send did.
+            ...(claimMeta.scheduled_service_id ? { appointmentId: claimMeta.scheduled_service_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
             // re-queues here minutes later — still an answer to the
@@ -3891,8 +3950,12 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
+          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+            // MOVE_HOLD: the replay now names its visit (appointmentId, app
+            // property scope PR 3), so a grouped-move hold stamped on that
+            // visit — or its fail-closed read — answers the send exactly like
+            // the immediate path: a deferral, never a terminal block.
             // Transient provider failure (Twilio 429/5xx/timeout) or a DB
             // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
             // no retry metadata but is retry-advised by contract): re-queue
@@ -6319,16 +6382,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:23AM — IB thread retention purge (GATE_IB_THREADS lane, owner
-  // default 365 days / IB_THREAD_RETENTION_DAYS). Hard-deletes idle
-  // ib_threads; turns ride the FK cascade. No-op while the gate is off —
-  // nothing writes threads then, and pre-existing rows still age out.
+  // DAILY 4:23AM — IB retention. Threads use IB_THREAD_RETENTION_DAYS
+  // (default 365); tasks use their stored 30-day expiry. The sweep runs with
+  // either write gate off so pre-existing conversation data still ages out.
   // =========================================================================
   cron.schedule('23 4 * * *', async () => {
     try {
       await runExclusive('ib-thread-retention', async () => {
         const { purgeExpiredThreads } = require('./intelligence-bar/threads');
         await purgeExpiredThreads();
+        const deletedTasks = await require('./intelligence-bar/tasks').purgeExpiredTasks();
+        if (deletedTasks) logger.info(`IB retention removed ${deletedTasks} expired task(s)`);
       });
     } catch (err) {
       logger.error(`IB thread retention purge failed: ${err.message}`);

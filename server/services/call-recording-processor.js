@@ -9192,6 +9192,18 @@ const CallRecordingProcessor = {
           await createDefaultCustomerRows(db, customerId)
             .catch((e) => logger.warn(`[call-proc] default rows create failed for ${customerId}: ${e.message}`));
 
+          // Line-type check (2026-09-10 incident): `phone` here can be the
+          // caller-ID ANI the customer never spoke (resolveCallContactPhone's
+          // fallback) — landing a landline in customers.phone silently breaks
+          // SMS login and every future text to this customer. Fail-open;
+          // never blocks or delays creation, which has already committed.
+          const { flagNonMobileCallCustomer } = require('./call-created-customer-line-type');
+          await flagNonMobileCallCustomer({
+            customerId,
+            phone,
+            name: [extracted.first_name, extracted.last_name].filter(Boolean).join(' ') || null,
+          });
+
           // Auto-create Stripe customer (non-blocking, but log failures so a
           // misconfigured Stripe key surfaces in the logs instead of silently
           // skipping every new customer's billing record)
@@ -14752,7 +14764,14 @@ const CallRecordingProcessor = {
                     try {
                       const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
                       const freshCustomer = await db('customers').where({ id: customerId }).first();
-                      const prefsRow = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
+                      // The visit's NON-primary saved property owns the confirmation
+                      // toggle (app property scope, PR 3): resolve the row through
+                      // the visit; an unreadable property under enforcement reads as
+                      // opted out below (held email, never a send on unknown settings).
+                      const prefsRow = await require('./appointment-reminders').visitPrefsRow(customerId, scheduledServiceId);
+                      if (!prefsRow || prefsRow.__prefsUnavailable === true) {
+                        throw new Error('notification preferences unreadable for the call-booking confirmation');
+                      }
                       const fanLast10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
                       const { filterRecipientsByOptin } = require('./recipient-optin');
                       const extraContacts = !v2SmsConsentExplicit ? [] : (await filterRecipientsByOptin(

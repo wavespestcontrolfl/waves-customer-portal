@@ -96,6 +96,7 @@
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
+ *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -121,8 +122,18 @@ const gates = {
   // ignores propertyId — tonight's behavior exactly. Registered for
   // logGateStatus; consumers read it at CALL time (gateEnvValue).
   appPropertyScope: gateEnvValue('GATE_APP_PROPERTY_SCOPE'),
+  // GATE_APP_PROPERTY_TEXTS: appointment texts for a NON-primary saved
+  // property follow that property's own toggles (property_notification_prefs,
+  // ruling-R1 defaults). Off (ruling R5): the sender seams resolve the
+  // property decision and record it in property_text_decisions next to the
+  // customer-row decision — the shadow log — with zero change to sends. Only
+  // meaningful with GATE_APP_PROPERTY_SCOPE on. Consumers read it at CALL
+  // time (gateEnvValue).
+  appPropertyTexts: gateEnvValue('GATE_APP_PROPERTY_TEXTS'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
+  // Registered for startup logging; the completion writer reads it at call time (strict 'true').
+  lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -507,6 +518,9 @@ const gates = {
   // hides the picker, and a propertyId on create is refused (409), so a
   // stale tab cannot book to a secondary address while the lane is dark.
   editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
+  // Admin-only, reasoned second-program creation; reviewed IDs are checked
+  // under the existing series-create lock. Unset hides and refuses the flow.
+  separateRecurringProgram: process.env.GATE_SEPARATE_RECURRING_PROGRAM === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
   // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
@@ -1310,6 +1324,7 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
@@ -1338,6 +1353,11 @@ const gates = {
   // appointment_cancelled template instead of vanishing silently
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07): an invoice
+  // linked to an open visit that is SENT to the customer or PAID by hand
+  // closes the visit out quietly (no report / text / review ask / charge;
+  // the invoice is reused). Ships DARK; owner flips.
+  invoiceIssuedClosesVisit: process.env.GATE_INVOICE_ISSUED_CLOSES_VISIT === 'true',
   // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
   // an accept's customers.monthly_rate becomes the SUM of the customer's
   // customer_plan_rates components, so a multi-plan customer's same-family
@@ -1876,6 +1896,10 @@ const gates = {
   // time via gateEnvValue so tests and gate flips take effect immediately.
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
+
+  // Bid unit controls; default off everywhere.
+  // Readers always honor saved quantities and units after the controls are off.
+  commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
 
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
   // proposal.pdf download, and the proposal email attachment render the React
@@ -2430,6 +2454,10 @@ const gates = {
   // (gateEnvValue is a hoisted function declaration, safe to call here.)
   ibThreads: gateEnvValue('GATE_IB_THREADS'),
 
+  // Platform-wide IB discovery/execution. Dark until explicitly enabled;
+  // existing confirmation and role gates remain mandatory on every request.
+  ibPlatform: gateEnvValue('GATE_IB_PLATFORM'),
+
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /
   // Recommendations boxes) and, in a later PR, the quoted note on the live
@@ -2582,6 +2610,8 @@ const gates = {
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
   // Staff source/version UI and APIs. Default off; every request rechecks.
   controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
+  // Field Team Program rev 2b: evidence and simulation only; never payroll.
+  fieldTeamProgram: gateEnvValue('GATE_FIELD_TEAM_PROGRAM'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
