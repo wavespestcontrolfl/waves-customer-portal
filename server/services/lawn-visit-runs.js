@@ -1,5 +1,8 @@
 /** Stored provenance for a newly created lawn visit assessment. */
 const { SCORE_KEYS } = require('./lawn-visit-scores');
+const { validateReview } = require('./lawn-visit-review-input');
+const { buildReview } = require('./lawn-visit-review-evidence');
+const { reviewedObservations } = require('./lawn-visit-customer-copy');
 
 const CONTEXT_KEYS = ['season', 'month', 'region', 'grassType', 'turfHeightIn', 'irrigation', 'priorSummary'];
 const parseObject = (value) => {
@@ -82,6 +85,62 @@ async function loadRun(assessmentId, knex) {
   }
 }
 
+// Always join the caller's transaction through a savepoint, or open one when
+// called directly. The confirmation caller owns authorization/finalization and
+// takes its customer baseline lock BEFORE this assessment -> run lock order.
+// Read under those locks: a second partial review must merge the first one's
+// committed decisions, not the snapshot it saw before waiting.
+async function reviewRun({ assessmentId, review = {}, technicianId = null, observationEdit, stressOverride }, knex) {
+  if (observationEdit !== undefined && observationEdit !== null && typeof observationEdit !== 'string') {
+    throw new TypeError('Observation edit must be text or null');
+  }
+  if (stressOverride !== undefined && stressOverride !== null && (!Number.isFinite(stressOverride) || stressOverride < 0 || stressOverride > 100)) {
+    throw new TypeError('Stress override must be a score from 0 to 100 or null');
+  }
+  return knex.transaction(async (trx) => {
+    let assessment = await trx('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
+    if (!assessment) throw Object.assign(new Error('Assessment not found'), { status: 404 });
+    const run = await trx('lawn_assessment_runs').where({ assessment_id: assessmentId }).forUpdate().first();
+    if (!run) throw Object.assign(new Error('Visit assessment run not found'), { status: 409 });
+    const validated = validateReview(review, run);
+    if (validated.errors.length) throw Object.assign(new Error('Invalid visit assessment review'), { status: 400, details: validated.errors });
+    const provided = validated.review.provided;
+    if (!provided && observationEdit === undefined && stressOverride === undefined) return { assessment, run };
+
+    const previous = parseObject(run.reconciliation) || {};
+    const built = provided ? buildReview(run, validated.review) : {};
+    const observations = observationEdit === undefined && provided
+      ? reviewedObservations({
+        current: assessment.observations, lastPublished: previous.published_observations,
+        observations: run.observations,
+        findings: [...built.reviewed_findings, ...built.added_details],
+      })
+      : null;
+    // An explicit edit withdraws ownership even when it repeats the exact
+    // generated sentence. A mismatched or absent marker never regains it.
+    const published = observationEdit !== undefined || assessment.observations !== previous.published_observations
+      ? null : (provided ? observations : previous.published_observations ?? null);
+    const reconciliation = {
+      ...previous, ...built.reconciliation, published_observations: published,
+      ...(stressOverride !== undefined ? { stress_damage_override: stressOverride } : {}),
+    };
+    const [updatedRun] = await trx('lawn_assessment_runs').where({ id: run.id }).update({
+      reconciliation: JSON.stringify(reconciliation), updated_at: trx.fn.now(),
+      ...(provided ? {
+        reviewed_findings: JSON.stringify(built.reviewed_findings),
+        added_details: JSON.stringify(built.added_details),
+        reviewed_at: trx.fn.now(), reviewed_by_technician_id: technicianId,
+      } : {}),
+    }).returning('*');
+    const nextText = observationEdit === undefined ? observations ?? assessment.observations : observationEdit;
+    if (nextText !== assessment.observations) {
+      [assessment] = await trx('lawn_assessments').where({ id: assessmentId })
+        .update({ observations: nextText, updated_at: trx.fn.now() }).returning('*');
+    }
+    return { assessment, run: updatedRun };
+  });
+}
+
 // Eligibility to compare a reconstructed prompt with the original input
 // hash, not proof that the photos or current rubric still match that hash.
 function replayContextForRun(run) {
@@ -96,4 +155,4 @@ function replayContextForRun(run) {
   return { visionContext: storedContext(context), omitted, exactInputEligible: omitted.length === 0 };
 }
 
-module.exports = { billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, replayContextForRun };
+module.exports = { billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, reviewRun, replayContextForRun };
