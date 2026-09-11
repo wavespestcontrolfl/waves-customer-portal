@@ -422,9 +422,18 @@ persist_ref_artifacts() {
 # merely that the changes were fine.
 verdict_reviewed_nothing() {
   # $1 = verdict json. 0 = the reviewer admits it reviewed nothing.
+  #
+  # EVERY alternative must require wording that the diff itself was absent or
+  # unreachable. This matcher has now produced two false positives, both of
+  # which would have thrown away a good review and manufactured a fake
+  # UN-AUDITED — the exact darkness this feature exists to remove:
+  #   "No code changes introduce correctness issues"  (bare "no code changes")
+  #   "No diff issues were found"                     (bare "no diff")
+  # So no alternative may end on a bare noun. scripts/test-verdict-guards.sh
+  # pins both cases; add to it before touching this pattern.
   [ "$(jq -r '(.findings|length)' "$1" 2>/dev/null)" = "0" ] || return 1
   jq -r '.summary // ""' "$1" 2>/dev/null | grep -Eqi \
-    "(no|empty|missing) diff( content| was provided| was available| was included)?[.,;: ]|diff (was |is )?(not |un)(available|provided|supplied|included|attached)|could not (see|read|access|retrieve|find|locate) (the |any )?(diff|changes|patch|content)|no (code )?(changes|content|files) (were |was )?(provided|available|supplied|included|attached|visible)|nothing (was )?(provided|supplied|to review|was reviewed)|(diff|changes|patch) (were|was) not (provided|included|supplied|available)"
+    "(no|empty|missing) (diff|patch)( content)?( was| is)? (not )?(provided|available|supplied|included|attached|accessible)|(diff|patch|changes) (was|were) not (provided|included|supplied|available|attached)|could not (see|read|access|retrieve|find|locate) (the |any )?(diff|change|changes|patch|content)|no (code )?(changes|content|files) (were |was )?(provided|available|supplied|included|attached|visible)|nothing (was )?(provided|supplied|to review)|(diff|patch) (is|was) (empty|unavailable|missing|inaccessible)"
 }
 
 # ── Full schema validation ───────────────────────────────────────────────
