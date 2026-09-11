@@ -43,7 +43,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
-const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
@@ -4673,13 +4673,18 @@ router.get('/month', async (req, res, next) => {
 // conflict identically to the client (same code, same existingSeries shape).
 function duplicateSeriesConflictBody(existingSeries) {
   return {
-    error: `This customer already has an active recurring series for this service: ${existingSeries.map((s) => `${s.service_type} (series #${s.id}${s.next_upcoming_date ? `, next visit ${s.next_upcoming_date}` : ', ongoing'})`).join('; ')}. Extend or edit the existing series instead — or pass allowDuplicateSeries to intentionally run a second program.`,
+    error: 'An active recurring program already exists for this service. Open the existing program to edit or extend it.',
     code: 'duplicate_recurring_series',
+    canCreateSeparateProgram: isEnabled('separateRecurringProgram'),
     existingSeries: existingSeries.map((s) => ({
       id: s.id,
       serviceType: s.service_type,
       pattern: s.recurring_pattern,
       nextUpcomingDate: s.next_upcoming_date || null,
+      appointmentId: s.next_upcoming_id || s.id,
+      appointmentDate: s.next_upcoming_date || dateOnly(s.scheduled_date),
+      propertyId: s.property_id || null,
+      recordedAddress: [s.service_address_line1, s.service_address_line2, s.service_address_city, s.service_address_zip].filter(Boolean).join(', ') || null,
       // Provenance for idempotent retries (codex r21 P0): a client that lost
       // its partial-save state can recover ONLY when the existing series
       // demonstrably came from the same linked estimate it is booking.
@@ -4707,6 +4712,18 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
     } = req.body;
+
+    const separateProgram = req.body.duplicateSeriesOverride;
+    if (separateProgram !== undefined) {
+      if (!isEnabled('separateRecurringProgram')) return res.status(409).json({ error: 'Separate recurring programs are not enabled.' });
+      if (!isRecurring || typeof separateProgram?.reason !== 'string'
+        || separateProgram.reason.trim().length < 5 || separateProgram.reason.trim().length > 500
+        || !Array.isArray(separateProgram.existingSeriesIds) || !separateProgram.existingSeriesIds.length
+        || separateProgram.existingSeriesIds.length > 100
+        || separateProgram.existingSeriesIds.some((id) => !/^[a-zA-Z0-9-]{1,80}$/.test(String(id)))) {
+        return res.status(400).json({ error: 'Review the existing programs and provide a reason (5–500 characters) for a separate program.' });
+      }
+    }
 
     // Window intake by explicit presence (windowIntakeFromBody, shared with
     // update-details): both absent / both cleared = a windowless booking;
@@ -4776,14 +4793,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
           serviceType,
           serviceAddressScope: bookingSeriesScope,
         });
-        if (existingSeries.length > 0) {
-          if (req.body.allowDuplicateSeries === true) {
-            logger.warn(`[schedule] allowDuplicateSeries override: booking a second active "${serviceType}" series for customer ${customerId} alongside existing parent(s) ${existingSeries.map((s) => s.id).join(', ')}`);
-          } else {
-            return res.status(409).json(duplicateSeriesConflictBody(existingSeries));
-          }
+        const canCreate = separateProgram
+          ? RecurringAppointmentSeeder.separateProgramMatches(existingSeries, separateProgram.existingSeriesIds)
+          : req.body.allowDuplicateSeries === true || existingSeries.length === 0;
+        if (!canCreate) return res.status(409).json(duplicateSeriesConflictBody(existingSeries));
+        if (!separateProgram && existingSeries.length > 0 && req.body.allowDuplicateSeries === true) {
+          logger.warn(`[schedule] allowDuplicateSeries override: booking a second active "${serviceType}" series for customer ${customerId} alongside existing parent(s) ${existingSeries.map((s) => s.id).join(', ')}`);
         }
       } catch (guardErr) {
+        if (separateProgram) throw guardErr;
         logger.warn(`[schedule] duplicate-series guard failed (booking proceeds): ${guardErr.message}`);
       }
     }
@@ -5504,7 +5522,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // its savepoint keeps a failed guard query from aborting this
       // transaction). A hit throws a tagged error the route catch maps to
       // the same 409 the preflight returns.
-      if (isRecurring && req.body.allowDuplicateSeries !== true) {
+      if (isRecurring && (req.body.allowDuplicateSeries !== true || separateProgram)) {
         const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
         const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
           customerId,
@@ -5512,8 +5530,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
           serviceType,
           serviceAddressScope: bookingSeriesScope,
         });
+        if (separateProgram && guardError) throw guardError;
         if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
-        if (matches.length > 0) {
+        const canCreate = separateProgram
+          ? RecurringAppointmentSeeder.separateProgramMatches(matches, separateProgram.existingSeriesIds)
+          : matches.length === 0;
+        if (!canCreate) {
           const dupErr = new Error('duplicate_recurring_series');
           dupErr.duplicateRecurringSeries = matches;
           throw dupErr;
@@ -5640,6 +5662,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
         trx, cols, source: { sourceAction: 'admin_manual' },
       });
       [svc] = await trx('scheduled_services').insert(adminCreateInsert).returning('*');
+      if (separateProgram) {
+        await trx('activity_log').insert({
+          admin_user_id: req.technicianId || null,
+          customer_id: customerId,
+          action: 'separate_recurring_program_created',
+          description: `Series ${svc.id}; reviewed series ${separateProgram.existingSeriesIds.join(', ')}. Reason: ${separateProgram.reason.trim()}`,
+        });
+      }
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
@@ -6688,6 +6718,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
 
     const { transitionJobStatus } = require('../services/job-status');
 
+    // Every date this batch touched, refreshed ONCE after the loop. The
+    // endpoint accepts 100 ids and each refresh repairs and remeasures whole
+    // routes, so a per-row refresh would run up to 100 near-duplicate passes
+    // serially and could time out the response after the rows had already
+    // committed (codex #4295 r1 P2).
+    const qualityDates = new Set();
+
     for (const id of serviceIds) {
       try {
         // Held locally until this row's transaction COMMITS: the CAS below
@@ -6706,7 +6743,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 trx,
               });
             });
-            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId }); } catch {}
+            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId, qualityDates }); } catch {}
             break;
           }
           case 'reschedule': {
@@ -7000,10 +7037,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // options.expect); deliberately NOT SELECT..FOR UPDATE, which
               // would widen this quick single-row mover's tx shape for no
               // added safety. updated_at stays out of the predicate: knex
-              // never auto-touches it and not every mover stamps it (this
-              // UPDATE doesn't), so it isn't a reliable change marker. Zero
-              // rows matched = the row changed under us; refuse this id (the
-              // batch carries the reason).
+              // never auto-touches it, so it isn't a reliable CAS marker; this
+              // UPDATE does stamp it (the movers' change time, which SMS
+              // follow-up reads). Zero rows matched = the row changed under
+              // us; refuse this id (the batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
               // Tech-day membership change (bulk board move): shared fence
               // for the leaving and joining day + drop the stale sequence
@@ -7036,7 +7073,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   }),
                 svc,
               )
-                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates) })
+                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates), updated_at: new Date() })
                 // The technician on the COMMITTED row (the CAS does not pin
                 // technician_id): the move notice below goes to them.
                 .returning(['id', 'technician_id']);
@@ -7187,6 +7224,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // shared with the rebooker path; best-effort outside the trx (a
             // failed shift leaves the child where it was; the helper no-ops
             // when the date didn't actually change).
+            const bulkFollowUpReport = {};
             try {
               const shifted = await shiftCallFollowUpsForParentMove({
                 conn: db,
@@ -7194,6 +7232,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 fromDate: callFollowUpShiftFrom,
                 toDate: bulkTargetDate,
                 noticeActorId: req.technicianId || null,
+                // Reported so the route refresh covers the child's own two
+                // days as well as the parent's (codex #4295 r1 P2).
+                report: bulkFollowUpReport,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
@@ -7201,6 +7242,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             } catch (e) {
               logger.error(`[admin-schedule] bulk reschedule call follow-up shift failed for ${id}: ${e.message}`);
             }
+            [callFollowUpShiftFrom, bulkTargetDate,
+              ...(bulkFollowUpReport.shifted || []).flatMap((row) => [row.previousDate, row.date])]
+              .filter(Boolean).forEach((date) => qualityDates.add(date));
             break;
           }
           case 'cancel': {
@@ -7230,6 +7274,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // (notify-or-suppress below per the bulk flag) — the
                 // shared-writer hook must stand down, not race the claim.
                 notifyCustomer: payload?.notifyCustomer === false ? 'caller_suppress' : 'caller',
+                // The batch's shared date set: one route refresh after the
+                // loop instead of a concurrent pass per cancelled row.
+                qualityDates,
               });
             });
             try {
@@ -7325,6 +7372,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       } catch (e) {
         failed.push({ id, reason: e.message });
       }
+    }
+
+    // One pass for the whole batch, after every row settled. Best-effort:
+    // the schedule writes are already committed and the refresh reports its
+    // own failures.
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (e) {
+      logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
     }
 
     res.json({
@@ -7568,10 +7624,15 @@ async function planCollectiveEditDateMove(req) {
   return {
     async commit() {
       const SmartRebooker = require('../services/rebooker');
+      // One route-quality refresh for the whole series edit: the rebooker's
+      // move dates, every occurrence's board broadcast and the grouped
+      // members below all collect into this Set (codex #4295 r3 P2).
+      const qualityDates = new Set();
       // Same predicate the choke point evaluates (gate + cadence row + date
       // delta), so this call always lands as a series move.
       const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
         allowLive: true,
+        qualityDates,
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
@@ -7607,13 +7668,19 @@ async function planCollectiveEditDateMove(req) {
         notify: notifyCustomer === true,
         actorId: req.technicianId,
         reasonText: null,
+        qualityDates,
       });
       // Grouped siblings moved singly by moveVisitAsUnit sit outside the
       // series effects' broadcast — other boards need them (codex #3609 r10).
       for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(row.id))) {
-        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId }); } catch (err) {
+        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates }); } catch (err) {
           logger.error(`[schedule/update-details] series board broadcast failed for grouped member ${movedId}: ${err.message}`);
         }
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (err) {
+        logger.error(`[schedule/update-details] series route quality refresh failed: ${err.message}`);
       }
       return {
         seriesMoveId: result.seriesMoveId || null,
@@ -8542,6 +8609,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
     let recurringUpdatedJobIds = [];
+    const qualityPreviousDates = new Map();
     // Children spawned inside the trx below; reminder rows are registered for
     // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
     // never reads a row whose visit could still roll back.
@@ -8705,6 +8773,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         await acquireOccupancyLocks(trx, [...lockedRecurrenceDates]);
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
+      }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung (slot-reservation's order) and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      if (reServiceConversionZeroPrice) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
@@ -9896,6 +9977,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 );
               }
               recurringUpdatedJobIds.push(child.id);
+              qualityPreviousDates.set(child.id, child.scheduled_date);
             }
             if (pendingBoosters.length > 0) {
               for (const booster of pendingBoosters) {
@@ -9956,6 +10038,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   );
                 }
                 recurringUpdatedJobIds.push(booster.id);
+                qualityPreviousDates.set(booster.id, booster.scheduled_date);
               }
             }
           }
@@ -10287,6 +10370,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 windowStart: parent.window_start,
                 serviceType: childIdentity.service_type,
               });
+              // Same batching contract as the visit-count spawn branches
+              // below: without this, converting a one-time visit to a
+              // series gets its new children's dates NO measurement/alert
+              // reconciliation — only the edited parent's (codex #4295 r2 P2).
+              recurringUpdatedJobIds.push(childRow.id);
             }
             if (parentAddons.length > 0 && childRow?.id) {
               try {
@@ -10666,6 +10754,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // edit modal moves the primary — shared with the rebooker path; best-effort
     // outside the trx (a failed shift leaves the child where it was; the
     // helper no-ops when the date didn't actually change).
+    const editFollowUpReport = {};
     if (callFollowUpShiftFrom != null && updates.scheduled_date !== undefined) {
       try {
         const shifted = await shiftCallFollowUpsForParentMove({
@@ -10674,6 +10763,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           fromDate: callFollowUpShiftFrom,
           toDate: updates.scheduled_date,
           noticeActorId: req.technicianId || null,
+          // Reported so the route refresh covers the child's own two days as
+          // well as the parent's (codex #4295 r1 P2).
+          report: editFollowUpReport,
         });
         if (shifted > 0) {
           logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);
@@ -10712,18 +10804,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
-    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
+    // recurringUpdatedJobIds: a count-only series edit (recurringPlannedCount
+    // alone) adds or cancels occurrences without touching assignment,
+    // details, add-ons or addresses, and those dates need the refresh too
+    // (codex #4295 r3 P2).
+    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length || recurringUpdatedJobIds.length) {
+      // One refresh for the whole edit: a cadence resize broadcasts every
+      // updated child and booster, and refreshing per broadcast would run
+      // that many near-duplicate route passes concurrently (codex #4295 r1 P2).
+      const qualityDates = new Set((editFollowUpReport.shifted || [])
+        .flatMap((row) => [row.previousDate, row.date]).filter(Boolean));
       try {
+        qualityPreviousDates.set(req.params.id, callFollowUpShiftFrom);
         const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
         for (const id of addressUpdatedIds) broadcastJobIds.add(id);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
-        await Promise.all([...broadcastJobIds].map((jobId) =>
-          emitDispatchJobUpdate({ jobId, actorId: req.technicianId })
+        // allSettled, not all: the flush below snapshots and clears the shared
+        // Set, so every broadcast must have added its dates before it runs —
+        // an early rejection must not let a slower survivor add a date to an
+        // already-flushed Set (codex #4295 r5 P2).
+        const settled = await Promise.allSettled([...broadcastJobIds].map((jobId) =>
+          emitDispatchJobUpdate({ jobId, actorId: req.technicianId, previousDate: qualityPreviousDates.get(jobId), qualityDates })
         ));
+        for (const outcome of settled) {
+          if (outcome.status === 'rejected') logger.error(`[schedule/update-details] dispatch board broadcast failed: ${outcome.reason?.message || outcome.reason}`);
+        }
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (e) {
+        logger.error(`[schedule/update-details] route quality refresh failed: ${e.message}`);
       }
     }
 
@@ -10912,12 +11026,20 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
     });
 
     const job = await db('scheduled_services').where({ id: req.params.id }).first();
+    // A series-scoped assignment changes every future occurrence — collect
+    // their dates and refresh once (codex #4295 r1 P2).
+    const qualityDates = new Set();
     for (const jobId of result.changedJobIds || []) {
       try {
-        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId, qualityDates });
       } catch (e) {
         logger.error(`[schedule/assign] dispatch board broadcast failed for ${jobId}: ${e.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (e) {
+      logger.error(`[schedule/assign] route quality refresh failed: ${e.message}`);
     }
 
     if (job?.technician_id === null) {
@@ -11101,7 +11223,13 @@ async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false
 // atomic paid transition; open PaymentIntent cancelled/refused first), then send
 // the receipt. Never throws to the route: every non-send path returns a typed
 // reason the modal can explain.
-async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false } = {}) {
+// actorTechnicianId: the operator recording the prepayment — the actor of
+// the invoice-issued closeout's visit transition (GitHub r4 P1 #4127).
+// actorRole: their AUTHENTICATED staff role (req.techRole) — this route
+// admits technicians (requireTechOrAdmin), so the closeout's own audit
+// must record 'technician' rather than folding every non-null actor into
+// 'admin' (GitHub r7 P2 #4127).
+async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null, actorRole = null } = {}) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -11134,9 +11262,21 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
   const invoice = minted.invoice;
   if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
 
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+  // GATE_INVOICE_ISSUED_CLOSES_VISIT): cash taken at the visit and applied
+  // to its invoice is money received by hand — the same proof
+  // recordManualPayment closes the visit on (GitHub r4 P1 #4127). Runs
+  // after the paid flip commits (and again on the already-paid resend, the
+  // operator's reachable retry); a completed visit refuses quietly.
+  const closeOutOnPaid = async () => {
+    const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+    await closeOutVisitForIssuedInvoice({ invoiceId: invoice.id, trigger: 'paid', actorTechnicianId, actorRole });
+  };
+
   // Already settled (a prior mark-prepaid, or a card/ACH payment landed): just
   // (idempotently) send the receipt for the existing paid invoice.
   if (['paid', 'prepaid'].includes(invoice.status)) {
+    await closeOutOnPaid();
     return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated });
   }
 
@@ -11250,6 +11390,10 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
     }
   }
 
+  // The visit-linked invoice is paid (this call, or a race winner's): close
+  // the visit it bills out quietly.
+  await closeOutOnPaid();
+
   return sendPrepaidReceiptForInvoice(outcome.invoice, { operatorInitiated });
 }
 
@@ -11338,7 +11482,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (decision.attempt) {
       // Authenticated operator action with an explicit receipt request —
       // operator provenance for the 8AM-8PM send window.
-      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true }).catch((err) => {
+      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null }).catch((err) => {
         logger.error(`[schedule] prepaid receipt failed for ${req.params.id}: ${err.message}`);
         return { sent: false, reason: 'error' };
       });
@@ -13182,6 +13326,14 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         }
       });
     }
+    // A manual reorder writes route_order directly, never through the
+    // batched dispatch/rebooker paths — without this the day's card stays
+    // stale after an operator fixes the route (codex #4295 r2 P2).
+    try {
+      await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [dateStr] });
+    } catch (e) {
+      logger.error(`[schedule/optimize] route quality refresh failed: ${e.message}`);
+    }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
     const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
@@ -13292,6 +13444,12 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
           }
         }
       });
+    }
+    // Same after-commit refresh as /optimize above (codex #4295 r2 P2).
+    try {
+      await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [dateStr] });
+    } catch (e) {
+      logger.error(`[schedule/optimize-route] route quality refresh failed: ${e.message}`);
     }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
@@ -17689,18 +17847,31 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
     const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
       .sort((a, b) => a - b);
-    const { WEEKLY_DAYS_OFF_KEY } = require('../services/scheduling/blackout-dates');
-    await db('system_settings')
-      .insert({
-        key: WEEKLY_DAYS_OFF_KEY,
-        value: JSON.stringify(days),
-        category: 'scheduling',
-        description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
-      })
-      .onConflict('key')
-      .merge({ value: JSON.stringify(days), updated_at: db.fn.now() });
+    const { WEEKLY_DAYS_OFF_KEY, getWeeklyDaysOff, lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — serializes against a
+    // capacity reservation transaction's shared read (arrival-route.js
+    // assertCapacityEligibility) so a hold cannot commit for a day this
+    // write is about to close (codex #4346 P2). See blackout-dates.js for
+    // lock order.
+    let previousDays = [];
+    await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      // Read under the lock, before the write: only the weekdays that
+      // toggle need a route-quality refresh (codex #4295 r2 P2).
+      previousDays = [...(await getWeeklyDaysOff(trx))];
+      await trx('system_settings')
+        .insert({
+          key: WEEKLY_DAYS_OFF_KEY,
+          value: JSON.stringify(days),
+          category: 'scheduling',
+          description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
+        })
+        .onConflict('key')
+        .merge({ value: JSON.stringify(days), updated_at: trx.fn.now() });
+    });
     logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days));
     res.json({ success: true, weeklyDaysOff: days });
   } catch (err) { next(err); }
 });
@@ -17714,24 +17885,43 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     }
     // Upsert keeps the button idempotent — re-adding a date just updates
     // the reason instead of tripping the unique constraint.
-    const [row] = await db('schedule_blackout_dates')
-      .insert({ date, reason: reason || null })
-      .onConflict('date')
-      .merge({ reason: reason || null })
-      .returning(['id', 'date', 'reason']);
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const row = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      const [inserted] = await trx('schedule_blackout_dates')
+        .insert({ date, reason: reason || null })
+        .onConflict('date')
+        .merge({ reason: reason || null })
+        .returning(['id', 'date', 'reason']);
+      return inserted;
+    });
     // Reason is free-form admin text — never log it (PII rule): a staffer
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange([date]);
     res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
   } catch (err) { next(err); }
 });
 
 router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
-    const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order. The date
+    // is read first, under the lock: once the row is gone nothing else says
+    // which day's closure card to reconcile (codex #4295 r2 P2).
+    const { row, deleted } = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      const existing = await trx('schedule_blackout_dates').where({ id: req.params.id }).first('date');
+      const count = await trx('schedule_blackout_dates').where({ id: req.params.id }).del();
+      return { row: existing, deleted: count };
+    });
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange([blackoutDateString(row && row.date)]);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -17748,7 +17938,46 @@ function flushEstimateSlotCaches() {
   }
 }
 
+// A blackout write changes `day.closed` for the affected date(s), and the
+// route-quality reconciler only notices when something refreshes those
+// dates — so refresh them here, after the write, best-effort like the cache
+// flush above (codex #4295 r2 P2). With the quality gates off this returns
+// immediately.
+async function refreshQualityForBlackoutChange(dates) {
+  const list = [...new Set((dates || []).filter(Boolean))];
+  if (!list.length) return;
+  try {
+    await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: list });
+  } catch (err) {
+    logger.error(`[schedule] blackout route quality refresh failed: ${err.message}`);
+  }
+}
+
+// A weekly days-off change touches every future occurrence of the weekdays
+// that toggled — bounded to the reconciler's 30-day horizon, tomorrow
+// onward (today's closure is already in effect). Pure; exported for tests.
+function weeklyBlackoutRefreshDates(previousDays, nextDays, now = new Date()) {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const { expandWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+  const previous = new Set((previousDays || []).map(Number));
+  const next = new Set((nextDays || []).map(Number));
+  const toggled = new Set([...previous, ...next].filter((day) => previous.has(day) !== next.has(day)));
+  return expandWeeklyDaysOff(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled);
+}
+
+// schedule_blackout_dates.date is a DATE column: pg hands it back as a
+// local-midnight Date unless a parser is installed. Either way, YYYY-MM-DD.
+function blackoutDateString(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.slice(0, 10);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 router._test = {
+  weeklyBlackoutRefreshDates,
+  blackoutDateString,
   registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,

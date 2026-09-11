@@ -654,6 +654,16 @@ router.post('/:id/rain-out', async (req, res, next) => {
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,
     });
+    // commit() collects every moved row's route-quality dates for its caller
+    // to flush once (codex #4295 r4 P2) — without this a Quick Move from the
+    // tech portal refreshed nothing. Best-effort, after the move committed.
+    if (result.ok && Array.isArray(result.qualityDates) && result.qualityDates.length) {
+      try {
+        await require('../services/dispatch-assignment').flushDispatchQualityDates(new Set(result.qualityDates));
+      } catch (err) {
+        logger.error(`[tech-track] quick move route quality refresh failed: ${err.message}`);
+      }
+    }
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
@@ -819,6 +829,221 @@ router.post('/:id/photos', (req, res, next) => {
   } catch (err) {
     logger.error(`[tech-track] photo upload failed: ${err.message}`);
     next(err);
+  }
+});
+
+// Identity of the photo set a recovery reconciled: sorted service_photos ids
+// hashed. Stable across retries of the same recovery; changes when a later
+// recovery attaches more rows. Stored in the partial-photos alert payload so
+// a retried reconciliation cannot raise a second alert for a set dispatch
+// already reviewed (see the reconcile route, step 4).
+function photoRecoveryAlertKey(photoRows) {
+  const ids = (photoRows || []).map((row) => String(row.id)).sort();
+  return `${ids.length}-${require('crypto').createHash('sha1').update(ids.join(',')).digest('hex').slice(0, 16)}`;
+}
+
+// POST /api/tech/services/:id/photos/reconcile — completion-aware
+// reconciliation after a post-closeout photo recovery.
+//
+// The attachment route above only inserts the service_photos row. Artifacts
+// built at closeout from the photos that uploaded THEN — the cached report
+// PDF and, for Tree & Shrub, the vision-scored assessment — do not see a
+// photo recovered later. The completion panel calls this once every owed
+// photo has landed and clears its local recovery marker ONLY on 2xx, so a
+// failure here keeps the retry available instead of declaring recovery
+// complete over a stale report (Codex #4091 P1).
+//
+// Contract (fail-closed, unlike the best-effort invalidations elsewhere in
+// this file): the PDF cache key is cleared directly; a report that already
+// had a render queued is re-queued so the customer copy is rebuilt from the
+// full photo set; a render still in flight (it may have read the pre-recovery
+// photo set) answers 409 so the panel retries once it settles. A Tree & Shrub
+// assessment cannot be re-scored in place — scoreAndStoreTreeShrubAssessment
+// is first-completion-only by design — so its partial scoring is surfaced to
+// dispatch as a one-time alert on the visit rather than silently kept.
+function parseJsonColumn(value) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+// Step 1 of the reconcile contract above: restore the parked photo-summary
+// narrative once every closeout photo has landed. Returns { photoSummary }
+// on success (a no-op shape when nothing was pending) or { error: { status,
+// body } } for the fail-closed 409 when photos are still missing.
+async function reconcilePhotoSummary(record) {
+  const {
+    hasPendingPhotoSummary, restorePhotoSummaryAfterRecovery, completionPhotosFullyRecovered,
+  } = require('../services/service-report/photo-summary-recovery');
+  const serviceData = parseJsonColumn(record.service_data);
+  if (!hasPendingPhotoSummary(serviceData)) {
+    return { photoSummary: { pending: false, restored: false } };
+  }
+  // The uploader dedupes on (service_record_id, image_sha256) across
+  // every photo_type, so a recovered image whose bytes already exist on
+  // the record as e.g. a 'progress' row never gains an 'after' row —
+  // verify hashes over the whole record, not only 'after' rows.
+  const recordRows = await db('service_photos')
+    .where({ service_record_id: record.id })
+    .select('image_sha256', 'photo_type');
+  const recovered = completionPhotosFullyRecovered(parseJsonColumn(record.structured_notes), {
+    afterPhotoCount: recordRows.filter((row) => row.photo_type === 'after').length,
+    presentImageHashes: recordRows.map((row) => row.image_sha256),
+  });
+  if (!recovered) {
+    return { error: { status: 409, body: { error: 'Closeout photos are still missing', code: 'photos_still_missing' } } };
+  }
+  restorePhotoSummaryAfterRecovery(serviceData);
+  await db('service_records').where({ id: record.id }).update({ service_data: JSON.stringify(serviceData) });
+  return { photoSummary: { pending: true, restored: true } };
+}
+
+// Steps 2 & 3 of the reconcile contract above: invalidate the cached PDF and,
+// only for a record that had already queued a render, re-queue it. Returns
+// { pdf } on success or { error: { status, body } } when a render is still
+// in flight (409, retry shortly) or the render queue itself is unavailable
+// (503) — the cache-clear write has already landed by then either way, per
+// the fail-closed contract (a failed reconciliation still leaves the stale
+// PDF invalidated, never silently served).
+async function reconcilePdfReport(recordId) {
+  // Cached PDF: cleared directly (not via the swallow-and-warn helper) so
+  // a failed write is a failed reconciliation, never a silent success.
+  await db('service_records').where({ id: recordId }).update({ pdf_storage_key: null });
+
+  // Re-render only a report that was rendering in the first place — a
+  // disabled / internal_only report never queued a render at closeout
+  // and must not start one now (its public route 404s for the headless
+  // renderer).
+  const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
+  const priorJob = await db('service_report_pdf_jobs')
+    .where({ service_record_id: recordId })
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'payload');
+  if (!priorJob) return { pdf: { invalidated: true, requeued: false } };
+
+  const priorPayload = typeof priorJob.payload === 'string'
+    ? (() => { try { return JSON.parse(priorJob.payload); } catch { return {}; } })()
+    : (priorJob.payload || {});
+  const queued = await enqueuePdfRenderJob({
+    serviceRecordId: recordId,
+    payload: { source: 'photo_recovery', token: priorPayload.token || undefined },
+  });
+  if (!queued.queued && queued.job?.status === 'rendering') {
+    return { error: { status: 409, body: { error: 'Report render in flight — retry shortly', code: 'report_render_in_flight' } } };
+  }
+  if (queued.ok === false) {
+    return { error: { status: 503, body: { error: 'Report render queue unavailable', code: 'report_queue_unavailable' } } };
+  }
+  return { pdf: { invalidated: true, requeued: true } };
+}
+
+// Step 4 of the reconcile contract above: the closeout assessment scored
+// only the photos that uploaded then. Flag it for review; never re-score
+// behind the tech. The auto-scorer closes over that closeout-time subset
+// and can still be running when the tech recovers (completion waits at
+// most 12 s, then a 60 s background retry) — so a missing row is NOT proof
+// the visit is fine. Raise the warning either way; the payload says
+// whether the row existed yet (Codex r-375c002 P1). Returns the treeShrub
+// response field directly (null when the line has no Tree & Shrub angle);
+// this step never fails the reconciliation.
+async function reconcileTreeShrubAssessment(svc, record) {
+  const { TREE_SHRUB_SERVICE_LINES } = require('../services/tree-shrub-closeout');
+  const serviceLine = String(record.service_line || '').toLowerCase();
+  if (!TREE_SHRUB_SERVICE_LINES.has(serviceLine)) return null;
+
+  const assessment = await db('tree_shrub_assessments')
+    .where({ service_record_id: record.id })
+    .first('id');
+  const assessmentId = assessment ? assessment.id : null;
+  // Only the tree_shrub line auto-scores at closeout
+  // (complete-scheduled-service.js: reportServiceLine === 'tree_shrub');
+  // a palm visit has no scorer, so with no row there is nothing pending
+  // and no alert to raise (Codex r-05933b2 P2).
+  const scoringPending = !assessmentId && serviceLine === 'tree_shrub';
+  if (!assessmentId && !scoringPending) {
+    return { assessmentId: null, rescored: false, flaggedForReview: false };
+  }
+
+  const { createAlertOnce } = require('../services/dispatch-alerts');
+  // Durable identity for this once-per-visit alert: the set of photo
+  // rows the recovery reconciled. The panel keeps its recovery marker
+  // after an uncertain (lost 2xx) response and legitimately retries, and
+  // dispatch may have resolved the first alert by then — the partial
+  // unique index (migration 20260909000114) only dedupes UNRESOLVED
+  // rows, so the retry would insert and broadcast a second alert for
+  // the same unchanged recovery (Codex r-63b2098 P2). A resolved alert
+  // whose photo set matches means this recovery was already reviewed;
+  // a later recovery that attached MORE photos is a new set and does
+  // warrant a fresh alert.
+  const photoRows = await db('service_photos')
+    .where({ service_record_id: record.id })
+    .select('id');
+  const photoSetKey = photoRecoveryAlertKey(photoRows);
+  const priorAlerts = await db('dispatch_alerts')
+    .where({ type: 'tree_shrub_assessment_partial_photos', job_id: svc.id })
+    .select('id', 'payload', 'resolved_at');
+  const alreadyRaised = priorAlerts.find((row) => parseJsonColumn(row.payload)?.photoSetKey === photoSetKey);
+  if (alreadyRaised) {
+    return {
+      assessmentId, rescored: false, flaggedForReview: true, alertId: alreadyRaised.id, alertDeduped: true,
+    };
+  }
+
+  const alert = await createAlertOnce({
+    type: 'tree_shrub_assessment_partial_photos',
+    severity: 'warn',
+    techId: svc.technician_id || null,
+    jobId: svc.id,
+    payload: {
+      source: 'photo_recovery',
+      serviceRecordId: record.id,
+      assessmentId,
+      scoringPending,
+      photoSetKey,
+      customerId: svc.customer_id,
+      message: assessmentId
+        ? 'Tree & Shrub assessment was scored before recovered photos were attached; review the diagnosis.'
+        : 'Tree & Shrub photos were recovered after closeout; any auto-scored assessment covers only the photos uploaded then. Review the diagnosis once scoring lands.',
+    },
+  });
+  return {
+    assessmentId, rescored: false, flaggedForReview: true, alertId: alert?.row?.id || null, alertDeduped: false,
+  };
+}
+
+router.post('/:id/photos/reconcile', async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.id })
+      .first('id', 'customer_id', 'technician_id', 'scheduled_date');
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
+      return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    const record = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('id', 'service_line', 'service_data', 'structured_notes');
+    if (!record) return res.status(409).json({ error: 'Visit has no completion record', code: 'not_completed' });
+
+    const summary = await reconcilePhotoSummary(record);
+    if (summary.error) return res.status(summary.error.status).json(summary.error.body);
+
+    const pdfResult = await reconcilePdfReport(record.id);
+    if (pdfResult.error) return res.status(pdfResult.error.status).json(pdfResult.error.body);
+
+    const treeShrub = await reconcileTreeShrubAssessment(svc, record);
+
+    logger.info(
+      `[tech-track] photo recovery reconciled service=${svc.id} record=${record.id} ` +
+      `tech=${req.technicianId} pdfRequeued=${pdfResult.pdf.requeued} treeShrubFlagged=${!!treeShrub?.flaggedForReview}`
+    );
+    return res.json({
+      ok: true, serviceRecordId: record.id, photoSummary: summary.photoSummary, pdf: pdfResult.pdf, treeShrub,
+    });
+  } catch (err) {
+    logger.error(`[tech-track] photo recovery reconcile failed: ${err.message}`);
+    return next(err);
   }
 });
 

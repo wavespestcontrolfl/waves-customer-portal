@@ -413,6 +413,17 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
 
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);
 
+    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+    // GATE_INVOICE_ISSUED_CLOSES_VISIT): a reconciled cash / check /
+    // off-platform payment is money received by hand for the visit this
+    // invoice bills — the same proof recordManualPayment closes on (GitHub
+    // r4 P1 #4127). After the commit, best-effort by contract; the operator
+    // who reconciled is the actor of the visit transition.
+    {
+      const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
+    }
+
     const refreshed = await db('invoices').where({ id: invoiceId }).first();
     res.json({ success: true, invoice: refreshed, stripe_charge: chargeDetails ? {
       id: chargeDetails.id, amount: chargeDetails.amount / 100, receipt_url: chargeDetails.receipt_url,

@@ -292,6 +292,9 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
     expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', {
       allowLive: true,
       adminWindowRules: true,
+      // The route owns one route-quality Set across the rebooker and the
+      // series effects (codex #4295 r2 P2).
+      qualityDates: expect.any(Set),
       sourceSurface: 'dispatch_board',
       notifyRequested: false,
       // Staff surface — occupancy clashes commit with a warning (owner
