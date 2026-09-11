@@ -45,6 +45,14 @@ test('retires not-yet-resolved rows (read or unread) by opsKey + source and stam
   expect(typeof merged.resolvedAt).toBe('string');
 });
 
+test('source: null scopes to rows with NO source (the in-process senders)', async () => {
+  const q = chain(1);
+  mockDb.mockReturnValue(q);
+  expect(await resolveOpsDigest({ key: 'lead-to-cash-invariants', source: null })).toBe(1);
+  expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'source' IS NULL");
+  expect(q.whereRaw).not.toHaveBeenCalledWith("metadata->>'source' = ?", expect.anything());
+});
+
 test('no source filter when source is omitted; blank key is a no-op', async () => {
   const q = chain(1);
   mockDb.mockReturnValue(q);

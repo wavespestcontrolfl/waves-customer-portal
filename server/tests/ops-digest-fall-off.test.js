@@ -12,9 +12,9 @@ describe('retireIfClean', () => {
     jest.doMock('../services/ops-digest', () => ({ resolveOpsDigest }));
     const { retireIfClean } = require('../services/ops-digest-fall-off');
     await expect(retireIfClean('lead-to-cash-invariants')).resolves.toBe(3);
-    expect(resolveOpsDigest).toHaveBeenCalledWith({ key: 'lead-to-cash-invariants', resolvedBy: 'lead-to-cash-invariants:clean-run' });
+    expect(resolveOpsDigest).toHaveBeenCalledWith({ key: 'lead-to-cash-invariants', source: null, resolvedBy: 'lead-to-cash-invariants:clean-run' });
     await retireIfClean('gbp-sync-health', { resolvedBy: 'gbp:hourly' });
-    expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'gbp-sync-health', resolvedBy: 'gbp:hourly' });
+    expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'gbp-sync-health', source: null, resolvedBy: 'gbp:hourly' });
   });
 
   test('a stubbed digest module without resolveOpsDigest is a no-op', async () => {

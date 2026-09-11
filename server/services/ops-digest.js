@@ -143,7 +143,11 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
  * failed retire is logged and reported as 0 so the caller can retry on its
  * next clean run.
  */
-async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons' } = {}) {
+// `source` scoping: a string matches rows that seam wrote (the ingest route
+// passes 'ops-crons'); `null` matches rows with NO source — the in-process
+// senders, which never set one (ops-digest-fall-off.js); `undefined` (omitted)
+// matches any. A key can therefore never retire another seam's rows.
+async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons' } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
   const db = require('../models/db');
@@ -153,7 +157,8 @@ async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons' }
       .where({ recipient_type: 'admin', category: CATEGORY })
       .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
-    if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
+    if (source === null) q = q.whereRaw("metadata->>'source' IS NULL");
+    else if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
     const count = await q.update({
       read_at: db.raw('COALESCE(read_at, NOW())'),
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),

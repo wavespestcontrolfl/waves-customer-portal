@@ -17,7 +17,10 @@ async function retireIfClean(key, { resolvedBy } = {}) {
   try {
     const opsDigest = require('./ops-digest');
     if (typeof opsDigest.resolveOpsDigest !== 'function') return 0;
-    return await opsDigest.resolveOpsDigest({ key, resolvedBy: resolvedBy || `${key}:clean-run` });
+    // source: null — only rows the in-process seam wrote (they carry no
+    // source); the ops-cron ingest rows are scoped to 'ops-crons' and are
+    // retired by their own /resolve path, never from here.
+    return await opsDigest.resolveOpsDigest({ key, source: null, resolvedBy: resolvedBy || `${key}:clean-run` });
   } catch {
     return 0;
   }
