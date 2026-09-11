@@ -117,6 +117,20 @@ check_schema '{"summary":"s","findings":[{"priority":"P0","line":1,"title":"t"}]
 check_schema '{"summary":"","findings":[]}' bad "rejects an empty summary"
 check_schema '{"findings":[]}' bad "rejects a missing summary"
 check_schema '{"summary":"s"}' bad "rejects a missing findings array"
+check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","title":"t","description":"d"}]}' bad "rejects a finding with no line key at all (schema requires it)"
+check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":0,"title":"t","description":"d"}]}' bad "rejects line 0"
+check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":-4,"title":"t","description":"d"}]}' bad "rejects a negative line"
+check_schema '{"summary":"s","findings":[{"priority":"P0","file":"a","line":3.5,"title":"t","description":"d"}]}' bad "rejects a fractional line"
+
+# A STREAM of two objects: jq empty accepts it, and the P0 counter would then
+# emit "0\n1" and blow up Bash arithmetic — blocking a push on two clean
+# verdicts, the opposite of the hook's fail-open policy.
+printf '%s\n%s' '{"summary":"one","findings":[]}' '{"summary":"two","findings":[]}' > "$WORK/v.json"
+if verdict_matches_schema "$WORK/v.json"; then
+  fail "accepted a two-object JSON stream (would break the counters)"
+else
+  pass "rejects a two-object JSON stream"
+fi
 
 # ── extract_review_json ──────────────────────────────────────────────────
 echo "extract_review_json:"

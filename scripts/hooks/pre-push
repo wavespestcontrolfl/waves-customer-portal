@@ -445,6 +445,18 @@ verdict_reviewed_nothing() {
 # allowed. Validate the whole object before trusting the count.
 verdict_matches_schema() {
   # $1 = verdict json. 0 = conforms well enough for the scoring block.
+  #
+  # EXACTLY ONE top-level value first. `jq empty` happily accepts a STREAM of
+  # two objects, and two schema-valid objects with no prose between them
+  # sailed past the fast path without ever reaching the ambiguity check in
+  # extract_review_json. The counters below then produced "0\n1", which blows
+  # up Bash arithmetic and can block a push on two clean verdicts — the exact
+  # opposite of this hook's fail-open policy.
+  [ "$(jq -s 'length' "$1" 2>/dev/null)" = "1" ] || return 1
+  # `line` is REQUIRED by .github/codex-review-schema.json and, when not null,
+  # must be an integer >= 1. Checking only `.line == null` conflated "absent"
+  # with "explicitly null" and let a finding through with no citation at all;
+  # checking only `type == "number"` admitted 0, -4 and 3.5.
   jq -e '
     (.summary | type == "string") and (.summary | length > 0) and
     (.findings | type == "array") and
@@ -454,7 +466,11 @@ verdict_matches_schema() {
           and (.file? | type == "string" and (. | length > 0))
           and (.title? | type == "string" and (. | length > 0))
           and (.description? | type == "string" and (. | length > 0))
-          and ((.line == null) or (.line | type == "number"))
+          and (has("line"))
+          and (
+                (.line == null)
+                or ((.line | type == "number") and (.line >= 1) and ((.line | floor) == .line))
+              )
       ] | all
     )
   ' "$1" >/dev/null 2>&1
@@ -816,6 +832,15 @@ run_claude_audit() {
             echo "nothing; never return it because you could not see the diff."
             ;;
         esac
+        echo ""
+        echo "── Your previous reply, verbatim ──────────────────────────────────"
+        echo "It is reproduced because it may contain a REAL finding that was"
+        echo "expressed in an invalid form. Re-issuing the review must not lose"
+        echo "it: anything below that is a genuine issue belongs in the findings"
+        echo "array of your new reply. Do not return an empty findings array"
+        echo "simply because this attempt is a retry."
+        echo ""
+        head -c 30000 "$TMPDIR_RUN/claude-raw-$idx.txt"
         echo ""
         echo "── Schema ─────────────────────────────────────────────────────────"
         cat "$SCHEMA"
