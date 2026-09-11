@@ -324,6 +324,62 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     expect(db.__state.status).toBe('draft');
     db.__state.queuedCompletionText = null;
   });
+
+  // Codex r12 P1 #4131: processScheduledSends parks a stale 'sending' claim
+  // as status 'scheduled' + scheduled_send_at: null + the durable
+  // "Recovered from stale sending claim…" marker for OPERATOR review — the
+  // claim may have died AFTER the provider accepted the text, and DB state
+  // can't tell that apart from a pre-delivery crash. An automatic claimant
+  // (the completion) must honor that hold instead of texting a pay link the
+  // customer may already have; an explicit operator resend is the intended
+  // way off it.
+  test('a stale-claim review hold refuses an automatic claim (report-only shape) but an operatorInitiated claim still proceeds', async () => {
+    const db = require('../models/db');
+    const InvoiceService = require('../services/invoice');
+    const { claimInvoiceForSend } = InvoiceService;
+    const original = db.getMockImplementation();
+    const parkedRow = {
+      id: 'inv-1',
+      status: 'scheduled',
+      scheduled_send_at: null,
+      scheduled_send_error: 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually',
+      total: 117,
+      credit_applied: 0,
+      scheduled_service_id: null,
+      service_record_id: null,
+    };
+    db.__state.status = 'scheduled';
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'invoices') q.first = jest.fn(async () => ({ ...parkedRow, status: db.__state.status }));
+      return q;
+    });
+    try {
+      // No operatorInitiated: refused, and shaped so the completion's
+      // existing classifier reads it as nothing-left-to-deliver (report-only,
+      // not the resumable 503) — same "Invoice is not sendable" phrase.
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({
+        code: 'stale_claim_review_hold',
+        message: expect.stringMatching(/Invoice is not sendable/),
+      });
+      expect(db.__state.status).toBe('scheduled'); // never flipped to sending
+
+      // An explicit operator resend (operatorInitiated: true) is the
+      // intended way off the hold and still claims normally.
+      const resend = await claimInvoiceForSend('inv-1', { operatorInitiated: true });
+      expect(resend).toMatchObject({ previousStatus: 'scheduled', claimed: true });
+      expect(db.__state.status).toBe('sending');
+      db.__state.status = 'scheduled';
+
+      // sendViaSMS and sendViaSMSAndEmail thread operatorInitiated through to
+      // the claim — the two callers an admin resend route actually uses.
+      const invoiceSource = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated \}\)/);
+      expect(invoiceSource).toMatch(/claimInvoiceForSend\(invoiceId, \{ allowClaimed, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated \}\)/);
+    } finally {
+      db.mockImplementation(original);
+    }
+  });
 });
 
 describe('completionInvoiceAlreadyDelivered', () => {
@@ -353,7 +409,11 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);[\s\S]{0,600}?if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\) \{\s*await InvoiceServiceForClaim\.restoreSendClaim\(invoice\.id, claim\.previousStatus, claim\.claimed\);[\s\S]{0,300}?reusedInvoiceClaimedElsewhere = true;\s*\} else \{\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
     // The claim is attempted only when every other pay-link gate already passes.
     // …including a decline notice that already delivered the link (GitHub r6 P1): report-only, no claim.
-    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id\s*(?:\/\/[^\n]*\n\s*)*&& !paymentFailedNoticeSent;[\s\S]{0,1200}?if \(linkOtherwiseEligible && preMintedInvoice && invoice\?\.id/);
+    // Codex r12 P1 #4131: preMintedInvoice alone misses a concurrently
+    // ADOPTED invoice (the mint's own attempt lost the race to an office
+    // create and adopted the row it committed) — preMintedInvoice stays
+    // null there, so the gate now also fires on adoptedConcurrentInvoice.
+    expect(completion).toMatch(/const linkOtherwiseEligible = !suppressCompletionInvoiceLink\s*&& includePayLink !== false[\s\S]{0,2200}?&& !invoice\?\.payer_id\s*(?:\/\/[^\n]*\n\s*)*&& !paymentFailedNoticeSent;[\s\S]{0,1600}?if \(linkOtherwiseEligible && invoice\?\.id\s*&& \(\(preMintedInvoice && String\(invoice\.id\) === String\(preMintedInvoice\.id\)\) \|\| adoptedConcurrentInvoice\)\) \{/);
     expect(completion).toMatch(/const allowCompletionInvoiceLink = linkOtherwiseEligible && !reusedInvoiceClaimedElsewhere;/);
     expect(completion).not.toMatch(/allowCompletionInvoiceLinkBase/);
     // A refused claim is classified: settled/gone → report-only; in-flight send or transient failure → the resumable 503 (retryable delivery).

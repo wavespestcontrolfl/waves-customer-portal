@@ -2605,6 +2605,14 @@ describe('completion route wiring (source contracts)', () => {
     // price basis (pinned by its own contract test below).
     expect(source).toMatch(/const minted = await mintScheduledServiceInvoiceWithDeposit\(\{[\s\S]{0,1400}svc: useReplayLines/);
     expect(source).toMatch(/adoptedConcurrentInvoice = minted\.reused === true;/);
+    // Codex r12 P1 #4131: adoptedConcurrentInvoice is declared at the
+    // OUTER function scope (beside invoiceCreated/payUrl/invoice/
+    // alreadyPaid), not re-declared with `let` inside the mint's try
+    // block — the shared send-claim gate far below (the reused-invoice
+    // decision) reads it, and a block-scoped `let` there would make that
+    // read a ReferenceError / permanently-false miss.
+    expect(source).toMatch(/let alreadyPaid = false;\s*\n\s*let paymentCollectionSuppressed = false;\s*\n\s*let paymentReconciliationRequired = false;\s*\n(\s*\/\/[^\n]*\n)*\s*let adoptedConcurrentInvoice = false;/);
+    expect(source).not.toMatch(/let adoptedConcurrentInvoice = false;\s*\n\s*if \(typedLiveRequiredMint\)/);
     const mintServiceSource = fs.readFileSync(path.join(__dirname, '../services/scheduled-invoice-mint.js'), 'utf8');
     // The raw advisory statement lives ONLY in the shared acquire helper
     // (codex #3344 r8 P1) — every writer imports it, never re-declares it.

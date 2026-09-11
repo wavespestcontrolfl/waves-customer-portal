@@ -7953,6 +7953,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let alreadyPaid = false;
     let paymentCollectionSuppressed = false;
     let paymentReconciliationRequired = false;
+    // Hoisted out of the mint's try block (Codex r12 P1 #4131): when the
+    // initial preMintedInvoice lookup found nothing and the completion's own
+    // mint attempt ADOPTED an invoice another writer (an office create)
+    // committed first, preMintedInvoice stays null even though `invoice` is
+    // not exclusively this completion's own mint. The shared send-claim gate
+    // below keys off exactly this — reused-not-minted — so it must survive
+    // past the try block that discovers it.
+    let adoptedConcurrentInvoice = false;
     // Suppressor-lookup health (pre-push Codex P0, gate-removal round 2):
     // these lookups are best-effort for every historical lane, but the
     // LIVE typed one-time mint they now guard inherited the removed
@@ -9801,7 +9809,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // (read-only); a REQUIRED resume mints the frozen single line for
         // the provable-money reason mintOptions documents. Every other
         // lane keeps the direct createFromService mint.
-        let adoptedConcurrentInvoice = false;
         if (typedLiveRequiredMint) {
           const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
           const useReplayLines = !resumingCommittedCompletion;
@@ -11500,17 +11507,28 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // a transient claim read failure, would otherwise turn a
           // guaranteed report-only closeout into the resumable 503.
           && !paymentFailedNoticeSent;
-        // A REUSED pre-minted invoice is delivered under the ONE send claim
-        // (Codex P1 #4131 r4): the completion takes claimInvoiceForSend — the
-        // same atomic draft/scheduled/… → 'sending' flip sendViaSMSAndEmail
-        // takes — before it may text the pay link. An admin "send now" that
-        // claimed first (or already delivered) makes the claim fail, and the
-        // completion text goes report-only; a completion that claimed first
-        // makes the admin send fail its own claim. The claim is released at
-        // the end unless the link actually went out (markDeliverySent then
-        // finalizes 'sending' → 'sent'). A failed claim read fails closed.
+        // A REUSED invoice — one this completion did not exclusively mint
+        // itself — is delivered under the ONE send claim (Codex P1 #4131
+        // r4, broadened r12 P1): the completion takes claimInvoiceForSend —
+        // the same atomic draft/scheduled/… → 'sending' flip
+        // sendViaSMSAndEmail takes — before it may text the pay link. An
+        // admin "send now" that claimed first (or already delivered) makes
+        // the claim fail, and the completion text goes report-only; a
+        // completion that claimed first makes the admin send fail its own
+        // claim. The claim is released at the end unless the link actually
+        // went out (markDeliverySent then finalizes 'sending' → 'sent'). A
+        // failed claim read fails closed. Two shapes are "reused" here: the
+        // preMintedInvoice snapshot taken before the mint ran (an office
+        // Charge-Now pre-mint the completion is reusing), and
+        // adoptedConcurrentInvoice — preMintedInvoice found nothing, but the
+        // completion's OWN mint attempt lost the race and adopted a row an
+        // office create committed first. Keying only on preMintedInvoice
+        // misses the second shape entirely (it stays null there) and would
+        // let the completion text the pay link on an invoice it never
+        // claimed, duplicating the office send.
         let reusedInvoiceClaimedElsewhere = false;
-        if (linkOtherwiseEligible && preMintedInvoice && invoice?.id && String(invoice.id) === String(preMintedInvoice.id)) {
+        if (linkOtherwiseEligible && invoice?.id
+          && ((preMintedInvoice && String(invoice.id) === String(preMintedInvoice.id)) || adoptedConcurrentInvoice)) {
           try {
             const InvoiceServiceForClaim = require('../services/invoice');
             const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);

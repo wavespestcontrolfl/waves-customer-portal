@@ -1030,7 +1030,111 @@ function queuedPayLinkError(queued) {
   return e;
 }
 
-async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliveryOnly = false, adoptsQueuedInvoiceSend = false } = {}) {
+// The exact marker processScheduledSends writes when it parks a stale
+// 'sending' claim for operator review (Codex r12 P1 #4131): the claim may
+// have died AFTER the provider accepted the text — a delivered send whose
+// finalize failed is deliberately left exactly like this — and DB state
+// cannot tell that apart from a pre-delivery crash. clearing
+// scheduled_send_at takes the row out of processScheduledSends' own due
+// query, so this is a review fence, not an ordinary due-later schedule.
+// Matched by prefix: the operator instructions after the em dash are
+// message, not identity.
+const STALE_CLAIM_REVIEW_HOLD_PREFIX = "Recovered from stale sending claim";
+function isStaleClaimReviewHold(row) {
+  return row?.status === "scheduled"
+    && row?.scheduled_send_at == null
+    && typeof row?.scheduled_send_error === "string"
+    && row.scheduled_send_error.startsWith(STALE_CLAIM_REVIEW_HOLD_PREFIX);
+}
+
+function staleClaimReviewHoldError(invoiceId) {
+  logger.warn(`[invoice] ${invoiceId}: automatic send claim refused — parked under a stale-claim review hold (delivery unverified); left for operator review/resend`);
+  // "Invoice is not sendable" is the phrase the completion's classifier
+  // reads as nothing-left-to-deliver (report-only) — this hold is exactly
+  // that: an automatic completion must not duplicate a pay link the
+  // provider may have already accepted, so it goes report-only and leaves
+  // the row for the operator instead of retrying forever.
+  const e = new Error(`Invoice is not sendable — parked under a stale-claim review hold (delivery unverified); an operator must review and resend`);
+  e.code = "stale_claim_review_hold";
+  return e;
+}
+
+// ── claimInvoiceForSend helper steps (Codex P2 r12 #4131) ──────────────
+// Flattened out of one 33-branch function into named single-concern steps;
+// every comment/behavior below is carried over unchanged from the flat
+// version — this is a pure refactor, not a rule change.
+
+// Claim-restoration: the ONE place every under-claim re-check gives an
+// already-taken claim back before re-throwing (a refusal or a lookup
+// failure alike), so a claim nobody holds never sits on a 'sending' row.
+async function restoreClaimAndThrow(invoiceId, previousStatus, err) {
+  await restoreSendClaim(invoiceId, previousStatus, true);
+  throw err;
+}
+
+// Zero-balance settlement (Codex P1 r9 #4131): a visit-linked invoice with
+// nothing due is settled (prepaid / system:zero_balance) instead of ever
+// handing out a claim that would text a $0 pay link. Shared by the
+// pre-claim check (current row) and the post-claim re-check (a retotal to
+// $0 between the read and the flip, Codex P1 r10) — always throws, settled
+// or not: either way there is nothing left for this claim to deliver.
+async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow) {
+  const settlement = await settleZeroDueVisitInvoice(invoiceId);
+  if (settlement.settled) throw invoiceNotSendableError(settlement.invoice || { ...fallbackRow, status: "prepaid" });
+  throw depositSettlementPendingError(invoiceId, settlement.reason);
+}
+
+// Visit-cancellation (+ zero-due retotal) re-check UNDER an already-taken
+// claim (Codex P1 r10 ×2, r11 #4131): the flip above compares status only,
+// so a retotal to $0 or a visit cancelled since the invoice was created
+// slip past the pre-claim reads. A lookup failure or a refusal both give
+// the claim back — nothing is texted either way. A cancellation that lands
+// AFTER this read is caught by the void sweep instead, which voids the
+// claimed row out from under this send.
+async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus) {
+  let underClaim;
+  try {
+    underClaim = await visitInvoiceRefusalUnderClaim(invoice, previousStatus);
+  } catch (lookupErr) {
+    await restoreClaimAndThrow(invoiceId, previousStatus, lookupErr);
+  }
+  if (!underClaim) return;
+  await restoreSendClaim(invoiceId, previousStatus, true);
+  if (underClaim.kind === "zero_due") await throwForZeroDueVisitInvoice(invoiceId, invoice);
+  throw visitNeverRanError(invoiceId, underClaim.visitStatus);
+}
+
+// Queue-adoption / reconciliation UNDER the claim (pre-push P1 r5, Codex P1
+// r6 #4131): the flip compares status only, so draft → sending → draft in
+// between (another sender claimed, queued its held SMS leg, failed its
+// email leg and restored the row) is invisible to it. Any LIVE queue row
+// seen here was inserted before this claim and owns the delivery — give
+// the claim back and refuse. adoptsQueuedInvoiceSend additionally consumes
+// this send's OWN still-scheduled held leg (superseded by the live send),
+// then re-checks strictly: a worker that claimed the row meanwhile keeps
+// the delivery and the claim is given back. A lookup/consume that THROWS
+// gives the claim back too — the caller never receives it.
+async function reconcileQueuedSendUnderClaim(invoiceId, previousStatus, adoptsQueuedInvoiceSend) {
+  let queuedUnderClaim;
+  try {
+    queuedUnderClaim = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
+  } catch (lookupErr) {
+    await restoreClaimAndThrow(invoiceId, previousStatus, lookupErr);
+  }
+  if (queuedUnderClaim) await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(queuedUnderClaim));
+  if (!adoptsQueuedInvoiceSend) return;
+  let stillQueued;
+  try {
+    const consumed = await consumeQueuedInvoiceSend(invoiceId);
+    if (consumed) logger.info(`[invoice] Queued pay-link SMS for invoice ${invoiceId} consumed by a live send (${consumed} row${consumed === 1 ? "" : "s"} cancelled)`);
+    stillQueued = await queuedPayLinkText(invoiceId);
+  } catch (adoptErr) {
+    await restoreClaimAndThrow(invoiceId, previousStatus, adoptErr);
+  }
+  if (stillQueued) await restoreClaimAndThrow(invoiceId, previousStatus, queuedPayLinkError(stillQueued));
+}
+
+async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliveryOnly = false, adoptsQueuedInvoiceSend = false, operatorInitiated = false } = {}) {
   const current = await db("invoices").where({ id: invoiceId }).first();
   if (!current) throw invoiceNotSendableError(current);
 
@@ -1047,15 +1151,20 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   if (!SEND_CLAIMABLE_STATUSES.includes(current.status)) {
     throw invoiceNotSendableError(current);
   }
+  // Stale-claim review hold (Codex r12 P1 #4131): an automatic claimant
+  // (no operatorInitiated) must honor the park processScheduledSends left
+  // for the operator — an explicit operator resend (sendViaSMS/
+  // sendViaSMSAndEmail called with operatorInitiated: true from the admin
+  // resend routes) is the intended way OFF this hold and still proceeds.
+  if (!operatorInitiated && isStaleClaimReviewHold(current)) {
+    throw staleClaimReviewHoldError(invoiceId);
+  }
   // Nothing due on a visit-linked invoice: settle it and refuse the claim
   // as "prepaid — nothing to deliver" (the completion reads that as
   // report-only), or refuse with a retryable code when settlement is not
   // possible right now. Never hand out a claim that would text a $0 link.
-  if (zeroDueVisitInvoice(current)) {
-    const settlement = await settleZeroDueVisitInvoice(invoiceId);
-    if (settlement.settled) throw invoiceNotSendableError(settlement.invoice || { ...current, status: "prepaid" });
-    throw depositSettlementPendingError(invoiceId, settlement.reason);
-  }
+  if (zeroDueVisitInvoice(current)) await throwForZeroDueVisitInvoice(invoiceId, current);
+
   const queuedBefore = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
   if (queuedBefore) throw queuedPayLinkError(queuedBefore);
 
@@ -1073,69 +1182,9 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     }
     throw invoiceNotSendableError(latest);
   }
-  // Re-checked UNDER the claim (Codex P1 r10 ×2): a retotal to $0 or a
-  // visit cancellation that landed between the read above and the flip.
-  // Either gives the claim straight back (settleZeroBalance refuses a
-  // 'sending' row) and refuses, so nothing is texted. A cancellation that
-  // lands AFTER this read is caught by the void sweep instead, which now
-  // voids the claimed row out from under this send (Codex P1 r11 #4131).
-  let underClaim;
-  try {
-    underClaim = await visitInvoiceRefusalUnderClaim(invoice, current.status);
-  } catch (lookupErr) {
-    await restoreSendClaim(invoiceId, current.status, true);
-    throw lookupErr;
-  }
-  if (underClaim) {
-    await restoreSendClaim(invoiceId, current.status, true);
-    if (underClaim.kind === "zero_due") {
-      const settlement = await settleZeroDueVisitInvoice(invoiceId);
-      if (settlement.settled) throw invoiceNotSendableError(settlement.invoice || { ...invoice, status: "prepaid" });
-      throw depositSettlementPendingError(invoiceId, settlement.reason);
-    }
-    throw visitNeverRanError(invoiceId, underClaim.visitStatus);
-  }
-  // Re-checked UNDER the claim (pre-push P1 r5 ×2): the flip above compares
-  // status only, so draft → sending → draft in between (another sender
-  // claimed, queued its held SMS leg, failed its email leg and restored the
-  // row) is invisible to it. A queue row is only ever inserted by the holder
-  // of the 'sending' claim, and this call holds it now — so any live queue
-  // row seen here was inserted before this claim and owns the delivery:
-  // give the claim back and refuse.
-  // A lookup that THROWS gives the claim back too (pre-push P1 r5 ×3): the
-  // caller never receives it, so nothing else could release it and the row
-  // would sit 'sending' until stale-claim recovery parked it.
-  let queuedUnderClaim;
-  try {
-    queuedUnderClaim = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
-  } catch (lookupErr) {
-    await restoreSendClaim(invoiceId, current.status, true);
-    throw lookupErr;
-  }
-  if (queuedUnderClaim) {
-    await restoreSendClaim(invoiceId, current.status, true);
-    throw queuedPayLinkError(queuedUnderClaim);
-  }
-  // Adoption consumes the send's own still-scheduled held SMS leg UNDER the
-  // claim, then re-checks strictly: a worker that flipped that row to
-  // 'sending' between the check above and the cancel keeps the delivery,
-  // and this claim is given back (Codex P1 r6 #4131). A throw anywhere
-  // here gives the claim back too — the caller never receives it.
-  if (adoptsQueuedInvoiceSend) {
-    let stillQueued;
-    try {
-      const consumed = await consumeQueuedInvoiceSend(invoiceId);
-      if (consumed) logger.info(`[invoice] Queued pay-link SMS for invoice ${invoiceId} consumed by a live send (${consumed} row${consumed === 1 ? "" : "s"} cancelled)`);
-      stillQueued = await queuedPayLinkText(invoiceId);
-    } catch (adoptErr) {
-      await restoreSendClaim(invoiceId, current.status, true);
-      throw adoptErr;
-    }
-    if (stillQueued) {
-      await restoreSendClaim(invoiceId, current.status, true);
-      throw queuedPayLinkError(stillQueued);
-    }
-  }
+  await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status);
+  await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
+
   return { invoice, previousStatus: current.status, claimed: true };
 }
 
@@ -1380,27 +1429,55 @@ const InvoiceService = {
     // would fall back to the customer default (or self-pay) and bill the wrong
     // party. Reuse the same link resolved for the mint lock above; the row's own
     // scheduled_service_id linkage below is unchanged.
+    let payerResolution;
+    try {
+      payerResolution = await PayerService.resolveForInvoice({
+        database,
+        customerId,
+        customer,
+        scheduledServiceId: linkedScheduledServiceId,
+        // Fail closed under the statements gate: if payer resolution is uncertain,
+        // a NET-terms job must NOT silently fall back to self-pay and create an
+        // individually-collectible invoice instead of accruing. (Default fail-soft
+        // when the gate is off — unchanged for everyone today.)
+        // Also fail closed under a FROZEN Bill-To contract (codex pre-push r5
+        // P0): a fail-soft lookup error would report self-pay, match a frozen
+        // frozenPayerId === null, and mint the frozen (possibly exempt-0)
+        // rate onto the homeowner while a real non-exempt payer exists.
+        // Also fail closed whenever the CALLER pinned a payer verdict (Codex
+        // r12 P1 #4131): fail-soft here would synthesize self-pay on any
+        // final-lookup error, and self-pay can spuriously MATCH a self-pay
+        // pin (expectedPayerId === null) taken earlier under the caller's
+        // own lock — the equality check below would then pass even though a
+        // payer was assigned concurrently and the final resolution never
+        // actually verified it. A pin demands a VERIFIED final answer, not
+        // an unverifiable one that happens to look the same.
+        throwOnError: isEnabled("payerStatements") || frozenTaxAuthority || expectedPayerId !== undefined,
+      });
+    } catch (resolveErr) {
+      if (expectedPayerId !== undefined) {
+        // Same 409 contract as the explicit divergence check below — an
+        // unverifiable final resolution can't satisfy the pin any more than
+        // a verified mismatch can, so it gets the identical refusal instead
+        // of a raw lookup error escaping past the pin.
+        const payerChanged = new Error(
+          "That visit's Bill-To could not be verified while this invoice was being created — nothing was created; reload and try again",
+        );
+        payerChanged.statusCode = 409;
+        payerChanged.status = 409;
+        payerChanged.isOperational = true;
+        payerChanged.code = "PAYER_CHANGED";
+        throw payerChanged;
+      }
+      throw resolveErr;
+    }
     const {
       payerId: resolvedPayerId,
       poNumber: resolvedPoNumber,
       taxExempt: resolvedTaxExempt,
       snapshot: resolvedPayerSnapshot,
       paymentTerms: resolvedPaymentTerms,
-    } = await PayerService.resolveForInvoice({
-      database,
-      customerId,
-      customer,
-      scheduledServiceId: linkedScheduledServiceId,
-      // Fail closed under the statements gate: if payer resolution is uncertain,
-      // a NET-terms job must NOT silently fall back to self-pay and create an
-      // individually-collectible invoice instead of accruing. (Default fail-soft
-      // when the gate is off — unchanged for everyone today.)
-      // Also fail closed under a FROZEN Bill-To contract (codex pre-push r5
-      // P0): a fail-soft lookup error would report self-pay, match a frozen
-      // frozenPayerId === null, and mint the frozen (possibly exempt-0)
-      // rate onto the homeowner while a real non-exempt payer exists.
-      throwOnError: isEnabled("payerStatements") || frozenTaxAuthority,
-    });
+    } = payerResolution;
 
     // PIN the caller's payer verdict (GitHub r11 P1 #4131). The Invoices-page
     // open-visit create decides prepaid coverage from a payer it resolved
@@ -2690,7 +2767,7 @@ const InvoiceService = {
     // down — applying before the claim strands credit the winner can't see and we
     // can't reverse off the winner's 'sending' row (reverseAppliedCredit refuses
     // 'sending').
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true });
+    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated });
     const { invoice, previousStatus, claimed } = claim;
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
@@ -3124,7 +3201,7 @@ const InvoiceService = {
     // never reverses it either, leaving an undelivered, edit-locked invoice with
     // credit_applied set. Claiming first means a lost race throws here before any
     // credit is drawn down — nothing to reverse.
-    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, firstDeliveryOnly, adoptsQueuedInvoiceSend: true });
+    const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, firstDeliveryOnly, adoptsQueuedInvoiceSend: true, operatorInitiated });
     // Now that we own the claim, apply available account credit so the pay link the
     // customer receives bills amount due (total − applied credit), not the gross
     // total. Auto-apply otherwise only runs at dispatch completion, so invoices
