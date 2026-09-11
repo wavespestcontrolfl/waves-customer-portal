@@ -84,7 +84,7 @@ const { handleClarifyReply } = require('../services/estimate-clarify-asks');
 const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
-const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const { knownCallerPhoneExists, findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const numbers = require('../config/twilio-numbers');
 const router = require('../routes/twilio-webhook');
 const handler = router.stack.find((layer) => layer.route?.path === '/sms').route.stack[0].handle;
@@ -459,5 +459,27 @@ test('a service-contact-only known sender\'s own opt-out is never stripped, even
   // Known via the relationship lookup, not the primary match — never a
   // solicitation-screening candidate either (mirrors the classifier gate,
   // which already uses this same knownCallerPhoneExists result).
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+});
+
+// Codex P1 follow-up, 2026-09-11: a failed unified-inbox persistence skips
+// the classifier gate entirely (recordTouchpoint's message id never lands),
+// so knownCallerPhoneExists/`known` never runs and stays at its default
+// false — but the always-on compliance relationship lookup
+// (findKnownCallerCustomer, feeding complianceEligible on every message
+// regardless of persistence) still resolves this same service contact.
+// That already-successful result must still count for the footer decision,
+// or a known sender's genuine opt-out is silently dropped by an unrelated
+// persistence failure.
+test('a failed unified persistence bypass still honors a known service contact\'s own opt-out', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  recordTouchpoint.mockResolvedValueOnce(null);
+  findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1', first_name: 'Service', last_name: 'Contact' });
+  const res = await receive('Reply STOP to stop messages');
+  expect(res.body).toContain('unsubscribed');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+  expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
+  // The classifier gate itself never ran — persistence failed before it.
+  expect(knownCallerPhoneExists).not.toHaveBeenCalled();
   expect(dispatchWithFallback).not.toHaveBeenCalled();
 });

@@ -420,8 +420,21 @@ router.post('/sms', async (req, res) => {
     // stored service contact (spouse / tenant / manager slot) is a known
     // recipient whose sends may sit on the account's conversation with a
     // null contact_phone — the relationship check covers them (codex r2).
+    // Captured (not just Boolean-and-discarded) so the successful record can
+    // also feed `knownRelationship` below — codex P1 follow-up, 2026-09-11:
+    // a classifier bypass (recordTouchpoint failure, mode off, a reaction)
+    // leaves `known` at its default, but this lookup runs unconditionally
+    // for every inbound message regardless of any of that, so its result is
+    // the one known-relationship signal always available. `complianceEligible`
+    // itself is untouched — same immediate fail-OPEN to eligible on a query
+    // error via the try/catch, so a real STOP is still always honored.
+    let knownCallerRecord = null;
+    let knownCallerLookupFailed = false;
+    try {
+      knownCallerRecord = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From);
+    } catch { knownCallerLookupFailed = true; }
     const complianceEligible = isAiNumber
-      || Boolean(await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From).catch(() => true))
+      || Boolean(knownCallerLookupFailed || knownCallerRecord)
       || await hasOutboundHistory(From);
     // Enforcement mode also strips a vendor's own reply-instruction footer
     // before matching (see the comment above `solicitationMode`), so an
@@ -439,15 +452,13 @@ router.post('/sms', async (req, res) => {
     // knownCallerPhoneExists already uses for the classifier gate above.
     // Left keyed on `customer`, their own "Reply STOP to stop messages"
     // got stripped and silently dropped, same as a spoofed vendor footer
-    // (codex P0, 2026-09-11). Reuses `known` — the hoisted result of the
-    // SAME knownCallerPhoneExists lookup the classifier gate above already
-    // made for this exact population (!customer && !isAiNumber, enforcement
-    // not off) — rather than issuing a second, differently-gated query: any
-    // bypass that left the classifier from running (a reaction, an empty
-    // body, a failed durable save) also leaves `known` at its fail-toward-
-    // stripping default of false, so an unresolved relationship can never
-    // let a spoofed footer through.
-    const knownRelationship = Boolean(customer) || known;
+    // (codex P0, 2026-09-11). `known` is the classifier gate's own
+    // knownCallerPhoneExists result when that gate ran; `knownCallerRecord`
+    // is the always-on compliance lookup just above, which stays populated
+    // even on a classifier bypass (codex P1 follow-up, 2026-09-11) — a
+    // failed lookup on BOTH fails toward stripping (treated as not known)
+    // so an unresolved relationship can never let a spoofed footer through.
+    const knownRelationship = Boolean(customer) || known || Boolean(knownCallerRecord);
     const ignoreReplyInstructions = solicitationMode === 'enforce' && !knownRelationship && !isAiNumber;
     const optCommand = complianceEligible
       ? detectSmsOptCommand(Body, { ignoreReplyInstructions })
