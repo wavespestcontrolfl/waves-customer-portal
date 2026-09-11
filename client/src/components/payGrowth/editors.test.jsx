@@ -260,6 +260,22 @@ describe('Growth', () => {
     expect(body.position_available).toBeNull();
     expect(body.items[0].critical).toBe(true);
   });
+
+  it('fixes the starting role to the level in effect on the assessed date and blocks the top of the ladder', () => {
+    const today = etDateString(new Date());
+    const levels = [{ id: 'l2', role_key: 'general_manager', effective_date: today }, { id: 'l1', role_key: 'technician_i', effective_date: '2026-01-15' }];
+    render(<Growth view={view({ levels, level: levels[0] })} manage onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Record assessment' }));
+    expect(screen.getByLabelText('Assess from role')).toBeDisabled();
+    expect(screen.getByLabelText('Assess from role')).toHaveValue('general_manager');
+    expect(screen.getByRole('button', { name: 'Retain assessment' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Assessment date'), { target: { value: '2026-02-01' } });
+    expect(screen.getByLabelText('Assess from role')).toHaveValue('technician_i');
+    expect(screen.getByLabelText('Next step')).toHaveValue('Technician II');
+    expect(screen.getByRole('button', { name: 'Retain assessment' })).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Assessment date'), { target: { value: '2026-01-01' } });
+    expect(screen.getByLabelText('Assess from role')).not.toBeDisabled();
+  });
 });
 
 describe('PayOverview', () => {
